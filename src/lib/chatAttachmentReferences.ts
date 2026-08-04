@@ -56,6 +56,17 @@ export interface MergeChatAttachmentsResult {
   overflowCount: number;
 }
 
+type PersistedChatAttachmentReference = Omit<ChatAttachmentReference, 'preview'> & {
+  preview?: string | null;
+};
+
+const MAX_PERSISTED_ATTACHMENT_TEXT = 30_000;
+
+function boundedAttachmentText(value?: string | null): string | null {
+  const text = String(value || '').trim();
+  return text ? text.slice(0, MAX_PERSISTED_ATTACHMENT_TEXT) : null;
+}
+
 function normalizeReferencePath(value: string): string {
   return value.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/').toLowerCase();
 }
@@ -157,4 +168,39 @@ export function mergeChatAttachmentReferences(
   }
 
   return { attachments, added, duplicateCount, overflowCount };
+}
+
+/**
+ * Keeps verified references available when the desktop client is reopened.
+ * Large previews (notably image data URLs) are deliberately excluded; the
+ * copied knowledge-vault path remains the source of truth.
+ */
+export function serializeChatAttachmentContext(attachments: ChatAttachmentReference[]): string {
+  const persisted: PersistedChatAttachmentReference[] = attachments
+    .filter(item => Boolean(item.path || item.fileId || item.content || item.transcript))
+    .slice(0, MAX_CHAT_ATTACHMENTS)
+    .map(item => ({
+      ...item,
+      content: boundedAttachmentText(item.content),
+      transcript: boundedAttachmentText(item.transcript),
+      preview: item.preview && !item.preview.startsWith('data:')
+        ? boundedAttachmentText(item.preview)
+        : null,
+    }));
+  return JSON.stringify(persisted);
+}
+
+export function parseChatAttachmentContext(value?: string | null): ChatAttachmentReference[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(item => item && typeof item === 'object' && String(item.fileName || '').trim())
+      .map(item => createChatAttachmentReference(item as ChatFileReferenceInput))
+      .filter(item => Boolean(item.path || item.fileId || item.content || item.transcript))
+      .slice(0, MAX_CHAT_ATTACHMENTS);
+  } catch {
+    return [];
+  }
 }

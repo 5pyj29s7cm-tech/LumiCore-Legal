@@ -4,6 +4,8 @@ import {
   chatAttachmentRequestMatchesScope,
   createChatAttachmentReference,
   mergeChatAttachmentReferences,
+  parseChatAttachmentContext,
+  serializeChatAttachmentContext,
 } from '../src/lib/chatAttachmentReferences';
 
 describe('chat attachment references', () => {
@@ -59,5 +61,25 @@ describe('chat attachment references', () => {
     expect(chatAttachmentRequestMatchesScope({ domain: 'work', orgId: 'org-a' }, 'work', 'org-a')).toBe(true);
     expect(chatAttachmentRequestMatchesScope({ domain: 'work', orgId: 'org-a' }, 'work', 'org-b')).toBe(false);
     expect(chatAttachmentRequestMatchesScope({ domain: 'work' }, 'work')).toBe(false);
+  });
+
+  it('restores verified conversation attachment context without persisting image data URLs', () => {
+    const attachment = createChatAttachmentReference({
+      fileId: 'evidence.pdf',
+      fileName: 'Evidence.pdf',
+      path: 'C:\\Lumi\\knowledge\\evidence.pdf',
+      content: 'extracted evidence',
+      preview: 'data:image/png;base64,too-large-to-persist',
+    });
+
+    const restored = parseChatAttachmentContext(serializeChatAttachmentContext([attachment]));
+
+    expect(restored).toHaveLength(1);
+    expect(restored[0]).toMatchObject({
+      fileName: 'Evidence.pdf',
+      path: 'C:\\Lumi\\knowledge\\evidence.pdf',
+      content: 'extracted evidence',
+      preview: null,
+    });
   });
 });
