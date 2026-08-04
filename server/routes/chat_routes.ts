@@ -163,6 +163,7 @@ function buildLegalMeetingMinutesArgs(input: {
 const DIRECT_LEGAL_TOOL_ALLOWLIST = new Set([
   'legal_search_case',
   'legal_search_statute',
+  'legal_case_strategy',
   'legal_case_workspace',
   'legal_case_workflow_status',
   'legal_message_intake_to_case',
@@ -179,6 +180,8 @@ const DIRECT_LEGAL_TOOL_ALLOWLIST = new Set([
   'legal_download_and_extract_document',
   'legal_trace_assets',
   'legal_equity_penetration',
+  'legal_external_source_status',
+  'legal_search_tender_projects',
   'legal_external_research_plan',
   'legal_search_external_authorities',
   'legal_company_database_lookup',

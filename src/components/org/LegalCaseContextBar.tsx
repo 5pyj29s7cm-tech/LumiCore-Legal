@@ -3,6 +3,7 @@ import { CheckCircle2, FolderOpen, Loader2, Link2, MinusCircle } from 'lucide-re
 import { useT } from '../../lib/useT';
 import type { LegalCaseFile } from '../../lib/legalCaseStore';
 import { uiMessage } from '../../i18n/uiMessages';
+import { chinaLegalCopy } from '../../i18n/regions/cn/legal';
 
 export type LegalToolState = 'input' | 'running' | 'result';
 export type LegalUsageMode = 'standalone' | 'case';
@@ -31,7 +32,7 @@ export function LegalCaseContextBar({
   const inheritedMode = useContext(LegalUsageModeContext);
   const t = useT();
   const isZh = t.langCode !== 'en';
-  const ui = (zh: string, en: string) => (isZh ? zh : en);
+  const copy = chinaLegalCopy(isZh ? 'zh' : 'en').workspace;
   const mode = inheritedMode || (caseFile ? 'case' : 'standalone');
   const linkedCase = mode === 'case' ? (caseFile || null) : null;
   const title = linkedCase?.title || linkedCase?.party || linkedCase?.caseNumber || uiMessage('legal-case-context-bar.untitled-case.796e2578d9');
@@ -57,13 +58,13 @@ export function LegalCaseContextBar({
         </span>
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 text-xs text-white/38">{ui('使用方式', 'Usage')}</span>
+            <span className="shrink-0 text-xs text-white/38">{copy.usage}</span>
             <span className="truncate text-sm font-semibold text-white/78">
               {mode === 'standalone'
-                ? ui('独立使用', 'Standalone')
+                ? copy.standalone
                 : linkedCase
-                  ? `${ui('已关联', 'Linked')} · ${title}`
-                  : ui('未选择案件', 'No case selected')}
+                  ? `${copy.linked} · ${title}`
+                  : copy.noCaseSelected}
             </span>
           </div>
           <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-white/35">
@@ -75,7 +76,7 @@ export function LegalCaseContextBar({
                 <span>{detail || uiMessage('legal-case-context-bar.results-stay-linked-to-the.8c34a53402')}</span>
               </>
             ) : mode === 'standalone' ? (
-              <span>{ui('本次结果不会写入任何案件', 'Results from this run will not be saved to a case')}</span>
+              <span>{copy.standaloneResultNotice}</span>
             ) : (
               <span>{uiMessage('legal-case-context-bar.select-or-create-a-case.55c616e673')}</span>
             )}

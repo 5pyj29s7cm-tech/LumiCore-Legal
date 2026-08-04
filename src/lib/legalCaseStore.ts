@@ -1,5 +1,6 @@
 import { getLocale } from '../i18n/runtime';
 import { chinaLegalCopy } from '../i18n/regions/cn/legal';
+import { normalizeAssetTraceWorkflow, type AssetTraceWorkflow } from './legalAssetTraceWorkflow';
 
 export type LegalCaseStage = 'consultation' | 'filing' | 'trial' | 'judgment' | 'enforcement' | 'closed';
 
@@ -29,6 +30,7 @@ export interface LegalCaseFile {
   enforcementDeadline: string;
   notes: string;
   materials: LegalCaseMaterial[];
+  assetTraceWorkflow?: AssetTraceWorkflow;
   createdAt: string;
   updatedAt: string;
 }
@@ -114,6 +116,7 @@ function normalizeCaseFile(value: any): LegalCaseFile | null {
       content: item?.content ? String(item.content) : undefined,
       source: item?.source,
     })) : [],
+    assetTraceWorkflow: normalizeAssetTraceWorkflow(value.assetTraceWorkflow) || undefined,
     createdAt: String(value.createdAt || new Date().toISOString()),
     updatedAt: String(value.updatedAt || value.createdAt || new Date().toISOString()),
   };

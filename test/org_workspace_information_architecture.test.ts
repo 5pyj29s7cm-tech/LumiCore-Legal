@@ -46,7 +46,7 @@ describe('organization workspace information architecture', () => {
     expect(orgHub).not.toContain("uiMessage('org-hub.organization-modules");
     expect(orgHub).not.toContain('t.orgExitWorkSpace');
     expect(orgHub).toContain('legalNavItems.map');
-    expect(orgHub).toContain("'独立法律工具'");
+    expect(orgHub).toContain('workspaceCopy.standaloneLegalTools');
     expect(orgHub).toContain('workspaceResetKey={legalWorkspaceResetKey}');
     expect(legalHub).not.toContain('flex w-56 shrink-0 flex-col');
     expect(legalHub).not.toContain('<LegalDataSourcesSettings />');
@@ -162,8 +162,8 @@ describe('organization workspace information architecture', () => {
     expect(orgHub).not.toContain('LegalUsageMode');
     expect(contextBar).toContain("export type LegalToolState = 'input' | 'running' | 'result'");
     expect(contextBar).toContain("export type LegalUsageMode = 'standalone' | 'case'");
-    expect(contextBar).toContain("ui('本次结果不会写入任何案件', 'Results from this run will not be saved to a case')");
-    expect(contextBar).toContain("ui('使用方式', 'Usage')");
+    expect(contextBar).toContain('copy.standaloneResultNotice');
+    expect(contextBar).toContain('copy.usage');
     expect(contextBar).not.toContain('onModeChange');
     expect(contextBar).not.toContain('onSelectCase');
     expect(contextBar).toContain("uiMessage('legal-case-context-bar.closed.f9c16bb807')");

@@ -16,7 +16,7 @@ import {
 import {
   searchWenshu, searchFLK, searchMOHURDTemplates,
   searchCompany, searchCompanySources, searchEnforcementRecords, listLegalSourceCapabilities,
-  searchLegalAuthorityDatabase, type ExternalLegalSearchKind,
+  searchLegalAuthorityDatabase, searchTenderSources, type ExternalLegalSearchKind,
 } from '../../../legal/sources';
 import { generateEmbedding } from '../../../memory/store';
 import { makeLLMCall, type NormalizedMessage } from '../../../llm/providers';
@@ -112,6 +112,18 @@ const EXTERNAL_LEGAL_SOURCES = [
     use: '查询企业基本信息、股东结构、风险信息和财产线索',
   },
   {
+    label: '启信宝',
+    presetId: 'qixinbao',
+    url: 'https://www.qixin.com/home',
+    use: '使用律所授权账号补充企业主体、股东、风险和执行线索',
+  },
+  {
+    label: '天眼查',
+    presetId: 'tianyancha',
+    url: 'https://www.tianyancha.com/',
+    use: '使用律所授权账号补充企业工商、关联关系和风险信息',
+  },
+  {
     label: '国家企业信用信息公示系统',
     presetId: 'national-enterprise-credit',
     url: 'https://www.gsxt.gov.cn/',
@@ -122,6 +134,48 @@ const EXTERNAL_LEGAL_SOURCES = [
     presetId: 'court-online-service',
     url: 'https://zxfw.court.gov.cn/',
     use: '半自动立案材料组卷后，由律师人工登录、核对、提交',
+  },
+  {
+    label: '中国执行信息公开网',
+    presetId: 'china-enforcement-disclosure',
+    url: 'https://zxgk.court.gov.cn/',
+    use: '核验被执行人、失信被执行人、限制消费和终本线索',
+  },
+  {
+    label: '全国公共资源交易平台',
+    presetId: 'national-public-resources',
+    url: 'https://data.ggzy.gov.cn/',
+    use: '检索项目、中标公告、采购方、交易对手、金额和潜在应收款',
+  },
+  {
+    label: '动产融资统一登记公示系统',
+    presetId: 'movable-financing-register',
+    url: 'https://www.zhongdengwang.org.cn/',
+    use: '核验动产抵押、应收账款质押、保理、融资租赁和所有权保留登记',
+  },
+  {
+    label: '国家知识产权公共服务平台',
+    presetId: 'cnipa-public-service',
+    url: 'https://ggfw.cnipa.gov.cn/home',
+    use: '核验专利、商标、质押、转让、许可和法律状态',
+  },
+  {
+    label: '全国建筑市场监管公共服务平台',
+    presetId: 'construction-market',
+    url: 'https://jzsc.mohurd.gov.cn/',
+    use: '核验建筑资质、人员、项目业绩、在建项目和工程款线索',
+  },
+  {
+    label: '海关企业信用信息公示平台',
+    presetId: 'customs-credit',
+    url: 'https://credit.customs.gov.cn/',
+    use: '核验进出口备案、海关信用、行政处罚和跨境经营线索',
+  },
+  {
+    label: '全国企业破产重整案件信息网',
+    presetId: 'bankruptcy-restructuring',
+    url: 'https://pccz.court.gov.cn/index/xxwsy',
+    use: '检索破产案件、管理人、公告、债权申报期限和资产处置线索',
   },
 ];
 
@@ -4744,7 +4798,7 @@ async function companyDatabaseLookupHandler(args: Record<string, any>, context?:
 
   const companies = await searchCompanySources(name, sourceIds);
   const capabilities = listLegalSourceCapabilities()
-    .filter(source => ['qichacha', 'tianyancha', 'national-enterprise-credit'].includes(source.id));
+    .filter(source => ['qichacha', 'tianyancha', 'qixinbao', 'national-enterprise-credit'].includes(source.id));
 
   const companyRows = companies.length
     ? companies.map((company, index) =>
@@ -4765,7 +4819,7 @@ async function companyDatabaseLookupHandler(args: Record<string, any>, context?:
 
 ## 一、查询对象
 - 主体名称：${name}
-- 指定数据源：${sourceIds.join('；') || '企查查、天眼查优先，官方网页兜底'}
+- 指定数据源：${sourceIds.join('；') || '企查查、天眼查、启信宝优先，官方网页兜底'}
 
 ## 二、API 查询结果
 | 序号 | 数据源 | 主体名称 | 法定代表人 | 注册资本 | 状态 | 统一社会信用代码 | 来源链接 |
@@ -4783,7 +4837,7 @@ ${sourceRegisterRows}
 ${statusRows}
 
 ## 五、下一步
-- 若 API 未命中或未配置，请使用 web_login_profile_save_from_preset {"presetId":"qichacha"} 或 {"presetId":"national-enterprise-credit"} 打开授权网页核验。
+- 若 API 未命中或未配置，请使用 qichacha、tianyancha、qixinbao 或 national-enterprise-credit 登录预设打开网页核验。
 - 律师确认股东、涉诉、被执行、失信和限制高消费信息后，再用 legal_import_materials_to_kb 导入组织知识库。
 - Lumi 不绕过验证码、付费墙、账号权限、平台频控或下载限制。`;
 
@@ -4818,6 +4872,70 @@ ${statusRows}
   });
 
   return `${report}\n\n## 六、入库与案件归档\n${kbLine}\n${caseLine}`;
+}
+
+async function searchTenderProjectsHandler(args: Record<string, any>, context?: any): Promise<string> {
+  const keyword = textArg(args, 'keyword') || textArg(args, 'name') || textArg(args, 'companyName') || textArg(args, 'subjectName');
+  if (!keyword) return '请提供 keyword（企业、项目、采购人或供应商名称）。';
+
+  const orgId = legalWorkspaceId(args, context);
+  const userId = textArg(args, 'userId') || context?.userId || 'system';
+  const caseName = textArg(args, 'caseName') || `${keyword} 招投标与应收款线索`;
+  const sourceIds = [
+    ...listArg(args, 'sourceIds'),
+    ...listArg(args, 'sources'),
+    ...listArg(args, 'platforms'),
+  ];
+  const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
+  const projects = await searchTenderSources({ keyword, sourceIds, limit });
+  const capabilities = listLegalSourceCapabilities()
+    .filter(source => ['tender-data', 'national-public-resources', 'movable-financing-register'].includes(source.id));
+  const projectRows = projects.length
+    ? projects.map((project, index) =>
+      `| ${index + 1} | ${mdCell(project.sourceName)} | ${mdCell(project.title)} | ${mdCell(project.projectNumber)} | ${mdCell(project.purchaser)} | ${mdCell(project.bidder)} | ${mdCell(project.amount)} | ${mdCell(project.publishDate)} | ${mdCell(project.status)} | ${mdCell(project.url)} | 律师复核 |`,
+    ).join('\n')
+    : '| 1 | 未配置或未命中 | 待官网核验 | 待登记 | 待登记 | 待登记 | 待登记 | 待登记 | 待登记 | https://data.ggzy.gov.cn/ | 律师复核 |';
+  const statusRows = capabilities.map(source =>
+    `| ${mdCell(source.label)} | ${source.accessMode} | ${source.configured ? '已配置/官网可用' : 'API 未配置'} | ${source.canAutoQuery ? '可以' : '需网页登录或人工确认'} | ${mdCell(source.nextAction)} |`,
+  ).join('\n');
+
+  const report = `# ${caseName}
+
+## 一、检索条件
+- 关键词：${keyword}
+- 返回上限：${limit}
+- 指定数据源：${sourceIds.join('；') || '招投标授权数据网关；未配置时转全国公共资源交易平台'}
+
+## 二、项目与应收款线索登记
+| 序号 | 来源 | 项目/公告 | 项目编号 | 采购人/招标人 | 中标人/供应商 | 金额 | 发布日期 | 状态 | 原文链接 | 复核状态 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+${projectRows}
+
+## 三、接入状态
+| 数据源 | 模式 | 状态 | 自动查询 | 下一步 |
+| --- | --- | --- | --- | --- |
+${statusRows}
+
+## 四、未配置 API 时的真实核验动作
+1. 使用 web_login_profile_save_from_preset {"presetId":"national-public-resources"}，再由律师在可见浏览器检索关键词“${keyword}”。
+2. 回填公告原文、项目编号、采购人、中标人、金额、公告日期、履约状态和原文链接。
+3. 对可能的应收账款，继续核验合同、验收、结算、开票、付款节点和质押/保理登记；必要时申请法院调查令。
+4. 仅凭中标公告不能认定债权真实存在、已到期或尚未支付，结论必须由律师结合证据复核。
+
+## 五、数据边界
+- 未填写 TENDER_DATA_API_KEY 与 TENDER_DATA_BASE_URL 时，不会发起第三方数据 API 请求，也不会生成模拟项目。
+- Lumi 不绕过验证码、登录、付费墙、频控或下载限制。`;
+
+  const caseLine = archiveLegalReportToCase(args, {
+    orgId,
+    userId,
+    caseName,
+    title: `${caseName} 招投标与应收款线索查询`,
+    content: report,
+    type: 'evidence',
+    cause: textArg(args, 'caseType') || '执行财产线索调查',
+  });
+  return `${report}\n\n## 六、案件空间归档\n${caseLine}`;
 }
 
 async function externalSourceStatusHandler(): Promise<string> {
@@ -4880,8 +4998,11 @@ ${sourceCapabilities.map(source => `- ${source.label}: ${source.accessMode} / ${
 2. 人民法院案例库：优先查权威案例和裁判规则。
 3. 中国裁判文书网：按法院层级筛选，顺序为 ${courtLevels.join(' > ')}。
 4. 法蝉 / Alpha：使用律所授权账号补充商业库资料。
-5. 企查查 / 国家企业信用信息公示系统：核验公司和被执行人情况。
-6. 人民法院在线服务：仅用于半自动立案材料核对和人工提交。
+5. 企查查 / 天眼查 / 启信宝 / 国家企业信用信息公示系统：核验公司和被执行人情况。
+6. 中国执行信息公开网：核验被执行、失信、限制消费和终本线索。
+7. 全国公共资源交易平台 / 动产融资统一登记公示系统：核验中标、应收款、动产担保和保理线索。
+8. 国家知识产权、建筑市场、海关信用和破产重整平台：按主体类型补齐权利、资质、跨境与资产处置线索。
+9. 人民法院在线服务：仅用于半自动立案材料核对和人工提交。
 
 ## 四、网页登录动作
 ${loginActions}
@@ -5709,7 +5830,7 @@ export function registerLegalTools(registry: ToolRegistry): void {
       },
       required: ['query'],
     },
-    handler: searchCaseHandler,
+    handler: withLegalReceipt(searchCaseHandler, { status: 'observed' }),
     permission: 'user',
     securityLevel: 'safe',
   });
@@ -5729,7 +5850,7 @@ export function registerLegalTools(registry: ToolRegistry): void {
       },
       required: ['query'],
     },
-    handler: searchStatuteHandler,
+    handler: withLegalReceipt(searchStatuteHandler, { status: 'observed' }),
     permission: 'user',
     securityLevel: 'safe',
   });
@@ -5841,7 +5962,7 @@ export function registerLegalTools(registry: ToolRegistry): void {
       },
       required: ['name'],
     },
-    handler: traceAssetsHandler,
+    handler: withLegalReceipt(traceAssetsHandler, { status: 'observed', expectCaseMutation: 'when_requested' }),
     permission: 'user',
     securityLevel: 'safe',
   });
@@ -5862,7 +5983,7 @@ export function registerLegalTools(registry: ToolRegistry): void {
       },
       required: ['name'],
     },
-    handler: equityPenetrationHandler,
+    handler: withLegalReceipt(equityPenetrationHandler, { status: 'observed', expectCaseMutation: 'when_requested' }),
     permission: 'user',
     securityLevel: 'safe',
   });
@@ -6380,13 +6501,41 @@ export function registerLegalTools(registry: ToolRegistry): void {
   });
 
   registry.register({
+    name: 'legal_search_tender_projects',
+    description: '招投标与应收款线索查询 — 调用律所已配置的招投标数据网关；未配置 API 时生成全国公共资源交易平台核验动作、来源登记和证据缺口，不生成模拟项目。',
+    parameters: {
+      type: 'object',
+      properties: {
+        keyword: { type: 'string', description: '企业、项目、采购人、招标人或供应商名称' },
+        name: { type: 'string', description: 'keyword 的别名' },
+        companyName: { type: 'string', description: 'keyword 的别名' },
+        subjectName: { type: 'string', description: 'keyword 的别名' },
+        sourceIds: { type: 'array', items: { type: 'string' }, description: '指定数据源；当前 API 源为 tender-data' },
+        sources: { type: 'array', items: { type: 'string' }, description: 'sourceIds 的别名' },
+        platforms: { type: 'array', items: { type: 'string' }, description: 'sourceIds 的别名' },
+        limit: { type: 'number', description: '返回数量上限，默认 10，最高 50' },
+        caseId: { type: 'string', description: '已有案件工作台 ID；提供后归档查询报告' },
+        caseName: { type: 'string', description: '关联案件名称或简称' },
+        caseType: { type: 'string', description: '案由或案件类型' },
+        persistCase: { type: 'boolean', description: '是否归档到案件空间；设置 false 可关闭' },
+        orgId: { type: 'string', description: '组织 ID' },
+        userId: { type: 'string', description: '操作用户 ID' },
+      },
+      required: ['keyword'],
+    },
+    handler: withLegalReceipt(searchTenderProjectsHandler, { status: 'observed', expectCaseMutation: 'when_requested' }),
+    permission: 'user',
+    securityLevel: 'safe',
+  });
+
+  registry.register({
     name: 'legal_external_source_status',
-    description: '外部法律数据源接入状态 — 明确企查查、Alpha、法蝉、裁判文书网、人民法院案例库、国家企业信用等数据源当前是官方 API 接入、授权网页登录协作还是材料导入，不夸大自动抓取能力。',
+    description: '外部法律数据源接入状态 — 明确企业、法源、执行、招投标、动产、知识产权、资质、海关与破产数据源是 API、官方网页还是授权浏览器协作，不夸大自动抓取能力。',
     parameters: {
       type: 'object',
       properties: {},
     },
-    handler: externalSourceStatusHandler,
+    handler: withLegalReceipt(externalSourceStatusHandler, { status: 'observed' }),
     permission: 'user',
     securityLevel: 'safe',
   });
@@ -6415,21 +6564,21 @@ export function registerLegalTools(registry: ToolRegistry): void {
       },
       required: ['query'],
     },
-    handler: searchExternalAuthoritiesHandler,
+    handler: withLegalReceipt(searchExternalAuthoritiesHandler, { status: 'observed', expectCaseMutation: 'when_requested' }),
     permission: 'user',
     securityLevel: 'safe',
   });
 
   registry.register({
     name: 'legal_company_database_lookup',
-    description: '企业主体数据库 API 查询 — 调用已配置的企查查/天眼查官方 API 查询公司、股东和被执行主体基础信息；未配置时输出网页登录协作和材料入库步骤。',
+    description: '企业主体数据库 API 查询 — 调用已配置的企查查、天眼查或启信宝授权 API 查询公司、股东和被执行主体基础信息；未配置时输出网页登录协作和材料入库步骤。',
     parameters: {
       type: 'object',
       properties: {
         name: { type: 'string', description: '公司、被执行人或主体名称' },
         companyName: { type: 'string', description: 'name 的别名' },
         subjectName: { type: 'string', description: 'name 的别名' },
-        sourceIds: { type: 'array', items: { type: 'string' }, description: '指定数据源，如 qichacha、tianyancha' },
+        sourceIds: { type: 'array', items: { type: 'string' }, description: '指定数据源，如 qichacha、tianyancha、qixinbao' },
         sources: { type: 'array', items: { type: 'string' }, description: 'sourceIds 的别名' },
         platforms: { type: 'array', items: { type: 'string' }, description: 'sourceIds 的别名' },
         caseId: { type: 'string', description: '已有案件工作台 ID；提供后会把主体信息报告归档到该案件空间' },
@@ -6442,14 +6591,14 @@ export function registerLegalTools(registry: ToolRegistry): void {
       },
       required: ['name'],
     },
-    handler: companyDatabaseLookupHandler,
+    handler: withLegalReceipt(companyDatabaseLookupHandler, { status: 'observed', expectCaseMutation: 'when_requested' }),
     permission: 'user',
     securityLevel: 'safe',
   });
 
   registry.register({
     name: 'legal_external_research_plan',
-    description: '半自动外部检索行动单 — 生成法条、人民法院案例库、裁判文书网、法蝉、Alpha、企查查、国家企业信用、法院在线服务的检索顺序、网页登录预设和来源登记表。',
+    description: '半自动外部检索行动单 — 生成法源、企业、执行、招投标、动产、知识产权、资质、海关、破产与法院服务的检索顺序、网页登录预设和来源登记表。',
     parameters: {
       type: 'object',
       properties: {
@@ -6464,7 +6613,7 @@ export function registerLegalTools(registry: ToolRegistry): void {
         userId: { type: 'string', description: '操作用户 ID，默认上下文 userId 或 system' },
       },
     },
-    handler: externalResearchPlanHandler,
+    handler: withLegalReceipt(externalResearchPlanHandler, { status: 'observed', expectCaseMutation: 'when_requested' }),
     permission: 'user',
     securityLevel: 'safe',
   });

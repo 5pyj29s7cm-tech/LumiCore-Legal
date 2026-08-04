@@ -547,6 +547,7 @@ function priorityToolsForRoute(categories: string[], text: string): string[] {
         'legal_review_contract',
         'legal_draft_contract',
         'legal_generate_bid',
+        'legal_search_tender_projects',
       );
     }
     if (/财产线索|被执行人|执行线索|财产保全|诉前保全|股权穿透|实际控制人|关联企业|失信|限制消费|asset|enforcement|equity|shareholder/i.test(text)) {
@@ -554,6 +555,7 @@ function priorityToolsForRoute(categories: string[], text: string): string[] {
         'legal_trace_assets',
         'legal_equity_penetration',
         'legal_company_database_lookup',
+        'legal_search_tender_projects',
       );
     }
     if (/下一步|下.?一步|缺什么|还缺|完成度|闭环|状态|进度|能不能.*(交付|立案|起草)|case\s*(status|progress|next)|what.*next/i.test(text)) {
@@ -585,6 +587,7 @@ function priorityToolsForRoute(categories: string[], text: string): string[] {
       'legal_external_research_plan',
       'legal_search_external_authorities',
       'legal_company_database_lookup',
+      'legal_search_tender_projects',
       'legal_analyze_folder_and_draft_argument',
       'legal_generate_argument_or_opinion',
       'legal_extract_dispute_focus',

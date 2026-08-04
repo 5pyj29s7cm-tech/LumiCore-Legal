@@ -1361,6 +1361,10 @@ describe('semi-automated legal workflows', () => {
 
     expect(output).toContain('外部法律数据源接入状态');
     expect(output).toContain('企查查');
+    expect(output).toContain('启信宝');
+    expect(output).toContain('招投标数据网关');
+    expect(output).toContain('全国公共资源交易平台');
+    expect(output).toContain('动产融资统一登记公示系统');
     expect(output).toContain('api');
     expect(output).toMatch(/Alpha|法蝉|中国裁判文书网/);
     expect(output).toMatch(/授权网页登录协作|网页登录/);
@@ -1520,6 +1524,95 @@ describe('semi-automated legal workflows', () => {
     }
   });
 
+  it('queries a configured Qixinbao gateway without assuming a default endpoint', async () => {
+    const registry = createLegalRegistry();
+    const original = {
+      QIXINBAO_API_KEY: process.env.QIXINBAO_API_KEY,
+      QIXINBAO_BASE_URL: process.env.QIXINBAO_BASE_URL,
+    };
+    const companyName = `Qixinbao Test Company ${Date.now()}`;
+    process.env.QIXINBAO_API_KEY = 'test-qixinbao-key';
+    process.env.QIXINBAO_BASE_URL = 'https://qixinbao.local/company-search';
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({
+        items: [{
+          companyName,
+          legalPersonName: 'Qixin Test Lawyer',
+          registeredCapital: '500万人民币',
+          regStatus: '存续',
+          creditCode: '91310000QIXINTEST',
+          companyId: 'qixin-1',
+        }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+
+    try {
+      const output = await registry.execute('legal_company_database_lookup', {
+        name: companyName,
+        sourceIds: ['qixinbao'],
+        persistCase: false,
+      });
+
+      expect(fetchMock).toHaveBeenCalled();
+      expect(String(fetchMock.mock.calls[0]?.[0])).toContain('qixinbao.local/company-search');
+      expect(output).toContain(companyName);
+      expect(output).toContain('Qixin Test Lawyer');
+      expect(output).toContain('91310000QIXINTEST');
+      expect(output).toContain('启信宝授权 API 网关');
+    } finally {
+      fetchMock.mockRestore();
+      if (original.QIXINBAO_API_KEY === undefined) delete process.env.QIXINBAO_API_KEY;
+      else process.env.QIXINBAO_API_KEY = original.QIXINBAO_API_KEY;
+      if (original.QIXINBAO_BASE_URL === undefined) delete process.env.QIXINBAO_BASE_URL;
+      else process.env.QIXINBAO_BASE_URL = original.QIXINBAO_BASE_URL;
+    }
+  });
+
+  it('queries a configured tender gateway and otherwise keeps an official-web handoff', async () => {
+    const registry = createLegalRegistry();
+    const original = {
+      TENDER_DATA_API_KEY: process.env.TENDER_DATA_API_KEY,
+      TENDER_DATA_BASE_URL: process.env.TENDER_DATA_BASE_URL,
+    };
+    const keyword = `Tender Test Company ${Date.now()}`;
+    process.env.TENDER_DATA_API_KEY = 'test-tender-key';
+    process.env.TENDER_DATA_BASE_URL = 'https://tender.local/search';
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({
+        records: [{
+          projectName: '测试信息化采购项目',
+          projectNo: 'TENDER-2026-001',
+          buyerName: '测试采购单位',
+          winnerName: keyword,
+          winningAmount: '1280000元',
+          publishDate: '2026-08-01',
+          detailUrl: 'https://tender.local/notices/1',
+        }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+
+    try {
+      const output = await registry.execute('legal_search_tender_projects', {
+        keyword,
+        sourceIds: ['tender-data'],
+        persistCase: false,
+      });
+
+      expect(fetchMock).toHaveBeenCalled();
+      expect(output).toContain('测试信息化采购项目');
+      expect(output).toContain('TENDER-2026-001');
+      expect(output).toContain('1280000元');
+      expect(output).toContain('招投标授权数据网关');
+      expect(output).toContain('仅凭中标公告不能认定债权真实存在');
+    } finally {
+      fetchMock.mockRestore();
+      if (original.TENDER_DATA_API_KEY === undefined) delete process.env.TENDER_DATA_API_KEY;
+      else process.env.TENDER_DATA_API_KEY = original.TENDER_DATA_API_KEY;
+      if (original.TENDER_DATA_BASE_URL === undefined) delete process.env.TENDER_DATA_BASE_URL;
+      else process.env.TENDER_DATA_BASE_URL = original.TENDER_DATA_BASE_URL;
+    }
+  });
+
   it('keeps triad reasoning as core legal logic rather than a standalone UI tab', () => {
     const registry = createLegalRegistry();
     const legalHubSource = fs.readFileSync(path.join(process.cwd(), 'src/components/org/LegalHub.tsx'), 'utf-8');
@@ -1584,7 +1677,16 @@ describe('legal web login presets', () => {
     'people-court-case-library',
     'court-online-service',
     'qichacha',
+    'qixinbao',
+    'tianyancha',
     'national-enterprise-credit',
+    'china-enforcement-disclosure',
+    'national-public-resources',
+    'movable-financing-register',
+    'cnipa-public-service',
+    'construction-market',
+    'customs-credit',
+    'bankruptcy-restructuring',
     'fachan',
     'alpha-lawyer',
   ];

@@ -11,6 +11,10 @@ import path from 'path';
 import crypto from 'crypto';
 import { getKey } from '../config/keys';
 import { getDataDirectory } from '../config/data_path';
+import {
+  CN_ASSET_TRACE_OFFICIAL_CAPABILITIES,
+  CN_ASSET_TRACE_SOURCE_COPY,
+} from '../regions/packs/cn/legal_asset_trace_sources';
 
 // ── Cache ───────────────────────────────────────────────────────────────
 
@@ -82,6 +86,26 @@ function tianyanchaConfig() {
   };
 }
 
+function qixinbaoConfig() {
+  const apiKey = readSecret('QIXINBAO_API_KEY');
+  const baseUrl = readSecret('QIXINBAO_BASE_URL').replace(/\/+$/, '');
+  return {
+    apiKey,
+    baseUrl,
+    configured: Boolean(apiKey && baseUrl),
+  };
+}
+
+function tenderDataConfig() {
+  const apiKey = readSecret('TENDER_DATA_API_KEY');
+  const baseUrl = readSecret('TENDER_DATA_BASE_URL').replace(/\/+$/, '');
+  return {
+    apiKey,
+    baseUrl,
+    configured: Boolean(apiKey && baseUrl),
+  };
+}
+
 function pkulawConfig() {
   const apiKey = readSecret('PKULAW_API_KEY') || readSecret('PKULAW_TOKEN');
   const baseUrl = readSecret('PKULAW_BASE_URL').replace(/\/+$/, '');
@@ -112,6 +136,8 @@ function faruiConfig() {
 export function listLegalSourceCapabilities(): LegalSourceCapability[] {
   const qcc = qichachaConfig();
   const tyc = tianyanchaConfig();
+  const qxb = qixinbaoConfig();
+  const tenderData = tenderDataConfig();
   const pkulaw = pkulawConfig();
   const farui = faruiConfig();
   return [
@@ -142,6 +168,34 @@ export function listLegalSourceCapabilities(): LegalSourceCapability[] {
       nextAction: tyc.configured
         ? '可通过 legal_company_database_lookup / legal_trace_assets 查询企业信息，并将律师确认结果入库。'
         : '配置 TIANYANCHA_API_KEY；如供应商提供专属网关，可同时配置 TIANYANCHA_BASE_URL。',
+    },
+    {
+      id: 'qixinbao',
+      label: CN_ASSET_TRACE_SOURCE_COPY.qixinbao.label,
+      accessMode: 'api',
+      configured: qxb.configured,
+      canAutoQuery: qxb.configured,
+      requiresAuthorization: true,
+      boundary: qxb.configured
+        ? CN_ASSET_TRACE_SOURCE_COPY.qixinbao.configuredBoundary
+        : CN_ASSET_TRACE_SOURCE_COPY.qixinbao.unconfiguredBoundary,
+      nextAction: qxb.configured
+        ? CN_ASSET_TRACE_SOURCE_COPY.qixinbao.configuredNextAction
+        : CN_ASSET_TRACE_SOURCE_COPY.qixinbao.unconfiguredNextAction,
+    },
+    {
+      id: 'tender-data',
+      label: CN_ASSET_TRACE_SOURCE_COPY.tenderData.label,
+      accessMode: 'api',
+      configured: tenderData.configured,
+      canAutoQuery: tenderData.configured,
+      requiresAuthorization: true,
+      boundary: tenderData.configured
+        ? CN_ASSET_TRACE_SOURCE_COPY.tenderData.configuredBoundary
+        : CN_ASSET_TRACE_SOURCE_COPY.tenderData.unconfiguredBoundary,
+      nextAction: tenderData.configured
+        ? CN_ASSET_TRACE_SOURCE_COPY.tenderData.configuredNextAction
+        : CN_ASSET_TRACE_SOURCE_COPY.tenderData.unconfiguredNextAction,
     },
     {
       id: 'pkulaw',
@@ -223,6 +277,7 @@ export function listLegalSourceCapabilities(): LegalSourceCapability[] {
       boundary: '按官方网站查询处理；遇验证码、地区跳转或频控时由人工完成。',
       nextAction: '打开官方网页核验主体信息，保存查询时间、主体名称和统一社会信用代码。',
     },
+    ...CN_ASSET_TRACE_OFFICIAL_CAPABILITIES,
   ];
 }
 
@@ -743,6 +798,73 @@ async function searchTianyanchaCompany(keyword: string): Promise<CompanyInfo | n
   return info;
 }
 
+function mapQixinbaoCompany(raw: any, keyword: string): CompanyInfo | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const name = firstString(raw, ['name', 'Name', 'companyName', 'CompanyName', 'entName']) || keyword;
+  const id = firstString(raw, ['id', 'Id', 'companyId', 'entId', 'eid']) || encodeURIComponent(keyword);
+  const shareholders = raw.shareholders || raw.Shareholders || raw.partners || raw.investors || [];
+  const branches = raw.branches || raw.Branches || raw.branchList || [];
+  return {
+    name,
+    legalPerson: firstString(raw, ['legalPersonName', 'legalPerson', 'operName', 'OperName', 'frName']),
+    registeredCapital: firstString(raw, ['registeredCapital', 'regCapital', 'RegistCapi', 'regCap']),
+    status: firstString(raw, ['status', 'regStatus', 'Status', 'entStatus']),
+    establishDate: formatMaybeDate(firstString(raw, ['establishDate', 'estiblishTime', 'StartDate', 'esDate'])),
+    unifiedCode: firstString(raw, ['unifiedCode', 'creditCode', 'CreditCode', 'creditNo']),
+    address: firstString(raw, ['address', 'regLocation', 'Address', 'dom']),
+    businessScope: firstString(raw, ['businessScope', 'scope', 'Scope', 'opScope']),
+    shareholders: (Array.isArray(shareholders) ? shareholders : []).map((shareholder: any) => ({
+      name: firstString(shareholder, ['name', 'Name', 'shareholderName', 'investorName']),
+      ratio: Number.parseFloat(firstString(shareholder, ['ratio', 'percent', 'capitalRatio', 'StockPercent'])) || 0,
+      type: firstString(shareholder, ['type', 'shareholderType', 'StockType']),
+    })),
+    branches: (Array.isArray(branches) ? branches : []).map((branch: any) => (
+      typeof branch === 'string' ? branch : firstString(branch, ['name', 'Name', 'branchName'])
+    )).filter(Boolean),
+    riskInfo: {
+      enforcementCount: Number(raw.enforcementCount || raw.zhixingCount || raw.executeCount || 0),
+      dishonestyCount: Number(raw.dishonestyCount || raw.shixinCount || 0),
+      restrictionsCount: Number(raw.restrictionsCount || raw.xiangaoCount || 0),
+    },
+    url: firstString(raw, ['url', 'detailUrl', 'sourceUrl']) || `https://www.qixin.com/company/${encodeURIComponent(id)}`,
+    sourceMode: 'api',
+    sourceName: CN_ASSET_TRACE_SOURCE_COPY.qixinbao.apiSourceName,
+    queriedAt: new Date().toISOString(),
+  };
+}
+
+async function searchQixinbaoCompany(keyword: string): Promise<CompanyInfo | null> {
+  const config = qixinbaoConfig();
+  if (!config.configured) return null;
+  const ck = cacheKey('qixinbao', JSON.stringify({ keyword, baseUrl: config.baseUrl }));
+  const cached = readCache(ck, 6 * 60 * 60 * 1000);
+  if (cached) return cached;
+
+  const endpoint = appendQuery(config.baseUrl, {
+    q: keyword,
+    query: keyword,
+    keyword,
+    name: keyword,
+  });
+  const authValue = /^bearer\s+/i.test(config.apiKey) ? config.apiKey : `Bearer ${config.apiKey}`;
+  const data = await fetchJsonWithTimeout(endpoint, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: authValue,
+      'X-API-Key': config.apiKey,
+      Token: config.apiKey,
+    },
+  }, 8000);
+  if (!data) return null;
+
+  const code = String(data?.error_code ?? data?.errorCode ?? data?.code ?? data?.Code ?? '');
+  if (code && !/^0$|^200$|^success$/i.test(code)) return null;
+  const raw = normalizeApiRows(data)[0];
+  const info = mapQixinbaoCompany(raw, keyword);
+  if (info) writeCache(ck, info);
+  return info;
+}
+
 export async function searchCompanySources(keyword: string, sourceIds?: string[]): Promise<CompanyInfo[]> {
   const results: CompanyInfo[] = [];
   if (isSelectedSource(sourceIds, 'qichacha', ['qcc', '企查查'])) {
@@ -752,6 +874,10 @@ export async function searchCompanySources(keyword: string, sourceIds?: string[]
   if (isSelectedSource(sourceIds, 'tianyancha', ['tyc', '天眼查'])) {
     const tyc = await searchTianyanchaCompany(keyword);
     if (tyc) results.push(tyc);
+  }
+  if (isSelectedSource(sourceIds, 'qixinbao', ['qxb', '启信宝'])) { // i18n-allow: reviewed provider aliases for source selection.
+    const qxb = await searchQixinbaoCompany(keyword);
+    if (qxb) results.push(qxb);
   }
 
   const seen = new Set<string>();
@@ -766,6 +892,86 @@ export async function searchCompanySources(keyword: string, sourceIds?: string[]
 export async function searchCompany(keyword: string): Promise<CompanyInfo | null> {
   const results = await searchCompanySources(keyword);
   return results[0] || null;
+}
+
+export interface TenderProjectInfo {
+  sourceId: string;
+  sourceName: string;
+  title: string;
+  projectNumber: string;
+  purchaser: string;
+  bidder: string;
+  amount: string;
+  publishDate: string;
+  status: string;
+  region: string;
+  url: string;
+  queriedAt: string;
+  raw?: any;
+}
+
+function mapTenderProject(raw: any): TenderProjectInfo | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const title = firstString(raw, [
+    'title', 'Title', 'projectName', 'ProjectName', 'noticeTitle', 'bulletinTitle', 'name',
+  ]);
+  if (!title) return null;
+  return {
+    sourceId: 'tender-data',
+    sourceName: CN_ASSET_TRACE_SOURCE_COPY.tenderData.apiSourceName,
+    title,
+    projectNumber: firstString(raw, ['projectNumber', 'projectNo', 'code', 'noticeCode', 'bidNo']),
+    purchaser: firstString(raw, ['purchaser', 'buyer', 'buyerName', 'tenderee', 'tenderer', 'ownerName']),
+    bidder: firstString(raw, ['bidder', 'supplier', 'supplierName', 'winner', 'winnerName', 'bidWinner']),
+    amount: firstString(raw, ['amount', 'bidAmount', 'winningAmount', 'dealAmount', 'budgetAmount']),
+    publishDate: formatMaybeDate(firstString(raw, ['publishDate', 'publishedAt', 'noticeDate', 'date'])),
+    status: firstString(raw, ['status', 'projectStatus', 'noticeType', 'type']),
+    region: firstString(raw, ['region', 'area', 'province', 'location']),
+    url: firstString(raw, ['url', 'detailUrl', 'sourceUrl', 'link']),
+    queriedAt: new Date().toISOString(),
+    raw,
+  };
+}
+
+export async function searchTenderSources(params: {
+  keyword: string;
+  sourceIds?: string[];
+  limit?: number;
+}): Promise<TenderProjectInfo[]> {
+  const keyword = params.keyword.trim();
+  if (!keyword) return [];
+  if (!isSelectedSource(params.sourceIds, 'tender-data', ['tender', 'bid', '招投标数据网关'])) return []; // i18n-allow: reviewed provider aliases for source selection.
+
+  const config = tenderDataConfig();
+  if (!config.configured) return [];
+  const limit = Math.max(1, Math.min(Number(params.limit) || 10, 50));
+  const ck = cacheKey('tender-data', JSON.stringify({ keyword, limit, baseUrl: config.baseUrl }));
+  const cached = readCache(ck, 30 * 60 * 1000);
+  if (cached) return cached;
+
+  const endpoint = appendQuery(config.baseUrl, {
+    q: keyword,
+    query: keyword,
+    keyword,
+    limit,
+  });
+  const authValue = /^bearer\s+/i.test(config.apiKey) ? config.apiKey : `Bearer ${config.apiKey}`;
+  const data = await fetchJsonWithTimeout(endpoint, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: authValue,
+      'X-API-Key': config.apiKey,
+      Token: config.apiKey,
+    },
+  }, 10000);
+  if (!data) return [];
+
+  const rows = normalizeApiRows(data)
+    .map(mapTenderProject)
+    .filter((row): row is TenderProjectInfo => Boolean(row))
+    .slice(0, limit);
+  writeCache(ck, rows);
+  return rows;
 }
 
 // ── 全国法院被执行人信息 (zhixing.court.gov.cn) ───────────────────────

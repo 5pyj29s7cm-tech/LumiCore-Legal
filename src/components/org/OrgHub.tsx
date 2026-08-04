@@ -19,6 +19,7 @@ import {
   takePendingOrganizationWorkspaceRoute,
 } from '../../lib/orgWorkspaceNavigation';
 import { uiMessage } from '../../i18n/uiMessages';
+import { chinaLegalCopy } from '../../i18n/regions/cn/legal';
 import type { LegalView } from './LegalHub';
 
 const AuditLogViewer = lazy(() => import('./AuditLogViewer').then(m => ({ default: m.AuditLogViewer })));
@@ -73,6 +74,7 @@ export function OrgHub() {
   const [editingArticleId, setEditingArticleId] = useState<string | undefined>(() => initialRoute?.articleId);
   const [switchBusy, setSwitchBusy] = useState(false);
   const t = useT();
+  const workspaceCopy = chinaLegalCopy(t.langCode === 'en' ? 'en' : 'zh').workspace;
 
   const allNavItems: NavItem[] = useMemo(() => [
     { id: 'dashboard', label: t.orgDashboard, icon: <Home size={16} />, roles: ['owner', 'admin', 'member', 'viewer'] },
@@ -118,12 +120,12 @@ export function OrgHub() {
   const primaryNavItems = visibleItems.filter(item => item.showInNav !== false);
   const legalNavItems: LegalNavItem[] = useMemo(() => [
     { id: 'workspace', label: uiMessage('legal-hub.case-workspace.9f165fc920'), icon: <FolderOpen size={16} /> },
-    { id: 'research', label: t.langCode === 'en' ? 'Legal Research' : '法律检索', icon: <Search size={16} /> },
+    { id: 'research', label: workspaceCopy.legalResearch, icon: <Search size={16} /> },
     { id: 'contract-review', label: t.legalContractReview, icon: <Shield size={16} /> },
     { id: 'asset-trace', label: t.legalAssetTrace, icon: <Crosshair size={16} /> },
     { id: 'verify', label: t.legalVerifyCitation, icon: <CheckCircle size={16} /> },
     { id: 'bid', label: t.legalBidWorkbench, icon: <FileText size={16} /> },
-  ], [t]);
+  ], [t, workspaceCopy]);
   const roleInfo = roleLabel[orgRole] || roleLabel.member;
   const currentLegalItem = legalNavItems.find(item => item.id === legalView) || legalNavItems[0];
   const currentItem = subView === 'legal'
@@ -243,7 +245,7 @@ export function OrgHub() {
           ))}
           <div className="my-2 border-t border-white/[0.08]" />
           <p className="hidden px-3 pb-1 text-[10px] font-black uppercase tracking-[0.14em] text-white/30 sm:block">
-            {t.langCode === 'en' ? 'Standalone Legal Tools' : '独立法律工具'}
+            {workspaceCopy.standaloneLegalTools}
           </p>
           {legalNavItems.map(item => {
             const active = subView === 'legal' && legalView === item.id;

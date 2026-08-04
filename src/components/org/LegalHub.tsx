@@ -34,6 +34,7 @@ import { formatUiMessage, uiMessage } from '../../i18n/uiMessages';
 import {
   buildChinaLegalCaseProfile,
   CHINA_LEGAL_TOOL_COPY,
+  chinaLegalCopy,
   inferChinaLegalDocumentType,
 } from '../../i18n/regions/cn/legal';
 
@@ -135,7 +136,7 @@ const LEGAL_CASE_READINESS_TOOLS: Record<string, string> = {
   reasoning: 'legal_case_reasoning_matrix',
   evidence: 'legal_generate_litigation_packet',
   law: 'legal_search_statute / legal_generate_citation_verification_report',
-  sources: 'legal_external_research_plan / legal_search_external_authorities',
+  sources: 'legal_external_research_plan / legal_search_external_authorities / legal_search_tender_projects',
   'work-product': 'legal_generate_litigation_packet / legal_generate_argument_or_opinion',
   filing: 'legal_prepare_filing_handoff',
   delivery: 'legal_finalize_delivery_package',
@@ -168,7 +169,7 @@ function buildLegalCaseReadiness(caseFile: LegalCaseFile, ui: (zh: string, en: s
   const hasReasoning = legalCaseHasSignal(caseFile, [/三段论|大前提|小前提|涵摄|legal_case_reasoning_matrix|法律分析三段论/i]);
   const hasEvidence = materials.some(material => material.type === 'evidence')
     || legalCaseHasSignal(caseFile, [/证据目录|证明目的|三性|真实性|合法性|关联性|质证/i]);
-  const hasSources = legalCaseHasSignal(caseFile, [/来源登记|外部检索|法源|类案|裁判文书|人民法院案例库|legal_external_research_plan|legal_search_external_authorities/i]);
+  const hasSources = legalCaseHasSignal(caseFile, [/来源登记|外部检索|招投标与应收款线索|法源|类案|裁判文书|人民法院案例库|legal_external_research_plan|legal_search_external_authorities|legal_search_tender_projects/i]); // i18n-allow: reviewed archived-material recognition.
   const hasWorkProduct = materials.some(material => material.type === 'pleading' || material.type === 'contract')
     || legalCaseHasSignal(caseFile, [/起诉状|答辩状|质证意见|代理词|法律意见书|合同审查|合同起草|投标书|标书|诉讼策略/i]);
   const hasLawBlocked = legalCaseHasSignal(caseFile, [/现行有效法律预检：未通过|硬门槛未通过|正式交付包未生成|不得标记为正式成果|已废止/i]);
@@ -322,6 +323,7 @@ export function LegalHub({
   const t = useT();
   const isZh = t.langCode !== 'en';
   const ui = useCallback((zh: string, en: string) => (isZh ? zh : en), [isZh]);
+  const workspaceCopy = chinaLegalCopy(isZh ? 'zh' : 'en').workspace;
   const useOrgCases = workDomain === 'work' && Boolean(orgConnection?.connected && orgConnection?.orgId);
   const canDeleteCases = !useOrgCases || ['owner', 'admin'].includes(String(orgConnection?.orgRole || '').toLowerCase());
 
@@ -395,7 +397,7 @@ export function LegalHub({
 
   const navItems: NavItem[] = useMemo(() => [
     { id: 'workspace', label: uiMessage('legal-hub.case-workspace.9f165fc920'), icon: <FolderOpen size={16} /> },
-    { id: 'research', label: ui('法律检索', 'Legal Research'), icon: <Search size={16} /> },
+    { id: 'research', label: workspaceCopy.legalResearch, icon: <Search size={16} /> },
     { id: 'packet', label: uiMessage('legal-hub.packet.1758eaea66'), icon: <ClipboardList size={16} /> },
     { id: 'external-research', label: uiMessage('legal-hub.research.fd18b45d25'), icon: <Search size={16} /> },
     { id: 'bid', label: t.legalBidWorkbench, icon: <FileText size={16} /> },
@@ -406,7 +408,7 @@ export function LegalHub({
     { id: 'verify', label: t.legalVerifyCitation, icon: <CheckCircle size={16} /> },
     { id: 'import', label: t.legalImportJudgment, icon: <Upload size={16} /> },
     { id: 'knowledge-sync', label: uiMessage('legal-hub.sync-to-kb.f5314698c5'), icon: <Archive size={16} /> },
-  ], [t, ui]);
+  ], [t, workspaceCopy]);
 
   const workflowNavItems = useMemo(() => {
     const order = new Map(LEGAL_WORKFLOW_ORDER.map((id, index) => [id, index]));
@@ -670,7 +672,14 @@ export function LegalHub({
       case 'external-research': return <LegalExternalResearchView caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
       case 'bid': return <LegalBidWorkbench onSwitchView={onViewChange} caseFile={toolCase} orgId={legalOrgId} />;
       case 'case-search': return <LegalCaseSearch caseFile={toolCase} onAddMaterial={toolAddMaterial} />;
-      case 'asset-trace': return <LegalAssetTrace caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
+      case 'asset-trace': return (
+        <LegalAssetTrace
+          caseFile={toolCase}
+          orgId={legalOrgId}
+          onAddMaterial={toolAddMaterial}
+          onUpdateCase={toolCase ? patch => updateCase(toolCase.id, patch) : undefined}
+        />
+      );
       case 'contract-review': return <LegalContractReview caseFile={toolCase} />;
       case 'strategy': return <LegalStrategyView caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
       case 'verify': return <LegalVerifyView caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
@@ -696,7 +705,7 @@ export function LegalHub({
               </div>
               <div className="mt-1 flex min-w-0 items-center gap-2 text-sm text-white/70">
                 <span className="truncate font-semibold text-white/85">
-                  {isWorkflowView ? legalCaseTitle(activeCase) : ui('独立使用', 'Standalone')}
+                  {isWorkflowView ? legalCaseTitle(activeCase) : workspaceCopy.standalone}
                 </span>
                 <span className="text-white/25">&rarr;</span>
                 <span className="truncate">{currentStep?.label}</span>
@@ -721,7 +730,7 @@ export function LegalHub({
           <div className="min-w-0 max-w-full border-b border-white/[0.08] bg-black/20 px-4 py-2.5">
             <div className="custom-scrollbar flex min-w-0 max-w-full items-center gap-2 overflow-x-auto overscroll-x-contain pb-0.5">
               <span className="mr-1 shrink-0 text-[10px] font-black uppercase tracking-[0.14em] text-white/30">
-                {ui('案件流程', 'Case flow')}
+                {workspaceCopy.caseFlow}
               </span>
               {workflowNavItems.map((item, index) => {
                 const active = workflowView === item.id;
@@ -1624,7 +1633,7 @@ type LegalResearchTab = 'case-search' | 'external-research' | 'import';
 function LegalResearchWorkspace({ orgId }: { orgId?: string }) {
   const t = useT();
   const isZh = t.langCode !== 'en';
-  const ui = (zh: string, en: string) => (isZh ? zh : en);
+  const workspaceCopy = chinaLegalCopy(isZh ? 'zh' : 'en').workspace;
   const [tab, setTab] = useState<LegalResearchTab>('case-search');
   const tabs: Array<{ id: LegalResearchTab; label: string; icon: React.ReactNode }> = [
     { id: 'case-search', label: t.legalCaseSearch, icon: <Search size={14} /> },
@@ -1637,7 +1646,7 @@ function LegalResearchWorkspace({ orgId }: { orgId?: string }) {
       <div className="shrink-0 border-b border-white/[0.08] bg-black/16 px-4 py-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="mr-1 text-[10px] font-black uppercase tracking-[0.14em] text-white/30">
-            {ui('法律检索', 'Legal Research')}
+            {workspaceCopy.legalResearch}
           </span>
           {tabs.map(item => (
             <button

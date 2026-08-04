@@ -64,6 +64,8 @@ export function LegalDataSourcesSettings() {
   const sourceConfigured = (source: DataSourceConfig) => {
     if (source.id === 'qichacha') return Boolean(status.QICHACHA_APP_KEY && status.QICHACHA_SECRET_KEY);
     if (source.id === 'tianyancha') return Boolean(status.TIANYANCHA_API_KEY);
+    if (source.id === 'qixinbao') return Boolean(status.QIXINBAO_API_KEY && status.QIXINBAO_BASE_URL);
+    if (source.id === 'tenderData') return Boolean(status.TENDER_DATA_API_KEY && status.TENDER_DATA_BASE_URL);
     if (source.id === 'pkulaw') return Boolean((status.PKULAW_API_KEY || status.PKULAW_TOKEN) && (status.PKULAW_BASE_URL || status.PKULAW_MCP_URL));
     if (source.id === 'farui') return Boolean(status.FARUI_API_KEY && status.FARUI_BASE_URL);
     return source.fields.some(field => status[field.keyName]);

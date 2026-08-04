@@ -1,3 +1,5 @@
+import { CN_ASSET_TRACE_WEB_LOGIN_PRESETS } from '../regions/packs/cn/legal_asset_trace_sources';
+
 export type WebLoginSitePreset = {
   id: string;
   label: string;
@@ -87,6 +89,7 @@ export const LEGAL_WEB_LOGIN_PRESETS: WebLoginSitePreset[] = [
       '正式尽调结论需保留查询时间、主体名称、统一社会信用代码和页面来源。',
     ].join(' '),
   },
+  ...CN_ASSET_TRACE_WEB_LOGIN_PRESETS,
   {
     id: 'fachan',
     label: '法蝉',

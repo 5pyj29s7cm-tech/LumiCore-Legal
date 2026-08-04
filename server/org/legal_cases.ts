@@ -42,6 +42,7 @@ export interface OrgLegalCaseFile {
   enforcementDeadline: string;
   notes: string;
   materials: OrgLegalCaseMaterial[];
+  assetTraceWorkflow?: Record<string, unknown>;
   createdBy: string;
   updatedBy: string;
   createdAt: string;
@@ -168,7 +169,7 @@ export function evaluateCaseWorkflow(
     options.currentLawGate === 'passed'
     || caseWorkflowHas(text, [/现行有效法律预检：通过|现行有效法律硬门槛：通过|引用核验报告|引用校验|citation-verification-report/i])
   );
-  const hasSources = caseWorkflowHas(text, [/来源登记表|source-register|外部检索行动单|外部检索|人民法院案例库|裁判文书网|法蝉|alpha|legal_external_research_plan|legal_search_external_authorities/i]);
+  const hasSources = caseWorkflowHas(text, [/来源登记表|source-register|外部检索行动单|外部检索|招投标与应收款线索|人民法院案例库|裁判文书网|法蝉|alpha|legal_external_research_plan|legal_search_external_authorities|legal_search_tender_projects/i]); // i18n-allow: reviewed archived-material recognition.
   const hasWorkProduct = materials.some(material => material.type === 'pleading' || material.type === 'contract')
     || caseWorkflowHas(text, [/起诉状|要素式诉状|答辩状|质证意见|代理词|法律意见书|合同审查|合同起草|投标书|标书|诉讼策略|legal_generate_litigation_packet|legal_generate_argument_or_opinion/i]);
   const hasFilingHandoff = caseWorkflowHas(text, [/半自动立案交接单|立案网交接单|法院在线服务|人民法院在线服务|legal_prepare_filing_handoff/i]);
@@ -229,7 +230,7 @@ export function evaluateCaseWorkflow(
       hasSources ? 'done' : hasReasoning || hasFacts ? 'ready' : 'missing',
       hasSources ? '已有外部检索或来源登记' : '待按法院层级检索类案并登记来源',
       '按最高院、高院、中院、基层法院顺序登记有利/不利裁判规则。',
-      'legal_external_research_plan / legal_search_external_authorities',
+      'legal_external_research_plan / legal_search_external_authorities / legal_search_tender_projects',
     ),
     makeWorkflowStep(
       'drafts',
@@ -377,6 +378,9 @@ export function createCase(orgId: string, userId: string, input: Partial<OrgLega
     enforcementDeadline: normalizeText(input.enforcementDeadline),
     notes: normalizeText(input.notes),
     materials: Array.isArray(input.materials) ? input.materials : [],
+    assetTraceWorkflow: input.assetTraceWorkflow && typeof input.assetTraceWorkflow === 'object'
+      ? input.assetTraceWorkflow
+      : undefined,
     createdBy: userId,
     updatedBy: userId,
     createdAt: ts,
