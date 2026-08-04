@@ -25,7 +25,7 @@ function legalCaseTitle(caseFile?: LegalCaseFile | null): string {
 }
 
 function assetTraceCaseArgs(caseFile?: LegalCaseFile | null, orgId?: string): Record<string, any> {
-  if (!caseFile) return orgId ? { orgId } : {};
+  if (!caseFile) return { ...(orgId ? { orgId } : {}), persistCase: false };
   return {
     caseId: caseFile.id,
     caseName: legalCaseTitle(caseFile),

@@ -408,8 +408,8 @@ const CLIENT_CAPABILITIES: ClientCapability[] = [
     id: 'workspace.org',
     label: 'Organization workspace',
     kind: 'organization',
-    actions: ['open_organization_workspace(section=dashboard|kb|chat|messaging|templates|review|members|audit|settings|branch|legal|spatial-design|brand-design)'],
-    notes: 'A work-space overlay for the same Lumi identity. It exposes role-scoped organization knowledge, company Lumi chat, messaging, templates, members, audit, settings/branch connection, legal, spatial architecture, and brand creative work without merging any member personal memory.',
+    actions: ['open_organization_workspace(section=dashboard|kb|chat|messaging|templates|review|members|audit|settings|branch|legal)'],
+    notes: 'A work-space overlay for the same Lumi identity. It exposes role-scoped organization knowledge, company Lumi chat, messaging, templates, members, audit, settings/branch connection, and legal work without merging any member personal memory.',
     stateKeys: ['workDomain', 'org', 'orgWorkspace', 'knowledge'],
   },
   {

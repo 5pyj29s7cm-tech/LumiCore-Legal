@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { AlertCircle, ArrowLeft, CheckCircle, Loader2, Package, Send } from 'lucide-react';
 import { useT } from '../../lib/useT';
@@ -6,11 +6,8 @@ import { formatUiMessage, uiMessage } from '../../i18n/uiMessages';
 
 export function TemplateCreator() {
   const t = useT();
-  const isZh = t.langCode !== 'en';
-  const ui = useCallback((zh: string, en: string) => (isZh ? zh : en), [isZh]);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [category, setCategory] = useState('productivity');
   const [icon, setIcon] = useState('Bot');
   const [configStr, setConfigStr] = useState(JSON.stringify({
     initialPrompt: '',
@@ -42,7 +39,7 @@ export function TemplateCreator() {
       const res = await fetch('/api/org/templates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), description: description.trim(), category, config, icon: icon.trim() || 'Bot' }),
+        body: JSON.stringify({ name: name.trim(), description: description.trim(), category: 'legal', config, icon: icon.trim() || 'Bot' }),
         credentials: 'include',
       });
       const data = await res.json().catch(() => ({}));
@@ -147,26 +144,12 @@ export function TemplateCreator() {
             />
           </label>
 
-          <label className="mt-4 block">
+          <div className="mt-4">
             <span className="mb-1 block text-xs text-white/50">{uiMessage('template-creator.category.6744e11866')}</span>
-            <select
-              value={category}
-              onChange={event => setCategory(event.target.value)}
-              className="w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/75 outline-none focus:border-violet-400/35"
-            >
-              <option value="productivity">{t.categoryProductivity || uiMessage('template-creator.productivity.4514e0830e')}</option>
-              <option value="data-analysis">{t.categoryDataAnalysis || uiMessage('template-creator.data-analysis.7f93838089')}</option>
-              <option value="customer-support">{t.categoryCustomerSupport || uiMessage('template-creator.customer-support.0fa655031e')}</option>
-              <option value="engineering">{t.categoryEngineering || uiMessage('template-creator.engineering.d73b96c6c8')}</option>
-              <option value="legal">{uiMessage('template-creator.legal.20218cb84a')}</option>
-              <option value="design">{uiMessage('template-creator.design.6c5392efbf')}</option>
-              <option value="finance">{uiMessage('template-creator.finance.e8c4c462f6')}</option>
-              <option value="hr">{t.categoryHR || 'HR'}</option>
-              <option value="sales">{t.categorySales || uiMessage('template-creator.sales.90e639dd41')}</option>
-              <option value="creative">{t.categoryCreative || uiMessage('template-creator.creative.9195660fea')}</option>
-              <option value="other">{t.categoryOther || uiMessage('template-creator.other.71e98789be')}</option>
-            </select>
-          </label>
+            <div className="w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/75">
+              {uiMessage('template-creator.legal.20218cb84a')}
+            </div>
+          </div>
         </section>
 
         <section className="rounded-lg border border-white/10 bg-white/[0.04] p-5">

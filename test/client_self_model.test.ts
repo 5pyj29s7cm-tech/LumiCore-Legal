@@ -188,6 +188,8 @@ describe('Lumi client self model', () => {
       'org-lumi',
       'org-messaging',
       'org-legal',
+    ]));
+    expect(ids).not.toEqual(expect.arrayContaining([
       'org-spatial-design',
       'org-brand-design',
     ]));

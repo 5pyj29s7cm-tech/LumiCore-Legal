@@ -22,15 +22,49 @@ describe('organization workspace information architecture', () => {
     expect(routes).toContain("requireOrgRole('owner', 'admin')");
   });
 
-  it('separates spatial architecture from brand creative work', () => {
+  it('keeps the legal client organization workspace legal-only', () => {
     const orgHub = source('src/components/org/OrgHub.tsx');
-    const designHub = source('src/components/org/DesignHub.tsx');
+    const legalHub = source('src/components/org/LegalHub.tsx');
+    const marketplace = source('src/components/org/TemplateMarketplace.tsx');
+    const creator = source('src/components/org/TemplateCreator.tsx');
+    const reviewQueue = source('src/components/org/TemplateReviewQueue.tsx');
 
-    expect(orgHub).toContain("id: 'spatial-design'");
-    expect(orgHub).toContain("id: 'brand-design'");
-    expect(orgHub).toContain('<DesignHub workspace="spatial" />');
-    expect(orgHub).toContain('<DesignHub workspace="brand" />');
-    expect(designHub).toContain("new Set<DesignView>(['space', 'interior', 'architecture'])");
+    for (const id of [
+      'workspace',
+      'research',
+      'contract-review',
+      'asset-trace',
+      'verify',
+      'bid',
+    ]) {
+      expect(orgHub).toContain(`id: '${id}'`);
+    }
+    expect(orgHub).not.toContain('spatial-design');
+    expect(orgHub).not.toContain('brand-design');
+    expect(orgHub).not.toContain('DesignHub');
+    expect(orgHub).not.toContain('orgModulesOpen');
+    expect(orgHub).not.toContain("uiMessage('org-hub.organization-modules");
+    expect(orgHub).not.toContain('t.orgExitWorkSpace');
+    expect(orgHub).toContain('legalNavItems.map');
+    expect(orgHub).toContain("'独立法律工具'");
+    expect(orgHub).toContain('workspaceResetKey={legalWorkspaceResetKey}');
+    expect(legalHub).not.toContain('flex w-56 shrink-0 flex-col');
+    expect(legalHub).not.toContain('<LegalDataSourcesSettings />');
+    expect(legalHub).toContain('onSetView={openCaseTool}');
+    expect(legalHub).toContain('setWorkflowView(nextView)');
+    expect(legalHub).toContain('workflowNavItems.map');
+    expect(legalHub).toContain("const activeView = isWorkflowView ? workflowView : view");
+    expect(legalHub).toContain('overflow-x-auto overscroll-x-contain');
+    expect(legalHub).not.toContain('onClick={() => openCaseTool(nextStep.id)}');
+    expect(legalHub).not.toContain('const setView = onViewChange');
+    expect(legalHub).toContain('LegalResearchWorkspace');
+    expect(legalHub).toContain("type LegalResearchTab = 'case-search' | 'external-research' | 'import'");
+    for (const id of ['strategy', 'packet', 'knowledge-sync']) {
+      expect(legalHub).toContain(`case '${id}'`);
+    }
+    expect(marketplace).toContain('category=legal');
+    expect(creator).toContain("category: 'legal'");
+    expect(reviewQueue).toContain('category=legal');
   });
 
   it('combines template review with the marketplace and hides duplicate dashboard destinations from navigation', () => {
@@ -57,7 +91,8 @@ describe('organization workspace information architecture', () => {
     expect(orgHub).toContain("id: 'branch'");
     expect(settingsWorkspace).toContain('<OrgSettings />');
     expect(settingsWorkspace).toContain('<OrgBranchPanel />');
-    expect(settingsWorkspace).toContain("type OrganizationSettingsTab = 'general' | 'branch'");
+    expect(settingsWorkspace).toContain("type OrganizationSettingsTab = 'general' | 'legal-data-sources' | 'branch'");
+    expect(settingsWorkspace).toContain('<LegalDataSourcesSettings />');
     expect(branchPanel).toContain("uiMessage('org-branch-panel.branch-connection.9cecc72547')");
     expect(branchPanel).not.toContain("ui('分支连接', 'Branch Connection')");
   });
@@ -88,8 +123,9 @@ describe('organization workspace information architecture', () => {
     expect(desktop).toContain('queueOrganizationWorkspaceRoute');
     expect(desktop).toContain('organizationWorkspaceView');
     expect(desktop).toContain('availableOrganizationWorkspaceViews');
-    expect(contract).toContain("'spatial-design'");
-    expect(contract).toContain("'brand-design'");
+    expect(contract).toContain("'legal'");
+    expect(contract).not.toContain("'spatial-design'");
+    expect(contract).not.toContain("'brand-design'");
     expect(navigation).toContain('sessionStorage');
   });
 
@@ -110,12 +146,26 @@ describe('organization workspace information architecture', () => {
 
   it('gives legal tools a shared current-case and execution-state context', () => {
     const legalHub = source('src/components/org/LegalHub.tsx');
+    const orgHub = source('src/components/org/OrgHub.tsx');
     const contextBar = source('src/components/org/LegalCaseContextBar.tsx');
+    const assetTrace = source('src/components/org/LegalAssetTrace.tsx');
+    const bidWorkbench = source('src/components/org/LegalBidWorkbench.tsx');
     const toolClient = source('src/lib/legalToolClient.ts');
 
     expect(legalHub).toContain('<LegalCaseContextBar');
+    expect(legalHub).toContain('const toolCase = isWorkflowView ? activeCase : null');
+    expect(legalHub).toContain('const toolAddMaterial = toolCase ? addMaterial : undefined');
+    expect(legalHub).toContain("<LegalUsageModeProvider mode={isWorkflowView ? 'case' : 'standalone'}>");
+    expect(legalHub).toContain("persistCase: false");
+    expect(assetTrace).toContain("persistCase: false");
+    expect(bidWorkbench).toContain("persistCase: false");
+    expect(orgHub).not.toContain('LegalUsageMode');
     expect(contextBar).toContain("export type LegalToolState = 'input' | 'running' | 'result'");
-    expect(contextBar).toContain("uiMessage('legal-case-context-bar.current-case.0708a66402')");
+    expect(contextBar).toContain("export type LegalUsageMode = 'standalone' | 'case'");
+    expect(contextBar).toContain("ui('本次结果不会写入任何案件', 'Results from this run will not be saved to a case')");
+    expect(contextBar).toContain("ui('使用方式', 'Usage')");
+    expect(contextBar).not.toContain('onModeChange');
+    expect(contextBar).not.toContain('onSelectCase');
     expect(contextBar).toContain("uiMessage('legal-case-context-bar.closed.f9c16bb807')");
     expect(contextBar).not.toContain("ui('当前案件', 'Current case')");
     expect(toolClient).toContain("'lumi:org-legal-cases-changed'");

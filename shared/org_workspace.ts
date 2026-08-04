@@ -13,9 +13,7 @@ export type OrganizationWorkspaceView =
   | 'audit'
   | 'settings'
   | 'branch'
-  | 'legal'
-  | 'spatial-design'
-  | 'brand-design';
+  | 'legal';
 
 export const ORGANIZATION_WORKSPACE_VIEWS: readonly OrganizationWorkspaceView[] = [
   'dashboard',
@@ -31,8 +29,6 @@ export const ORGANIZATION_WORKSPACE_VIEWS: readonly OrganizationWorkspaceView[] 
   'settings',
   'branch',
   'legal',
-  'spatial-design',
-  'brand-design',
 ] as const;
 
 export const ORGANIZATION_WORKSPACE_PUBLIC_VIEWS: readonly OrganizationWorkspaceView[] = [
@@ -47,8 +43,6 @@ export const ORGANIZATION_WORKSPACE_PUBLIC_VIEWS: readonly OrganizationWorkspace
   'settings',
   'branch',
   'legal',
-  'spatial-design',
-  'brand-design',
 ] as const;
 
 const VIEW_ALIASES: Record<string, OrganizationWorkspaceView> = {
@@ -83,11 +77,6 @@ const VIEW_ALIASES: Record<string, OrganizationWorkspaceView> = {
   'branch-connection': 'branch',
   'law-firm': 'legal',
   lawyer: 'legal',
-  spatial: 'spatial-design',
-  architecture: 'spatial-design',
-  design: 'spatial-design',
-  brand: 'brand-design',
-  creative: 'brand-design',
 };
 
 const ADMIN_ONLY_VIEWS = new Set<OrganizationWorkspaceView>(['review', 'members', 'audit']);

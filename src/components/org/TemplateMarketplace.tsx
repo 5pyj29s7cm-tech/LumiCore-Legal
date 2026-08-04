@@ -35,8 +35,6 @@ type Feedback = { type: 'success' | 'error'; text: string; agentId?: string };
 
 export function TemplateMarketplace() {
   const t = useT();
-  const isZh = t.langCode !== 'en';
-  const ui = useCallback((zh: string, en: string) => (isZh ? zh : en), [isZh]);
   const socket = useSocket();
   const [templates, setTemplates] = useState<Template[]>([]);
   const [search, setSearch] = useState('');
@@ -65,13 +63,13 @@ export function TemplateMarketplace() {
     } catch {
       // Team state is a convenience; failing to read it should not block templates.
     }
-  }, [ui]);
+  }, []);
 
   const loadTemplates = useCallback(async () => {
     setLoading(true);
     setFeedback(null);
     try {
-      const res = await fetch('/api/org/templates?status=published', { credentials: 'include' });
+      const res = await fetch('/api/org/templates?status=published&category=legal', { credentials: 'include' });
       const data = await res.json().catch(() => []);
       if (!res.ok) throw new Error((data as any).error || formatUiMessage('template-marketplace.failed-to-load-templates-value0.e91945cfaa', { value0: res.status }));
       setTemplates(Array.isArray(data) ? data : []);
@@ -81,7 +79,7 @@ export function TemplateMarketplace() {
     } finally {
       setLoading(false);
     }
-  }, [ui]);
+  }, []);
 
   useEffect(() => {
     void loadTemplates();

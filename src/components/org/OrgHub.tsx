@@ -1,9 +1,9 @@
 import React, { Suspense, lazy, useMemo, useState } from 'react';
 import {
   Building2, BookOpen, Package, Users, Settings,
-  ClipboardCheck, ScrollText, MessageSquare, ArrowLeft,
-  Shield, User, Briefcase, Home, Scale, Palette, GitBranch, Loader2, MessagesSquare,
-  ChevronDown, ChevronRight, Layers,
+  ClipboardCheck, ScrollText, MessageSquare,
+  Shield, User, Briefcase, Home, GitBranch, Loader2, MessagesSquare,
+  FolderOpen, FileText, Search, Crosshair, CheckCircle,
 } from 'lucide-react';
 import { useApp } from '../../contexts/AppContext';
 import { useT } from '../../lib/useT';
@@ -19,12 +19,12 @@ import {
   takePendingOrganizationWorkspaceRoute,
 } from '../../lib/orgWorkspaceNavigation';
 import { uiMessage } from '../../i18n/uiMessages';
+import type { LegalView } from './LegalHub';
 
 const AuditLogViewer = lazy(() => import('./AuditLogViewer').then(m => ({ default: m.AuditLogViewer })));
 const AgentTemplateWorkspace = lazy(() => import('./AgentTemplateWorkspace').then(m => ({ default: m.AgentTemplateWorkspace })));
 const BranchDashboard = lazy(() => import('./BranchDashboard').then(m => ({ default: m.BranchDashboard })));
 const CentralLumiChat = lazy(() => import('./CentralLumiChat').then(m => ({ default: m.CentralLumiChat })));
-const DesignHub = lazy(() => import('./DesignHub').then(m => ({ default: m.DesignHub })));
 const KnowledgeBaseBrowser = lazy(() => import('./KnowledgeBaseBrowser').then(m => ({ default: m.KnowledgeBaseBrowser })));
 const KnowledgeBaseEditor = lazy(() => import('./KnowledgeBaseEditor').then(m => ({ default: m.KnowledgeBaseEditor })));
 const LegalHub = lazy(() => import('./LegalHub').then(m => ({ default: m.LegalHub })));
@@ -41,6 +41,12 @@ interface NavItem {
   icon: React.ReactNode;
   roles: Array<'owner' | 'admin' | 'member' | 'viewer'>;
   showInNav?: boolean;
+}
+
+interface LegalNavItem {
+  id: LegalView;
+  label: string;
+  icon: React.ReactNode;
 }
 
 function OrgViewFallback() {
@@ -62,12 +68,11 @@ export function OrgHub() {
     return route && canAccessOrganizationWorkspaceView(orgRole, route.view) ? route : null;
   });
   const [subView, setSubView] = useState<SubView>(() => initialRoute?.view || 'dashboard');
+  const [legalView, setLegalView] = useState<LegalView>('workspace');
+  const [legalWorkspaceResetKey, setLegalWorkspaceResetKey] = useState(0);
   const [editingArticleId, setEditingArticleId] = useState<string | undefined>(() => initialRoute?.articleId);
   const [switchBusy, setSwitchBusy] = useState(false);
-  const [orgModulesOpen, setOrgModulesOpen] = useState(false);
   const t = useT();
-  const isZh = t.langCode !== 'en';
-  const ui = (zh: string, en: string) => (isZh ? zh : en);
 
   const allNavItems: NavItem[] = useMemo(() => [
     { id: 'dashboard', label: t.orgDashboard, icon: <Home size={16} />, roles: ['owner', 'admin', 'member', 'viewer'] },
@@ -78,12 +83,9 @@ export function OrgHub() {
     { id: 'review', label: uiMessage('org-hub.agent-templates.9cc4c8c9d0'), icon: <ClipboardCheck size={16} />, roles: ['owner', 'admin'], showInNav: false },
     { id: 'members', label: t.orgMembers, icon: <Users size={16} />, roles: ['owner', 'admin'], showInNav: false },
     { id: 'audit', label: t.orgAudit, icon: <ScrollText size={16} />, roles: ['owner', 'admin'] },
-    { id: 'legal', label: t.legalHub || uiMessage('org-hub.legal.95d17f5100'), icon: <Scale size={16} />, roles: ['owner', 'admin', 'member', 'viewer'] },
-    { id: 'spatial-design', label: uiMessage('org-hub.spatial-architecture.ad5a608bfc'), icon: <Building2 size={16} />, roles: ['owner', 'admin', 'member', 'viewer'] },
-    { id: 'brand-design', label: uiMessage('org-hub.brand-creative.2ae19b7f69'), icon: <Palette size={16} />, roles: ['owner', 'admin', 'member', 'viewer'] },
     { id: 'settings', label: t.orgSettings, icon: <Settings size={16} />, roles: ['owner', 'admin', 'member', 'viewer'] },
     { id: 'branch', label: uiMessage('org-hub.branch-connection.9cecc72547'), icon: <GitBranch size={16} />, roles: ['owner', 'admin', 'member', 'viewer'], showInNav: false },
-  ], [t, isZh]);
+  ], [t]);
 
   const roleLabel: Record<string, { label: string; icon: React.ReactNode; color: string }> = useMemo(() => ({
     owner:  { label: t.orgRoleOwner,  icon: <Shield size={10} />, color: 'text-amber-400 bg-amber-500/10' },
@@ -113,16 +115,20 @@ export function OrgHub() {
     () => listOrganizationWorkspaceViewsForRole(orgRole),
     [orgRole],
   );
-  const moduleItemIds = useMemo(() => new Set<SubView>(['legal', 'spatial-design', 'brand-design']), []);
-  const primaryNavItems = visibleItems.filter(item => item.showInNav !== false && !moduleItemIds.has(item.id));
-  const moduleNavItems = visibleItems.filter(item => moduleItemIds.has(item.id));
-  const isModuleView = moduleItemIds.has(subView);
+  const primaryNavItems = visibleItems.filter(item => item.showInNav !== false);
+  const legalNavItems: LegalNavItem[] = useMemo(() => [
+    { id: 'workspace', label: uiMessage('legal-hub.case-workspace.9f165fc920'), icon: <FolderOpen size={16} /> },
+    { id: 'research', label: t.langCode === 'en' ? 'Legal Research' : '法律检索', icon: <Search size={16} /> },
+    { id: 'contract-review', label: t.legalContractReview, icon: <Shield size={16} /> },
+    { id: 'asset-trace', label: t.legalAssetTrace, icon: <Crosshair size={16} /> },
+    { id: 'verify', label: t.legalVerifyCitation, icon: <CheckCircle size={16} /> },
+    { id: 'bid', label: t.legalBidWorkbench, icon: <FileText size={16} /> },
+  ], [t]);
   const roleInfo = roleLabel[orgRole] || roleLabel.member;
-  const currentItem = visibleItems.find(item => item.id === subView) || allNavItems.find(item => item.id === subView) || allNavItems[0];
-
-  React.useEffect(() => {
-    if (isModuleView) setOrgModulesOpen(true);
-  }, [isModuleView]);
+  const currentLegalItem = legalNavItems.find(item => item.id === legalView) || legalNavItems[0];
+  const currentItem = subView === 'legal'
+    ? currentLegalItem
+    : visibleItems.find(item => item.id === subView) || allNavItems.find(item => item.id === subView) || allNavItems[0];
 
   React.useEffect(() => {
     if (!canAccessOrganizationWorkspaceView(orgRole, subView)) {
@@ -172,9 +178,13 @@ export function OrgHub() {
       case 'members': return <OrgMembers />;
       case 'settings': return <OrganizationSettingsWorkspace />;
       case 'audit': return <AuditLogViewer />;
-      case 'legal': return <LegalHub />;
-      case 'spatial-design': return <DesignHub workspace="spatial" />;
-      case 'brand-design': return <DesignHub workspace="brand" />;
+      case 'legal': return (
+        <LegalHub
+          view={legalView}
+          onViewChange={setLegalView}
+          workspaceResetKey={legalWorkspaceResetKey}
+        />
+      );
       case 'branch': return <OrganizationSettingsWorkspace initialTab="branch" />;
       default: return <BranchDashboard />;
     }
@@ -231,59 +241,33 @@ export function OrgHub() {
               <span className="hidden min-w-0 truncate sm:block">{item.label}</span>
             </button>
           ))}
-          {moduleNavItems.length > 0 && (
-            <div className="pt-1">
-              <button
-                type="button"
-                onClick={() => setOrgModulesOpen(prev => !prev)}
-                aria-label={uiMessage('org-hub.organization-modules.75dd9b5603')}
-                title={uiMessage('org-hub.organization-modules.75dd9b5603')}
-                className={`flex w-full items-center justify-center gap-2 rounded-xl border px-2 py-2 text-sm transition-colors sm:justify-start sm:px-3 ${
-                  isModuleView
-                    ? 'border-blue-400/20 bg-blue-500/10 text-blue-200'
-                    : 'border-white/[0.08] bg-white/[0.03] text-white/55 hover:bg-white/[0.06] hover:text-white/80'
-                }`}
-              >
-                <Layers size={16} className="shrink-0" />
-                <span className="hidden min-w-0 flex-1 truncate text-left sm:block">{uiMessage('org-hub.organization-modules.75dd9b5603')}</span>
-                <span className="hidden sm:block">{orgModulesOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
-              </button>
-              {orgModulesOpen && (
-                <div className="mt-1 space-y-1 sm:pl-3">
-                  {moduleNavItems.map(item => (
-                    <button
-                      key={item.id}
-                      onClick={() => openSubView(item.id)}
-                      aria-label={item.label}
-                      title={item.label}
-                      className={`flex w-full items-center justify-center gap-2 rounded-xl px-2 py-2 text-sm transition-colors sm:justify-start sm:px-3 ${
-                        subView === item.id
-                          ? 'border border-blue-400/20 bg-blue-500/10 text-blue-200'
-                          : 'border border-transparent text-white/45 hover:border-white/[0.08] hover:bg-white/[0.05] hover:text-white/80'
-                      }`}
-                    >
-                      <span className="shrink-0">{item.icon}</span>
-                      <span className="hidden min-w-0 truncate sm:block">{item.label}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
           <div className="my-2 border-t border-white/[0.08]" />
-          <button
-            onClick={() => {
-              void switchDomain('personal').finally(() => {
-                window.dispatchEvent(new CustomEvent('lumi:navigate', { detail: { tab: 'home' } }));
-              });
-            }}
-            aria-label={t.orgExitWorkSpace}
-            title={t.orgExitWorkSpace}
-            className="flex w-full items-center justify-center gap-2 rounded-xl border border-transparent px-2 py-2 text-sm text-white/40 transition-colors hover:border-white/[0.08] hover:bg-white/[0.05] hover:text-white/70 sm:justify-start sm:px-3"
-          >
-            <ArrowLeft size={16} />
-            <span className="hidden min-w-0 truncate sm:block">{t.orgExitWorkSpace}</span>
-          </button>
+          <p className="hidden px-3 pb-1 text-[10px] font-black uppercase tracking-[0.14em] text-white/30 sm:block">
+            {t.langCode === 'en' ? 'Standalone Legal Tools' : '独立法律工具'}
+          </p>
+          {legalNavItems.map(item => {
+            const active = subView === 'legal' && legalView === item.id;
+            return (
+            <button
+              key={item.id}
+              onClick={() => {
+                if (item.id === 'workspace') setLegalWorkspaceResetKey(value => value + 1);
+                setLegalView(item.id);
+                openSubView('legal');
+              }}
+              aria-label={item.label}
+              title={item.label}
+              className={`flex w-full items-center justify-center gap-2 rounded-xl px-2 py-2 text-sm transition-colors sm:justify-start sm:px-3 ${
+                active
+                  ? 'border border-blue-400/20 bg-blue-500/10 text-blue-200'
+                  : 'border border-transparent text-white/50 hover:border-white/[0.08] hover:bg-white/[0.05] hover:text-white/80'
+              }`}
+            >
+              <span className="shrink-0">{item.icon}</span>
+              <span className="hidden min-w-0 truncate sm:block">{item.label}</span>
+            </button>
+            );
+          })}
         </nav>
       </div>
 

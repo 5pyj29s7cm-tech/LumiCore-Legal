@@ -28,7 +28,6 @@ type Feedback = { type: 'success' | 'error'; text: string };
 export function TemplateReviewQueue() {
   const t = useT();
   const isZh = t.langCode !== 'en';
-  const ui = useCallback((zh: string, en: string) => (isZh ? zh : en), [isZh]);
   const socket = useSocket();
   const [queue, setQueue] = useState<ReviewTemplate[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,7 +40,7 @@ export function TemplateReviewQueue() {
     setLoading(true);
     setFeedback(null);
     try {
-      const res = await fetch('/api/org/templates?status=pending_review', { credentials: 'include' });
+      const res = await fetch('/api/org/templates?status=pending_review&category=legal', { credentials: 'include' });
       const data = await res.json().catch(() => []);
       if (!res.ok) throw new Error((data as any).error || formatUiMessage('template-review-queue.failed-to-load-agent-review.1e2f2f450e', { value0: res.status }));
       setQueue(Array.isArray(data) ? data : []);
@@ -51,7 +50,7 @@ export function TemplateReviewQueue() {
     } finally {
       setLoading(false);
     }
-  }, [ui]);
+  }, []);
 
   useEffect(() => {
     void loadQueue();

@@ -331,7 +331,7 @@ export function getAdapterRegistry(options: AdapterRegistryOptions = {}): Adapte
       category: 'organization',
       status: state?.org?.connected ? 'ready' : 'available',
       actions: [
-        'open_organization_workspace(section=dashboard|kb|chat|messaging|templates|review|members|audit|settings|branch|legal|spatial-design|brand-design)',
+        'open_organization_workspace(section=dashboard|kb|chat|messaging|templates|review|members|audit|settings|branch|legal)',
       ],
       surfaces: [
         'organization dashboard',
@@ -343,8 +343,6 @@ export function getAdapterRegistry(options: AdapterRegistryOptions = {}): Adapte
         'audit',
         'organization settings and branch connection',
         'law firm workspace',
-        'spatial and architecture workspace',
-        'brand and creative workspace',
       ],
       diagnostics: state?.org?.connected
         ? [

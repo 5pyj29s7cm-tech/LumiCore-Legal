@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Scale, FileText, Search, Crosshair, Shield, Brain, CheckCircle, Upload,
-  Calendar, ClipboardList, Plus, FolderOpen, Gavel, AlertTriangle, RefreshCw, Loader2, Database,
+  Calendar, ClipboardList, Plus, FolderOpen, Gavel, AlertTriangle, RefreshCw, Loader2,
   ArrowRight, Archive, Trash2, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -9,8 +9,10 @@ import { LegalBidWorkbench } from './LegalBidWorkbench';
 import { LegalCaseSearch } from './LegalCaseSearch';
 import { LegalAssetTrace } from './LegalAssetTrace';
 import { LegalContractReview } from './LegalContractReview';
-import { LegalDataSourcesSettings } from './LegalDataSourcesSettings';
-import { LegalCaseContextBar } from './LegalCaseContextBar';
+import {
+  LegalCaseContextBar,
+  LegalUsageModeProvider,
+} from './LegalCaseContextBar';
 import { useT } from '../../lib/useT';
 import { useApp } from '../../contexts/AppContext';
 import { runLegalTool } from '../../lib/legalToolClient';
@@ -35,7 +37,7 @@ import {
   inferChinaLegalDocumentType,
 } from '../../i18n/regions/cn/legal';
 
-type LegalView = 'workspace' | 'packet' | 'external-research' | 'data-sources' | 'bid' | 'case-search' | 'asset-trace' | 'contract-review' | 'strategy' | 'verify' | 'import' | 'knowledge-sync';
+export type LegalView = 'workspace' | 'research' | 'packet' | 'external-research' | 'bid' | 'case-search' | 'asset-trace' | 'contract-review' | 'strategy' | 'verify' | 'import' | 'knowledge-sync';
 
 interface NavItem {
   id: LegalView;
@@ -287,7 +289,7 @@ function legalReadinessIcon(item: LegalCaseReadinessItem) {
 }
 
 function legalCaseToolArgs(caseFile?: LegalCaseFile | null, orgId?: string): Record<string, any> {
-  if (!caseFile) return orgId ? { orgId } : {};
+  if (!caseFile) return { ...(orgId ? { orgId } : {}), persistCase: false };
   return {
     caseId: caseFile.id,
     caseName: legalCaseTitle(caseFile),
@@ -300,8 +302,16 @@ function legalCaseToolArgs(caseFile?: LegalCaseFile | null, orgId?: string): Rec
   };
 }
 
-export function LegalHub() {
-  const [view, setView] = useState<LegalView>('workspace');
+export function LegalHub({
+  view,
+  onViewChange,
+  workspaceResetKey,
+}: {
+  view: LegalView;
+  onViewChange: (view: LegalView) => void;
+  workspaceResetKey: number;
+}) {
+  const [workflowView, setWorkflowView] = useState<LegalView>('workspace');
   const [cases, setCases] = useState<LegalCaseFile[]>(() => readLegalCaseFiles());
   const [activeCaseId, setActiveCaseIdState] = useState(() => getActiveLegalCaseId());
   const [orgCasesLoading, setOrgCasesLoading] = useState(false);
@@ -314,6 +324,10 @@ export function LegalHub() {
   const ui = useCallback((zh: string, en: string) => (isZh ? zh : en), [isZh]);
   const useOrgCases = workDomain === 'work' && Boolean(orgConnection?.connected && orgConnection?.orgId);
   const canDeleteCases = !useOrgCases || ['owner', 'admin'].includes(String(orgConnection?.orgRole || '').toLowerCase());
+
+  useEffect(() => {
+    setWorkflowView('workspace');
+  }, [workspaceResetKey]);
 
   const refreshCases = useCallback(async () => {
     if (!useOrgCases) {
@@ -381,9 +395,9 @@ export function LegalHub() {
 
   const navItems: NavItem[] = useMemo(() => [
     { id: 'workspace', label: uiMessage('legal-hub.case-workspace.9f165fc920'), icon: <FolderOpen size={16} /> },
+    { id: 'research', label: ui('法律检索', 'Legal Research'), icon: <Search size={16} /> },
     { id: 'packet', label: uiMessage('legal-hub.packet.1758eaea66'), icon: <ClipboardList size={16} /> },
     { id: 'external-research', label: uiMessage('legal-hub.research.fd18b45d25'), icon: <Search size={16} /> },
-    { id: 'data-sources', label: uiMessage('legal-hub.data-sources.5ed118a719'), icon: <Database size={16} /> },
     { id: 'bid', label: t.legalBidWorkbench, icon: <FileText size={16} /> },
     { id: 'case-search', label: t.legalCaseSearch, icon: <Search size={16} /> },
     { id: 'asset-trace', label: t.legalAssetTrace, icon: <Crosshair size={16} /> },
@@ -397,21 +411,18 @@ export function LegalHub() {
   const workflowNavItems = useMemo(() => {
     const order = new Map(LEGAL_WORKFLOW_ORDER.map((id, index) => [id, index]));
     return navItems
-      .filter(item => item.id !== 'data-sources' && item.id !== 'bid')
+      .filter(item => order.has(item.id))
       .sort((a, b) => (order.get(a.id) ?? 999) - (order.get(b.id) ?? 999));
   }, [navItems]);
-  const specialToolNavItems = useMemo(() => navItems.filter(item => item.id === 'bid'), [navItems]);
-  const utilityNavItems = useMemo(() => navItems.filter(item => item.id === 'data-sources'), [navItems]);
 
   const activeCase = useMemo(() => {
     return cases.find(item => item.id === activeCaseId) || cases[0] || null;
   }, [activeCaseId, cases]);
-  const workflowStepIndex = workflowNavItems.findIndex(item => item.id === view);
-  const isWorkflowView = workflowStepIndex >= 0;
-  const isSpecialToolView = specialToolNavItems.some(item => item.id === view);
-  const activeStepIndex = isWorkflowView ? workflowStepIndex : 0;
-  const currentStep = isWorkflowView ? workflowNavItems[activeStepIndex] : navItems.find(item => item.id === view);
-  const nextStep = isWorkflowView ? (workflowNavItems[activeStepIndex + 1] || null) : null;
+  const isWorkflowView = view === 'workspace';
+  const activeView = isWorkflowView ? workflowView : view;
+  const currentStep = isWorkflowView
+    ? workflowNavItems.find(item => item.id === workflowView)
+    : navItems.find(item => item.id === view);
   const legalOrgId = useOrgCases ? orgConnection?.orgId : undefined;
 
   const saveCases = (next: LegalCaseFile[], nextActiveId = activeCaseId) => {
@@ -444,7 +455,8 @@ export function LegalHub() {
         saveCases([nextCase, ...cases], nextCase.id);
       }
       setCreateDialogOpen(false);
-      setView('workspace');
+      setWorkflowView('workspace');
+      onViewChange('workspace');
       toast.success(uiMessage('legal-hub.case-file-created.24082b4003'));
     } catch (err: any) {
       toast.error(err?.message || uiMessage('legal-hub.failed-to-create-case.d77857142e'));
@@ -471,7 +483,8 @@ export function LegalHub() {
       if (getLegalConsultationCaseId() === deleteTarget.id) clearLegalConsultationCaseId();
       saveCases(next, nextActiveId);
       setDeleteTarget(null);
-      setView('workspace');
+      setWorkflowView('workspace');
+      onViewChange('workspace');
       toast.success(uiMessage('legal-hub.case-deleted.6afeed7983'));
     } catch (err: any) {
       toast.error(err?.message || uiMessage('legal-hub.failed-to-delete-case.34167edea4'));
@@ -616,8 +629,15 @@ export function LegalHub() {
     }));
   };
 
+  const openCaseTool = (nextView: LegalView) => {
+    setWorkflowView(nextView);
+  };
+
+  const toolCase = isWorkflowView ? activeCase : null;
+  const toolAddMaterial = toolCase ? addMaterial : undefined;
+
   const renderView = () => {
-    switch (view) {
+    switch (activeView) {
       case 'workspace':
         return (
           <LegalCaseWorkspace
@@ -631,7 +651,7 @@ export function LegalHub() {
               setActiveLegalCaseId(id);
             }}
             onUpdateCase={updateCase}
-            onSetView={setView}
+            onSetView={openCaseTool}
             onStartConsultation={startConsultation}
             onOpenMeetingNotes={openMeetingNotes}
             onCreateReminder={createReminder}
@@ -645,17 +665,17 @@ export function LegalHub() {
             ui={ui}
           />
       );
-      case 'packet': return <LegalPacketView caseFile={activeCase} orgId={legalOrgId} onAddMaterial={addMaterial} />;
-      case 'external-research': return <LegalExternalResearchView caseFile={activeCase} orgId={legalOrgId} onAddMaterial={addMaterial} />;
-      case 'data-sources': return <LegalDataSourcesPanel />;
-      case 'bid': return <LegalBidWorkbench onSwitchView={setView} caseFile={activeCase} orgId={legalOrgId} />;
-      case 'case-search': return <LegalCaseSearch caseFile={activeCase} onAddMaterial={addMaterial} />;
-      case 'asset-trace': return <LegalAssetTrace caseFile={activeCase} orgId={legalOrgId} onAddMaterial={addMaterial} />;
-      case 'contract-review': return <LegalContractReview caseFile={activeCase} />;
-      case 'strategy': return <LegalStrategyView caseFile={activeCase} orgId={legalOrgId} onAddMaterial={addMaterial} />;
-      case 'verify': return <LegalVerifyView caseFile={activeCase} orgId={legalOrgId} onAddMaterial={addMaterial} />;
-      case 'import': return <LegalImportView caseFile={activeCase} orgId={legalOrgId} onAddMaterial={addMaterial} />;
-      case 'knowledge-sync': return <LegalKnowledgeSyncView caseFile={activeCase} />;
+      case 'research': return <LegalResearchWorkspace orgId={legalOrgId} />;
+      case 'packet': return <LegalPacketView caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
+      case 'external-research': return <LegalExternalResearchView caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
+      case 'bid': return <LegalBidWorkbench onSwitchView={onViewChange} caseFile={toolCase} orgId={legalOrgId} />;
+      case 'case-search': return <LegalCaseSearch caseFile={toolCase} onAddMaterial={toolAddMaterial} />;
+      case 'asset-trace': return <LegalAssetTrace caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
+      case 'contract-review': return <LegalContractReview caseFile={toolCase} />;
+      case 'strategy': return <LegalStrategyView caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
+      case 'verify': return <LegalVerifyView caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
+      case 'import': return <LegalImportView caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
+      case 'knowledge-sync': return <LegalKnowledgeSyncView caseFile={toolCase} />;
       default: return <LegalCaseSearch />;
     }
   };
@@ -663,134 +683,68 @@ export function LegalHub() {
   return (
     <>
       <div className="flex h-full">
-      <div className="flex w-56 shrink-0 flex-col border-r border-white/[0.08] bg-black/20">
-        <div className="border-b border-white/[0.08] p-4">
-          <h3 className="flex items-center gap-2 text-sm font-black uppercase tracking-[0.12em] text-white/85">
-            <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-amber-300/15 bg-amber-400/10 text-amber-300">
-              <Scale size={16} />
-            </span>
-            <span className="min-w-0 truncate">{t.legalHub || uiMessage('legal-hub.law-firm.a283f14451')}</span>
-          </h3>
-          {activeCase && (
-            <p className="mt-2 line-clamp-2 text-xs text-white/45">
-              {activeCase.title || activeCase.party || activeCase.caseNumber || uiMessage('legal-hub.untitled-case.796e2578d9')}
-            </p>
-          )}
-        </div>
-        <nav className="custom-scrollbar flex-1 space-y-1 overflow-y-auto p-2">
-          {workflowNavItems.map((item, index) => (
-            <button
-              key={item.id}
-              onClick={() => setView(item.id)}
-              className={`flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-colors ${
-                view === item.id
-                  ? 'border-amber-400/20 bg-amber-500/10 text-amber-200'
-                  : 'border-transparent text-white/50 hover:border-white/[0.08] hover:bg-white/[0.05] hover:text-white/80'
-              }`}
-            >
-              <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border text-[10px] font-bold ${
-                view === item.id
-                  ? 'border-amber-300/25 bg-amber-400/15 text-amber-100'
-                  : 'border-white/10 bg-white/[0.035] text-white/35'
-              }`}>
-                {index + 1}
-              </span>
-              <span className="shrink-0">{item.icon}</span>
-              <span className="min-w-0 truncate">{item.label}</span>
-            </button>
-          ))}
-          {specialToolNavItems.length > 0 && (
-            <>
-              <div className="my-2 border-t border-white/[0.08]" />
-              <div className="px-3 pb-1 pt-1 text-[10px] font-black uppercase tracking-[0.14em] text-white/28">
-                {uiMessage('legal-hub.special-tools.77554fcb98')}
-              </div>
-              {specialToolNavItems.map(item => (
-                <button
-                  key={item.id}
-                  onClick={() => setView(item.id)}
-                  className={`flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-colors ${
-                    view === item.id
-                      ? 'border-violet-400/20 bg-violet-500/10 text-violet-200'
-                      : 'border-transparent text-white/45 hover:border-white/[0.08] hover:bg-white/[0.05] hover:text-white/80'
-                  }`}
-                >
-                  <span className="shrink-0">{item.icon}</span>
-                  <span className="min-w-0 truncate">{item.label}</span>
-                </button>
-              ))}
-            </>
-          )}
-          {utilityNavItems.length > 0 && (
-            <>
-              <div className="my-2 border-t border-white/[0.08]" />
-              <div className="px-3 pb-1 pt-1 text-[10px] font-black uppercase tracking-[0.14em] text-white/28">
-                {uiMessage('legal-hub.settings.57cc04dce6')}
-              </div>
-              {utilityNavItems.map(item => (
-                <button
-                  key={item.id}
-                  onClick={() => setView(item.id)}
-                  className={`flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-colors ${
-                    view === item.id
-                      ? 'border-cyan-400/20 bg-cyan-500/10 text-cyan-200'
-                      : 'border-transparent text-white/45 hover:border-white/[0.08] hover:bg-white/[0.05] hover:text-white/80'
-                  }`}
-                >
-                  <span className="shrink-0">{item.icon}</span>
-                  <span className="min-w-0 truncate">{item.label}</span>
-                </button>
-              ))}
-            </>
-          )}
-        </nav>
-      </div>
       <div className="flex min-w-0 flex-1 flex-col bg-black/10">
         <div className="border-b border-white/[0.08] bg-black/25 px-5 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.14em] text-amber-200/70">
-                <span>{isWorkflowView ? uiMessage('legal-hub.case-workflow.f359a263f7') : isSpecialToolView ? uiMessage('legal-hub.legal-special-tool.53e70e4ac3') : uiMessage('legal-hub.legal-settings.0b819765e7')}</span>
-                {isWorkflowView && (
-                  <>
-                    <span className="text-white/25">/</span>
-                    <span>{activeStepIndex + 1}/{workflowNavItems.length}</span>
-                  </>
-                )}
-              </div>
-              <div className="mt-1 flex min-w-0 items-center gap-2 text-sm text-white/70">
-                <span className="truncate font-semibold text-white/85">{legalCaseTitle(activeCase)}</span>
-                <span className="text-white/25">&rarr;</span>
-                <span className="truncate">{currentStep?.label}</span>
-                <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-white/40">
-                  {(activeCase?.materials || []).length} {uiMessage('legal-hub.materials.e065db1968')}
+                <span>
+                  {isWorkflowView
+                    ? uiMessage('legal-hub.case-workflow.f359a263f7')
+                    : uiMessage('legal-hub.legal-special-tool.53e70e4ac3')}
                 </span>
               </div>
+              <div className="mt-1 flex min-w-0 items-center gap-2 text-sm text-white/70">
+                <span className="truncate font-semibold text-white/85">
+                  {isWorkflowView ? legalCaseTitle(activeCase) : ui('独立使用', 'Standalone')}
+                </span>
+                <span className="text-white/25">&rarr;</span>
+                <span className="truncate">{currentStep?.label}</span>
+                {isWorkflowView && (
+                  <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-white/40">
+                    {(activeCase?.materials || []).length} {uiMessage('legal-hub.materials.e065db1968')}
+                  </span>
+                )}
+              </div>
             </div>
-            {nextStep ? (
-              <button
-                type="button"
-                onClick={() => setView(nextStep.id)}
-                className="inline-flex h-9 items-center gap-2 rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 text-xs font-bold text-amber-100 transition hover:bg-amber-500/18"
-              >
-                <span>{uiMessage('legal-hub.next.b527069e7f')}</span>
-                <span className="max-w-[160px] truncate">{nextStep.label}</span>
-                <ArrowRight size={14} />
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => window.dispatchEvent(new CustomEvent('lumi:navigate', { detail: { tab: 'org', sub: 'chat' } }))}
-                className="inline-flex h-9 items-center gap-2 rounded-xl border border-cyan-400/20 bg-cyan-500/10 px-3 text-xs font-bold text-cyan-100 transition hover:bg-cyan-500/18"
-              >
-                <span>{uiMessage('legal-hub.ask-lumi-in-work-workspace.6fe76d2092')}</span>
-                <ArrowRight size={14} />
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new CustomEvent('lumi:navigate', { detail: { tab: 'org', sub: 'chat' } }))}
+              className="inline-flex h-9 items-center gap-2 rounded-xl border border-cyan-400/20 bg-cyan-500/10 px-3 text-xs font-bold text-cyan-100 transition hover:bg-cyan-500/18"
+            >
+              <span>{uiMessage('legal-hub.ask-lumi-in-work-workspace.6fe76d2092')}</span>
+              <ArrowRight size={14} />
+            </button>
           </div>
         </div>
+        {isWorkflowView && (
+          <div className="min-w-0 max-w-full border-b border-white/[0.08] bg-black/20 px-4 py-2.5">
+            <div className="custom-scrollbar flex min-w-0 max-w-full items-center gap-2 overflow-x-auto overscroll-x-contain pb-0.5">
+              <span className="mr-1 shrink-0 text-[10px] font-black uppercase tracking-[0.14em] text-white/30">
+                {ui('案件流程', 'Case flow')}
+              </span>
+              {workflowNavItems.map((item, index) => {
+                const active = workflowView === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setWorkflowView(item.id)}
+                    className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition ${active ? 'border-amber-400/25 bg-amber-500/12 text-amber-100' : 'border-white/[0.08] bg-white/[0.035] text-white/45 hover:bg-white/[0.07] hover:text-white/75'}`}
+                  >
+                    <span className="text-[10px] text-white/30">{index + 1}</span>
+                    {item.icon}
+                    <span>{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
-          {renderView()}
+          <LegalUsageModeProvider mode={isWorkflowView ? 'case' : 'standalone'}>
+            {renderView()}
+          </LegalUsageModeProvider>
         </div>
       </div>
       </div>
@@ -1651,14 +1605,6 @@ function LegalActionButton({ icon, title, desc, onClick }: { icon: React.ReactNo
   );
 }
 
-function LegalDataSourcesPanel() {
-  return (
-    <div className="custom-scrollbar h-full overflow-y-auto p-5">
-      <LegalDataSourcesSettings />
-    </div>
-  );
-}
-
 function legalCaseDraftContext(caseFile?: LegalCaseFile | null): string {
   if (!caseFile) return '';
   return [
@@ -1671,6 +1617,48 @@ function legalCaseDraftContext(caseFile?: LegalCaseFile | null): string {
     caseFile.notes && `事实摘要/待补材料：\n${caseFile.notes}`,
     ...(caseFile.materials || []).slice(0, 6).map(material => `材料：${material.title}\n${material.content || ''}`),
   ].filter(Boolean).join('\n\n');
+}
+
+type LegalResearchTab = 'case-search' | 'external-research' | 'import';
+
+function LegalResearchWorkspace({ orgId }: { orgId?: string }) {
+  const t = useT();
+  const isZh = t.langCode !== 'en';
+  const ui = (zh: string, en: string) => (isZh ? zh : en);
+  const [tab, setTab] = useState<LegalResearchTab>('case-search');
+  const tabs: Array<{ id: LegalResearchTab; label: string; icon: React.ReactNode }> = [
+    { id: 'case-search', label: t.legalCaseSearch, icon: <Search size={14} /> },
+    { id: 'external-research', label: uiMessage('legal-hub.research.fd18b45d25'), icon: <Search size={14} /> },
+    { id: 'import', label: t.legalImportJudgment, icon: <Upload size={14} /> },
+  ];
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0 border-b border-white/[0.08] bg-black/16 px-4 py-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="mr-1 text-[10px] font-black uppercase tracking-[0.14em] text-white/30">
+            {ui('法律检索', 'Legal Research')}
+          </span>
+          {tabs.map(item => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setTab(item.id)}
+              className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition ${tab === item.id ? 'border-blue-400/25 bg-blue-500/12 text-blue-100' : 'border-white/[0.08] bg-white/[0.035] text-white/45 hover:bg-white/[0.07] hover:text-white/75'}`}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="min-h-0 flex-1">
+        {tab === 'case-search' && <LegalCaseSearch />}
+        {tab === 'external-research' && <LegalExternalResearchView caseFile={null} orgId={orgId} />}
+        {tab === 'import' && <LegalImportView caseFile={null} orgId={orgId} />}
+      </div>
+    </div>
+  );
 }
 
 function LegalPacketView({
@@ -2148,6 +2136,10 @@ function LegalKnowledgeSyncView({ caseFile }: { caseFile?: LegalCaseFile | null 
     caseFile ? buildLegalCaseKnowledgeMarkdown(caseFile) : ''
   ), [caseFile]);
 
+  useEffect(() => {
+    setStatus('');
+  }, [caseFile?.id]);
+
   const syncToKnowledgeBase = async () => {
     if (!caseFile || loading) return;
     setLoading(true);
@@ -2188,13 +2180,18 @@ function LegalKnowledgeSyncView({ caseFile }: { caseFile?: LegalCaseFile | null 
 
   if (!caseFile) {
     return (
-      <div className="flex h-full items-center justify-center p-8 text-white">
-        <div className="max-w-md text-center">
-          <Archive size={36} className="mx-auto mb-3 text-white/25" />
-          <h2 className="text-xl font-semibold">{uiMessage('legal-hub.create-a-case-first.277e87bd38')}</h2>
-          <p className="mt-2 text-sm leading-6 text-white/45">
-            {uiMessage('legal-hub.knowledge-sync-needs-a-current.b4ab7aa09b')}
-          </p>
+      <div className="h-full overflow-y-auto p-6 text-white">
+        <div className="mx-auto flex max-w-6xl flex-col gap-4">
+          <LegalCaseContextBar caseFile={null} state="input" />
+          <div className="flex min-h-[420px] items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] p-8">
+            <div className="max-w-md text-center">
+              <Archive size={36} className="mx-auto mb-3 text-white/25" />
+              <h2 className="text-xl font-semibold">{uiMessage('legal-hub.create-a-case-first.277e87bd38')}</h2>
+              <p className="mt-2 text-sm leading-6 text-white/45">
+                {uiMessage('legal-hub.knowledge-sync-needs-a-current.b4ab7aa09b')}
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -2295,6 +2292,10 @@ function LegalImportView({
   const [content, setContent] = useState('');
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setStatus('');
+  }, [caseFile?.id]);
 
   const importJudgment = async () => {
     if (!content.trim() || loading) return;
