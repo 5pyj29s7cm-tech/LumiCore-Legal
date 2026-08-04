@@ -25,18 +25,23 @@ describe('remote organization work routing integration', () => {
   let orgId = '';
   let agentId = '';
 
-  function message(text: string, messageId: string, mentionedUserIds: string[] = []): IncomingMessage {
+  function message(
+    text: string,
+    messageId: string,
+    mentionedUserIds: string[] = [],
+    senderUserId = memberA,
+  ): IncomingMessage {
     return {
       platform: 'feishu',
-      userId: `ou-${memberA}`,
-      userName: 'Remote Member A',
+      userId: `ou-${senderUserId}`,
+      userName: senderUserId === ownerId ? 'Remote Owner' : 'Remote Member A',
       chatId: `oc-${suffix}`,
       chatType: 'group',
       botMentioned: true,
       mentionedUserIds,
       messageId,
       text,
-      boundUserId: memberA,
+      boundUserId: senderUserId,
       boundOrgId: orgId,
       raw: {},
       timestamp: new Date().toISOString(),
@@ -99,6 +104,16 @@ describe('remote organization work routing integration', () => {
       positionId: position.id,
       approvalMode: 'none',
     });
+    createOrganizationWorkRoutingRule({
+      orgId,
+      actorUserId: ownerId,
+      name: 'Explicit Feishu administrator approval',
+      priority: 110,
+      platforms: ['feishu'],
+      keywords: ['approval-required'],
+      positionId: position.id,
+      approvalMode: 'admin',
+    });
     for (const [lumiUserId, platformUserId] of [
       [memberB, `ou-${memberB}`],
       [ownerId, `ou-${ownerId}`],
@@ -148,7 +163,7 @@ describe('remote organization work routing integration', () => {
     const requestId = `remote-approval-${suffix}`;
     let callbackCalls = 0;
     const blockedReply = await processWithPersonality(
-      message('Publish this notice to the public website.', requestId),
+      message('Publish this approval-required notice to the public website.', requestId),
       {
         onMessage: async () => {
           callbackCalls += 1;
@@ -189,6 +204,26 @@ describe('remote organization work routing integration', () => {
       status: 'blocked',
       lastBlocker: 'The external commit has no verified terminal receipt.',
     });
+  });
+
+  it('lets a bound organization administrator execute without approving their own Feishu request', async () => {
+    const requestId = `remote-owner-no-approval-${suffix}`;
+    let callbackCalls = 0;
+    const reply = await processWithPersonality(
+      message('Publish this approval-required owner notice to the public website.', requestId, [], ownerId),
+      {
+        onMessage: async () => {
+          callbackCalls += 1;
+          return { platform: 'feishu', text: 'Owner-authorized callback ran.' };
+        },
+      },
+    );
+
+    expect(reply).not.toContain('等待组织管理员审批');
+    expect(callbackCalls).toBe(1);
+    const [workItem] = listOrganizationWorkItems(orgId).filter(item => item.requestId === `feishu_bot:${requestId}`);
+    expect(workItem.approvalId).toBeNull();
+    expect(workItem.status).not.toBe('waiting_approval');
   });
 
   it('runs deterministic organization knowledge commands inside the same task and receipt route', async () => {
