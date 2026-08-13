@@ -31,6 +31,7 @@ import {
   type EvidenceWorkflowStepBlueprint,
   type EvidenceWorkflowStepStatus,
 } from '../../../shared/evidence_workflow';
+import { settleIndustryWorkflowConversationTask } from '../../industry/workflow_service';
 
 function contextUser(context?: any): { userId: string; domain: string; orgId: string } {
   return {
@@ -893,7 +894,10 @@ export function registerWorkTakeoverTools(registry: ToolRegistry): void {
 
       let updatedTask = task;
       if (args.record !== false) {
-        const status: WorkTakeoverStatus = verification.status === 'blocked'
+        const isIndustryWorkflow = Boolean(task.metadata?.industryWorkflow?.conversationTaskId);
+        const status: WorkTakeoverStatus = verification.passed && isIndustryWorkflow
+          ? 'delivered'
+          : verification.status === 'blocked'
           ? 'blocked'
           : verification.status === 'needs_review'
           ? 'waiting_confirmation'
@@ -930,6 +934,7 @@ export function registerWorkTakeoverTools(registry: ToolRegistry): void {
           },
           note: verification.summary,
         } as any) || task;
+        if (isIndustryWorkflow) settleIndustryWorkflowConversationTask(updatedTask, verification);
       }
 
       return JSON.stringify({

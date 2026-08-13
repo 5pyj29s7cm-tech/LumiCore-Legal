@@ -21,6 +21,7 @@ import {
 import { uiMessage } from '../../i18n/uiMessages';
 import { chinaLegalCopy } from '../../i18n/regions/cn/legal';
 import type { LegalView } from './LegalHub';
+import { startIndustryWorkflow } from '../../lib/industryWorkflowClient';
 
 const AuditLogViewer = lazy(() => import('./AuditLogViewer').then(m => ({ default: m.AuditLogViewer })));
 const AgentTemplateWorkspace = lazy(() => import('./AgentTemplateWorkspace').then(m => ({ default: m.AgentTemplateWorkspace })));
@@ -73,6 +74,7 @@ export function OrgHub() {
   const [legalWorkspaceResetKey, setLegalWorkspaceResetKey] = useState(0);
   const [editingArticleId, setEditingArticleId] = useState<string | undefined>(() => initialRoute?.articleId);
   const [switchBusy, setSwitchBusy] = useState(false);
+  const [legalTaskId, setLegalTaskId] = useState('');
   const t = useT();
   const workspaceCopy = chinaLegalCopy(t.langCode === 'en' ? 'en' : 'zh').workspace;
 
@@ -168,6 +170,40 @@ export function OrgHub() {
 
   const displayedDomain = workDomain === 'work' ? t.orgWorkDomain : t.orgPersonalDomain;
 
+  const openLegalOutcome = async (view: LegalView) => {
+    if (view === 'workspace') setLegalWorkspaceResetKey(value => value + 1);
+    setLegalView(view);
+    openSubView('legal');
+    const entryId = view === 'workspace'
+      ? 'workspace'
+      : view === 'packet'
+        ? 'packet'
+        : view === 'contract-review'
+          ? 'contract-review'
+          : view === 'research'
+            ? 'research'
+            : view === 'asset-trace'
+              ? 'asset-trace'
+              : view === 'verify'
+                ? 'verify'
+                : 'bid';
+    try {
+      const started = await startIndustryWorkflow({
+        entryId,
+        source: 'legal_outcome_navigation',
+        context: { legalView: view },
+      });
+      setLegalTaskId(started.task.id);
+      sessionStorage.setItem('lumi_legal_industry_task', JSON.stringify({
+        taskId: started.task.id,
+        entryId,
+        createdAt: Date.now(),
+      }));
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
   const renderView = () => {
     switch (subView) {
       case 'dashboard': return <BranchDashboard />;
@@ -253,11 +289,7 @@ export function OrgHub() {
             return (
             <button
               key={item.id}
-              onClick={() => {
-                if (item.id === 'workspace') setLegalWorkspaceResetKey(value => value + 1);
-                setLegalView(item.id);
-                openSubView('legal');
-              }}
+              onClick={() => void openLegalOutcome(item.id)}
               aria-label={item.label}
               title={item.label}
               className={`flex w-full items-center justify-center gap-2 rounded-xl px-2 py-2 text-sm transition-colors sm:justify-start sm:px-3 ${
@@ -271,6 +303,7 @@ export function OrgHub() {
             </button>
             );
           })}
+          {legalTaskId && <div className="mx-2 mt-2 hidden truncate text-[10px] font-mono text-emerald-200/35 sm:block">task {legalTaskId}</div>}
         </nav>
       </div>
 

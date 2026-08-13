@@ -21,6 +21,7 @@ import { mountNotificationRoutes } from "../routes/notifications";
 import { autonomyRoutes } from "../routes/autonomy_routes";
 import { mountExploreRoutes, mountPlanRoutes } from "../routes/plan_explore_routes";
 import { mountCommandCenterPlanRoutes } from "../routes/command_center_plan_routes";
+import { mountIndustryWorkflowRoutes } from "../routes/industry_workflow_routes";
 
 interface RouteContext {
   apiRouter: Router;
@@ -78,6 +79,7 @@ export function mountAllRoutes({ apiRouter, jwtSecret, llm, getCookieOptions, io
   mountExploreRoutes(apiRouter);
   mountPlanRoutes(apiRouter);
   mountCommandCenterPlanRoutes(apiRouter);
+  mountIndustryWorkflowRoutes(apiRouter);
 
   // Autonomy
   apiRouter.use('/autonomy', autonomyRoutes());
