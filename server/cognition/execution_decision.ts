@@ -22,6 +22,10 @@ import {
 import { WPS_CREATE_DOCUMENT_TOOL } from '../external_control/wps_automation';
 import type { ConversationActionContinuationState } from './action_continuation';
 import { applyTaskPolicySnapshot } from './task_execution_ledger';
+import {
+  formatIndustryWorkflowRoutingPrompt,
+  matchCurrentIndustryWorkflow,
+} from '../regions/packs/cn/industry_capability_profile';
 
 type ToolDeclaration = ReturnType<ToolRegistry['getToolDeclarations']>[number];
 
@@ -173,7 +177,7 @@ function enhanceToolRouteForFlow(
   declarations: ToolDeclaration[],
   registry?: ToolRegistry,
 ): ToolRoute {
-  if (route.hardAllowlist) return route;
+  if (route.hardAllowlist && !flow.industryWorkflowEntryId) return route;
 
   const available = new Set(declarations.map(declaration => declaration.function.name));
   const additions = new Set<string>();
@@ -185,6 +189,19 @@ function enhanceToolRouteForFlow(
     limit: 8,
     evidenceOperations: ['observe', 'test'],
   }) || [];
+  const industryWorkflowMatch = !recoveredCurrentAppEdit && flow.industryWorkflowEntryId
+    ? matchCurrentIndustryWorkflow(flow.routeText)
+    : null;
+  if (industryWorkflowMatch) {
+    addAvailable(additions, available, [
+      'industry_workflow_start',
+      'industry_workflow_complete',
+      'work_takeover_task_get',
+      'work_takeover_task_verify_result',
+    ]);
+    categories.push('industry_workflow');
+    reasons.push(`matched edition outcome ${industryWorkflowMatch.entry.entryId}`);
+  }
   if (discoveredEvidenceTools.length) {
     addAvailable(additions, available, discoveredEvidenceTools.map(tool => tool.name));
     categories.push('capability_discovery');
@@ -285,7 +302,9 @@ function enhanceToolRouteForFlow(
   ));
   const priority = recoveredWpsCreateAndType && available.has(WPS_CREATE_DOCUMENT_TOOL)
     ? [WPS_CREATE_DOCUMENT_TOOL]
-    : [];
+    : industryWorkflowMatch
+      ? ['industry_workflow_start', 'industry_workflow_complete'].filter(name => available.has(name))
+      : [];
   const merged = unique([...priority, ...routeNames, ...Array.from(additions)]);
   if (
     merged.length === route.toolNames.length
@@ -399,6 +418,9 @@ export function buildLumiExecutionDecision(input: LumiExecutionDecisionInput): L
       routeCategories: effectiveToolRoute?.categories,
       toolNames: effectiveToolRoute?.toolNames,
     }),
+    !input.flow.industryWorkflowEntryId
+      ? ''
+      : formatIndustryWorkflowRoutingPrompt(input.flow.routeText || input.text),
     !effectiveToolRoute && allowToolUse && !input.flow.clientActionOnlyTurn && !input.flow.selfRepairTurn
       ? 'No narrow tool route was selected. Use the base policy conservatively and ask one clarification if the work surface is unclear.'
       : '',

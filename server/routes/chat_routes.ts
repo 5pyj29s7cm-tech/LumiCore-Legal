@@ -21,6 +21,10 @@ import {
 import type { LumiTurnFlow } from "../cognition/turn_flow";
 import type { ToolExecutionRecord } from "../tools/types";
 import { getIndustryWorkflowTask, recordIndustryWorkflowExecution } from "../industry/workflow_service";
+import {
+  formatIndustryCapabilityProfilePrompt,
+  formatIndustryWorkflowRoutingPrompt,
+} from '../regions/packs/cn/industry_capability_profile';
 
 const REST_CHAT_BASE_SYSTEM_INSTRUCTION =
   'You are Lumi, the local core intelligence. Be professional, thoughtful, forward-looking, concise, and useful. Follow the user-facing response-language instruction while keeping internal protocols, tool names, state fields, and execution policy in canonical English.';
@@ -82,7 +86,12 @@ function buildRestChatSystemInstruction(input: {
     channel: 'chat',
     source: input.source,
   });
-  return [REST_CHAT_BASE_SYSTEM_INSTRUCTION, legalOverlay].filter(Boolean).join('\n\n');
+  return [
+    REST_CHAT_BASE_SYSTEM_INSTRUCTION,
+    formatIndustryCapabilityProfilePrompt(),
+    formatIndustryWorkflowRoutingPrompt(input.routeText),
+    legalOverlay,
+  ].filter(Boolean).join('\n\n');
 }
 
 function finalizeRestChatResponse(input: {

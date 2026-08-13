@@ -34,6 +34,7 @@ import { getLumiModelConfiguration, LUMI_MODEL_ROLES } from '../llm/model_config
 import { DESKTOP_APPLICATION_REGISTRY } from '../desktop/execution_plan';
 import { CN_SELF_INTRODUCTION_COPY } from '../regions/packs/cn/self_introduction';
 import { listRegisteredProviders } from '../extensions/registry';
+import { formatIndustryCapabilityProfilePrompt } from '../regions/packs/cn/industry_capability_profile';
 
 export type ClientMode = 'chat' | 'assistant' | 'autonomous' | 'meeting';
 export type ClientCapabilityKind =
@@ -2046,6 +2047,7 @@ export function formatClientSelfPrompt(
   return [
     '## Lumi Client Self Model',
     `Live self snapshot: ${JSON.stringify(selfSnapshot)}`,
+    formatIndustryCapabilityProfilePrompt(),
     'When introducing yourself, derive every capability and limitation from this live snapshot. Do not use a fixed capability script, and do not describe indexed knowledge as fully absorbed.',
     selfSnapshot.runtime.refreshRequired
       ? `The self snapshot is ${selfSnapshot.runtime.awareness}. Before a final present-tense self-introduction or capability claim, run ${selfSnapshot.runtime.refreshAction}; if no fresh state arrives, keep the limitation explicit and do not claim current desktop readiness.`

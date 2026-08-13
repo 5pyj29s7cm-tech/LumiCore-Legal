@@ -262,6 +262,8 @@ export interface ToolContext {
   autonomous?: boolean;
   /** Surface that initiated the tool call, such as chat, voice, runtime-log, meeting, or mcp. */
   source?: string;
+  /** Current canonical records from this exact model tool loop, before the active call. */
+  getCurrentToolRecords?: () => ToolExecutionRecord[];
 }
 
 export interface ToolDefinition {

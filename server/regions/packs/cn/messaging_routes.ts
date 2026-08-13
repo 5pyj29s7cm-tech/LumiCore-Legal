@@ -1729,7 +1729,7 @@ export async function processWithPersonality(
       || requestsOrganizationScope(requestText)
       || actionTaskExecution.kind === 'resume'
     )
-    && !directlyAppliedMode
+    && (!directlyAppliedMode || Boolean(turnFlow.industryWorkflowEntryId))
     && executionPlan.normalizedIntent.operation !== 'status'
     && executionPlan.normalizedIntent.operation !== 'explain',
   );

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { readDB, writeDB } from '../../db_layer';
-import { getOrCreateActiveConversation } from '../conversation/manager';
+import { getConversationForScope, getOrCreateActiveConversation } from '../conversation/manager';
 import {
   ensureBackgroundConversationActionTask,
   settleBackgroundConversationActionTask,
@@ -36,6 +36,10 @@ export interface StartIndustryWorkflowInput extends IndustryWorkflowScope {
   sourceInput?: string;
   source?: string;
   context?: Record<string, unknown>;
+  idempotencyKey?: string;
+  conversationId?: string;
+  conversationTaskId?: string;
+  requestId?: string;
 }
 
 export interface IndustryWorkflowStartResult {
@@ -45,6 +49,7 @@ export interface IndustryWorkflowStartResult {
   requestId: string;
   contract: IndustryWorkflowContract;
   handoffPrompt: string;
+  reused?: boolean;
 }
 
 export interface RecordIndustryWorkflowInput extends IndustryWorkflowScope {
@@ -64,6 +69,17 @@ export interface IndustryWorkflowRecordResult {
 
 function compact(value: unknown, limit = 5000): string {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+}
+
+function parseObject(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== 'string' || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function sha256(value: unknown): string {
@@ -258,8 +274,38 @@ export function listCurrentIndustryWorkflowContracts(): IndustryWorkflowContract
 export function startIndustryWorkflow(input: StartIndustryWorkflowInput): IndustryWorkflowStartResult {
   const contract = contractForCurrentProduct(input.entryId);
   const sourceInput = compact(input.sourceInput, 12_000);
-  const requestId = `industry_request_${crypto.randomUUID()}`;
-  const conversation = getOrCreateActiveConversation(input.userId, '', input.domain, input.orgId);
+  const idempotencyKey = compact(input.idempotencyKey, 300);
+  if (idempotencyKey) {
+    const existing = listIndustryWorkflowTasks(input, 200).find(task => (
+      workflowMetadata(task).idempotencyKey === idempotencyKey
+      && workflowMetadata(task).entryId === contract.entryId
+    ));
+    if (existing) {
+      const correlation = correlationFor(existing);
+      return {
+        task: existing,
+        conversationId: correlation.conversationId,
+        conversationTaskId: correlation.conversationTaskId,
+        requestId: correlation.requestId,
+        contract,
+        handoffPrompt: buildHandoffPrompt(existing, contract),
+        reused: true,
+      };
+    }
+  }
+  const requestId = compact(input.requestId, 200) || `industry_request_${crypto.randomUUID()}`;
+  const requestedConversationId = compact(input.conversationId, 200);
+  const conversation = (requestedConversationId
+    ? getConversationForScope(requestedConversationId, input.userId, input.domain, input.orgId)
+    : null) || getOrCreateActiveConversation(input.userId, '', input.domain, input.orgId);
+  const requestedConversationTaskId = compact(input.conversationTaskId, 200);
+  const existingConversationTaskId = requestedConversationTaskId && (readDB().conversationActionTasks || []).some((candidate: any) => (
+    candidate.id === requestedConversationTaskId
+    && candidate.conversationId === conversation.id
+    && candidate.userId === input.userId
+    && candidate.domain === input.domain
+    && String(candidate.orgId || '') === String(input.orgId || '')
+  )) ? requestedConversationTaskId : '';
   const task = createWorkTakeoverTask({
     userId: input.userId,
     domain: input.domain,
@@ -281,6 +327,7 @@ export function startIndustryWorkflow(input: StartIndustryWorkflowInput): Indust
         productLine: contract.productLine,
         variantId: PRODUCT_VARIANT.variantId,
         entryId: contract.entryId,
+        idempotencyKey,
         inputDigest: sha256(sourceInput),
         inputLength: sourceInput.length,
         requestId,
@@ -297,7 +344,7 @@ export function startIndustryWorkflow(input: StartIndustryWorkflowInput): Indust
       },
     },
   });
-  const conversationTaskId = `industry_${task.id}`;
+  const conversationTaskId = existingConversationTaskId || `industry_${task.id}`;
   const linkedTask = updateWorkTakeoverTask(input.userId, task.id, {
     metadata: {
       industryWorkflow: {
@@ -309,25 +356,31 @@ export function startIndustryWorkflow(input: StartIndustryWorkflowInput): Indust
   }) || task;
 
   const db = readDB();
-  ensureBackgroundConversationActionTask(db, {
-    taskId: conversationTaskId,
-    conversationId: conversation.id,
-    userId: input.userId,
-    domain: input.domain,
-    orgId: input.orgId,
-    goal: `Execute and verify ${contract.title} industry workflow`,
-    target: `${contract.productLine}:${contract.entryId}`,
-    requestId,
-    source: 'industry_workflow',
-    context: {
-      industryWorkflow: {
-        workTakeoverTaskId: task.id,
-        productLine: contract.productLine,
-        entryId: contract.entryId,
-        inputDigest: sha256(sourceInput),
-      },
-    },
-  });
+  const industryContext = {
+    workTakeoverTaskId: task.id,
+    productLine: contract.productLine,
+    entryId: contract.entryId,
+    inputDigest: sha256(sourceInput),
+  };
+  if (existingConversationTaskId) {
+    const actionTask = (db.conversationActionTasks || []).find((candidate: any) => candidate.id === existingConversationTaskId);
+    const existingContext = parseObject(actionTask?.context);
+    actionTask.context = JSON.stringify({ ...existingContext, industryWorkflow: industryContext });
+    actionTask.updatedAt = new Date().toISOString();
+  } else {
+    ensureBackgroundConversationActionTask(db, {
+      taskId: conversationTaskId,
+      conversationId: conversation.id,
+      userId: input.userId,
+      domain: input.domain,
+      orgId: input.orgId,
+      goal: `Execute and verify ${contract.title} industry workflow`,
+      target: `${contract.productLine}:${contract.entryId}`,
+      requestId,
+      source: 'industry_workflow',
+      context: { industryWorkflow: industryContext },
+    });
+  }
   writeDB(db);
 
   return {

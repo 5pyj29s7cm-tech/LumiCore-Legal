@@ -30,6 +30,10 @@ import {
   needsRecentActionContinuationContext,
 } from './action_continuation';
 import { isCapabilityMetaQuestion } from './capability_meta';
+import {
+  isCurrentIndustryWorkflowExecutionRequest,
+  matchCurrentIndustryWorkflow,
+} from '../regions/packs/cn/industry_capability_profile';
 
 export type LumiTurnChannel = 'chat' | 'voice' | 'task' | 'scheduler' | 'agent';
 export type LumiVerificationIntent = 'none' | 'completion_evidence' | 'work_takeover_result' | 'capability_experiment';
@@ -63,6 +67,7 @@ export interface LumiTurnFlow {
   requestedMode: OperationMode | null;
   autoPromoteToAssistant: boolean;
   conceptualCapabilityQuestion?: boolean;
+  industryWorkflowEntryId?: string;
   allowToolUseForTurn: boolean;
   selfRepairTurn: boolean;
   clientActionOnlyTurn: boolean;
@@ -381,6 +386,11 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     ? contextualText
     : input.text;
   const explicitTeamExecution = !conceptualCapabilityQuestion && hasExplicitTeamExecutionRequest(routingText);
+  const industryWorkflowMatch = !conceptualCapabilityQuestion
+    ? matchCurrentIndustryWorkflow(routingText)
+    : null;
+  const industryWorkflowExecutionRequested = !conceptualCapabilityQuestion
+    && isCurrentIndustryWorkflowExecutionRequest(routingText);
   const operationMode = normalizeOperationMode(input.operationMode);
   const requestedMode = input.requestedMode || detectRequestedOperationMode(input.text);
   const surface = resolveTurnSurface({
@@ -410,7 +420,7 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     operationMode,
     requestedMode,
     input.channel,
-  ) || Boolean(
+  ) || industryWorkflowExecutionRequested || Boolean(
     explicitTeamExecution
     && operationMode === 'chat'
     && !requestedMode
@@ -454,6 +464,7 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
       workTakeover.shouldResumeTask ||
       explicitTeamExecution ||
       explicitBackgroundDelegation ||
+      industryWorkflowExecutionRequested ||
       shouldAllowToolUseForTurn(input.text, input.source, effectiveOperationMode);
   const specialWorkflow = conceptualCapabilityQuestion || recoveredCurrentAppEdit
     ? null
@@ -494,6 +505,7 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     requestedMode,
     autoPromoteToAssistant,
     conceptualCapabilityQuestion,
+    industryWorkflowEntryId: industryWorkflowExecutionRequested ? industryWorkflowMatch?.entry.entryId || '' : '',
     allowToolUseForTurn,
     selfRepairTurn,
     clientActionOnlyTurn,

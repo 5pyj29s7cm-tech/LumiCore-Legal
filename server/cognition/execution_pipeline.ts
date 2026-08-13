@@ -243,10 +243,13 @@ export function buildLumiExecutionPipeline(
     schemaVersion: 1,
     capabilityIds,
     taskLedgerRequired: Boolean(
-      turnIntent.flow.completionEvidenceNeeded
-      || turnIntent.flow.allowToolUseForTurn
-      || turnIntent.boundary === 'task_center'
-      || turnIntent.boundary === 'work_takeover',
+      (!turnIntent.flow.industryWorkflowEntryId || turnIntent.flow.domain === 'work')
+      && (
+        turnIntent.flow.completionEvidenceNeeded
+        || turnIntent.flow.allowToolUseForTurn
+        || turnIntent.boundary === 'task_center'
+        || turnIntent.boundary === 'work_takeover'
+      ),
     ),
   };
   const executionPlan = buildCapabilityExecutionPlan({

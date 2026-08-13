@@ -48,6 +48,7 @@ import { registerNetworkDiagnosticTools } from './network_diagnostic_tools';
 import { registerRuntimeWorkTools } from './runtime_work_tools';
 import { registerCadWorkflowTools } from './cad_workflow_tools';
 import { registerExtensionRegistryTools } from './extension_registry_tools';
+import { registerIndustryWorkflowTools } from './industry_workflow_tools';
 
 export function registerAllTools(
   registry: ToolRegistry,
@@ -100,6 +101,7 @@ export function registerAllTools(
   registerWorkProductTools(registry);
   registerAuthorityResearchTools(registry);
   registerWorkTakeoverTools(registry);
+  registerIndustryWorkflowTools(registry);
   registerDesktopAiTools(registry);
   registerExternalAiCollaborationTools(registry);
   registerExternalAiHistoryTools(registry);

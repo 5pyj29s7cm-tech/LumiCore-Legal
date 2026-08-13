@@ -737,6 +737,7 @@ export async function runWithTools(
       const executionArguments = currentAppGuard.normalizedArguments
         || tc.arguments
         || {};
+      if (context) context.getCurrentToolRecords = () => [...executionLog];
       const record = await executeToolCall({
         registry: toolRegistry,
         id: tc.id,

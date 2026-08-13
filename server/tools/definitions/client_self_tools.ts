@@ -25,6 +25,7 @@ import {
 } from '../../client/diagnostic_sanitizer';
 import { getDurableTaskHealthSnapshot } from '../../cognition/durable_task_diagnostics';
 import { getAdapterResilienceSnapshot } from '../adapter_resilience';
+import { getCurrentIndustryCapabilityProfile } from '../../regions/packs/cn/industry_capability_profile';
 
 const ACTIONS = Array.from(new Set([
   'set_client_mode',
@@ -175,6 +176,7 @@ export function registerClientSelfTools(registry: ToolRegistry): void {
       const state = getClientStateForScope(userId, scope);
       return JSON.stringify(sanitizeDiagnosticValue({
         architecture: getLumiTechnicalArchitecture(),
+        industryCapabilityProfile: getCurrentIndustryCapabilityProfile(),
         selfAwareness: getClientSelfAwarenessReport(userId, scope),
         capabilities: getClientCapabilities(registry.getCapabilityManifest(context?.toolPolicy)),
         interfaceSurfaces: getClientInterfaceSurfaces(),
