@@ -119,12 +119,13 @@ export function OrgHub() {
   );
   const primaryNavItems = visibleItems.filter(item => item.showInNav !== false);
   const legalNavItems: LegalNavItem[] = useMemo(() => [
-    { id: 'workspace', label: uiMessage('legal-hub.case-workspace.9f165fc920'), icon: <FolderOpen size={16} /> },
-    { id: 'research', label: workspaceCopy.legalResearch, icon: <Search size={16} /> },
+    { id: 'workspace', label: workspaceCopy.caseWorkspace, icon: <FolderOpen size={16} /> },
+    { id: 'packet', label: workspaceCopy.documentGeneration, icon: <FileText size={16} /> },
     { id: 'contract-review', label: t.legalContractReview, icon: <Shield size={16} /> },
-    { id: 'asset-trace', label: t.legalAssetTrace, icon: <Crosshair size={16} /> },
-    { id: 'verify', label: t.legalVerifyCitation, icon: <CheckCircle size={16} /> },
-    { id: 'bid', label: t.legalBidWorkbench, icon: <FileText size={16} /> },
+    { id: 'research', label: workspaceCopy.lawAndCases, icon: <Search size={16} /> },
+    { id: 'asset-trace', label: workspaceCopy.assetClues, icon: <Crosshair size={16} /> },
+    { id: 'verify', label: workspaceCopy.deliveryVerification, icon: <CheckCircle size={16} /> },
+    { id: 'bid', label: workspaceCopy.bidProduction, icon: <Briefcase size={16} /> },
   ], [t, workspaceCopy]);
   const roleInfo = roleLabel[orgRole] || roleLabel.member;
   const currentLegalItem = legalNavItems.find(item => item.id === legalView) || legalNavItems[0];

@@ -25,6 +25,7 @@ describe('organization workspace information architecture', () => {
   it('keeps the legal client organization workspace legal-only', () => {
     const orgHub = source('src/components/org/OrgHub.tsx');
     const legalHub = source('src/components/org/LegalHub.tsx');
+    const legalCopy = source('src/i18n/regions/cn/legal.ts');
     const marketplace = source('src/components/org/TemplateMarketplace.tsx');
     const creator = source('src/components/org/TemplateCreator.tsx');
     const reviewQueue = source('src/components/org/TemplateReviewQueue.tsx');
@@ -47,6 +48,13 @@ describe('organization workspace information architecture', () => {
     expect(orgHub).not.toContain('t.orgExitWorkSpace');
     expect(orgHub).toContain('legalNavItems.map');
     expect(orgHub).toContain('workspaceCopy.standaloneLegalTools');
+    for (const entry of ['caseWorkspace', 'documentGeneration', 'lawAndCases', 'assetClues', 'deliveryVerification', 'bidProduction']) {
+      expect(orgHub).toContain(`workspaceCopy.${entry}`);
+    }
+    expect(orgHub).toContain("{ id: 'packet'");
+    for (const label of ['案件工作台', '文书生成', '合同审查', '法条与类案', '财产线索', '交付核验', '标书制作']) {
+      expect(legalCopy).toContain(label);
+    }
     expect(orgHub).toContain('workspaceResetKey={legalWorkspaceResetKey}');
     expect(legalHub).not.toContain('flex w-56 shrink-0 flex-col');
     expect(legalHub).not.toContain('<LegalDataSourcesSettings />');
