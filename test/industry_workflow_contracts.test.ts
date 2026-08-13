@@ -11,6 +11,7 @@ import {
   startIndustryWorkflow,
 } from '../server/industry/workflow_service';
 import { readDB } from '../db_layer';
+import { updateWorkTakeoverTask } from '../server/work_takeover/tasks';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -121,6 +122,59 @@ describe('industry workflow contracts', () => {
     expect(db.conversationActionReceipts.some((receipt: any) => (
       receipt.taskId === started.conversationTaskId && receipt.outcome === 'verified_success'
     ))).toBe(false);
+  });
+
+  it('settles the linked action ledger only after the canonical verification tool passes', async () => {
+    const userId = 'industry_canonical_verifier_user';
+    const entryId = EXPECTED_ENTRY_IDS[PRODUCT_VARIANT.productLine][0];
+    const contract = getIndustryWorkflowContract(PRODUCT_VARIANT.productLine, entryId)!;
+    const started = startIndustryWorkflow({
+      userId,
+      domain: 'personal',
+      orgId: '',
+      entryId,
+      sourceInput: 'A scoped source record is ready for a reviewable result.',
+    });
+    const content = [
+      ...contract.expectedContentTerms,
+      'The source scope, material facts, current status, risks, review notes and next actions are archived for human review.',
+    ].join(' ');
+    updateWorkTakeoverTask(userId, started.task.id, {
+      result: content,
+      artifact: {
+        type: 'document',
+        label: contract.requiredArtifactLabels[0],
+        content,
+        status: 'prepared',
+      },
+    });
+
+    const { ToolRegistry } = await import('../server/tools/registry');
+    const { registerWorkTakeoverTools } = await import('../server/tools/definitions/work_takeover_tools');
+    const registry = new ToolRegistry();
+    registerWorkTakeoverTools(registry);
+    const raw = await registry.execute('work_takeover_task_verify_result', {
+      id: started.task.id,
+      requireScreenEvidence: false,
+      requireExternalOutcome: false,
+      requiredArtifactLabels: contract.requiredArtifactLabels,
+      expectedContentTerms: contract.expectedContentTerms,
+      minMatchedContentTerms: 1,
+    }, {
+      userId,
+      domain: 'personal',
+      orgId: '',
+    } as any);
+    const result = JSON.parse(raw);
+    expect(result.verification.passed).toBe(true);
+    expect(result.task.status).toBe('delivered');
+
+    const db = readDB();
+    const actionTask = db.conversationActionTasks.find((task: any) => task.id === started.conversationTaskId);
+    expect(actionTask.status).toBe('completed');
+    expect(db.conversationActionReceipts.some((receipt: any) => (
+      receipt.taskId === started.conversationTaskId && receipt.outcome === 'verified_success'
+    ))).toBe(true);
   });
 
   it('requires a real accepted file for file-mandatory workflows', () => {

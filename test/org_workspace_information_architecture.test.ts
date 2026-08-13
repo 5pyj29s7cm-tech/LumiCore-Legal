@@ -168,6 +168,10 @@ describe('organization workspace information architecture', () => {
     expect(assetTrace).toContain("persistCase: false");
     expect(bidWorkbench).toContain("persistCase: false");
     expect(orgHub).not.toContain('LegalUsageMode');
+    expect(orgHub).not.toContain('startIndustryWorkflow');
+    expect(orgHub).toContain("sessionStorage.setItem('lumi_legal_industry_task'");
+    expect(toolClient).toContain('ensureLegalIndustryTask');
+    expect(toolClient).toContain("source: 'legal_tool_execution'");
     expect(contextBar).toContain("export type LegalToolState = 'input' | 'running' | 'result'");
     expect(contextBar).toContain("export type LegalUsageMode = 'standalone' | 'case'");
     expect(contextBar).toContain('copy.standaloneResultNotice');
