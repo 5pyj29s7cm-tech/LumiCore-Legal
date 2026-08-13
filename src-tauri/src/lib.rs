@@ -1898,7 +1898,7 @@ fn app_launch_history_path() -> Option<PathBuf> {
         .ok()?;
     Some(
         PathBuf::from(base)
-            .join("LumiOS")
+            .join("LumiOS-Legal")
             .join("app-launch-history.json"),
     )
 }
@@ -3328,7 +3328,7 @@ fn child_is_running(child: &mut Option<Child>) -> bool {
 #[cfg(target_os = "windows")]
 const WINDOWS_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 #[cfg(target_os = "windows")]
-const AUTOSTART_VALUE_NAME: &str = "LumiOS";
+const AUTOSTART_VALUE_NAME: &str = "LumiLegal";
 
 #[cfg(target_os = "windows")]
 fn hidden_output(cmd: &mut Command) -> std::io::Result<std::process::Output> {
@@ -3465,7 +3465,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&show, &exit_wallpaper, &hide, &quit])?;
 
     let mut builder = TrayIconBuilder::with_id("main")
-        .tooltip("Lumi OS is ready")
+        .tooltip("Lumi Legal is ready")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -5148,7 +5148,7 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building Lumi OS")
+        .expect("error while building Lumi Legal")
         .run(|app, event| match event {
             tauri::RunEvent::WindowEvent {
                 label,

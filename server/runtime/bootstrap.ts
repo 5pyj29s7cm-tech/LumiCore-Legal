@@ -22,6 +22,7 @@ import { startDurableBackgroundTaskSupervisor } from "../agents/background_task_
 import { recoverInterruptedExternalAiCollaborations } from "../agents/external_ai_collaboration";
 import { recoverInterruptedExternalAiHistorySyncs } from "../agents/external_ai_history_sync";
 import { hydrateActiveExtensions } from "../extensions/registry";
+import { PRODUCT_VARIANT } from "../../shared/product_variant";
 import { runScheduledReadOnlyPrewarm, readOnlyContextCache } from "../context/read_only_cache";
 import { getGptSovitsRuntimeStatus } from "../tts/gptsovits_runtime";
 import { getVoiceprintRuntimeStatus } from "../biometrics/voiceprint_provider";
@@ -48,6 +49,23 @@ let firstBootExplorationWorker: ChildProcess | null = null;
 let backgroundTaskSupervisor: ReturnType<typeof startDurableBackgroundTaskSupervisor> | null = null;
 let backgroundTaskSupervisorStartupTimer: ReturnType<typeof setTimeout> | null = null;
 let unifiedRuntimeSupervisor: UnifiedRuntimeSupervisor | null = null;
+
+function ensureProductVariantSkills(): string[] {
+  const configured = mcpManager.getConfig();
+  const installedNow: string[] = [];
+  for (const skillName of PRODUCT_VARIANT.runtime.defaultSkills) {
+    if (configured[skillName]) continue;
+    const bundledPath = path.join(process.cwd(), 'server', 'skills', 'bundled', skillName);
+    if (!fs.existsSync(path.join(bundledPath, 'package.json'))) continue;
+    try {
+      mcpManager.installSkill(skillName, bundledPath, true);
+      installedNow.push(skillName);
+    } catch (error: any) {
+      console.warn(`[Variant] Could not install default skill "${skillName}": ${error?.message || String(error)}`);
+    }
+  }
+  return installedNow;
+}
 
 function isValidSystemSnapshot(value: unknown): value is SystemSnapshot {
   const snapshot = value as Partial<SystemSnapshot> | null;
@@ -246,6 +264,10 @@ export async function bootstrap(ctx: BootstrapContext) {
   // Recovered work starts only after MCP discovery settles, so a task that
   // depended on an MCP/CAD tool is not failed merely because startup discovery
   // was still in flight.
+  const defaultSkillsInstalled = ensureProductVariantSkills();
+  if (defaultSkillsInstalled.length > 0) {
+    console.log(`[Variant] Installed default ${PRODUCT_VARIANT.productLine} skills: ${defaultSkillsInstalled.join(', ')}`);
+  }
   registerMCPTools(io).then(mcpTools => {
     if (mcpTools.length > 0) {
       console.log(`[MCP] Registered ${mcpTools.length} MCP tools (total: ${toolRegistry.list().length})`);

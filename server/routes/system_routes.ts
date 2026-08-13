@@ -59,6 +59,7 @@ import { generateConfiguredEmbedding } from "../llm/embedding_provider";
 import { rerankConfiguredDocuments } from "../llm/rerank_provider";
 import { queryWindowsGpuName } from "../adapters/host_probe";
 import { loadRuntimeBuildMetadata } from "../../shared/runtime_build_metadata";
+import { PRODUCT_VARIANT } from "../../shared/product_variant";
 import {
   testLLMProviderConnection,
   testLumiModelConfiguration,
@@ -130,6 +131,7 @@ export function getRuntimeVersionInfo() {
     buildId: runtimeBuildMetadata.buildId,
     sourceFingerprint: runtimeBuildMetadata.sourceFingerprint,
     sourceDirty: runtimeBuildMetadata.sourceDirty,
+    variant: PRODUCT_VARIANT,
     pid: process.pid,
     startedAt: serverStartedAt,
     uptimeSeconds: Math.round(process.uptime()),

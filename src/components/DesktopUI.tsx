@@ -127,6 +127,7 @@ import {
   shouldUseCompactDesktopLayout,
   type ViewportSize,
 } from '@/lib/desktopLayout';
+import { PRODUCT_VARIANT } from '../../shared/product_variant';
 
 const IDLE_AWAY_SECONDS = 5 * 60;
 const RETURN_IDLE_SECONDS = 30;
@@ -632,7 +633,7 @@ function ControlCenter({ isOpen, onClose, t, brightness, setBrightness, volume, 
         </div>
       </div>
       <div className="mt-6 pt-6 border-t border-white/5 flex items-center justify-between font-sans">
-        <span className="text-xs font-bold text-white/45 tracking-widest uppercase">{t.desktopVersion || 'Lumi OS v3.0.2'}</span>
+        <span className="text-xs font-bold text-white/45 tracking-widest uppercase">{PRODUCT_VARIANT.runtime.productName} v3.0.3</span>
         <button onClick={onClose} className="text-xs font-black text-celestial-saturn hover:underline uppercase tracking-widest">{t.closeNexus || 'Close Nexus'}</button>
       </div>
     </motion.div>
@@ -4720,7 +4721,7 @@ export function DesktopUI({
                <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-celestial-mars to-celestial-saturn flex items-center justify-center p-1 group-hover:rotate-12 transition-transform shadow-lg shadow-celestial-saturn/20">
                  <Rocket size={14} className="text-white" />
                </div>
-               <span className="lumi-shell-brand-label text-xs font-black tracking-widest uppercase text-white/60">{t.lumiOS || 'Lumi OS'}</span>
+               <span className="lumi-shell-brand-label text-xs font-black tracking-widest uppercase text-white/60">{PRODUCT_VARIANT.runtime.productName}</span>
             </button>
             <div className="lumi-shell-optional h-4 w-px bg-white/10" />
             <div className="flex items-center gap-2">

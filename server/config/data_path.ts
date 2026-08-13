@@ -6,6 +6,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { PRODUCT_VARIANT } from '../../shared/product_variant';
 
 const ENV_KEY = 'LUMI_DATA_DIR';
 const TEST_ROOT_ENV_KEY = 'LUMI_TEST_TMPDIR';
@@ -31,7 +32,7 @@ function testDataRoot(): string {
 
 function defaultDataRoot(): string {
   if (process.env.NODE_ENV === 'test') return testDataRoot();
-  return path.join(os.homedir(), 'LumiOS');
+  return path.join(os.homedir(), PRODUCT_VARIANT.runtime.dataDirectoryName);
 }
 
 export function getDataRoot(): string {

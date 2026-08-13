@@ -3,6 +3,16 @@
   "variantId": "legal-client",
   "displayName": "Lumi 律师客户定制版",
   "productLine": "legal",
+  "runtime": {
+    "productName": "Lumi Legal",
+    "desktopTitle": "Lumi Legal",
+    "appIdentifier": "com.lumiai.legal",
+    "mobileAppIdentifier": "com.lumiai.legal",
+    "dataDirectoryName": "LumiOS-Legal",
+    "updaterChannel": "lumi-legal",
+    "defaultSkills": ["legal-casework"],
+    "modules": ["legal-workbench", "case-management", "evidence-workflows"]
+  },
   "upstream": {
     "repository": "https://github.com/5pyj29s7cm-tech/lumi-CEO.git",
     "branch": "main",
