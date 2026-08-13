@@ -121,6 +121,8 @@ export function CentralLumiChat() {
   const pendingAttachmentsRef = useRef<ChatAttachment[]>([]);
   const [conversationAttachments, setConversationAttachments] = useState<ChatAttachment[]>([]);
   const conversationAttachmentsRef = useRef<ChatAttachment[]>([]);
+  const attachmentConversationIdRef = useRef('');
+  const [attachmentContextStorageKey, setAttachmentContextStorageKey] = useState('');
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -132,22 +134,68 @@ export function CentralLumiChat() {
   const streamingMessageIdRef = useRef<string | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nativeDropHandledAtRef = useRef(0);
-  const attachmentContextStorageKey = `lumi_org_chat_attachment_context:${user?.uid || user?.username || 'anonymous'}:${orgConnection?.orgId || 'unbound'}`;
+  const attachmentContextStoragePrefix = `lumi_org_chat_attachment_context:${user?.uid || user?.username || 'anonymous'}:${orgConnection?.orgId || 'unbound'}`;
+  const bindAttachmentContextToConversation = useCallback((
+    conversationId: string,
+    options: { carryCurrent?: boolean } = {},
+  ) => {
+    const nextConversationId = String(conversationId || '').trim();
+    if (!nextConversationId) {
+      attachmentConversationIdRef.current = '';
+      setAttachmentContextStorageKey('');
+      conversationAttachmentsRef.current = [];
+      setConversationAttachments([]);
+      return;
+    }
+    if (attachmentConversationIdRef.current === nextConversationId) return;
+    const nextStorageKey = `${attachmentContextStoragePrefix}:${nextConversationId}`;
+    let nextAttachments = options.carryCurrent ? conversationAttachmentsRef.current : [];
+    if (!options.carryCurrent) {
+      try {
+        nextAttachments = parseChatAttachmentContext(localStorage.getItem(nextStorageKey));
+        if (nextAttachments.length === 0) localStorage.removeItem(nextStorageKey);
+      } catch {
+        nextAttachments = [];
+      }
+    }
+    attachmentConversationIdRef.current = nextConversationId;
+    setAttachmentContextStorageKey(nextStorageKey);
+    conversationAttachmentsRef.current = nextAttachments;
+    setConversationAttachments(nextAttachments);
+    if (options.carryCurrent && nextAttachments.length > 0) {
+      try {
+        localStorage.setItem(nextStorageKey, serializeChatAttachmentContext(nextAttachments));
+      } catch {}
+    }
+  }, [attachmentContextStoragePrefix]);
 
   useEffect(() => {
     pendingAttachmentsRef.current = pendingAttachments;
   }, [pendingAttachments]);
 
   useEffect(() => {
-    let restored: ChatAttachment[] = [];
     try {
-      restored = parseChatAttachmentContext(localStorage.getItem(attachmentContextStorageKey));
+      // Remove the old organization-wide key so materials cannot cross a
+      // deliberate conversation boundary and old extracted text is discarded.
+      localStorage.removeItem(attachmentContextStoragePrefix);
     } catch {}
-    conversationAttachmentsRef.current = restored;
-    setConversationAttachments(restored);
+    bindAttachmentContextToConversation('');
     pendingAttachmentsRef.current = [];
     setPendingAttachments([]);
-  }, [attachmentContextStorageKey]);
+  }, [attachmentContextStoragePrefix, bindAttachmentContextToConversation]);
+
+  useEffect(() => {
+    const onConversationClosed = (event: Event) => {
+      const closedConversationId = String((event as CustomEvent<{ conversationId?: string }>).detail?.conversationId || '');
+      if (!closedConversationId || closedConversationId !== attachmentConversationIdRef.current) return;
+      try {
+        localStorage.removeItem(`${attachmentContextStoragePrefix}:${closedConversationId}`);
+      } catch {}
+      bindAttachmentContextToConversation('');
+    };
+    window.addEventListener('lumi:conversation-closed', onConversationClosed);
+    return () => window.removeEventListener('lumi:conversation-closed', onConversationClosed);
+  }, [attachmentContextStoragePrefix, bindAttachmentContextToConversation]);
 
   const clearActiveRequest = useCallback(() => {
     if (timeoutRef.current) {
@@ -213,15 +261,19 @@ export function CentralLumiChat() {
     const merged = mergeChatAttachmentReferences(conversationAttachmentsRef.current, attachments).attachments;
     conversationAttachmentsRef.current = merged;
     setConversationAttachments(merged);
-    try {
-      localStorage.setItem(attachmentContextStorageKey, serializeChatAttachmentContext(merged));
-    } catch {}
+    if (attachmentContextStorageKey) {
+      try {
+        localStorage.setItem(attachmentContextStorageKey, serializeChatAttachmentContext(merged));
+      } catch {}
+    }
   }, [attachmentContextStorageKey]);
 
   const clearConversationAttachments = useCallback(() => {
     conversationAttachmentsRef.current = [];
     setConversationAttachments([]);
-    try { localStorage.removeItem(attachmentContextStorageKey); } catch {}
+    if (attachmentContextStorageKey) {
+      try { localStorage.removeItem(attachmentContextStorageKey); } catch {}
+    }
     toast.success(uiMessage('agent-chat-page.session-materials-cleared.53bea199b2'));
   }, [attachmentContextStorageKey]);
 
@@ -417,6 +469,7 @@ export function CentralLumiChat() {
           if (!cancelled) setMessages(prev => (prev.length ? prev : [greeting()]));
           return;
         }
+        bindAttachmentContextToConversation(conversationId);
         const messagesRes = await fetch(`/api/conversations/${conversationId}/messages?domain=work&limit=80`, {
           credentials: 'include',
         });
@@ -432,7 +485,7 @@ export function CentralLumiChat() {
     };
     loadConversation();
     return () => { cancelled = true; };
-  }, [greeting]);
+  }, [bindAttachmentContextToConversation, greeting, orgConnection?.orgId, user?.uid, user?.username]);
 
   useEffect(() => {
     if (!socket) return;
@@ -527,19 +580,33 @@ export function CentralLumiChat() {
       clearActiveRequest();
     };
 
+    const onConversationUpdated = (data: {
+      conversationId?: string;
+      agentId?: string;
+      rolledOver?: boolean;
+    }) => {
+      if (data.agentId !== 'lumi' || !data.conversationId) return;
+      if (data.conversationId === attachmentConversationIdRef.current) return;
+      bindAttachmentContextToConversation(data.conversationId, {
+        carryCurrent: data.rolledOver === true || !attachmentConversationIdRef.current,
+      });
+    };
+
     socket.on('agent:chunk', onChunk);
     socket.on('agent:response', onResponse);
     socket.on('agent:status', onStatus);
     socket.on('agent:error', onError);
+    socket.on('chat:conversation_updated', onConversationUpdated);
 
     return () => {
       socket.off('agent:chunk', onChunk);
       socket.off('agent:response', onResponse);
       socket.off('agent:status', onStatus);
       socket.off('agent:error', onError);
+      socket.off('chat:conversation_updated', onConversationUpdated);
       clearActiveRequest();
     };
-  }, [clearActiveRequest, socket]);
+  }, [bindAttachmentContextToConversation, clearActiveRequest, socket]);
 
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();

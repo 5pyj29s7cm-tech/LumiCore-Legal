@@ -1,6 +1,7 @@
 import sqlite3 from 'sqlite3';
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { getDataPath, getDataRoot } from './server/config/data_path';
 import { isolateLegacyGuardSummaryState } from './server/conversation/guard_history';
@@ -66,8 +67,11 @@ const PERFORMANCE_INDEX_SQL = [
   `CREATE INDEX IF NOT EXISTS idx_model_routing_conversation_completed ON model_routing_receipts(conversationId, completedAt)`,
   `CREATE INDEX IF NOT EXISTS idx_model_routing_request ON model_routing_receipts(requestId)`,
   `CREATE INDEX IF NOT EXISTS idx_model_routing_selected ON model_routing_receipts(selectedProvider, selectedModel, completedAt)`,
+  `CREATE INDEX IF NOT EXISTS idx_read_only_tool_patterns_scope ON read_only_tool_patterns(userId, domain, orgId, updatedAt)`,
   `CREATE INDEX IF NOT EXISTS idx_background_tasks_user_status ON background_delegation_tasks(userId, status, updatedAt)`,
   `CREATE INDEX IF NOT EXISTS idx_background_tasks_lease ON background_delegation_tasks(status, leaseExpiresAt)`,
+  `CREATE INDEX IF NOT EXISTS idx_command_center_plans_scope_status ON command_center_plans(userId, domain, orgId, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_command_center_plans_due ON command_center_plans(status, nextRunAt)`,
   `CREATE INDEX IF NOT EXISTS idx_autonomous_tasks_user_status ON autonomous_tasks(userId, status, updatedAt)`,
   `CREATE INDEX IF NOT EXISTS idx_autonomous_tasks_lease ON autonomous_tasks(status, leaseExpiresAt)`,
   `CREATE INDEX IF NOT EXISTS idx_external_commit_journal_task ON external_commit_journal(taskId, updatedAt)`,
@@ -116,6 +120,11 @@ const PERFORMANCE_INDEX_SQL = [
 let memoryDB: any = null;
 const SYSTEM_FLAGS_SETTING = '__lumi_system_flags';
 const SYSTEM_SNAPSHOTS_SETTING = '__lumi_system_snapshots';
+// One-version compatibility snapshot. Legacy continuation data can be read and
+// migrated, but new task state is persisted only in conversation_action_*.
+// Keeping the original value outside the mutable conversation projection stops
+// normal database flushes from writing new state back into the legacy column.
+const legacyActionContinuationStates = new WeakMap<object, Record<string, any> | undefined>();
 
 export interface LegacySummaryPersistenceRepair {
   id: string;
@@ -732,6 +741,17 @@ function createTables(): Promise<void> {
         durationMs INTEGER NOT NULL DEFAULT 0
       );
 
+      CREATE TABLE IF NOT EXISTS read_only_tool_patterns (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        domain TEXT NOT NULL DEFAULT 'personal',
+        orgId TEXT NOT NULL DEFAULT '',
+        confidence REAL NOT NULL DEFAULT 0,
+        successCount INTEGER NOT NULL DEFAULT 0,
+        updatedAt TEXT NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}'
+      );
+
       CREATE TABLE IF NOT EXISTS background_delegation_tasks (
         id TEXT PRIMARY KEY,
         userId TEXT NOT NULL,
@@ -739,6 +759,27 @@ function createTables(): Promise<void> {
         leaseExpiresAt TEXT NOT NULL DEFAULT '',
         updatedAt TEXT NOT NULL,
         payload TEXT NOT NULL DEFAULT '{}'
+      );
+
+      CREATE TABLE IF NOT EXISTS command_center_plans (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        domain TEXT NOT NULL DEFAULT 'personal',
+        orgId TEXT NOT NULL DEFAULT '',
+        conversationId TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        instruction TEXT NOT NULL,
+        cadence TEXT NOT NULL DEFAULT 'none',
+        timeOfDay TEXT NOT NULL DEFAULT '09:00',
+        dayOfWeek INTEGER NOT NULL DEFAULT 1,
+        dayOfMonth INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'active',
+        nextRunAt TEXT NOT NULL DEFAULT '',
+        lastRunAt TEXT NOT NULL DEFAULT '',
+        lastRuntimeTaskId TEXT NOT NULL DEFAULT '',
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS autonomous_tasks (
@@ -1194,8 +1235,9 @@ async function loadMemoryDB(): Promise<void> {
   const interactionsRaw = await query<any>('SELECT * FROM interactions');
   const marketplaceSkills = await query<any>('SELECT * FROM marketplace_skills');
   const skills = await query<any>('SELECT * FROM skills');
-  const founderVisionRow = await query<any>('SELECT content FROM founder_vision WHERE id = 1');
+  const founderVisionRow = await query<any>('SELECT content, updatedAt FROM founder_vision WHERE id = 1');
   const founderVision = founderVisionRow[0]?.content || '';
+  const founderVisionUpdatedAt = founderVisionRow[0]?.updatedAt || new Date(0).toISOString();
 
   // Load memories
   const memoriesRaw = await query<any>('SELECT * FROM memories');
@@ -1212,7 +1254,9 @@ async function loadMemoryDB(): Promise<void> {
   const conversationActionTasks = await query<any>('SELECT * FROM conversation_action_tasks');
   const conversationActionReceipts = await query<any>('SELECT * FROM conversation_action_receipts');
   const modelRoutingReceiptsRaw = await query<any>('SELECT * FROM model_routing_receipts');
+  const readOnlyToolPatternsRaw = await query<any>('SELECT * FROM read_only_tool_patterns');
   const backgroundDelegationTasksRaw = await query<any>('SELECT * FROM background_delegation_tasks');
+  const commandCenterPlansRaw = await query<any>('SELECT * FROM command_center_plans');
   const autonomousTasksRaw = await query<any>('SELECT * FROM autonomous_tasks');
   const externalAiSessionsRaw = await query<any>('SELECT * FROM external_ai_sessions');
   const externalAiDispatchesRaw = await query<any>('SELECT * FROM external_ai_dispatches');
@@ -1334,15 +1378,18 @@ async function loadMemoryDB(): Promise<void> {
         lastSummaryMessageCount: isolatedSummary.lastSummaryMessageCount,
       });
     }
-    return {
+    const legacyActionContinuationState = parseStoredActionContinuationState(c.actionContinuationState);
+    const conversation = {
       ...c,
       summary: isolatedSummary.summary,
       summaryChain: isolatedSummary.summaryChain,
       lastSummaryMessageCount: isolatedSummary.lastSummaryMessageCount,
-      actionContinuationState: parseStoredActionContinuationState(c.actionContinuationState),
+      actionContinuationState: legacyActionContinuationState,
       domain: c.domain || 'personal',
       orgId: c.orgId || '',
     };
+    legacyActionContinuationStates.set(conversation, legacyActionContinuationState);
+    return conversation;
   });
 
   memoryDB = {
@@ -1352,6 +1399,7 @@ async function loadMemoryDB(): Promise<void> {
     marketplaceSkills,
     skills,
     founderVision,
+    founderVisionUpdatedAt,
     memories: (memories || []).map((m: any) => ({ ...m, domain: m.domain || 'personal', orgId: m.orgId || '' })),
     reminders: remindersRaw || [],
     conversations,
@@ -1363,12 +1411,30 @@ async function loadMemoryDB(): Promise<void> {
         try { return JSON.parse(receipt.attempts || '[]'); } catch { return []; }
       })(),
     })),
+    readOnlyToolPatterns: (readOnlyToolPatternsRaw || []).flatMap((row: any) => {
+      try {
+        const payload = JSON.parse(row.payload || '{}');
+        return payload && typeof payload === 'object'
+          ? [{
+              ...payload,
+              id: row.id,
+              userId: row.userId,
+              domain: row.domain || 'personal',
+              orgId: row.orgId || '',
+              confidence: Number(row.confidence) || 0,
+              successCount: Number(row.successCount) || 0,
+              updatedAt: row.updatedAt,
+            }]
+          : [];
+      } catch { return []; }
+    }),
     backgroundDelegationTasks: (backgroundDelegationTasksRaw || []).flatMap((row: any) => {
       try {
         const task = JSON.parse(row.payload || '{}');
         return task && typeof task === 'object' ? [{ ...task, id: row.id, userId: row.userId, status: row.status, leaseExpiresAt: row.leaseExpiresAt || '', updatedAt: row.updatedAt }] : [];
       } catch { return []; }
     }),
+    commandCenterPlans: commandCenterPlansRaw || [],
     autonomousTasks: (autonomousTasksRaw || []).flatMap((row: any) => {
       try {
         const task = JSON.parse(row.payload || '{}');
@@ -1500,6 +1566,8 @@ async function loadMemoryDB(): Promise<void> {
     auditLog: auditLogEntries || [],
   };
 
+  seedPersistenceTableDigests();
+
   configureSqliteExternalCommitJournal();
 
   // Prompt safety is already guaranteed by the sanitized in-memory rows.
@@ -1534,11 +1602,14 @@ export function readDB(): any {
   return memoryDB;
 }
 
-// Prune old entries from memory + SQLite to prevent unbounded growth
+// Prune high-volume telemetry from memory + SQLite to prevent unbounded
+// growth. Durable memories are deliberately excluded: count-based deletion
+// would silently erase knowledge and identity without considering tier,
+// importance, consolidation state, or user retention policy.
 export function pruneOldData(): void {
   if (!memoryDB || !db) return;
-  const limits: Record<string, number> = { interactions: 20000, memories: 5000, tokenUsage: 5000 };
-  const tableMap: Record<string, string> = { interactions: 'interactions', memories: 'memories', tokenUsage: 'token_usage' };
+  const limits: Record<string, number> = { interactions: 20000, tokenUsage: 5000 };
+  const tableMap: Record<string, string> = { interactions: 'interactions', tokenUsage: 'token_usage' };
   for (const [key, max] of Object.entries(limits)) {
     const arr = memoryDB[key];
     if (arr && arr.length > max) {
@@ -1553,7 +1624,7 @@ export function pruneOldData(): void {
       console.log(`[DB] Pruned ${excess} old ${key} (${max} kept)`);
     }
   }
-  dbDirty = true;
+  recordDatabaseDirty();
 }
 
 // Write lock to prevent concurrent SQLite transactions
@@ -1571,6 +1642,32 @@ let writeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let writeRevision = 0;
 let persistedRevision = 0;
 let writeInFlight = false;
+let dirtySinceMs = 0;
+let lastSuccessfulFlushAt = '';
+let lastPersistenceError = '';
+let persistenceTableDigests = new Map<string, string>();
+let lastFlushTables: string[] = [];
+let totalTableWrites = 0;
+let totalSkippedTableWrites = 0;
+
+function recordDatabaseDirty(): void {
+  if (!dirtySinceMs) dirtySinceMs = Date.now();
+  dbDirty = true;
+}
+
+function recordSuccessfulDatabaseFlush(): void {
+  lastSuccessfulFlushAt = new Date().toISOString();
+  lastPersistenceError = '';
+  if (persistedRevision >= writeRevision) {
+    dbDirty = false;
+    dirtySinceMs = 0;
+  }
+}
+
+function recordDatabaseFlushFailure(error: unknown): void {
+  recordDatabaseDirty();
+  lastPersistenceError = error instanceof Error ? error.message : String(error || 'Unknown persistence failure');
+}
 
 function scheduleDatabaseFlush(delayMs = 100): void {
   if (writeDebounceTimer || writeInFlight) return;
@@ -1587,14 +1684,14 @@ function scheduleDatabaseFlush(delayMs = 100): void {
       .then(() => persistMemoryDB())
       .then(() => {
         persistedRevision = Math.max(persistedRevision, targetRevision);
-        dbDirty = persistedRevision < writeRevision;
+        recordSuccessfulDatabaseFlush();
       })
       .catch((err) => {
         // persistMemoryDB writes through a transaction and does not mutate the
         // in-memory source of truth. Keeping that live object is both safer and
         // dramatically cheaper than cloning the complete database on every
         // chat/voice event (large tool receipts previously exhausted V8 heap).
-        dbDirty = true;
+        recordDatabaseFlushFailure(err);
         console.error('[DB] Failed to persist database:', err);
       })
       .finally(() => {
@@ -1670,7 +1767,7 @@ export function writeDB(data: any): void {
     throw new Error('Database not initialized.');
   }
   memoryDB = data;
-  dbDirty = true;
+  recordDatabaseDirty();
   writeRevision += 1;
 
   // Keep at most one full snapshot write in flight. Rapid message, memory and
@@ -1688,9 +1785,14 @@ async function flushDatabaseStrict(): Promise<void> {
   if (persistedRevision < writeRevision || dbDirty) {
     const targetRevision = writeRevision;
     writeInFlight = true;
-    await persistMemoryDB();
-    persistedRevision = Math.max(persistedRevision, targetRevision);
-    dbDirty = persistedRevision < writeRevision;
+    try {
+      await persistMemoryDB();
+      persistedRevision = Math.max(persistedRevision, targetRevision);
+      recordSuccessfulDatabaseFlush();
+    } catch (error) {
+      recordDatabaseFlushFailure(error);
+      throw error;
+    }
   }
 }
 
@@ -1713,7 +1815,7 @@ export async function flushDB(): Promise<void> {
   try {
     await flushDBOrThrow();
   } catch (err) {
-    dbDirty = true;
+    recordDatabaseFlushFailure(err);
     console.error('[DB] flushDB failed:', err);
   }
 }
@@ -1722,6 +1824,36 @@ let dbDirty = false;
 
 export function isDbDirty(): boolean {
   return dbDirty;
+}
+
+/**
+ * A short dirty window is normal because writes are deliberately coalesced.
+ * Health only degrades after a real persistence error or a sustained backlog.
+ */
+export function getDatabasePersistenceStatus(nowMs = Date.now()): {
+  pending: boolean;
+  writeInFlight: boolean;
+  lagMs: number;
+  degraded: boolean;
+  lastSuccessfulFlushAt: string;
+  lastError: string;
+  lastFlushTables: string[];
+  totalTableWrites: number;
+  totalSkippedTableWrites: number;
+} {
+  const pending = dbDirty || persistedRevision < writeRevision;
+  const lagMs = pending && dirtySinceMs ? Math.max(0, nowMs - dirtySinceMs) : 0;
+  return {
+    pending,
+    writeInFlight,
+    lagMs,
+    degraded: Boolean(lastPersistenceError) || lagMs >= 30_000,
+    lastSuccessfulFlushAt,
+    lastError: lastPersistenceError,
+    lastFlushTables: [...lastFlushTables],
+    totalTableWrites,
+    totalSkippedTableWrites,
+  };
 }
 
 /** Flush pending work and release the SQLite handle (tests and graceful shutdown). */
@@ -1743,6 +1875,13 @@ export async function closeDatabase(): Promise<void> {
   writeRevision = 0;
   persistedRevision = 0;
   writeInFlight = false;
+  dirtySinceMs = 0;
+  lastSuccessfulFlushAt = '';
+  lastPersistenceError = '';
+  persistenceTableDigests = new Map();
+  lastFlushTables = [];
+  totalTableWrites = 0;
+  totalSkippedTableWrites = 0;
   dbDirty = false;
   configureExternalCommitJournal(null);
 
@@ -1760,16 +1899,25 @@ export async function closeDatabase(): Promise<void> {
  * Data is written to temp tables first, then the original tables are atomically
  * replaced. If the process crashes mid-write, the original data is preserved.
  */
-async function persistMemoryDB(): Promise<void> {
-  // Table definitions: [tableName, createSQL (must match the schema), insertSQL, rowMapper]
-  interface TableSpec {
-    name: string;
-    createSQL: string;
-    insertSQL: string;
-    rows: () => any[][];
-  }
+interface PersistenceTableSpec {
+  name: string;
+  createSQL: string;
+  insertSQL: string;
+  rows: () => any[][];
+}
 
-  const specs: TableSpec[] = [
+const STABLE_PERSISTENCE_TIMESTAMP = new Date(0).toISOString();
+
+function persistenceTimestamp(...candidates: unknown[]): string {
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (value) return value;
+  }
+  return STABLE_PERSISTENCE_TIMESTAMP;
+}
+
+function buildPersistenceTableSpecs(): PersistenceTableSpec[] {
+  const specs: PersistenceTableSpec[] = [
     {
       name: 'users',
       createSQL: `CREATE TABLE _temp_users (uid TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, role TEXT DEFAULT 'user', balance REAL DEFAULT 0, phone TEXT DEFAULT '', createdAt TEXT NOT NULL)`,
@@ -1804,7 +1952,7 @@ async function persistMemoryDB(): Promise<void> {
       name: 'conversations',
       createSQL: `CREATE TABLE _temp_conversations (id TEXT PRIMARY KEY, userId TEXT NOT NULL, agentId TEXT, title TEXT DEFAULT '', status TEXT DEFAULT 'active', summary TEXT DEFAULT '', summaryChain TEXT DEFAULT '[]', lastSummaryMessageCount INTEGER DEFAULT -1, actionContinuationState TEXT DEFAULT '{}', messageCount INTEGER DEFAULT 0, lastActiveAt TEXT NOT NULL, createdAt TEXT NOT NULL, domain TEXT DEFAULT 'personal', orgId TEXT DEFAULT '')`,
       insertSQL: `INSERT INTO _temp_conversations (id, userId, agentId, title, status, summary, summaryChain, lastSummaryMessageCount, actionContinuationState, messageCount, lastActiveAt, createdAt, domain, orgId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      rows: () => (memoryDB.conversations || []).map((c: any) => [c.id, c.userId, c.agentId || '', c.title || '', c.status || 'active', c.summary || '', JSON.stringify(Array.isArray(c.summaryChain) ? c.summaryChain : []), Number.isFinite(Number(c.lastSummaryMessageCount)) ? Math.floor(Number(c.lastSummaryMessageCount)) : -1, serializeStoredActionContinuationState(c.actionContinuationState), c.messageCount || 0, c.lastActiveAt, c.createdAt, c.domain || 'personal', c.orgId || '']),
+      rows: () => (memoryDB.conversations || []).map((c: any) => [c.id, c.userId, c.agentId || '', c.title || '', c.status || 'active', c.summary || '', JSON.stringify(Array.isArray(c.summaryChain) ? c.summaryChain : []), Number.isFinite(Number(c.lastSummaryMessageCount)) ? Math.floor(Number(c.lastSummaryMessageCount)) : -1, serializeStoredActionContinuationState(legacyActionContinuationStates.get(c)), c.messageCount || 0, c.lastActiveAt, c.createdAt, c.domain || 'personal', c.orgId || '']),
     },
     {
       name: 'conversation_action_tasks',
@@ -1845,6 +1993,21 @@ async function persistMemoryDB(): Promise<void> {
       ]),
     },
     {
+      name: 'read_only_tool_patterns',
+      createSQL: `CREATE TABLE _temp_read_only_tool_patterns (id TEXT PRIMARY KEY, userId TEXT NOT NULL, domain TEXT NOT NULL DEFAULT 'personal', orgId TEXT NOT NULL DEFAULT '', confidence REAL NOT NULL DEFAULT 0, successCount INTEGER NOT NULL DEFAULT 0, updatedAt TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}')`,
+      insertSQL: `INSERT INTO _temp_read_only_tool_patterns (id, userId, domain, orgId, confidence, successCount, updatedAt, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      rows: () => (memoryDB.readOnlyToolPatterns || []).map((pattern: any) => [
+        pattern.id,
+        pattern.userId,
+        pattern.domain || 'personal',
+        pattern.orgId || '',
+        Number(pattern.confidence) || 0,
+        Number(pattern.successCount) || 0,
+        persistenceTimestamp(pattern.updatedAt, pattern.createdAt),
+        JSON.stringify(pattern),
+      ]),
+    },
+    {
       name: 'background_delegation_tasks',
       createSQL: `CREATE TABLE _temp_background_delegation_tasks (id TEXT PRIMARY KEY, userId TEXT NOT NULL, status TEXT NOT NULL, leaseExpiresAt TEXT NOT NULL DEFAULT '', updatedAt TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}')`,
       insertSQL: `INSERT INTO _temp_background_delegation_tasks (id, userId, status, leaseExpiresAt, updatedAt, payload) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1853,8 +2016,33 @@ async function persistMemoryDB(): Promise<void> {
         task.userId,
         task.status || 'queued',
         task.leaseExpiresAt || '',
-        task.updatedAt || task.createdAt || new Date().toISOString(),
+        persistenceTimestamp(task.updatedAt, task.createdAt),
         JSON.stringify(task),
+      ]),
+    },
+    {
+      name: 'command_center_plans',
+      createSQL: `CREATE TABLE _temp_command_center_plans (id TEXT PRIMARY KEY, userId TEXT NOT NULL, domain TEXT NOT NULL DEFAULT 'personal', orgId TEXT NOT NULL DEFAULT '', conversationId TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, title TEXT NOT NULL, instruction TEXT NOT NULL, cadence TEXT NOT NULL DEFAULT 'none', timeOfDay TEXT NOT NULL DEFAULT '09:00', dayOfWeek INTEGER NOT NULL DEFAULT 1, dayOfMonth INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'active', nextRunAt TEXT NOT NULL DEFAULT '', lastRunAt TEXT NOT NULL DEFAULT '', lastRuntimeTaskId TEXT NOT NULL DEFAULT '', createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL)`,
+      insertSQL: `INSERT INTO _temp_command_center_plans (id, userId, domain, orgId, conversationId, kind, title, instruction, cadence, timeOfDay, dayOfWeek, dayOfMonth, status, nextRunAt, lastRunAt, lastRuntimeTaskId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      rows: () => (memoryDB.commandCenterPlans || []).map((plan: any) => [
+        plan.id,
+        plan.userId,
+        plan.domain || 'personal',
+        plan.orgId || '',
+        plan.conversationId || '',
+        plan.kind || 'daily_task',
+        plan.title || '',
+        plan.instruction || '',
+        plan.cadence || 'none',
+        plan.timeOfDay || '09:00',
+        Number(plan.dayOfWeek) || 0,
+        Number(plan.dayOfMonth) || 1,
+        plan.status || 'active',
+        plan.nextRunAt || '',
+        plan.lastRunAt || '',
+        plan.lastRuntimeTaskId || '',
+        plan.createdAt,
+        plan.updatedAt,
       ]),
     },
     {
@@ -1866,7 +2054,7 @@ async function persistMemoryDB(): Promise<void> {
         task.userId,
         task.status || 'pending',
         task.leaseExpiresAt || '',
-        task.updatedAt || task.createdAt || new Date().toISOString(),
+        persistenceTimestamp(task.updatedAt, task.createdAt),
         JSON.stringify(task),
       ]),
     },
@@ -1880,7 +2068,7 @@ async function persistMemoryDB(): Promise<void> {
         session.taskId || '',
         session.conversationId || '',
         session.status || 'active',
-        session.updatedAt || session.createdAt || new Date().toISOString(),
+        persistenceTimestamp(session.updatedAt, session.createdAt),
         JSON.stringify(session),
       ]),
     },
@@ -1896,7 +2084,7 @@ async function persistMemoryDB(): Promise<void> {
         dispatch.status || 'planned',
         dispatch.routeKind || 'desktop_visual',
         dispatch.idempotencyKey,
-        dispatch.updatedAt || dispatch.createdAt || new Date().toISOString(),
+        persistenceTimestamp(dispatch.updatedAt, dispatch.createdAt),
         JSON.stringify(dispatch),
       ]),
     },
@@ -1910,7 +2098,7 @@ async function persistMemoryDB(): Promise<void> {
         answer.dispatchId,
         answer.userId,
         answer.targetId,
-        answer.receivedAt || new Date().toISOString(),
+        persistenceTimestamp(answer.receivedAt),
         JSON.stringify(answer),
       ]),
     },
@@ -1925,7 +2113,7 @@ async function persistMemoryDB(): Promise<void> {
         source.orgId || '',
         source.sourceKind,
         source.status || 'active',
-        source.updatedAt || source.createdAt || new Date().toISOString(),
+        persistenceTimestamp(source.updatedAt, source.createdAt),
         JSON.stringify(source),
       ]),
     },
@@ -1939,7 +2127,7 @@ async function persistMemoryDB(): Promise<void> {
         job.userId,
         job.status || 'pending',
         job.nextCursor || '',
-        job.updatedAt || job.createdAt || new Date().toISOString(),
+        persistenceTimestamp(job.updatedAt, job.createdAt),
         JSON.stringify(job),
       ]),
     },
@@ -1952,7 +2140,7 @@ async function persistMemoryDB(): Promise<void> {
         conversation.sourceId,
         conversation.userId,
         conversation.externalConversationId,
-        conversation.updatedAt || conversation.createdAt || new Date().toISOString(),
+        persistenceTimestamp(conversation.updatedAt, conversation.createdAt),
         JSON.stringify(conversation),
       ]),
     },
@@ -1968,7 +2156,7 @@ async function persistMemoryDB(): Promise<void> {
         message.externalMessageId,
         message.contentDigest || '',
         message.messageAt || '',
-        message.updatedAt || message.createdAt || new Date().toISOString(),
+        persistenceTimestamp(message.updatedAt, message.createdAt),
         JSON.stringify(message),
       ]),
     },
@@ -1983,7 +2171,7 @@ async function persistMemoryDB(): Promise<void> {
         attachment.userId,
         attachment.externalAttachmentId,
         attachment.contentDigest || '',
-        attachment.updatedAt || attachment.createdAt || new Date().toISOString(),
+        persistenceTimestamp(attachment.updatedAt, attachment.createdAt),
         JSON.stringify(attachment),
       ]),
     },
@@ -1995,7 +2183,7 @@ async function persistMemoryDB(): Promise<void> {
         publisher.fingerprint,
         publisher.publisherId,
         publisher.status || 'trusted',
-        publisher.updatedAt || publisher.createdAt || new Date().toISOString(),
+        persistenceTimestamp(publisher.updatedAt, publisher.createdAt),
         JSON.stringify(publisher),
       ]),
     },
@@ -2012,7 +2200,7 @@ async function persistMemoryDB(): Promise<void> {
         revision.status || 'staged',
         revision.manifestDigest,
         revision.signerFingerprint,
-        revision.updatedAt || revision.createdAt || new Date().toISOString(),
+        persistenceTimestamp(revision.updatedAt, revision.createdAt),
         JSON.stringify(revision),
       ]),
     },
@@ -2025,7 +2213,7 @@ async function persistMemoryDB(): Promise<void> {
         receipt.extensionId,
         receipt.revisionId,
         receipt.status || 'unknown',
-        receipt.createdAt || new Date().toISOString(),
+        persistenceTimestamp(receipt.createdAt),
         JSON.stringify(receipt),
       ]),
     },
@@ -2184,33 +2372,74 @@ async function persistMemoryDB(): Promise<void> {
   ];
 
   // Special handling: founder_vision is a single row
-  const founderSpec: TableSpec = {
+  const founderSpec: PersistenceTableSpec = {
     name: 'founder_vision',
     createSQL: `CREATE TABLE _temp_founder_vision (id INTEGER PRIMARY KEY CHECK (id = 1), content TEXT NOT NULL, updatedAt TEXT NOT NULL)`,
     insertSQL: `INSERT INTO _temp_founder_vision (id, content, updatedAt) VALUES (?, ?, ?)`,
-    rows: () => memoryDB.founderVision ? [[1, memoryDB.founderVision, new Date().toISOString()]] : [],
+    rows: () => memoryDB.founderVision
+      ? [[1, memoryDB.founderVision, persistenceTimestamp(memoryDB.founderVisionUpdatedAt)]]
+      : [],
   };
 
-  const allSpecs = [...specs, founderSpec];
+  return [...specs, founderSpec];
+}
+
+function digestPersistenceRows(rows: any[][]): string {
+  const hash = createHash('sha256');
+  hash.update(String(rows.length));
+  for (const row of rows) {
+    hash.update('\n');
+    hash.update(JSON.stringify(row));
+  }
+  return hash.digest('hex');
+}
+
+function seedPersistenceTableDigests(): void {
+  const next = new Map<string, string>();
+  for (const spec of buildPersistenceTableSpecs()) {
+    next.set(spec.name, digestPersistenceRows(spec.rows()));
+  }
+  persistenceTableDigests = next;
+}
+
+/**
+ * Persist only tables whose exact serialized rows changed since the last
+ * durable snapshot. The changed set is still replaced atomically in one
+ * transaction, preserving the previous crash/rollback semantics without
+ * rebuilding unrelated high-volume tables on every chat or scheduler write.
+ */
+async function persistMemoryDB(): Promise<void> {
+  const allSpecs = buildPersistenceTableSpecs();
+  const changed: Array<{ spec: PersistenceTableSpec; rows: any[][]; digest: string }> = [];
+  for (const spec of allSpecs) {
+    const rows = spec.rows();
+    const digest = digestPersistenceRows(rows);
+    if (persistenceTableDigests.get(spec.name) !== digest) changed.push({ spec, rows, digest });
+  }
+  totalSkippedTableWrites += allSpecs.length - changed.length;
+  if (changed.length === 0) {
+    lastFlushTables = [];
+    return;
+  }
 
   await run('BEGIN IMMEDIATE TRANSACTION');
   try {
     // Phase 1: Create temp tables and populate them
-    for (const spec of allSpecs) {
+    for (const { spec, rows } of changed) {
       await run(`DROP TABLE IF EXISTS _temp_${spec.name}`);
       await run(spec.createSQL);
-      for (const row of spec.rows()) {
+      for (const row of rows) {
         await run(spec.insertSQL, row);
       }
     }
 
     // Phase 2: Drop original tables
-    for (const spec of allSpecs) {
+    for (const { spec } of changed) {
       await run(`DROP TABLE IF EXISTS ${spec.name}`);
     }
 
     // Phase 3: Rename temp tables to original names (atomic in SQLite within a transaction)
-    for (const spec of allSpecs) {
+    for (const { spec } of changed) {
       await run(`ALTER TABLE _temp_${spec.name} RENAME TO ${spec.name}`);
     }
 
@@ -2221,12 +2450,15 @@ async function persistMemoryDB(): Promise<void> {
     }
 
     await run('COMMIT');
+    for (const { spec, digest } of changed) persistenceTableDigests.set(spec.name, digest);
+    lastFlushTables = changed.map(({ spec }) => spec.name);
+    totalTableWrites += changed.length;
   } catch (err) {
     // Preserve the original failure. A failed/externally interrupted BEGIN or
     // COMMIT must not be replaced by "no transaction is active" from cleanup.
     try { await run('ROLLBACK'); } catch {}
     try {
-      for (const spec of allSpecs) {
+      for (const { spec } of changed) {
         await run(`DROP TABLE IF EXISTS _temp_${spec.name}`);
       }
     } catch {}

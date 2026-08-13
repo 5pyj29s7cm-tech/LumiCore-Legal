@@ -31,10 +31,47 @@ import {
   attachConversationModelExecutionGraph,
   loadConversationModelExecutionRecovery,
   migrateLegacyConversationActionLedger,
+  recoverConversationActionTaskLeases,
+  repairContradictoryConversationActionReceipts,
+  compactLegacyScheduledCapabilityExecutions,
+  archiveBoundConversationActionReceipts,
+  getConversationActionStateFromLedger,
   syncConversationActionTaskLedger,
 } from './action_ledger';
 import type { CapabilityExecutionPlan } from '../cognition/capability_execution_plan';
 import type { WorkflowResult } from '../agents/orchestrator';
+import {
+  listConversationFocusThreads,
+  updateConversationFocusThread,
+  type ConversationFocusThread,
+} from './focus_threads';
+
+export function getConversationFocusThreads(input: {
+  userId: string;
+  domain?: string;
+  orgId?: string;
+  includeTerminal?: boolean;
+}): ConversationFocusThread[] {
+  return listConversationFocusThreads(readDB(), input);
+}
+
+export function updateConversationActionFocus(input: {
+  taskId: string;
+  userId: string;
+  domain?: string;
+  orgId?: string;
+  commitment?: string;
+  nextAction?: string;
+  waitingFor?: string;
+  interruption?: string;
+  resumePoint?: string;
+  dueAt?: string;
+}): ConversationFocusThread | null {
+  const db = readDB();
+  const focus = updateConversationFocusThread(db, input);
+  if (focus) writeDB(db);
+  return focus;
+}
 
 export function getConversationActionStatus(
   conversationId: string,
@@ -45,6 +82,37 @@ export function getConversationActionStatus(
   const db = readDB();
   return formatConversationActionLedgerStatus(db, { conversationId, userId, query })
     || formatConversationActionTaskStatus(fallbackState);
+}
+
+function hydrateConversationActionState(
+  db: any,
+  conversation: Conversation,
+  query = '',
+): ConversationActionContinuationState | null {
+  const existing = normalizeConversationActionState(conversation.actionContinuationState);
+  const resolveHistoricalTask = Boolean(
+    query.trim() && needsRecentActionContinuationContext(query),
+  );
+  const ledgerState = getConversationActionStateFromLedger(db, {
+    conversationId: conversation.id,
+    userId: conversation.userId,
+    query: resolveHistoricalTask ? query : '',
+  });
+  const existingUpdatedAt = existing ? Date.parse(existing.updatedAt) : Number.NaN;
+  const ledgerUpdatedAt = ledgerState ? Date.parse(ledgerState.updatedAt) : Number.NaN;
+  const newestRuntimeState = existing && ledgerState
+    ? (existing.taskId === ledgerState.taskId
+      && Number.isFinite(ledgerUpdatedAt)
+      && (!Number.isFinite(existingUpdatedAt) || ledgerUpdatedAt > existingUpdatedAt)
+        ? ledgerState
+        : existing)
+    : existing || (ledgerState?.unfinished ? ledgerState : null);
+  const state = resolveHistoricalTask
+    ? ledgerState || existing
+    : newestRuntimeState;
+  if (state) conversation.actionContinuationState = state;
+  else delete conversation.actionContinuationState;
+  return state;
 }
 
 export interface Conversation {
@@ -70,12 +138,13 @@ export interface Conversation {
   domain?: string;
   /** orgId when in work domain */
   orgId?: string;
-  /** Durable, evidence-backed pointer for ordinary cross-turn actions. */
+  /** Runtime compatibility projection; durable state lives in conversation_action_tasks/receipts. */
   actionContinuationState?: ConversationActionContinuationState;
   /** Latest user turn waiting for its terminal assistant/tool record. */
   pendingActionContinuation?: {
     userText: string;
     messageId: string;
+    requestId?: string;
     updatedAt: string;
   };
 }
@@ -134,6 +203,8 @@ export interface ConversationTurnOptions {
   userText?: string;
   /** Test/diagnostic override. Production defaults to CONVERSATION_ROLLOVER_MESSAGE_LIMIT or 240. */
   messageLimit?: number;
+  /** Bind this turn to the conversation selected by the client. */
+  conversationId?: string;
 }
 
 export interface ConversationTurnResult {
@@ -160,6 +231,7 @@ export function getConversationForScope(
   const conversation = (db.conversations || []).find((item: Conversation) => item.id === conversationId);
   if (!conversation || conversation.userId !== userId) return null;
   if (!conversationMatchesScope(conversation, domain, orgId)) return null;
+  hydrateConversationActionState(db, conversation);
   if (isolateConversationSummaryForUse(conversation)) writeDB(db);
   return conversation;
 }
@@ -180,6 +252,7 @@ export function getOrCreateActiveConversation(userId: string, agentId?: string, 
       new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
     )[0];
   if (active) {
+    hydrateConversationActionState(db, active);
     if (isolateConversationSummaryForUse(active)) writeDB(db);
     return active;
   }
@@ -204,6 +277,49 @@ export function getOrCreateActiveConversation(userId: string, agentId?: string, 
   db.conversations.push(conv);
   writeDB(db);
   return conv;
+}
+
+/**
+ * Start an empty active conversation without deleting the archived transcript or
+ * its durable task ledger. In-flight work may finish against the archived
+ * conversation while later chat turns are isolated in the new conversation.
+ */
+export function startNewConversation(userId: string, agentId?: string, domain?: string, orgId?: string): Conversation {
+  const db = readDB();
+  if (!db.conversations) db.conversations = [];
+  const scope = resolveConversationScope(domain, orgId);
+  const now = new Date().toISOString();
+
+  for (const conversation of db.conversations as Conversation[]) {
+    if (
+      conversation.userId === userId
+      && conversation.agentId === (agentId || '')
+      && conversation.status === 'active'
+      && conversationMatchesScope(conversation, scope.domain, scope.orgId)
+    ) {
+      conversation.status = 'closed';
+      conversation.lastActiveAt = now;
+    }
+  }
+
+  const conversation: Conversation = {
+    id: 'conv_' + crypto.randomUUID(),
+    userId,
+    agentId: agentId || '',
+    title: '',
+    status: 'active',
+    summary: '',
+    summaryChain: [],
+    lastSummaryMessageCount: 0,
+    messageCount: 0,
+    lastActiveAt: now,
+    createdAt: now,
+    domain: scope.domain,
+    orgId: scope.orgId,
+  };
+  db.conversations.push(conversation);
+  writeDB(db);
+  return conversation;
 }
 
 const DEFAULT_CONVERSATION_ROLLOVER_MESSAGE_LIMIT = 240;
@@ -306,7 +422,19 @@ export function getOrCreateConversationForTurn(
   orgId?: string,
   options: ConversationTurnOptions = {},
 ): ConversationTurnResult {
-  const current = getOrCreateActiveConversation(userId, agentId, domain, orgId);
+  const requestedConversationId = String(options.conversationId || '').trim();
+  const requestedConversation = requestedConversationId
+    ? getConversationForScope(requestedConversationId, userId, domain, orgId)
+    : null;
+  if (requestedConversationId && (!requestedConversation || requestedConversation.agentId !== (agentId || ''))) {
+    throw new Error('Conversation is unavailable for this user, agent, or workspace');
+  }
+  const current = requestedConversation || getOrCreateActiveConversation(userId, agentId, domain, orgId);
+  // An explicitly bound in-flight turn is allowed to finish after the user has
+  // opened a new conversation. Never roll that archived transcript into the new one.
+  if (requestedConversation && requestedConversation.status !== 'active') {
+    return { conversation: requestedConversation, rolledOver: false };
+  }
   if (!shouldRolloverConversationForTurn(current, options.userText, options.messageLimit)) {
     return { conversation: current, rolledOver: false };
   }
@@ -323,7 +451,9 @@ export function getOrCreateConversationForTurn(
     || !conversationMatchesScope(active, domain, orgId)
     || !shouldRolloverConversationForTurn(active, options.userText, options.messageLimit)
   ) {
-    return { conversation: active || current, rolledOver: false };
+    const selected = active || current;
+    hydrateConversationActionState(db, selected);
+    return { conversation: selected, rolledOver: false };
   }
 
   const now = new Date().toISOString();
@@ -388,6 +518,7 @@ export function getActiveConversation(userId: string, agentId?: string, domainOr
     .sort((a: Conversation, b: Conversation) =>
       new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
     )[0] || null;
+  if (active) hydrateConversationActionState(db, active);
   if (active && isolateConversationSummaryForUse(active)) writeDB(db);
   return active;
 }
@@ -402,22 +533,68 @@ export function setConversationMode(conversationId: string, mode: string): void 
   writeDB(db);
 }
 
-export function getUserConversations(userId: string, limit = 20, offset = 0, domainOrOrgId?: string, orgIdMaybe?: string): Conversation[] {
+export function getUserConversations(
+  userId: string,
+  limit = 20,
+  offset = 0,
+  domainOrOrgId?: string,
+  orgIdMaybe?: string,
+  agentId?: string,
+): Conversation[] {
   const db = readDB();
   if (!db.conversations) return [];
   const conversations = db.conversations
     .filter((c: Conversation) => {
       if (c.userId !== userId) return false;
+      if (agentId && c.agentId !== agentId) return false;
       return conversationMatchesScope(c, domainOrOrgId, orgIdMaybe);
     })
     .sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime())
     .slice(offset, offset + limit);
   let summaryWasIsolated = false;
   for (const conversation of conversations) {
+    hydrateConversationActionState(db, conversation);
     if (isolateConversationSummaryForUse(conversation)) summaryWasIsolated = true;
   }
   if (summaryWasIsolated) writeDB(db);
   return conversations;
+}
+
+export function activateConversation(
+  conversationId: string,
+  userId: string,
+  agentId: string,
+  domainOrOrgId?: string,
+  orgIdMaybe?: string,
+): Conversation | null {
+  const db = readDB();
+  if (!db.conversations) return null;
+  const target = db.conversations.find((conversation: Conversation) => (
+    conversation.id === conversationId
+    && conversation.userId === userId
+    && conversation.agentId === agentId
+    && conversationMatchesScope(conversation, domainOrOrgId, orgIdMaybe)
+  ));
+  if (!target) return null;
+
+  const now = new Date().toISOString();
+  for (const conversation of db.conversations as Conversation[]) {
+    if (
+      conversation.id !== target.id
+      && conversation.userId === userId
+      && conversation.agentId === agentId
+      && conversation.status === 'active'
+      && conversationMatchesScope(conversation, domainOrOrgId, orgIdMaybe)
+    ) {
+      conversation.status = 'closed';
+      conversation.lastActiveAt = now;
+    }
+  }
+  target.status = 'active';
+  target.lastActiveAt = now;
+  hydrateConversationActionState(db, target);
+  writeDB(db);
+  return target;
 }
 
 export function prepareConversationActionExecution(input: {
@@ -434,6 +611,7 @@ export function prepareConversationActionExecution(input: {
     item.id === input.conversationId && item.userId === input.userId
   ));
   if (!conversation) return { state: null, kind: 'conversation' };
+  hydrateConversationActionState(db, conversation, input.userText);
   const prepared = prepareConversationActionTaskState(conversation.actionContinuationState, input);
   if (prepared.state !== conversation.actionContinuationState) {
     if (prepared.state) conversation.actionContinuationState = prepared.state;
@@ -508,6 +686,7 @@ export function cancelConversationActionExecution(
   const conversation = (db.conversations || []).find((item: Conversation) => (
     item.id === conversationId && item.userId === userId
   ));
+  if (conversation) hydrateConversationActionState(db, conversation);
   const previous = normalizeConversationActionState(conversation?.actionContinuationState);
   if (!conversation || !previous) return null;
   if (expectedRequestId && previous.activeRequestId !== expectedRequestId) return previous;
@@ -540,6 +719,7 @@ export function completeConversationActionFromUserObservation(
   const conversation = (db.conversations || []).find((item: Conversation) => (
     item.id === conversationId && item.userId === userId
   ));
+  if (conversation) hydrateConversationActionState(db, conversation);
   const previous = normalizeConversationActionState(conversation?.actionContinuationState);
   if (!conversation || !previous || !isUserObservedTaskCompletion(userText, previous)) return null;
   conversation.actionContinuationState = {
@@ -577,6 +757,7 @@ export function settleConversationActionExecutionRequest(
   const conversation = (db.conversations || []).find((item: Conversation) => (
     item.id === conversationId && item.userId === userId
   ));
+  if (conversation) hydrateConversationActionState(db, conversation);
   const previous = normalizeConversationActionState(conversation?.actionContinuationState);
   if (!conversation || !previous || previous.activeRequestId !== requestId) return previous;
 
@@ -619,8 +800,12 @@ export function recoverOrphanedConversationActionExecutions(
 ): number {
   const db = readDB();
   const migrated = migrateLegacyConversationActionLedger(db);
+  const recoveredLedgerLeases = recoverConversationActionTaskLeases(db, now);
+  const repairedReceipts = repairContradictoryConversationActionReceipts(db);
+  const schedulerCompaction = compactLegacyScheduledCapabilityExecutions(db);
   let recovered = 0;
   for (const conversation of db.conversations || []) {
+    hydrateConversationActionState(db, conversation);
     const previous = normalizeConversationActionState(conversation.actionContinuationState);
     if (
       !previous?.unfinished
@@ -647,8 +832,14 @@ export function recoverOrphanedConversationActionExecutions(
     });
     recovered += 1;
   }
-  if (migrated > 0 || recovered > 0) writeDB(db);
-  return recovered;
+  if (
+    migrated > 0
+    || recoveredLedgerLeases > 0
+    || repairedReceipts > 0
+    || schedulerCompaction.tasksRemoved > 0
+    || recovered > 0
+  ) writeDB(db);
+  return recoveredLedgerLeases + recovered;
 }
 
 export function setConversationActionExecutionStatus(
@@ -661,6 +852,7 @@ export function setConversationActionExecutionStatus(
   const conversation = (db.conversations || []).find((item: Conversation) => (
     item.id === conversationId && item.userId === userId
   ));
+  if (conversation) hydrateConversationActionState(db, conversation);
   const previous = normalizeConversationActionState(conversation?.actionContinuationState);
   if (!conversation || !previous) return null;
   conversation.actionContinuationState = {
@@ -706,6 +898,8 @@ export function addMessage(msg: {
   routeSequence?: number;
   receivedAt?: string;
   timestamp?: string;
+  /** Immutable foreground request identity used to reject late replies. */
+  requestId?: string;
   /**
    * Persist the accepted instruction before routing/tool selection finishes,
    * while leaving creation of the real task state to the foreground executor.
@@ -753,6 +947,7 @@ export function addMessage(msg: {
   if (msg.conversationId && db.conversations) {
     const conv = db.conversations.find((c: Conversation) => c.id === msg.conversationId);
     if (conv) {
+      hydrateConversationActionState(db, conv);
       conv.messageCount = (conv.messageCount || 0) + 1;
       conv.lastActiveAt = now;
       // Auto-title from first user message
@@ -823,6 +1018,7 @@ export function addMessage(msg: {
             conv.pendingActionContinuation = {
               userText,
               messageId: id,
+              requestId: msg.requestId,
               updatedAt: now,
             };
           }
@@ -835,12 +1031,48 @@ export function addMessage(msg: {
         && conv.pendingActionContinuation
       ) {
         const pending = conv.pendingActionContinuation;
+        const activeTaskId = String(conv.actionContinuationState?.taskId || '');
+        const activeRequestId = String(conv.actionContinuationState?.activeRequestId || pending.requestId || '');
+        const records = normalizedToolCalls || [];
+        const staleRecords = records.filter((record: any) => (
+          (record?.taskId && activeTaskId && record.taskId !== activeTaskId)
+          || (record?.requestId && activeRequestId && record.requestId !== activeRequestId)
+        ));
+        if (staleRecords.length) {
+          archiveBoundConversationActionReceipts(db, {
+            conversationId: conv.id,
+            userId: conv.userId,
+            records: staleRecords,
+            turnId: msg.requestId,
+            now,
+          });
+        }
+        const currentToolRecords = records.filter(record => !staleRecords.includes(record));
+        const requestMismatch = Boolean(
+          pending.requestId
+          && msg.requestId
+          && pending.requestId !== msg.requestId,
+        );
+        // A superseded pipeline may still finish and persist its terminal
+        // reply. Archive its bound receipts above, but leave the newer turn's
+        // pending pointer and state untouched.
+        if (requestMismatch || (records.length > 0 && currentToolRecords.length === 0)) {
+          if (conv.actionContinuationState) {
+            syncConversationActionTaskLedger(db, {
+              conversation: conv,
+              state: conv.actionContinuationState,
+              now,
+            });
+          }
+          writeDB(db);
+          return id;
+        }
         const pendingFollowupIntent = classifyRecentActionFollowupIntent(pending.userText);
         const pendingContract = buildActionContract(pending.userText);
         const pendingNormalizedIntent = normalizeActionIntent(pending.userText);
         const toolRecordsBelongToActiveTask = Boolean(
           conv.actionContinuationState?.taskId
-          && normalizedToolCalls?.some((record: any) => (
+          && currentToolRecords.some((record: any) => (
             record?.taskId === conv.actionContinuationState?.taskId
             || (
               conv.actionContinuationState?.activeRequestId
@@ -855,7 +1087,7 @@ export function addMessage(msg: {
         const pendingAgeMs = Date.now() - new Date(pending.updatedAt).getTime();
         if (
           pendingExpectsExecution
-          && normalizedToolCalls?.length
+          && currentToolRecords.length
           && Number.isFinite(pendingAgeMs)
           && pendingAgeMs >= 0
           && pendingAgeMs <= 30 * 60 * 1000
@@ -864,7 +1096,7 @@ export function addMessage(msg: {
             previous: conv.actionContinuationState,
             userText: pending.userText,
             assistantText: msg.content,
-            toolCalls: normalizedToolCalls,
+            toolCalls: currentToolRecords,
             updatedAt: now,
             evidenceMessageId: id,
             requestId: conv.actionContinuationState?.activeRequestId,

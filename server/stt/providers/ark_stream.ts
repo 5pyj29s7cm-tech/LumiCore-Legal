@@ -1,14 +1,21 @@
 import { randomUUID } from 'crypto';
 import { gzipSync, gunzipSync } from 'zlib';
 import { WebSocket } from 'ws';
-import { STTResult } from '../types';
-import { getKey } from '../../config/keys';
+import { STTResult, StreamingSTTSession } from '../types';
 import { isCircuitClosed, recordFailure, recordSuccess } from '../../cloud/circuit_breaker';
 import { logger } from '../../../logger';
+import { shouldEmitStreamingPartial } from '../partial_transcript';
+import {
+  buildDoubaoApiHeaders,
+  getDoubaoSpeechCredentialMode,
+  getDoubaoStreamingAsrResourceId,
+  hasDoubaoSpeechCredentials,
+  requireDoubaoSpeechCredentials,
+} from '../../config/doubao_speech';
 
 const PROVIDER = 'doubao-stt-stream';
 const DEFAULT_WS_URL = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel';
-const DEFAULT_RESOURCE_ID = 'volc.bigasr.sauc.duration';
+const MAX_PENDING_AUDIO_CHUNKS = 32;
 
 const enum AsrMessageType {
   FullClientRequest = 0x1,
@@ -35,31 +42,18 @@ const enum Compression {
   Gzip = 0x1,
 }
 
-export interface ArkStreamSession {
-  sendAudio(chunk: Buffer): void;
-  end(): void;
-  onResult: (callback: (result: STTResult) => void) => void;
-  onError: (callback: (err: Error) => void) => void;
-}
-
-function getCredentials(): { appKey: string; accessKey: string } {
-  const raw = process.env.DOUBAO_SPEECH_KEY || getKey('DOUBAO_SPEECH_KEY') || '';
-  const colonIdx = raw.indexOf(':');
-  if (colonIdx === -1) {
-    throw new Error('Doubao Speech not configured. Enter AppID:AccessToken in Settings -> Voice Services.');
-  }
-  const appKey = raw.slice(0, colonIdx).trim();
-  const accessKey = raw.slice(colonIdx + 1).trim();
-  if (!appKey || !accessKey) {
-    throw new Error('Doubao Speech key must use AppID:AccessToken format.');
-  }
-  return { appKey, accessKey };
-}
+export interface ArkStreamSession extends StreamingSTTSession {}
 
 export function hasDoubaoSpeech(): boolean {
-  const raw = process.env.DOUBAO_SPEECH_KEY || getKey('DOUBAO_SPEECH_KEY') || '';
-  const colonIdx = raw.indexOf(':');
-  return colonIdx > 0 && colonIdx < raw.length - 1;
+  return hasDoubaoSpeechCredentials();
+}
+
+function connectionHeaders(connectId: string): Record<string, string> {
+  return {
+    ...buildDoubaoApiHeaders(requireDoubaoSpeechCredentials()),
+    'X-Api-Resource-Id': getDoubaoStreamingAsrResourceId(),
+    'X-Api-Connect-Id': connectId,
+  };
 }
 
 function mapLanguage(language?: string): string | undefined {
@@ -265,15 +259,9 @@ export function createStream(
     throw new Error('[CircuitBreaker] Doubao STT is temporarily unavailable (circuit open). The circuit will probe automatically after cooldown.');
   }
 
-  const { appKey, accessKey } = getCredentials();
   const url = process.env.DOUBAO_ASR_WS_URL || DEFAULT_WS_URL;
   const ws = new WebSocket(url, {
-    headers: {
-      'X-Api-App-Key': appKey,
-      'X-Api-Access-Key': accessKey,
-      'X-Api-Resource-Id': process.env.DOUBAO_ASR_RESOURCE_ID || DEFAULT_RESOURCE_ID,
-      'X-Api-Connect-Id': randomUUID(),
-    },
+    headers: connectionHeaders(randomUUID()),
   });
 
   const resultCallbacks: Array<(result: STTResult) => void> = [];
@@ -282,7 +270,19 @@ export function createStream(
   let sequence = 1;
   let sessionReady = false;
   let closed = false;
+  let ending = false;
+  let errorNotified = false;
   let lastPartial = '';
+
+  const queueAudio = (chunk: Buffer) => {
+    if (audioQueue.length < MAX_PENDING_AUDIO_CHUNKS) audioQueue.push(Buffer.from(chunk));
+  };
+
+  const notifyError = (error: Error) => {
+    if (errorNotified || ending) return;
+    errorNotified = true;
+    emitError(errorCallbacks, error);
+  };
 
   function sendAudioFrame(chunk: Buffer) {
     if (closed || ws.readyState !== WebSocket.OPEN) return;
@@ -290,7 +290,6 @@ export function createStream(
   }
 
   ws.on('open', () => {
-    recordSuccess(PROVIDER);
     logger.info('[Doubao-ASR] WebSocket connected, sending full client request');
     ws.send(buildFullClientRequest(sequence, buildRequest(language)));
   });
@@ -305,6 +304,7 @@ export function createStream(
 
       if (!sessionReady) {
         sessionReady = true;
+        recordSuccess(PROVIDER);
         logger.info('[Doubao-ASR] Session ready');
         for (const chunk of audioQueue.splice(0)) sendAudioFrame(chunk);
       }
@@ -315,8 +315,8 @@ export function createStream(
         if (isFinal) {
           lastPartial = '';
           logger.info(`[Doubao-ASR] Final: "${extracted.text}"`);
-          resultCallbacks.forEach(cb => cb({ text: extracted.text, isFinal: true, model: 'doubao-bigmodel' }));
-        } else if (interimResults && extracted.text !== lastPartial) {
+          resultCallbacks.forEach(cb => cb({ text: extracted.text, isFinal: true, speechFinal: true, model: 'doubao-bigmodel' }));
+        } else if (interimResults && shouldEmitStreamingPartial(lastPartial, extracted.text)) {
           lastPartial = extracted.text;
           resultCallbacks.forEach(cb => cb({ text: extracted.text, isFinal: false, model: 'doubao-bigmodel' }));
         }
@@ -324,34 +324,37 @@ export function createStream(
     } catch (err: any) {
       const error = err instanceof Error ? err : new Error(String(err));
       logger.error('[Doubao-ASR] Response parse error:', error.message);
-      emitError(errorCallbacks, error);
+      notifyError(error);
     }
   });
 
   ws.on('error', (err: Error) => {
     logger.error('[Doubao-ASR] WebSocket error:', err.message);
-    emitError(errorCallbacks, new Error(`Doubao-ASR WebSocket error: ${err.message}`));
+    notifyError(new Error(`Doubao-ASR WebSocket error: ${err.message}`));
   });
 
   ws.on('close', (code: number, reason: Buffer) => {
     closed = true;
-    if (code !== 1000 && code !== 1001 && code !== 0) {
-      recordFailure(PROVIDER, undefined, new Error(`Doubao-ASR closed (code=${code})`));
+    if (!ending) {
+      notifyError(new Error(`Doubao-ASR closed (code=${code}, reason=${reason?.toString() || 'none'})`));
     }
     logger.info(`[Doubao-ASR] Closed (code=${code}, reason=${reason?.toString() || 'none'})`);
   });
 
   return {
     sendAudio(chunk: Buffer) {
+      if (ending) return;
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       if (!sessionReady || ws.readyState !== WebSocket.OPEN) {
-        audioQueue.push(buffer);
+        queueAudio(buffer);
         return;
       }
       sendAudioFrame(buffer);
     },
     end() {
       if (closed) return;
+      ending = true;
+      audioQueue.length = 0;
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(buildAudioRequest(++sequence, Buffer.alloc(0), false));
         setTimeout(() => {
@@ -368,4 +371,86 @@ export function createStream(
       errorCallbacks.push(callback);
     },
   };
+}
+
+export interface DoubaoStreamingProbeResult {
+  ok: true;
+  credentialMode: 'api-key';
+  endpoint: string;
+  resourceId: string;
+  latencyMs: number;
+}
+
+export async function probeDoubaoStreamingConnection(
+  options: { timeoutMs?: number; language?: string } = {},
+): Promise<DoubaoStreamingProbeResult> {
+  const timeoutMs = Math.max(1_000, Math.min(30_000, options.timeoutMs || 8_000));
+  const language = options.language || 'zh-CN';
+  const endpoint = process.env.DOUBAO_ASR_WS_URL || DEFAULT_WS_URL;
+  const resourceId = getDoubaoStreamingAsrResourceId();
+  const credentialMode = getDoubaoSpeechCredentialMode();
+  if (!credentialMode) requireDoubaoSpeechCredentials();
+  const startedAt = Date.now();
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(endpoint, { headers: connectionHeaders(randomUUID()) });
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error(`Doubao-ASR probe timed out after ${timeoutMs}ms`)), timeoutMs);
+
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch {}
+      if (error) {
+        recordFailure(PROVIDER, undefined, error);
+        reject(error);
+        return;
+      }
+      recordSuccess(PROVIDER);
+      resolve({
+        ok: true,
+        credentialMode: credentialMode!,
+        endpoint,
+        resourceId,
+        latencyMs: Date.now() - startedAt,
+      });
+    };
+
+    ws.once('open', () => {
+      try {
+        ws.send(buildFullClientRequest(1, buildRequest(language)));
+      } catch (error: any) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    ws.once('message', (raw: WebSocket.RawData) => {
+      try {
+        const packet = parseResponse(Buffer.isBuffer(raw) ? raw : Buffer.from(raw as any));
+        if (packet.code) {
+          const detail = typeof packet.message === 'string' ? packet.message : JSON.stringify(packet.message || {});
+          finish(new Error(`Doubao-ASR server error ${packet.code}: ${detail}`));
+          return;
+        }
+        finish();
+      } catch (error: any) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    ws.once('unexpected-response', (_request, response) => {
+      const messageHeader = response.headers['x-api-message'];
+      const message = Array.isArray(messageHeader) ? messageHeader.join(', ') : messageHeader;
+      const logIdHeader = response.headers['x-tt-logid'];
+      const logId = Array.isArray(logIdHeader) ? logIdHeader[0] : logIdHeader;
+      finish(new Error(
+        `Doubao-ASR authentication handshake failed with HTTP ${response.statusCode || 'unknown'}`
+        + `${message ? `: ${message}` : ''}`
+        + `${logId ? ` [logid=${logId}]` : ''}`,
+      ));
+    });
+    ws.once('error', (error: Error) => finish(new Error(`Doubao-ASR WebSocket error: ${error.message}`)));
+    ws.once('close', (code: number, reason: Buffer) => {
+      if (!settled) finish(new Error(`Doubao-ASR probe closed before acknowledgement (code=${code}, reason=${reason?.toString() || 'none'})`));
+    });
+  });
 }

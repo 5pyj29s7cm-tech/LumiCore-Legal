@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Send, Loader2, ArrowLeft, Ghost, Zap, Cpu, Sparkles, FileText, Mic, CheckCircle2, Square, ChevronDown, ChevronRight, XCircle, Copy, Check, Paperclip, Image as ImageIcon, MessageCircle, Briefcase, User, ExternalLink, FolderOpen, Upload } from 'lucide-react';
+import { Send, Loader2, ArrowLeft, Ghost, Zap, Cpu, Sparkles, FileText, Mic, CheckCircle2, Square, ChevronDown, ChevronRight, XCircle, Copy, Check, Paperclip, Image as ImageIcon, MessageCircle, Briefcase, User, ExternalLink, FolderOpen, Upload, Plus, History, CalendarClock } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -24,7 +24,7 @@ import {
   type ChatResponseFinalization,
   type ChatProgressTone,
 } from '@/lib/chatProgress';
-import type { BackgroundWorkflowTask, WorkflowStep } from './WorkflowPanel';
+import type { BackgroundWorkflowTask, WorkflowStep } from './workflowTypes';
 import { WeChatSettings } from './WeChatSettings';
 import type { FileEntry } from './MemoryTree';
 import { formatUiMessage, uiMessage } from '../i18n/uiMessages';
@@ -46,6 +46,13 @@ import {
   shouldDisplayAgentResponse,
 } from '@/lib/agentResponseDelivery';
 import { buildChatConversationScopeKey } from '@/lib/chatConversationScope';
+import { useFocusThreads } from '@/hooks/useFocusThreads';
+import { CommandCenterPanel } from './CommandCenterPanel';
+import type { CommandCenterView } from './commandCenterTypes';
+import { ActiveTaskWidget } from './ActiveTaskWidget';
+import { useRuntimeStatus } from '@/hooks/useRuntimeStatus';
+import { CommandCenterPlanner } from './CommandCenterPlanner';
+import { commandCenterPlannerCopy } from '@/i18n/locales/commandCenterPlanner';
 
 const CHAT_HISTORY_LIMIT = 300;
 const CHAT_RENDER_LIMIT = 80;
@@ -64,10 +71,22 @@ type ChatExecutionSnapshot = {
 
 type PersistedChatExecution = {
   requestId: string;
-  source: 'chat';
+  source: string;
   domain: 'personal' | 'work';
   orgId?: string;
+  conversationId?: string;
   startedAt: string;
+};
+
+type ConversationHistoryItem = {
+  id: string;
+  displayTitle?: string;
+  title?: string;
+  preview?: string;
+  status: 'active' | 'paused' | 'closed';
+  messageCount: number;
+  lastActiveAt: string;
+  createdAt: string;
 };
 
 const ACTIVE_CHAT_EXECUTION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -362,9 +381,43 @@ function extractGeneratedFiles(text: string): GeneratedFileLink[] {
     });
 }
 
-export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage, prefillSource = 'proactive', onPrefillConsumed, attachmentRequest, onAttachmentRequestConsumed }: { t: any; user: any; agent?: any; isOpen: boolean; onClose: () => void; prefillMessage?: string; prefillSource?: string; onPrefillConsumed?: () => void; attachmentRequest?: ChatAttachmentRequest; onAttachmentRequestConsumed?: (requestId: string) => void }) {
+export function AgentChatPage({
+  t,
+  user,
+  agent,
+  isOpen,
+  onClose,
+  prefillMessage,
+  prefillSource = 'proactive',
+  onPrefillConsumed,
+  attachmentRequest,
+  onAttachmentRequestConsumed,
+  layout = 'standalone',
+  commandCenterView = 'office',
+  onCommandCenterViewChange,
+  onOpenNexus,
+}: {
+  t: any;
+  user: any;
+  agent?: any;
+  isOpen: boolean;
+  onClose: () => void;
+  prefillMessage?: string;
+  prefillSource?: string;
+  onPrefillConsumed?: () => void;
+  attachmentRequest?: ChatAttachmentRequest;
+  onAttachmentRequestConsumed?: (requestId: string) => void;
+  layout?: 'standalone' | 'command-center';
+  commandCenterView?: CommandCenterView;
+  onCommandCenterViewChange?: (view: CommandCenterView) => void;
+  onOpenNexus?: () => void;
+}) {
   const [messages, setMessages] = useState<any[]>([]);
+  const isOfficeCommandCenter = layout === 'command-center' && (commandCenterView === 'office' || commandCenterView === 'team');
+  const isCommandCenterUtility = layout === 'command-center' && !isOfficeCommandCenter;
+  const chatExecutionSource = layout === 'command-center' ? 'command-center-chat' : 'chat';
   const isZh = t?.langCode !== 'en';
+  const commandCenterPlannerText = commandCenterPlannerCopy(isZh ? 'zh' : 'en');
   const ui = (zh: string, en: string) => isZh ? zh : en;
   const { platform, isElectron } = usePlatform();
   const { orgConnection, workDomain, operationMode, resolvedAppearanceMode } = useApp();
@@ -422,6 +475,20 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
   })();
   const OperationModeIcon = operationModeMeta.Icon;
   const socket = socketService.connect();
+  const { threads: focusThreads } = useFocusThreads({
+    domain: activeDomain,
+    orgId: activeOrgId,
+    enabled: isOpen && Boolean(user),
+  });
+  const {
+    status: runtimeStatus,
+    loading: runtimeStatusLoading,
+    error: runtimeStatusError,
+    refresh: refreshRuntimeStatus,
+  } = useRuntimeStatus({
+    enabled: isOpen && isOfficeCommandCenter && Boolean(user),
+    scopeKey: `${activeDomain}:${activeDomain === 'work' ? activeOrgId || '' : ''}`,
+  });
   const [selectedVoiceId, setSelectedVoiceId] = useState<string | undefined>();
   const [voices, setVoices] = useState<any[]>([]);
   const [showVoicePicker, setShowVoicePicker] = useState(false);
@@ -527,6 +594,8 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
   const pendingAttachmentsRef = useRef<ChatAttachment[]>([]);
   const [conversationAttachments, setConversationAttachments] = useState<ChatAttachment[]>([]);
   const conversationAttachmentsRef = useRef<ChatAttachment[]>([]);
+  const attachmentConversationIdRef = useRef('');
+  const [attachmentContextStorageKey, setAttachmentContextStorageKey] = useState('');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const nativeDropHandledAtRef = useRef(0);
   const [knowledgeFiles, setKnowledgeFiles] = useState<FileEntry[]>([]);
@@ -535,6 +604,12 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearchingHistory, setIsSearchingHistory] = useState(false);
   const [searchError, setSearchError] = useState('');
+  const [isCreatingConversation, setIsCreatingConversation] = useState(false);
+  const [conversationHistoryOpen, setConversationHistoryOpen] = useState(false);
+  const [commandCenterPlannerOpen, setCommandCenterPlannerOpen] = useState(false);
+  const [conversationHistory, setConversationHistory] = useState<ConversationHistoryItem[]>([]);
+  const [conversationHistoryLoading, setConversationHistoryLoading] = useState(false);
+  const [restoringConversationId, setRestoringConversationId] = useState('');
   const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus>('idle');
   const [workflowSteps, setWorkflowSteps] = useState<WorkflowStep[]>([]);
   const [backgroundWorkflowTasks, setBackgroundWorkflowTasks] = useState<BackgroundWorkflowTask[]>([]);
@@ -550,6 +625,8 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
   const currentRequestNeedsEvidenceRef = useRef(false);
   const currentResponseFinalizationRef = useRef<ChatResponseFinalization | null>(null);
   const messagesRef = useRef<any[]>([]);
+  const activeChatViewDetachRef = useRef<(() => void) | null>(null);
+  const conversationHistoryRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -665,20 +742,76 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
         if (showVoicePicker) setShowVoicePicker(false);
         if (showWeChatSettings) setShowWeChatSettings(false);
         if (showAttachmentMenu) setShowAttachmentMenu(false);
+        if (conversationHistoryOpen) setConversationHistoryOpen(false);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [showAttachmentMenu, showVoicePicker, showWeChatSettings]);
+  }, [conversationHistoryOpen, showAttachmentMenu, showVoicePicker, showWeChatSettings]);
 
   const agentName = agent?.name || (t.lumiEssence || 'Lumi Essence');
   const agentCategory = agent?.category || (t.friend || 'friend');
   const agentId = agent?.id || 'lumi';
-  const attachmentContextStorageKey = `lumi_chat_attachment_context:${user?.id || user?.username || 'anonymous'}:${buildChatConversationScopeKey(agentId, activeDomain, activeOrgId)}`;
+  const attachmentContextStoragePrefix = `lumi_chat_attachment_context:${user?.id || user?.username || 'anonymous'}:${buildChatConversationScopeKey(agentId, activeDomain, activeOrgId)}`;
+  const bindAttachmentContextToConversation = useCallback((
+    conversationId: string,
+    options: { carryCurrent?: boolean } = {},
+  ) => {
+    const nextConversationId = String(conversationId || '').trim();
+    if (!nextConversationId) {
+      attachmentConversationIdRef.current = '';
+      setAttachmentContextStorageKey('');
+      conversationAttachmentsRef.current = [];
+      setConversationAttachments([]);
+      return;
+    }
+    if (attachmentConversationIdRef.current === nextConversationId) return;
+    const nextStorageKey = `${attachmentContextStoragePrefix}:${nextConversationId}`;
+    let nextAttachments = options.carryCurrent ? conversationAttachmentsRef.current : [];
+    if (!options.carryCurrent) {
+      try {
+        nextAttachments = parseChatAttachmentContext(localStorage.getItem(nextStorageKey));
+        if (nextAttachments.length === 0) localStorage.removeItem(nextStorageKey);
+      } catch {
+        nextAttachments = [];
+      }
+    }
+    attachmentConversationIdRef.current = nextConversationId;
+    setAttachmentContextStorageKey(nextStorageKey);
+    conversationAttachmentsRef.current = nextAttachments;
+    setConversationAttachments(nextAttachments);
+    if (options.carryCurrent && nextAttachments.length > 0) {
+      try {
+        localStorage.setItem(nextStorageKey, serializeChatAttachmentContext(nextAttachments));
+      } catch {}
+    }
+  }, [attachmentContextStoragePrefix]);
+  useEffect(() => {
+    const onConversationClosed = (event: Event) => {
+      const closedConversationId = String((event as CustomEvent<{ conversationId?: string }>).detail?.conversationId || '');
+      if (!closedConversationId || closedConversationId !== attachmentConversationIdRef.current) return;
+      try {
+        localStorage.removeItem(`${attachmentContextStoragePrefix}:${closedConversationId}`);
+      } catch {}
+      bindAttachmentContextToConversation('');
+    };
+    window.addEventListener('lumi:conversation-closed', onConversationClosed);
+    return () => window.removeEventListener('lumi:conversation-closed', onConversationClosed);
+  }, [attachmentContextStoragePrefix, bindAttachmentContextToConversation]);
   const scopedConversationUrl = useCallback((path: string) => {
     const separator = path.includes('?') ? '&' : '?';
     return `${path}${separator}domain=${encodeURIComponent(activeDomain)}&agentId=${encodeURIComponent(agentId)}`;
   }, [activeDomain, agentId]);
+  useEffect(() => {
+    if (!conversationHistoryOpen) return;
+    const onClick = (event: MouseEvent) => {
+      if (conversationHistoryRef.current && !conversationHistoryRef.current.contains(event.target as Node)) {
+        setConversationHistoryOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [conversationHistoryOpen]);
   const scopedFileUrl = useCallback((path: string) => {
     const separator = path.includes('?') ? '&' : '?';
     const orgScope = activeDomain === 'work' && activeOrgId
@@ -1066,16 +1199,16 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
     if (conversationScopeKey !== lastConversationScopeRef.current) {
       lastConversationScopeRef.current = conversationScopeKey;
       initialLoadDoneRef.current = false;
+      try {
+        // Remove the pre-fix scope-only key, which could contain plaintext and
+        // could incorrectly survive into a different conversation.
+        localStorage.removeItem(attachmentContextStoragePrefix);
+      } catch {}
       setMessages([]);
       messagesRef.current = [];
       setPendingAttachments([]);
       pendingAttachmentsRef.current = [];
-      let restoredAttachments: ChatAttachment[] = [];
-      try {
-        restoredAttachments = parseChatAttachmentContext(localStorage.getItem(attachmentContextStorageKey));
-      } catch {}
-      conversationAttachmentsRef.current = restoredAttachments;
-      setConversationAttachments(restoredAttachments);
+      bindAttachmentContextToConversation('');
     }
 
     // Only load once; do not overwrite live conversation.
@@ -1088,6 +1221,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
         .then(async (data) => {
           const conv = data.activeConversation;
           if (conv) {
+            bindAttachmentContextToConversation(conv.id);
             const msgRes = await fetch(scopedConversationUrl(`/api/conversations/${conv.id}/messages?limit=${CHAT_HISTORY_LIMIT}`));
             const msgData = await msgRes.json();
             if (msgData.messages && Array.isArray(msgData.messages)) {
@@ -1096,7 +1230,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
           }
         })
         .catch(() => {});
-  }, [activeDomain, activeOrgId, agentId, attachmentContextStorageKey, isFounder, normalizePersistedMessages, scopedConversationUrl, user?.id, user?.username]);
+  }, [activeDomain, activeOrgId, agentId, attachmentContextStoragePrefix, bindAttachmentContextToConversation, isFounder, normalizePersistedMessages, scopedConversationUrl, user?.id, user?.username]);
 
   useEffect(() => {
     const query = searchQuery.trim();
@@ -1148,14 +1282,15 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
     try {
       const execution: PersistedChatExecution = {
         requestId,
-        source: 'chat',
+        source: chatExecutionSource,
         domain: activeDomain,
         orgId: activeOrgId || undefined,
+        conversationId: attachmentConversationIdRef.current || undefined,
         startedAt: new Date().toISOString(),
       };
       localStorage.setItem(activeExecutionStorageKey, JSON.stringify(execution));
     } catch {}
-  }, [activeDomain, activeExecutionStorageKey, activeOrgId]);
+  }, [activeDomain, activeExecutionStorageKey, activeOrgId, chatExecutionSource]);
   const clearPersistedExecution = useCallback((requestId?: string) => {
     try {
       if (requestId) {
@@ -1169,11 +1304,12 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
   useEffect(() => {
     if (isFounder || !socket) return;
 
-    const isCurrentChatEvent = (data?: { requestId?: string; source?: string }) => {
+    const isCurrentChatEvent = (data?: { requestId?: string; source?: string; conversationId?: string }) => {
+      if (data?.conversationId && data.conversationId !== attachmentConversationIdRef.current) return false;
       const activeRequestId = activeChatRequestIdRef.current;
       if (activeRequestId) return data?.requestId === activeRequestId;
       if (data?.requestId) return false;
-      if (data?.source && data.source !== 'chat') return false;
+      if (data?.source && data.source !== chatExecutionSource) return false;
       return textChatActiveRef.current;
     };
 
@@ -1181,6 +1317,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
       message: string;
       timestamp: string;
       requestId?: string;
+      conversationId?: string;
       source?: string;
       type?: string;
       taskId?: string;
@@ -1205,7 +1342,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
       });
     };
 
-    const onChunk = (data: { text: string; agentName: string; requestId?: string; source?: string }) => {
+    const onChunk = (data: { text: string; agentName: string; requestId?: string; source?: string; conversationId?: string }) => {
       if (!isCurrentChatEvent(data)) return;
       if (streamingMsgId.current) {
         setMessages(prev => prev.map(m =>
@@ -1224,7 +1361,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
       }
     };
 
-    const onTool = (data: { correlationId?: string; name: string; args?: any; arguments?: any; result?: string; error?: string; requestId?: string; source?: string }) => {
+    const onTool = (data: { correlationId?: string; name: string; args?: any; arguments?: any; result?: string; error?: string; requestId?: string; source?: string; conversationId?: string }) => {
       if (!isCurrentChatEvent(data)) return;
       const args = data.arguments ?? data.args;
       const phase = data.error !== undefined ? 'error' : data.result !== undefined ? 'result' : 'start';
@@ -1267,7 +1404,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
       }
     };
 
-    const onProgress = (data: { text?: string; tone?: ChatProgressTone; requestId?: string; source?: string }) => {
+    const onProgress = (data: { text?: string; tone?: ChatProgressTone; requestId?: string; source?: string; conversationId?: string }) => {
       if (!isCurrentChatEvent(data)) return;
       pushChatProgress(data.text || '', data.tone || 'tool');
     };
@@ -1277,6 +1414,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
       agentName: string;
       source?: string;
       requestId?: string;
+      conversationId?: string;
       finalized?: boolean;
       blocked?: boolean;
       reason?: string;
@@ -1375,7 +1513,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
       // Auto-speak disabled
     };
 
-    const onStatus = (data: { status: string; requestId?: string; source?: string }) => {
+    const onStatus = (data: { status: string; requestId?: string; source?: string; conversationId?: string }) => {
       if (!isCurrentChatEvent(data)) return;
       const activeStatus = ['thinking', 'responding', 'executing', 'waiting_confirmation', 'cancelling'].includes(data.status);
       setIsTyping(activeStatus);
@@ -1428,7 +1566,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
       }
     };
 
-    const onError = (data: { message: string; code?: string; requestId?: string; source?: string }) => {
+    const onError = (data: { message: string; code?: string; requestId?: string; source?: string; conversationId?: string }) => {
       if (!isCurrentChatEvent(data)) return;
       clearPersistedExecution(data.requestId);
       if (!data.requestId || activeChatRequestIdRef.current === data.requestId) {
@@ -1476,8 +1614,24 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
     // conversation_updated: only reload for non-text-chat channels (voice, etc.)
     // Text chat state is managed live via agent:chunk/agent:response; API reload here
     // would replace messages with different ids, causing React to remount & re-animate them.
-    const onConversationUpdated = (data: { conversationId: string; agentId: string; source?: string }) => {
+    const onConversationUpdated = (data: {
+      conversationId: string;
+      agentId: string;
+      source?: string;
+      rolledOver?: boolean;
+      previousConversationId?: string;
+    }) => {
       if (data.agentId !== agentId) return;
+      const currentConversationId = attachmentConversationIdRef.current;
+      const isCurrentRollover = data.rolledOver === true
+        && Boolean(currentConversationId)
+        && data.previousConversationId === currentConversationId;
+      if (data.conversationId && data.conversationId !== currentConversationId && (isCurrentRollover || !currentConversationId)) {
+        bindAttachmentContextToConversation(data.conversationId, {
+          carryCurrent: isCurrentRollover,
+        });
+      }
+      if (currentConversationId && data.conversationId !== currentConversationId && !isCurrentRollover) return;
       const isExternalMessagingSync = /^(wechat|feishu|wecom)_bot$/.test(String(data.source || ''));
       if (data.source === 'chat' || (textChatActiveRef.current && !isExternalMessagingSync)) return;
       if (streamingMsgId.current) streamingMsgId.current = null;
@@ -1588,6 +1742,8 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
     activeOrgId,
     agentId,
     agentName,
+    bindAttachmentContextToConversation,
+    chatExecutionSource,
     clearChatProgress,
     clearPersistedExecution,
     finishChatProgress,
@@ -1636,9 +1792,10 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
 
       socket.emit('agent:execution_resume', {
         requestId: persisted.requestId,
-        source: 'chat',
+        source: persisted.source || chatExecutionSource,
         domain: persisted.domain,
         orgId: persisted.orgId || null,
+        conversationId: persisted.conversationId,
       }, (result?: { ok?: boolean; snapshot?: ChatExecutionSnapshot; error?: string }) => {
         if (activeChatRequestIdRef.current !== persisted?.requestId) return;
         const snapshot = result?.snapshot;
@@ -1666,7 +1823,140 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
     socket.on('connect', resumeActiveExecution);
     if (socket.connected) resumeActiveExecution();
     return () => { socket.off('connect', resumeActiveExecution); };
-  }, [activeExecutionStorageKey, clearPersistedExecution, isFounder, isZh, pushChatProgress, socket]);
+  }, [activeExecutionStorageKey, chatExecutionSource, clearPersistedExecution, isFounder, isZh, pushChatProgress, socket]);
+
+  const startNewTextConversation = useCallback(async () => {
+    if (isCreatingConversation) return;
+    setIsCreatingConversation(true);
+    try {
+      const response = await fetch(scopedConversationUrl('/api/conversations/new'), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId, domain: activeDomain }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result?.conversation?.id) {
+        throw new Error(result?.error || 'Unable to create a new conversation');
+      }
+
+      // Detach the text surface from the previous execution without cancelling
+      // its durable task. Any late receipt remains attached to the archived
+      // conversation and the task widget continues to report its real status.
+      activeChatViewDetachRef.current?.();
+      clearPersistedExecution();
+      activeChatRequestIdRef.current = null;
+      textChatActiveRef.current = false;
+      lastResumedRequestIdRef.current = null;
+      streamingMsgId.current = null;
+      currentResponseFinalizationRef.current = null;
+      bindAttachmentContextToConversation(result.conversation.id);
+      setConversationHistoryOpen(false);
+      setConversationHistory(previous => [result.conversation, ...previous.filter(item => item.id !== result.conversation.id)]);
+      setMessages([]);
+      messagesRef.current = [];
+      setPendingAttachments([]);
+      pendingAttachmentsRef.current = [];
+      setDraftText('');
+      setSearchQuery('');
+      setSearchResults([]);
+      setSearchError('');
+      setIsTyping(false);
+      setWorkflowStatus('idle');
+      setWorkflowSteps([]);
+      clearChatProgress();
+      seenWorkflowToolEvents.current.clear();
+      requestAnimationFrame(() => messageInputRef.current?.focus());
+    } catch (error: any) {
+      toast.error(error?.message || 'Unable to create a new conversation');
+    } finally {
+      setIsCreatingConversation(false);
+    }
+  }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, isCreatingConversation, scopedConversationUrl, setDraftText]);
+
+  const loadConversationHistory = useCallback(async () => {
+    setConversationHistoryLoading(true);
+    try {
+      const response = await fetch(scopedConversationUrl('/api/conversations?limit=40'), { credentials: 'include' });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result?.error || 'Unable to load conversation history');
+      setConversationHistory(Array.isArray(result?.conversations) ? result.conversations : []);
+    } catch (error: any) {
+      toast.error(error?.message || 'Unable to load conversation history');
+    } finally {
+      setConversationHistoryLoading(false);
+    }
+  }, [scopedConversationUrl]);
+
+  const toggleConversationHistory = useCallback(() => {
+    setConversationHistoryOpen(current => {
+      const next = !current;
+      if (next) void loadConversationHistory();
+      return next;
+    });
+  }, [loadConversationHistory]);
+
+  const restoreTextConversation = useCallback(async (conversationId: string) => {
+    if (!conversationId || restoringConversationId) return;
+    if (conversationId === attachmentConversationIdRef.current) {
+      setConversationHistoryOpen(false);
+      return;
+    }
+    setRestoringConversationId(conversationId);
+    try {
+      const activateResponse = await fetch(scopedConversationUrl(`/api/conversations/${encodeURIComponent(conversationId)}/activate`), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId, domain: activeDomain }),
+      });
+      const activateResult = await activateResponse.json().catch(() => ({}));
+      if (!activateResponse.ok || !activateResult?.conversation?.id) {
+        throw new Error(activateResult?.error || 'Unable to open this conversation');
+      }
+      const messageResponse = await fetch(
+        scopedConversationUrl(`/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=${CHAT_HISTORY_LIMIT}`),
+        { credentials: 'include' },
+      );
+      const messageResult = await messageResponse.json().catch(() => ({}));
+      if (!messageResponse.ok) throw new Error(messageResult?.error || 'Unable to load this conversation');
+
+      // Switching transcripts only detaches this chat surface. Durable tasks
+      // keep running and remain visible exclusively in the task widget.
+      activeChatViewDetachRef.current?.();
+      clearPersistedExecution();
+      activeChatRequestIdRef.current = null;
+      textChatActiveRef.current = false;
+      lastResumedRequestIdRef.current = null;
+      streamingMsgId.current = null;
+      currentResponseFinalizationRef.current = null;
+      bindAttachmentContextToConversation(conversationId);
+      const restoredMessages = normalizePersistedMessages(Array.isArray(messageResult?.messages) ? messageResult.messages : []);
+      setMessages(restoredMessages);
+      messagesRef.current = restoredMessages;
+      setPendingAttachments([]);
+      pendingAttachmentsRef.current = [];
+      setDraftText('');
+      setSearchQuery('');
+      setSearchResults([]);
+      setSearchError('');
+      setIsTyping(false);
+      setWorkflowStatus('idle');
+      setWorkflowSteps([]);
+      clearChatProgress();
+      seenWorkflowToolEvents.current.clear();
+      setConversationHistory(previous => previous.map(item => ({
+        ...item,
+        status: item.id === conversationId ? 'active' : item.status === 'active' ? 'closed' : item.status,
+      })));
+      setConversationHistoryOpen(false);
+      requestAnimationFrame(() => messageInputRef.current?.focus());
+    } catch (error: any) {
+      toast.error(error?.message || 'Unable to open this conversation');
+    } finally {
+      setRestoringConversationId('');
+    }
+  }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, normalizePersistedMessages, restoringConversationId, scopedConversationUrl, setDraftText]);
 
   useEffect(() => {
     // Scroll to bottom when messages change (new messages, initial load)
@@ -1709,17 +1999,21 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
     const merged = mergeChatAttachmentReferences(conversationAttachmentsRef.current, reusable).attachments;
     conversationAttachmentsRef.current = merged;
     setConversationAttachments(merged);
-    try {
-      localStorage.setItem(attachmentContextStorageKey, serializeChatAttachmentContext(merged));
-    } catch {}
+    if (attachmentContextStorageKey) {
+      try {
+        localStorage.setItem(attachmentContextStorageKey, serializeChatAttachmentContext(merged));
+      } catch {}
+    }
   }, [attachmentContextStorageKey]);
 
   const clearConversationAttachmentContext = useCallback(() => {
     conversationAttachmentsRef.current = [];
     setConversationAttachments([]);
-    try {
-      localStorage.removeItem(attachmentContextStorageKey);
-    } catch {}
+    if (attachmentContextStorageKey) {
+      try {
+        localStorage.removeItem(attachmentContextStorageKey);
+      } catch {}
+    }
     toast.success(uiMessage('agent-chat-page.session-materials-cleared.53bea199b2'));
   }, [attachmentContextStorageKey]);
 
@@ -1794,10 +2088,19 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
     let socketAckTimer: ReturnType<typeof setTimeout> | null = null;
     let socketAcknowledged = false;
     let lastProbeStatus = '';
-    const isCurrentResponse = (data?: { requestId?: string; source?: string }) => {
+    activeChatViewDetachRef.current = () => {
+      resolved = true;
+      clearTimeout(safetyTimer);
+      if (resumeProbeTimer) clearTimeout(resumeProbeTimer);
+      if (socketAckTimer) clearTimeout(socketAckTimer);
+      cleanupSocketWaiters();
+    };
+    const requestConversationId = attachmentConversationIdRef.current;
+    const isCurrentResponse = (data?: { requestId?: string; source?: string; conversationId?: string }) => {
+      if (data?.conversationId && data.conversationId !== requestConversationId) return false;
       if (data?.requestId) return data.requestId === requestId;
       if (activeChatRequestIdRef.current) return false;
-      if (data?.source && data.source !== 'chat') return false;
+      if (data?.source && data.source !== chatExecutionSource) return false;
       return textChatActiveRef.current;
     };
     const cleanupSocketWaiters = () => {
@@ -1812,14 +2115,15 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
       if (resumeProbeTimer) clearTimeout(resumeProbeTimer);
       if (socketAckTimer) clearTimeout(socketAckTimer);
       cleanupSocketWaiters();
+      if (activeChatViewDetachRef.current) activeChatViewDetachRef.current = null;
       setIsTyping(false);
       textChatActiveRef.current = false;
       clearPersistedExecution(requestId);
       if (activeChatRequestIdRef.current === requestId) activeChatRequestIdRef.current = null;
     };
-    const onResponse = (data?: { requestId?: string; source?: string }) => { if (isCurrentResponse(data)) resolve(); };
-    const onError = (data?: { requestId?: string; source?: string }) => { if (isCurrentResponse(data)) resolve(); };
-    const onStatus = (data: { status: string; requestId?: string; source?: string }) => {
+    const onResponse = (data?: { requestId?: string; source?: string; conversationId?: string }) => { if (isCurrentResponse(data)) resolve(); };
+    const onError = (data?: { requestId?: string; source?: string; conversationId?: string }) => { if (isCurrentResponse(data)) resolve(); };
+    const onStatus = (data: { status: string; requestId?: string; source?: string; conversationId?: string }) => {
       if (!isCurrentResponse(data)) return;
       if (data.status === 'idle' || data.status === 'error') resolve();
     };
@@ -1848,9 +2152,10 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
 
         socket.emit('agent:execution_resume', {
           requestId,
-          source: 'chat',
+          source: chatExecutionSource,
           domain: activeDomain,
           orgId: activeOrgId || null,
+          conversationId: attachmentConversationIdRef.current || undefined,
         }, (result?: { ok?: boolean; snapshot?: ChatExecutionSnapshot; error?: string }) => {
           if (probeSettled || resolved) return;
           probeSettled = true;
@@ -1895,9 +2200,10 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
       agentId,
       domain: activeDomain,
       orgId: activeOrgId || null,
-      source: 'chat',
+      source: chatExecutionSource,
       operationMode,
       requestId,
+      conversationId: attachmentConversationIdRef.current || undefined,
     };
 
     socketAckTimer = setTimeout(() => {
@@ -1959,9 +2265,10 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
     }, 8000);
     socket.emit('agent:abort_chat', {
       requestId,
-      source: 'chat',
+      source: chatExecutionSource,
       domain: activeDomain,
       orgId: activeOrgId || null,
+      conversationId: attachmentConversationIdRef.current || undefined,
     }, (result?: { ok?: boolean; error?: string }) => {
       acknowledged = true;
       window.clearTimeout(ackTimer);
@@ -2350,7 +2657,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
   }
 
   const latestChatProgressLine = chatProgressLines[chatProgressLines.length - 1];
-  const workflowProgressVisible = workflowStatus !== 'idle' || isTyping || backgroundWorkflowTasks.length > 0;
+  const workflowTaskActive = ['executing', 'waiting_confirmation', 'background', 'cancelling'].includes(workflowStatus);
   const workflowStatusText =
     workflowStatus === 'thinking' ? (t.workflowAnalyzing || 'Analyzing') :
     workflowStatus === 'executing' ? (t.workflowExecuting || 'Executing tools') :
@@ -2484,16 +2791,39 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
           </motion.div>
         )}
       </AnimatePresence>
-    <div className="lumi-chat-layout flex-1 max-w-[90rem] mx-auto w-full space-y-4 md:space-y-8 pb-32 md:pb-0 overflow-hidden flex flex-col">
-      <div className="lumi-chat-toolbar flex items-center justify-between px-4 md:px-0 pt-6 flex-shrink-0">
+    <div className={`lumi-chat-layout relative mx-auto flex w-full flex-1 flex-col overflow-hidden ${layout === 'command-center' ? 'max-w-none' : 'max-w-[90rem] space-y-4 pb-32 md:space-y-8 md:pb-0'}`}>
+      {isCommandCenterUtility && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.25 }}
+          className="absolute inset-3 z-20"
+        >
+          <CommandCenterPanel
+            t={t}
+            view={commandCenterView}
+            onViewChange={onCommandCenterViewChange || (() => {})}
+            onOpenNexus={onOpenNexus}
+          />
+        </motion.div>
+      )}
+
+      {!isCommandCenterUtility && (
+      <div className={`lumi-chat-toolbar relative z-[55] flex flex-shrink-0 items-center justify-between ${
+        isOfficeCommandCenter
+          ? 'h-14 border-b border-white/[0.07] bg-[#03070d]/92 px-4 shadow-[0_1px_0_rgba(255,255,255,0.025)]'
+          : 'px-4 pt-6 md:px-0'
+      }`}>
+        <div className="flex shrink-0 items-center gap-2">
         <button
           onClick={onClose}
           className="w-10 h-10 flex items-center justify-center bg-black/40 backdrop-blur-xl border border-white/[0.08] rounded-2xl text-white/40 hover:text-white hover:border-white/20 transition-all"
         >
           <ArrowLeft size={18} />
         </button>
-        <div className="lumi-chat-toolbar-actions flex min-w-0 items-center gap-3">
-          <div className="lumi-chat-voice-picker relative">
+        </div>
+        <div className={`lumi-chat-toolbar-actions flex min-w-0 items-center ${isOfficeCommandCenter ? 'gap-1.5' : 'gap-3'}`}>
+          {!isOfficeCommandCenter && <div className="lumi-chat-voice-picker relative">
             <Button
               variant="ghost"
               size="sm"
@@ -2530,7 +2860,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
                 </motion.div>
               )}
             </AnimatePresence>
-          </div>
+          </div>}
 
           <VoiceCallButton
             callState={callState}
@@ -2550,7 +2880,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
               <MessageCircle className="h-4 w-4 md:h-5 md:w-5" />
             </button>
           )}
-          <button
+          {!isOfficeCommandCenter && <button
             type="button"
             onClick={requestMeetingMode}
             className="flex h-8 w-8 items-center justify-center rounded-xl border border-cyan-400/20 bg-cyan-400/10 text-cyan-200 transition-all hover:border-cyan-300/35 hover:bg-cyan-400/15 md:h-10 md:w-10"
@@ -2558,8 +2888,8 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
             aria-label={uiMessage('agent-chat-page.open-meeting-mode.3aabc87fcb')}
           >
             <FileText className="h-4 w-4 md:h-5 md:w-5" />
-          </button>
-          <div className="lumi-chat-agent-mark w-8 h-8 md:w-10 md:h-10 rounded-xl bg-celestial-saturn/20 flex items-center justify-center text-celestial-saturn border border-celestial-saturn/20">
+          </button>}
+          <div className="lumi-chat-agent-mark flex h-8 w-8 items-center justify-center rounded-xl border border-celestial-saturn/20 bg-celestial-saturn/20 text-celestial-saturn md:h-10 md:w-10">
             <Ghost className="w-4 h-4 md:w-5 md:h-5" />
           </div>
           <div className="lumi-chat-agent-identity min-w-0 text-right sm:text-left">
@@ -2591,16 +2921,57 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
           </div>
         </div>
       </div>
+      )}
 
-      <div className="flex gap-3 flex-1 min-h-0">
+      {!isCommandCenterUtility && <div className={`relative z-20 flex min-h-0 flex-1 ${
+        isOfficeCommandCenter ? 'lumi-command-center-workspace overflow-hidden' : 'gap-3'
+      }`}>
+
+        {isOfficeCommandCenter && (
+          <motion.section
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.35 }}
+            className="lumi-command-center-office relative min-h-0 min-w-0 flex-1 overflow-hidden border-r border-white/[0.08]"
+          >
+            <div className="absolute inset-0">
+              <CommandCenterPanel
+                t={t}
+                view="office"
+                onViewChange={onCommandCenterViewChange || (() => {})}
+                onOpenNexus={onOpenNexus}
+                runtimeStatusOverride={{
+                  status: runtimeStatus,
+                  loading: runtimeStatusLoading,
+                  error: runtimeStatusError,
+                  refresh: refreshRuntimeStatus,
+                }}
+              />
+            </div>
+            <ActiveTaskWidget
+              status={runtimeStatus}
+              focusThreads={focusThreads}
+              backgroundTasks={backgroundWorkflowTasks}
+              workflowActive={workflowTaskActive}
+              workflowStatus={workflowStatus}
+              progressText={chatProgressStatusText}
+              isZh={isZh}
+            />
+          </motion.section>
+        )}
 
         {/* Chat Panel */}
+        <>
         <div
-          className="lumi-chat-panel flex-1 flex flex-col glass rounded-[2.5rem] md:rounded-[3rem] border overflow-hidden shadow-2xl min-w-0"
-          style={chatPanelStyle}
+          className={`lumi-chat-panel flex min-h-0 min-w-0 flex-col overflow-hidden ${
+            isOfficeCommandCenter
+              ? 'lumi-command-center-chat-rail w-[clamp(420px,30vw,560px)] shrink-0 border-0 bg-[#070b12]'
+              : 'glass flex-1 rounded-[2.5rem] border shadow-2xl md:rounded-[3rem]'
+          }`}
+          style={isOfficeCommandCenter ? { ...chatPanelStyle, boxShadow: 'none' } : chatPanelStyle}
         >
           <div
-            className="lumi-chat-panel-header p-4 md:p-6 border-b flex items-center justify-between"
+            className={`lumi-chat-panel-header flex items-center justify-between border-b ${isOfficeCommandCenter ? 'px-5 py-3.5' : 'p-4 md:p-6'}`}
             style={chatHeaderStyle}
           >
             <div className="flex items-center gap-3">
@@ -2609,14 +2980,14 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
                 Neural Link
               </span>
               <div
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-widest ${operationModeMeta.subtleClass}`}
+                className={`items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-widest ${operationModeMeta.subtleClass} ${isOfficeCommandCenter ? 'hidden' : 'inline-flex'}`}
                 title={operationModeMeta.detail}
               >
                 <span className={`h-1.5 w-1.5 rounded-full ${operationModeMeta.dotClass}`} />
                 <OperationModeIcon size={11} />
                 <span>{operationModeMeta.label}</span>
               </div>
-              {(knowledgeFiles.length > 0 || knowledgeLoading) && (
+              {!isOfficeCommandCenter && (knowledgeFiles.length > 0 || knowledgeLoading) && (
                 <div
                   className="ml-1 hidden min-w-0 items-center gap-1.5 rounded-full border border-emerald-400/15 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-100/75 sm:flex"
                   title={knowledgeStatusText}
@@ -2626,8 +2997,102 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
                 </div>
               )}
             </div>
-            <div className="lumi-chat-history-search flex items-center gap-2">
-              <div className="relative">
+            <div ref={conversationHistoryRef} className="lumi-chat-history-search relative flex items-center gap-2">
+              {isOfficeCommandCenter && (
+                <button
+                  type="button"
+                  onClick={() => { setConversationHistoryOpen(false); setCommandCenterPlannerOpen(value => !value); }}
+                  className={`flex h-8 items-center gap-1.5 rounded-xl border px-2.5 text-[9px] font-bold transition-colors ${
+                    commandCenterPlannerOpen
+                      ? 'border-cyan-300/30 bg-cyan-300/[0.10] text-cyan-50'
+                      : 'border-white/10 bg-white/[0.04] text-white/45 hover:border-cyan-300/25 hover:text-cyan-100'
+                  }`}
+                  title={commandCenterPlannerText.plannerButtonTitle}
+                  aria-pressed={commandCenterPlannerOpen}
+                >
+                  <CalendarClock size={13} />
+                  <span>{commandCenterPlannerText.plannerButton}</span>
+                </button>
+              )}
+              {isOfficeCommandCenter && (
+                <button
+                  type="button"
+                  onClick={toggleConversationHistory}
+                  className={`flex h-8 w-8 items-center justify-center rounded-xl border transition-colors ${
+                    conversationHistoryOpen
+                      ? 'border-cyan-300/30 bg-cyan-300/[0.10] text-cyan-100'
+                      : 'border-white/10 bg-white/[0.04] text-white/45 hover:border-cyan-300/25 hover:bg-cyan-300/[0.08] hover:text-cyan-100'
+                  }`}
+                  title={t.selectPreviousConversation || 'Select previous conversation'}
+                  aria-label={t.selectPreviousConversation || 'Select previous conversation'}
+                  aria-expanded={conversationHistoryOpen}
+                >
+                  {conversationHistoryLoading ? <Loader2 size={14} className="animate-spin" /> : <History size={15} />}
+                </button>
+              )}
+              {isOfficeCommandCenter && (
+                <button
+                  type="button"
+                  onClick={() => void startNewTextConversation()}
+                  disabled={isCreatingConversation}
+                  className="flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-white/45 transition-colors hover:border-cyan-300/25 hover:bg-cyan-300/[0.08] hover:text-cyan-100 disabled:cursor-wait disabled:opacity-50"
+                  title={t.newConversationHint || t.newConversation || 'New conversation'}
+                  aria-label={t.newConversation || 'New conversation'}
+                >
+                  {isCreatingConversation ? <Loader2 size={14} className="animate-spin" /> : <Plus size={15} />}
+                </button>
+              )}
+              <AnimatePresence>
+                {isOfficeCommandCenter && conversationHistoryOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -6, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -6, scale: 0.98 }}
+                    className="absolute right-0 top-10 z-[80] w-[min(320px,calc(100vw-4rem))] overflow-hidden rounded-2xl border border-cyan-300/15 bg-[#07101a]/98 shadow-2xl shadow-black/55 backdrop-blur-2xl"
+                  >
+                    <div className="border-b border-white/[0.07] px-3 py-2.5">
+                      <div className="text-[11px] font-bold text-white/75">{t.previousConversations || 'Previous conversations'}</div>
+                      <div className="mt-0.5 text-[9px] text-white/30">{t.continuePreviousConversation || 'Select one to continue its chat'}</div>
+                    </div>
+                    <div className="custom-scrollbar max-h-[360px] overflow-y-auto p-1.5">
+                      {conversationHistoryLoading && conversationHistory.length === 0 ? (
+                        <div className="flex items-center justify-center py-8 text-white/35"><Loader2 size={16} className="animate-spin" /></div>
+                      ) : conversationHistory.length === 0 ? (
+                        <div className="px-3 py-8 text-center text-[11px] text-white/35">{t.noConversations || 'No conversations yet'}</div>
+                      ) : conversationHistory.map(conversation => {
+                        const current = conversation.id === attachmentConversationIdRef.current;
+                        const title = conversation.displayTitle || conversation.title || conversation.preview || t.untitled || 'Untitled';
+                        return (
+                          <button
+                            key={conversation.id}
+                            type="button"
+                            onClick={() => void restoreTextConversation(conversation.id)}
+                            disabled={Boolean(restoringConversationId)}
+                            className={`group w-full rounded-xl px-3 py-2.5 text-left transition-colors disabled:cursor-wait disabled:opacity-60 ${
+                              current ? 'bg-cyan-300/[0.10]' : 'hover:bg-white/[0.05]'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="min-w-0 truncate text-[11px] font-semibold text-white/75">{title}</span>
+                              {restoringConversationId === conversation.id ? (
+                                <Loader2 size={11} className="shrink-0 animate-spin text-cyan-200" />
+                              ) : current ? (
+                                <span className="shrink-0 rounded-full bg-cyan-300/[0.12] px-1.5 py-0.5 text-[8px] font-bold text-cyan-100/75">{t.currentConversation || 'Current'}</span>
+                              ) : null}
+                            </div>
+                            {conversation.preview && <div className="mt-1 truncate text-[10px] text-white/34">{conversation.preview}</div>}
+                            <div className="mt-1.5 flex items-center justify-between text-[9px] text-white/24">
+                              <span>{conversation.messageCount || 0} {t.messageCountLabel || 'messages'}</span>
+                              <span>{new Date(conversation.lastActiveAt || conversation.createdAt).toLocaleString(isZh ? 'zh-CN' : 'en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              {!isOfficeCommandCenter && <div className="relative">
                 <input
                   type="text"
                   value={searchQuery}
@@ -2643,42 +3108,22 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
                     <XCircle size={12} />
                   </button>
                 )}
-              </div>
+              </div>}
             </div>
           </div>
-
-          {workflowProgressVisible && (
-            <div
-              className="border-b px-4 py-2 md:px-6"
-              style={{
-                background: chatAccentTheme.progress,
-                borderBottomColor: chatAccentTheme.panelBorder,
+          {isOfficeCommandCenter && commandCenterPlannerOpen ? (
+            <CommandCenterPlanner
+              isZh={isZh}
+              conversationId={attachmentConversationIdRef.current}
+              onDiscuss={(prompt) => {
+                setDraftText(prompt);
+                setCommandCenterPlannerOpen(false);
+                window.setTimeout(() => messageInputRef.current?.focus(), 0);
               }}
-            >
-              <div className="flex min-w-0 items-center gap-2">
-                {workflowStatus === 'done' ? (
-                  <CheckCircle2 size={13} className="shrink-0 text-emerald-300" />
-                ) : workflowStatus === 'error' ? (
-                  <XCircle size={13} className="shrink-0 text-red-300" />
-                ) : (
-                  <Loader2 size={13} className="shrink-0 animate-spin text-celestial-saturn" />
-                )}
-                <span className="shrink-0 text-[10px] font-black uppercase tracking-widest text-white/35">
-                  Lumi work
-                </span>
-                <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white/55">
-                  {workflowStatusText}
-                </span>
-                <span className="min-w-0 truncate text-xs text-white/60">
-                  {chatProgressStatusText}
-                </span>
-              </div>
-            </div>
-          )}
-
-          <div
+            />
+          ) : (<div
             ref={scrollRef}
-            className="flex-1 overflow-y-auto p-4 md:p-8 space-y-4 md:space-y-6 custom-scrollbar"
+            className={`flex-1 overflow-y-auto custom-scrollbar ${isOfficeCommandCenter ? 'space-y-5 px-5 py-4' : 'space-y-4 p-4 md:space-y-6 md:p-8'}`}
           >
             {messages.length === 0 && !searchQuery.trim() && (
               <div className="h-full flex flex-col items-center justify-center text-center space-y-8 px-4">
@@ -2729,7 +3174,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
             )}
             <AnimatePresence initial={false}>
               {displayMessages.map((msg) => (
-                msg.type === 'file_context' || msg.type === 'tool' ? null /* invisible context; tool detail stays on the home WorkflowPanel while chat shows inline progress */ : (
+                msg.type === 'file_context' || msg.type === 'tool' ? null /* invisible context; chat keeps the user-facing progress while detailed receipts stay in System Explorer */ : (
                 <motion.div
                   key={msg.id}
                   initial={{ opacity: 0, y: 10 }}
@@ -2879,10 +3324,10 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
                 </div>
               </motion.div>
             )}
-          </div>
+          </div>)}
 
           <div
-            className="lumi-chat-composer p-6 border-t"
+            className={`lumi-chat-composer border-t ${isOfficeCommandCenter ? 'p-4' : 'p-6'}`}
             style={chatInputPanelStyle}
           >
             {conversationAttachments.length > 0 && (
@@ -3051,7 +3496,7 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
                   type="button"
                   onClick={toggleListening}
                   variant="ghost"
-                  className={`absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 p-0 rounded-full transition-colors ${
+                  className={`absolute right-2 top-1/2 h-8 w-8 -translate-y-1/2 rounded-full p-0 transition-colors ${isOfficeCommandCenter ? 'hidden' : ''} ${
                     isListening ? 'text-celestial-mars bg-celestial-mars/20 animate-pulse' : 'text-white/40 hover:text-white'
                   }`}
                 >
@@ -3082,7 +3527,11 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
             </form>
           </div>
         </div>
+        </>
 
+        {/* Command Center or standalone chat information */}
+        {layout === 'command-center' ? null : (
+          <>
         {/* Info Sidebar */}
             <motion.div
               initial={{ opacity: 0, x: 40 }}
@@ -3186,7 +3635,9 @@ export function AgentChatPage({ t, user, agent, isOpen, onClose, prefillMessage,
           </GlassCard>
           </motion.div>
             </motion.div>
-      </div>
+          </>
+        )}
+      </div>}
     </div>
         </motion.div>
       )}

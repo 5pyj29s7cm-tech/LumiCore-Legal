@@ -3,14 +3,16 @@ import jwt from "jsonwebtoken";
 import os from "os";
 import fs from "fs";
 import path from "path";
-import { readDB, writeDB, isDbDirty } from "../../db_layer";
+import { getDatabasePersistenceStatus, readDB, writeDB, isDbDirty } from "../../db_layer";
 import { logger } from "../../logger";
 import { toolRegistry } from "../tools/registry";
 import { scheduler } from "../scheduler";
 import { classifyCloudError, getCloudHealth, recordFailure, resetCircuit } from "../cloud/core";
 import { loadKeys, saveKeys, getKey, getAllKeyNames, isPersistableKeyName } from "../config/keys";
-import { requireAuth, requireLocalRequest } from "../middleware/auth";
+import { parseDoubaoSpeechCredentials } from "../config/doubao_speech";
+import { requireAuth, requireLocalRequest, resolveDomain } from "../middleware/auth";
 import { getLatencyStats } from "../monitor/latency_store";
+import { getVoiceLatencyStats } from "../monitor/voice_latency_store";
 import { mcpManager, getMCPConfig } from "../mcp";
 import {
   getUserPreferredVision,
@@ -38,11 +40,18 @@ import { listModelRoutingReceipts } from "../llm/model_routing_receipts";
 import { getVoicePreference, setVoicePreference, type VoicePreference } from "../config/voice_preference";
 import { getActiveSTTProvider, getActiveStreamingSTTProvider } from "../stt/adapter";
 import { getActiveProvider as getActiveTTSProvider } from "../tts/adapter";
+import { probeDoubaoStreamingConnection } from "../stt/providers/ark_stream";
+import {
+  getConfiguredDoubaoTtsDetails,
+  synthesizeSpeech as synthesizeDoubaoSpeech,
+} from "../tts/providers/ark";
 import { getGptSovitsRuntimeStatus } from "../tts/gptsovits_runtime";
 import { getRuntimeQueueStatus as getGptSovitsQueueStatus } from "../tts/providers/gptsovits";
 import { getVoiceprintRuntimeStatus } from "../biometrics/voiceprint_provider";
 import { getToolRuntimeMetrics } from "../runtime/tool_metrics";
 import { getCapabilityRuntimeMetrics } from "../runtime/capability_metrics";
+import { getUnifiedRuntimeSupervisorStatus } from "../runtime/unified_supervisor";
+import { readOnlyContextCache } from "../context/read_only_cache";
 import { getCapabilityRolloutStage } from "../cognition/capability_rollout";
 import { getAdapterResilienceSnapshot } from "../tools/adapter_resilience";
 import { getLocalModelConfig, getLocalModelQueueSnapshot, refreshLocalModelConfig } from "../llm/local_models";
@@ -58,6 +67,7 @@ import {
 } from "../llm/model_configuration";
 import { getDesktopControlRuntimeSnapshot } from "../desktop/control_lease";
 import { listRegisteredProviders } from '../extensions/registry';
+import { buildStructuredRuntimeStatus } from '../monitor/runtime_status';
 
 export { testLLMProviderConnection, testVisionProviderConnection } from "../llm/model_configuration";
 
@@ -118,6 +128,8 @@ export function getRuntimeVersionInfo() {
     name: runtimeBuildMetadata.name,
     version: runtimeBuildMetadata.version,
     buildId: runtimeBuildMetadata.buildId,
+    sourceFingerprint: runtimeBuildMetadata.sourceFingerprint,
+    sourceDirty: runtimeBuildMetadata.sourceDirty,
     pid: process.pid,
     startedAt: serverStartedAt,
     uptimeSeconds: Math.round(process.uptime()),
@@ -276,6 +288,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       const capabilityMetrics = getCapabilityRuntimeMetrics();
       const ollama = getLocalModelConfig('ollama');
       const lmstudio = getLocalModelConfig('lmstudio');
+      const persistence = getDatabasePersistenceStatus();
       const backgroundTasks = Array.isArray(db.backgroundDelegationTasks) ? db.backgroundDelegationTasks : [];
       const autonomousTasks = Array.isArray(db.autonomousTasks) ? db.autonomousTasks : [];
       const externalAiSessions = Array.isArray(db.externalAiSessions) ? db.externalAiSessions : [];
@@ -291,7 +304,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
         return counts;
       }, {});
       res.json({
-        status: isDbDirty() ? "degraded" : "ok",
+        status: persistence.degraded ? "degraded" : "ok",
         timestamp: new Date().toISOString(),
         runtime: getRuntimeVersionInfo(),
         database: {
@@ -299,6 +312,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
           agents: db.agents.length,
           interactions: db.interactions.length,
           dirty: isDbDirty(),
+          persistence,
           actionTasks: (db.conversationActionTasks || []).length,
           actionReceipts: (db.conversationActionReceipts || []).length,
           extensionRevisions: extensionRevisions.length,
@@ -349,9 +363,11 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
           },
         },
         supervisedRuntimes: {
+          unified: getUnifiedRuntimeSupervisorStatus(),
           gptSovits: getGptSovitsRuntimeStatus(),
           voiceprint: getVoiceprintRuntimeStatus(),
         },
+        readOnlyContextCache: readOnlyContextCache.metrics(),
         functionalProbes: {
           databaseRead: true,
           registeredTools: toolRegistry.list().length,
@@ -398,6 +414,32 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     try { res.json(getCloudHealth()); } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  // Authenticated, scope-isolated projection of what Lumi is actually doing.
+  // Raw tool inputs/results never cross this boundary; the UI receives only
+  // durable task identities, policy state, receipt outcomes and aggregate
+  // runtime metrics.
+  router.get('/runtime/status', requireAuth, (req, res) => {
+    try {
+      const scope = resolveDomain(req.user!);
+      const toolMetrics = getToolRuntimeMetrics();
+      res.json(buildStructuredRuntimeStatus(readDB(), {
+        userId: req.user!.uid,
+        domain: scope.domain,
+        orgId: scope.orgId,
+        runtime: {
+          toolMetrics: toolMetrics.totals,
+          capabilityMetrics: getCapabilityRuntimeMetrics(),
+          voiceLatency: getVoiceLatencyStats(),
+          supervisor: getUnifiedRuntimeSupervisorStatus(),
+          readOnlyContextCache: readOnlyContextCache.metrics(),
+        },
+      }));
+    } catch (error: any) {
+      logger.error('Structured runtime status failed', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Explicit functional probe for local OpenAI-compatible runtimes. This is
   // separate from the cheap cached /health response so monitoring can choose
   // when to incur a network probe.
@@ -431,6 +473,52 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
         tts: getActiveTTSProvider({ requireHealthy: true }),
       },
     });
+  });
+
+  router.post("/voice/doubao/probe", requireAuth, requireLocalRequest, async (_req, res) => {
+    const ttsDetails = getConfiguredDoubaoTtsDetails();
+    if (!ttsDetails.credentialMode || !ttsDetails.voiceId) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Doubao Speech is not configured. Save a new-console API Key value first.',
+      });
+    }
+
+    const startedAt = Date.now();
+    const [streamingStt, speechSynthesis] = await Promise.allSettled([
+      probeDoubaoStreamingConnection({ timeoutMs: 10_000, language: 'zh-CN' }),
+      synthesizeDoubaoSpeech(
+        'Lumi Doubao speech connection test.',
+        ttsDetails.voiceId,
+        AbortSignal.timeout(20_000),
+      ).then(result => {
+        if (result.audioBuffer.length < 256) throw new Error('Doubao TTS returned too little audio data to verify synthesis');
+        return {
+          ok: true as const,
+          endpoint: ttsDetails.endpoint,
+          resourceId: ttsDetails.resourceId,
+          voiceId: ttsDetails.voiceId,
+          format: result.format,
+          audioBytes: result.audioBuffer.length,
+        };
+      }),
+    ]);
+
+    const failureMessage = (reason: unknown) => reason instanceof Error ? reason.message : String(reason || 'Unknown error');
+    const result = {
+      ok: streamingStt.status === 'fulfilled' && speechSynthesis.status === 'fulfilled',
+      credentialMode: ttsDetails.credentialMode,
+      fallbackUsed: false,
+      streamingStt: streamingStt.status === 'fulfilled'
+        ? streamingStt.value
+        : { ok: false, error: failureMessage(streamingStt.reason) },
+      speechSynthesis: speechSynthesis.status === 'fulfilled'
+        ? speechSynthesis.value
+        : { ok: false, error: failureMessage(speechSynthesis.reason) },
+      latencyMs: Date.now() - startedAt,
+      verifiedAt: new Date().toISOString(),
+    };
+    return res.status(result.ok ? 200 : 502).json(result);
   });
 
   router.post("/voice/provider", requireAuth, requireLocalRequest, (req, res) => {
@@ -828,7 +916,10 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       const stored = loadKeys();
       const masked: Record<string, boolean> = {};
       for (const name of getAllKeyNames()) {
-        masked[name] = !!(process.env[name] || stored[name]);
+        const configured = process.env[name] || stored[name];
+        masked[name] = name === 'DOUBAO_SPEECH_KEY'
+          ? parseDoubaoSpeechCredentials(configured) !== null
+          : !!configured;
       }
       res.json(masked);
     } catch (err: any) {
@@ -849,6 +940,11 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
         if (!isPersistableKeyName(k) || typeof v !== 'string') {
           ignored.push(k);
           continue;
+        }
+        if (k === 'DOUBAO_SPEECH_KEY' && v.trim().length > 0 && !parseDoubaoSpeechCredentials(v)) {
+          return res.status(400).json({
+            error: 'DOUBAO_SPEECH_KEY only accepts a new-console API Key value. Legacy AppID:AccessToken is not supported.',
+          });
         }
         if (v.trim().length > 0) {
           toSave[k] = v.trim();
@@ -922,7 +1018,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   // Latency stats
   router.get("/monitor/latency", (_req: any, res: any) => {
-    res.json(getLatencyStats());
+    res.json({ ...getLatencyStats(), voice: getVoiceLatencyStats() });
   });
 
   // Ecosystem stats

@@ -1,10 +1,20 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { makeApp } from './helpers';
 import type { IncomingMessage } from '../server/messaging/types';
 
 let cleanup = () => {};
 let attachmentContext: typeof import('../server/messaging/attachment_context');
 let messagingRoutes: typeof import('../server/messaging/routes');
+let tempDirectory = '';
+
+function cachedFile(name = 'case.pdf'): string {
+  const filePath = path.join(tempDirectory, name);
+  fs.writeFileSync(filePath, 'verified cache');
+  return filePath;
+}
 
 function incoming(partial: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
@@ -34,7 +44,14 @@ describe('remote messaging attachment context', () => {
     ]);
   });
 
-  beforeEach(() => attachmentContext.resetRemoteAttachmentContextForTest());
+  beforeEach(() => {
+    attachmentContext.resetRemoteAttachmentContextForTest();
+    tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'lumi-attachment-context-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDirectory, { recursive: true, force: true });
+  });
 
   afterAll(() => {
     attachmentContext.resetRemoteAttachmentContextForTest();
@@ -42,12 +59,13 @@ describe('remote messaging attachment context', () => {
   });
 
   it('carries verified files only within the exact organization member chat and thread', () => {
+    const localPath = cachedFile();
     const first = attachmentContext.applyRemoteAttachmentContext(incoming({
       attachments: [{
         id: 'file-a',
         type: 'file',
         fileName: 'case.pdf',
-        localPath: 'C:\\Lumi\\messaging\\case.pdf',
+        localPath,
         extractedText: 'contract evidence',
       }],
     }));
@@ -73,18 +91,37 @@ describe('remote messaging attachment context', () => {
   });
 
   it('supports an explicit clear command for the current remote conversation', () => {
+    const localPath = cachedFile();
     attachmentContext.applyRemoteAttachmentContext(incoming({
       attachments: [{
         id: 'file-a',
         type: 'file',
         fileName: 'case.pdf',
-        localPath: 'C:\\Lumi\\messaging\\case.pdf',
+        localPath,
       }],
     }));
 
     const cleared = attachmentContext.applyRemoteAttachmentContext(incoming({ text: '清除会话材料' }));
     expect(cleared.raw.lumiAttachmentContext).toMatchObject({ cleared: true, totalCount: 0 });
     expect(attachmentContext.applyRemoteAttachmentContext(incoming({ text: '继续' })).attachments).toBeUndefined();
+  });
+
+  it('drops a deleted cache path instead of presenting it as verified', () => {
+    const localPath = cachedFile('stale.pdf');
+    attachmentContext.applyRemoteAttachmentContext(incoming({
+      attachments: [{
+        id: 'stale-file',
+        type: 'file',
+        fileName: 'stale.pdf',
+        localPath,
+      }],
+    }));
+    fs.rmSync(localPath, { force: true });
+
+    const followup = attachmentContext.applyRemoteAttachmentContext(incoming({ text: '继续读取材料' }));
+
+    expect(followup.attachments).toBeUndefined();
+    expect(followup.text).not.toContain('Verified local cache');
   });
 
   it('breaks a long remote wall of text into mobile-friendly paragraphs', () => {

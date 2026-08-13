@@ -31,13 +31,17 @@ import {
   buildScheduledCapabilityExecutionPlan,
   type CapabilityExecutionPlan,
 } from './cognition/capability_execution_plan';
-import { persistScheduledCapabilityExecution } from './conversation/action_ledger';
+import {
+  getScheduledCapabilityExecutionStatus,
+  persistScheduledCapabilityExecution,
+} from './conversation/action_ledger';
 import type {
   CapabilityLane,
   CapabilityOperation,
   CapabilitySideEffect,
   ToolExecutionRecord,
 } from './tools/types';
+import { dispatchDueCommandCenterPlans } from './command_center/plans';
 
 export interface ScheduledDelivery {
   userId: string;
@@ -112,6 +116,12 @@ interface ScheduledTask {
   quiet?: boolean;
   /** If false, task is paused and will not fire */
   enabled?: boolean;
+  /**
+   * Collapse successful runs into a bounded audit summary. Compact is the
+   * safe default; use full only when every successful slot is itself a
+   * business record. Failures and unknown outcomes are always preserved.
+   */
+  auditMode?: 'full' | 'compact';
 }
 
 export type ParsedSchedule =
@@ -505,15 +515,21 @@ export class Scheduler {
     if (task.enabled === false || this.runningTasks.has(task.id)) return;
     this.runningTasks.add(task.id);
     const startedAt = new Date();
+    const compactAudit = task.auditMode !== 'full';
     let plan: CapabilityExecutionPlan | null = null;
     let handlerStarted = false;
     try {
       plan = buildScheduledTaskExecutionPlan(task, startedAt);
       const authorization = authorizeCapabilityPlanTool(plan, 'scheduler_task_handler');
       const db = readDB();
-      const previous = (db.conversationActionTasks || []).find((candidate: any) => candidate.id === plan.taskId);
-      if (previous) {
-        if (previous.status === 'executing') {
+      const previousStatus = compactAudit
+        ? getScheduledCapabilityExecutionStatus(db, {
+            scheduledTaskId: task.id,
+            executionId: plan.taskId,
+          })
+        : (db.conversationActionTasks || []).find((candidate: any) => candidate.id === plan.taskId)?.status;
+      if (previousStatus) {
+        if (previousStatus === 'executing') {
           const record = this.buildScheduledTaskRecord(plan, {
             verified: false,
             status: 'unknown',
@@ -526,6 +542,7 @@ export class Scheduler {
             blocker: 'A previous execution in this exact schedule slot has an unknown outcome; replay was stopped.',
             records: [record],
             now: startedAt.toISOString(),
+            compactAudit,
           });
           writeDB(db);
         }
@@ -542,6 +559,7 @@ export class Scheduler {
           error: authorization.reason,
         })],
         now: startedAt.toISOString(),
+        compactAudit,
       });
       writeDB(db);
       if (!authorization.allowed) {
@@ -563,6 +581,7 @@ export class Scheduler {
           delivery,
         })],
         now: task.lastRun,
+        compactAudit,
       });
       writeDB(completedDb);
     } catch (err: any) {
@@ -581,6 +600,7 @@ export class Scheduler {
               error: 'scheduler_handler_failed',
             })],
             now: failedAt,
+            compactAudit,
           });
           writeDB(db);
         } catch (ledgerError: any) {
@@ -725,6 +745,19 @@ export function registerScheduledTasks(
   getGlm?: () => any,
   getRelay?: () => any,
 ) {
+  scheduler.register({
+    id: 'command_center_plan_dispatch',
+    cron: 'every_1m',
+    quiet: true,
+    auditMode: 'compact',
+    lastRun: null,
+    executionClass: 'autonomous_orchestration',
+    handler: async () => {
+      dispatchDueCommandCenterPlans();
+      return null;
+    },
+  });
+
   /** Get all unique user IDs from DB (registered users + anonymous fallback) */
   function getAllUserIds(): string[] {
     const db = readDB();
@@ -2115,6 +2148,7 @@ Output ONLY the prediction message — no preamble, no labels.`;
     cron: 'every_10s',
     lastRun: null,
     executionClass: 'client_probe',
+    auditMode: 'compact',
     handler: async () => {
       if (scheduler.io) {
         const payload = { timestamp: new Date().toISOString() };
@@ -2132,6 +2166,7 @@ Output ONLY the prediction message — no preamble, no labels.`;
     cron: 'every_1m',
     lastRun: null,
     executionClass: 'client_probe',
+    auditMode: 'compact',
     handler: async () => {
       if (scheduler.io) {
         const payload = { timestamp: new Date().toISOString() };

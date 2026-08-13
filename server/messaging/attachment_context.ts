@@ -51,21 +51,32 @@ function attachmentIdentity(attachment: IncomingAttachment): string {
   return `name:${attachment.fileName.toLowerCase()}:${attachment.fileSize || 0}`;
 }
 
+function verifiedLocalPath(value?: string): string | undefined {
+  const candidate = String(value || '').trim();
+  if (!candidate) return undefined;
+  try {
+    return fs.statSync(candidate).isFile() ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function durableAttachment(attachment: IncomingAttachment): IncomingAttachment {
+  const localPath = verifiedLocalPath(attachment.localPath);
   return {
     id: attachment.id,
     type: attachment.type,
     fileName: attachment.fileName,
     fileSize: attachment.fileSize,
     mimeType: attachment.mimeType,
-    localPath: attachment.localPath,
+    localPath,
     extractedText: attachment.extractedText?.slice(0, MAX_EXTRACTED_TEXT),
     parseError: attachment.parseError,
   };
 }
 
 function usableAttachment(attachment: IncomingAttachment): boolean {
-  return Boolean(attachment.localPath || attachment.extractedText);
+  return Boolean(verifiedLocalPath(attachment.localPath) || attachment.extractedText);
 }
 
 export function remoteAttachmentContextKey(message: IncomingMessage): string {
@@ -115,13 +126,18 @@ export function applyRemoteAttachmentContext(message: IncomingMessage): Incoming
 
   const currentStore = readStore();
   const now = Date.now();
+  let storeChanged = false;
   for (const [key, entry] of Object.entries(currentStore.entries)) {
-    if (now - new Date(entry.updatedAt).getTime() > CONTEXT_TTL_MS) delete currentStore.entries[key];
+    if (now - new Date(entry.updatedAt).getTime() > CONTEXT_TTL_MS) {
+      delete currentStore.entries[key];
+      storeChanged = true;
+    }
   }
 
   const key = remoteAttachmentContextKey(message);
-  const previous = currentStore.entries[key]?.attachments?.filter(usableAttachment) || [];
-  const incoming = (message.attachments || []).filter(usableAttachment).map(durableAttachment);
+  const storedPrevious = currentStore.entries[key]?.attachments || [];
+  const previous = storedPrevious.map(durableAttachment).filter(usableAttachment);
+  const incoming = (message.attachments || []).map(durableAttachment).filter(usableAttachment);
   const incomingIdentities = new Set(incoming.map(attachmentIdentity));
   const carried = previous.filter(item => !incomingIdentities.has(attachmentIdentity(item)));
   const merged: IncomingAttachment[] = [];
@@ -133,13 +149,19 @@ export function applyRemoteAttachmentContext(message: IncomingMessage): Incoming
     merged.push(durableAttachment(item));
   }
   const bounded = merged.slice(-MAX_CONTEXT_ATTACHMENTS);
-  if (incoming.length > 0) {
-    currentStore.entries[key] = {
-      updatedAt: new Date(now).toISOString(),
-      attachments: bounded,
-    };
-    writeStore(currentStore);
+  const staleStoredAttachmentRemoved = previous.length !== storedPrevious.length
+    || previous.some((item, index) => item.localPath !== storedPrevious[index]?.localPath);
+  if (incoming.length > 0 || staleStoredAttachmentRemoved) {
+    if (bounded.length === 0) delete currentStore.entries[key];
+    else {
+      currentStore.entries[key] = {
+        updatedAt: new Date(now).toISOString(),
+        attachments: bounded,
+      };
+    }
+    storeChanged = true;
   }
+  if (storeChanged) writeStore(currentStore);
 
   if (bounded.length === 0) return message;
   const carriedBlocks = carried.slice(-MAX_CONTEXT_ATTACHMENTS).map(attachmentPromptBlock);

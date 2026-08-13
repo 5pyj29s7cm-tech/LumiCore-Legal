@@ -100,6 +100,7 @@ import {
   clearPendingConfirmation,
   consumePendingConfirmation,
   formatPendingConfirmationPrompt,
+  formatPendingConfirmationRequest,
   getPendingConfirmation,
   isConfirmationCancellation,
   isExplicitConfirmationReply,
@@ -1902,7 +1903,7 @@ export async function processWithPersonality(
     pendingConfirmationCreatedThisTurn = pending;
     if (conversation) {
       setConversationActionExecutionStatus(conversation.id, effectiveUserId, 'waiting_confirmation', {
-        assistantState: formatPendingConfirmationPrompt(pending),
+        assistantState: formatPendingConfirmationRequest(pending),
         requestId,
       });
     }
@@ -1927,8 +1928,22 @@ export async function processWithPersonality(
     const usageInteractionId = `messaging_${msg.platform}_${Date.now()}`;
     let responseText = '';
     let toolRecords: ToolExecutionRecord[] = [];
-    const callbackReply = options?.onMessage ? await options.onMessage(msg) : null;
-    let deterministicEntryReply: string | null = callbackReply?.text || null;
+    let callbackReply: Awaited<ReturnType<MessageHandler>> | null = null;
+    const callbackBlockedForExternalCommit = Boolean(
+      options?.onMessage && organizationWorkRoute?.workItem.sideEffectClass === 'external_commit',
+    );
+    // The legacy handler returns only prose and cannot produce a canonical tool
+    // envelope. Never let it execute an external commit; those actions must go
+    // through the receipt-producing tool route and its exact confirmation gate.
+    if (options?.onMessage && !callbackBlockedForExternalCommit) {
+      callbackReply = await options.onMessage(msg);
+    }
+    let deterministicEntryReply: string | null = callbackReply?.text
+      || (callbackBlockedForExternalCommit
+        ? (/[㐀-鿿]/u.test(routingText)
+          ? '外部提交已停止：旧消息回调不能生成统一工具回执，请改由受确认和回执约束的工具执行。'
+          : 'The external commit was stopped because the legacy message callback cannot produce a canonical tool receipt. Use the confirmed tool route instead.')
+        : null);
     if (deterministicEntryReply) responseText = deterministicEntryReply;
 
     if (isIdentityBound && directlyAppliedMode && !deterministicEntryReply) {
@@ -1970,7 +1985,7 @@ export async function processWithPersonality(
 
       if (isPureOperationModeSwitchRequest(requestText, provisionalPlan.dispatch.flow.requestedMode)) {
         const candidate = pendingConfirmationCreatedThisTurn
-          ? formatPendingConfirmationPrompt(pendingConfirmationCreatedThisTurn)
+          ? formatPendingConfirmationRequest(pendingConfirmationCreatedThisTurn)
           : formatOperationModeSwitchResponse(directlyAppliedMode, modeSynced, requestText);
         const finalizedMode = finalizeLumiResponse({
           taskText: routingText,
@@ -1993,7 +2008,7 @@ export async function processWithPersonality(
         );
         if (pendingConfirmationCreatedThisTurn && conversation) {
           setConversationActionExecutionStatus(conversation.id, effectiveUserId, 'waiting_confirmation', {
-            assistantState: formatPendingConfirmationPrompt(pendingConfirmationCreatedThisTurn),
+            assistantState: formatPendingConfirmationRequest(pendingConfirmationCreatedThisTurn),
             requestId,
           });
         }
@@ -2219,7 +2234,7 @@ export async function processWithPersonality(
 
     toolRecords = withDesktopExecutionReceipt(toolRecords, desktopExecutionTracker);
     if (pendingConfirmationCreatedThisTurn) {
-      responseText = formatPendingConfirmationPrompt(pendingConfirmationCreatedThisTurn);
+      responseText = formatPendingConfirmationRequest(pendingConfirmationCreatedThisTurn);
     }
     let finalized = callbackReply && organizationWorkRoute?.workItem.sideEffectClass !== 'external_commit'
       ? { text: responseText || callbackReply.text, blocked: false as const }
@@ -2240,6 +2255,7 @@ export async function processWithPersonality(
       ))) || /(?:send|submit|publish|post|comment|reply|payment|purchase|sign)/i.test(record.name);
     });
     const missingOrganizationExternalCommitReceipt = organizationWorkRoute?.workItem.sideEffectClass === 'external_commit'
+      && !pendingConfirmationCreatedThisTurn
       && !organizationVerifiedTerminalReceipt;
     if (missingOrganizationExternalCommitReceipt) {
       finalized = {
@@ -2267,7 +2283,7 @@ export async function processWithPersonality(
     persistBoundMessagingMessage(msg, 'assistant', correlated.text, options?.onConversationUpdated, toolRecords);
     if (pendingConfirmationCreatedThisTurn && conversation) {
       setConversationActionExecutionStatus(conversation.id, effectiveUserId, 'waiting_confirmation', {
-        assistantState: formatPendingConfirmationPrompt(pendingConfirmationCreatedThisTurn),
+        assistantState: formatPendingConfirmationRequest(pendingConfirmationCreatedThisTurn),
         requestId,
       });
     }

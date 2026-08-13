@@ -159,7 +159,7 @@ describe('remote organization work routing integration', () => {
     expect(JSON.parse(task.context).executionPlan).toBeTruthy();
   });
 
-  it('blocks an external commit before the callback, then resumes the exact work item after admin approval', async () => {
+  it('never lets the legacy callback execute an external commit after administrator approval', async () => {
     const requestId = `remote-approval-${suffix}`;
     let callbackCalls = 0;
     const blockedReply = await processWithPersonality(
@@ -196,7 +196,7 @@ describe('remote organization work routing integration', () => {
     );
     expect(continuedReply).toContain('not complete');
     expect(continuedReply).toContain('no verified terminal receipt');
-    expect(callbackCalls).toBe(1);
+    expect(callbackCalls).toBe(0);
     const sameTaskItems = listOrganizationWorkItems(orgId, { taskId: workItem.taskId });
     expect(sameTaskItems).toHaveLength(1);
     expect(sameTaskItems[0]).toMatchObject({
@@ -206,7 +206,7 @@ describe('remote organization work routing integration', () => {
     });
   });
 
-  it('lets a bound organization administrator execute without approving their own Feishu request', async () => {
+  it('skips redundant organization self-approval without allowing the legacy callback to commit', async () => {
     const requestId = `remote-owner-no-approval-${suffix}`;
     let callbackCalls = 0;
     const reply = await processWithPersonality(
@@ -220,7 +220,8 @@ describe('remote organization work routing integration', () => {
     );
 
     expect(reply).not.toContain('等待组织管理员审批');
-    expect(callbackCalls).toBe(1);
+    expect(reply).toContain('no verified terminal receipt');
+    expect(callbackCalls).toBe(0);
     const [workItem] = listOrganizationWorkItems(orgId).filter(item => item.requestId === `feishu_bot:${requestId}`);
     expect(workItem.approvalId).toBeNull();
     expect(workItem.status).not.toBe('waiting_approval');

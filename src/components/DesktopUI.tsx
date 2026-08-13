@@ -6,7 +6,6 @@ import { sounds } from '../services/soundService';
 import {
   Rocket,
   Cpu,
-  Globe,
   Settings as SettingsIcon,
   Shield,
   Zap,
@@ -39,7 +38,6 @@ import {
   Pause,
   Mic,
   Terminal as TerminalIcon,
-  Bot,
   Monitor,
   Trash2,
   RefreshCw,
@@ -72,7 +70,8 @@ import { useApp, type OperationMode } from '@/contexts/AppContext';
 const LocalAgentSphere = lazy(() => import('./LocalAgentSphere').then(m => ({ default: m.LocalAgentSphere })));
 const NexusGlobe = lazy(() => import('./NexusGlobe/NexusGlobe').then(m => ({ default: m.NexusGlobe })));
 const InkWorldLazy = lazy(() => import('./InkWorld').then(m => ({ default: m.InkWorld })));
-import type { BackgroundWorkflowTask, WorkflowStep } from './WorkflowPanel';
+import type { BackgroundWorkflowTask, WorkflowStep } from './workflowTypes';
+import type { CommandCenterView } from './commandCenterTypes';
 import { useWakeWord } from '../hooks/useWakeWord';
 import { ErrorBoundary } from './ErrorBoundary';
 import { appConfirm } from '@/lib/appConfirm';
@@ -150,12 +149,10 @@ const Sanctuary = lazy(() => import('./Sanctuary').then(m => ({ default: m.Sanct
 const Settings = lazy(() => import('./Settings').then(m => ({ default: m.Settings })));
 const SkillCenter = lazy(() => import('./SkillCenter').then(m => ({ default: m.SkillCenter })));
 const SystemExplorer = lazy(() => import('./SystemExplorer').then(m => ({ default: m.SystemExplorer })));
-const TeamHub = lazy(() => import('./TeamHub').then(m => ({ default: m.TeamHub })));
 const TerminalWindow = lazy(() => import('./Terminal').then(m => ({ default: m.TerminalWindow })));
 const TokenDashboard = lazy(() => import('./TokenDashboard').then(m => ({ default: m.TokenDashboard })));
 const ToolPanel = lazy(() => import('./ToolPanel').then(m => ({ default: m.ToolPanel })));
 const VoiceTrainingDialog = lazy(() => import('./VoiceTrainingDialog').then(m => ({ default: m.VoiceTrainingDialog })));
-const WorkflowPanel = lazy(() => import('./WorkflowPanel'));
 
 type ProactiveChatDetail = {
   type?: string;
@@ -1507,6 +1504,7 @@ export function DesktopUI({
 }) {
   // Camera and Environment state
   const [viewMode, setViewMode] = useState<'personal' | 'world'>('personal');
+  const [nexusReturnTarget, setNexusReturnTarget] = useState<'home' | 'command-center'>('home');
   const [syncRate, setSyncRate] = useState(1);
   const cameraZ = useMotionValue(viewMode === 'personal' ? 0 : -800);
 
@@ -1538,10 +1536,12 @@ export function DesktopUI({
   const canCustomizeLumiAppearance = workDomain !== 'work'
     || ['owner', 'admin'].includes(String(orgConnection?.orgRole || ''));
 
-  const [openWindows, setOpenWindows] = useState<string[]>(activeTab !== 'home' && activeTab !== 'knowledge' ? [activeTab] : []);
+  const initialCommandCenterOpen = activeTab === 'chat' || activeTab === 'team' || activeTab === 'command-center';
+  const initialWindowId = activeTab !== 'home' && activeTab !== 'knowledge' && !initialCommandCenterOpen ? activeTab : null;
+  const [openWindows, setOpenWindows] = useState<string[]>(initialWindowId ? [initialWindowId] : []);
   const [minimizedWindows, setMinimizedWindows] = useState<string[]>([]);
-  const [focusedWindow, setFocusedWindow] = useState<string | null>(activeTab !== 'home' && activeTab !== 'knowledge' ? activeTab : null);
-  const [windowOrder, setWindowOrder] = useState<string[]>(activeTab !== 'home' && activeTab !== 'knowledge' ? [activeTab] : []);
+  const [focusedWindow, setFocusedWindow] = useState<string | null>(initialWindowId);
+  const [windowOrder, setWindowOrder] = useState<string[]>(initialWindowId ? [initialWindowId] : []);
   const [knowledgeOpen, setKnowledgeOpen] = useState(activeTab === 'knowledge');
   const [knowledgeLoaded, setKnowledgeLoaded] = useState(activeTab === 'knowledge');
   const [organizationWorkspaceView, setOrganizationWorkspaceView] = useState<OrganizationWorkspaceView>('dashboard');
@@ -1567,8 +1567,9 @@ export function DesktopUI({
     };
   }, [knowledgeRuntimeState, orgConnection?.orgId, workDomain]);
   const knowledgeRefreshSequenceRef = useRef(0);
-  const [chatOpen, setChatOpen] = useState(false);
-  const [chatLoaded, setChatLoaded] = useState(false);
+  const [chatOpen, setChatOpen] = useState(initialCommandCenterOpen);
+  const [chatLoaded, setChatLoaded] = useState(initialCommandCenterOpen);
+  const [commandCenterView, setCommandCenterView] = useState<CommandCenterView>('office');
   const [chatPrefill, setChatPrefill] = useState('');
   const [chatPrefillSource, setChatPrefillSource] = useState('proactive');
   const [chatAttachmentRequest, setChatAttachmentRequest] = useState<ChatAttachmentRequest | null>(null);
@@ -1667,6 +1668,20 @@ export function DesktopUI({
   const [isCompactWindowMode, setIsCompactWindowMode] = useState(false);
   const isWallpaperModeRef = useRef(false);
   const closeToBackgroundSyncRef = useRef(false);
+
+  // Command Center and Wallpaper are both deliberate focus surfaces. Either
+  // one is enough to keep Lumi above other apps; normal stacking returns only
+  // after both have closed. Widget mode keeps its existing topmost contract.
+  useEffect(() => {
+    const shouldStayOnTop = chatOpen || isWallpaperMode || isDesktopWidgetMode;
+    void systemService.setAlwaysOnTop(shouldStayOnTop).catch(error => {
+      console.error('Failed to synchronize Lumi window level:', error);
+    });
+  }, [chatOpen, isDesktopWidgetMode, isWallpaperMode]);
+
+  useEffect(() => () => {
+    void systemService.setAlwaysOnTop(false).catch(() => {});
+  }, []);
   const desktopWidgetFallbackRef = useRef<DesktopWidgetFallbackState | null>(null);
   const wallpaperAutomationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wallpaperWasEnabledBeforeAutomationRef = useRef(false);
@@ -1686,16 +1701,33 @@ export function DesktopUI({
     if (isWallpaperMode) setWallpaperWorkPromptVisible(false);
   }, [isWallpaperMode]);
 
+  const syncWallpaperModeView = useCallback((enabled: boolean) => {
+    isWallpaperModeRef.current = enabled;
+    setIsWallpaperMode(enabled);
+    systemService.syncWallpaperDocumentMode(enabled);
+  }, []);
+
   useEffect(() => {
     if (chatOpen) setWallpaperWorkPromptVisible(false);
   }, [chatOpen]);
+
+  const openCommandCenter = useCallback((view: CommandCenterView = 'office') => {
+    setCommandCenterView(view === 'team' ? 'office' : view);
+    setOpenWindows(previous => previous.filter(windowId => !['chat', 'team', 'command-center'].includes(windowId)));
+    setMinimizedWindows(previous => previous.filter(windowId => !['chat', 'team', 'command-center'].includes(windowId)));
+    setWindowOrder(previous => previous.filter(windowId => !['chat', 'team', 'command-center'].includes(windowId)));
+    setFocusedWindow(previous => ['chat', 'team', 'command-center'].includes(previous || '') ? null : previous);
+    setChatLoaded(true);
+    setChatOpen(true);
+    setActiveTab('command-center');
+  }, [setActiveTab]);
 
   const openProactiveChat = useCallback((detail: ProactiveChatDetail) => {
     setIsNotificationPanelOpen(false);
     setChatPrefillSource('proactive_context');
     setChatPrefill(formatProactiveChatPrefill(detail, lang));
-    setChatOpen(true);
-  }, [lang]);
+    openCommandCenter('office');
+  }, [lang, openCommandCenter]);
 
   useEffect(() => {
     const handleOpenProactiveChat = (event: Event) => {
@@ -1719,13 +1751,11 @@ export function DesktopUI({
       }
       setChatAttachmentRequest(detail);
       setKnowledgeOpen(false);
-      setChatLoaded(true);
-      setChatOpen(true);
-      setActiveTab('chat');
+      openCommandCenter('office');
     };
     window.addEventListener('lumi:reference-file-in-chat', handleFileReference);
     return () => window.removeEventListener('lumi:reference-file-in-chat', handleFileReference);
-  }, [lang, orgConnection?.connected, orgConnection?.orgId, setActiveTab, workDomain]);
+  }, [lang, openCommandCenter, orgConnection?.connected, orgConnection?.orgId, workDomain]);
 
   const getDefaultDesktopIconPosition = useCallback((index: number) => ({
     x: desktopIconLayout.startX + (index % desktopIconColumns) * desktopIconLayout.cellWidth,
@@ -1734,12 +1764,9 @@ export function DesktopUI({
 
   // Desktop icon layout: absolute positioning with viewport-aware columns.
   const desktopIcons = [
-    { id: 'chat', labelKey: 'chat', icon: <MessageSquare size={24} />, colorClass: 'from-green-500 to-emerald-600', windowId: 'chat' },
     { id: 'tools', labelKey: 'tools', icon: <Wrench size={24} />, colorClass: 'from-amber-500 to-orange-600', windowId: 'tools' },
     { id: 'skills', labelKey: 'skills', icon: <Sparkles size={24} />, colorClass: 'from-emerald-500 to-teal-600', windowId: 'skills' },
-    { id: 'team', labelKey: 'team', icon: <Bot size={24} />, colorClass: 'from-cyan-500 to-blue-600', windowId: 'team' },
     { id: 'memory-avatar', labelKey: 'memoryAvatars', icon: <Castle size={24} />, colorClass: 'from-fuchsia-500 to-purple-600', windowId: 'memory-avatar' },
-    { id: 'personalization', labelKey: 'personalization', icon: <Brush size={24} />, colorClass: 'from-cyan-400 to-indigo-600', windowId: 'personalization' },
   ];
   const desktopIconAreaHeight = Math.max(
     desktopIconLayout.compact ? 300 : 400,
@@ -1857,7 +1884,6 @@ export function DesktopUI({
   const showMcpPanel = false;
   const [agentStatus, setAgentStatus] = useState<'idle' | 'thinking' | 'background' | 'executing' | 'waiting_confirmation' | 'done' | 'error'>('idle');
   const [workflowSteps, setWorkflowSteps] = useState<WorkflowStep[]>([]);
-  const [backgroundWorkflowTasks, setBackgroundWorkflowTasks] = useState<BackgroundWorkflowTask[]>([]);
   const [pendingOperationMode, setPendingOperationMode] = useState<OperationMode | null>(null);
   const seenWorkflowToolEvents = useRef<Set<string>>(new Set());
   const backgroundTaskStatusRef = useRef<Map<string, string>>(new Map());
@@ -2881,13 +2907,17 @@ export function DesktopUI({
         if (detail.tab === 'org' && detail.sub) {
           queueOrganizationWorkspaceRoute(detail.sub, detail.articleId);
         }
+        if (detail.tab === 'chat' || detail.tab === 'command-center' || detail.tab === 'team') {
+          openCommandCenter(detail.tab === 'team' ? 'team' : 'office');
+          return;
+        }
         // Anyone can open the org tab — join/create/connect handled by OrgPortal
         setActiveTab(detail.tab);
       }
     };
     window.addEventListener('lumi:navigate', handler);
     return () => window.removeEventListener('lumi:navigate', handler);
-  }, [setActiveTab]);
+  }, [openCommandCenter, setActiveTab]);
 
   const openMemoryAvatar = useCallback(async () => {
     try { sounds.playClick(); } catch {}
@@ -2924,14 +2954,25 @@ export function DesktopUI({
       wallpaperAutomationTimerRef.current = null;
     }
 
-    setIsWallpaperMode(enabled);
-    void systemService.setWallpaperMode(enabled);
+    const previous = isWallpaperModeRef.current;
+    syncWallpaperModeView(enabled);
+    void systemService.setWallpaperMode(enabled).then(actual => {
+      syncWallpaperModeView(actual);
+    }).catch(error => {
+      syncWallpaperModeView(previous);
+      console.error('Wallpaper mode transition failed:', error);
+      toast.error('Wallpaper mode could not be changed');
+    });
 
     if (enabled && options.timeoutMs) {
       wallpaperAutomationTimerRef.current = setTimeout(() => {
         if (!wallpaperWasEnabledBeforeAutomationRef.current) {
-          setIsWallpaperMode(false);
-          void systemService.setWallpaperMode(false);
+          syncWallpaperModeView(false);
+          void systemService.setWallpaperMode(false).then(actual => {
+            syncWallpaperModeView(actual);
+          }).catch(error => {
+            console.error('Wallpaper mode restore failed:', error);
+          });
         }
         wallpaperWasEnabledBeforeAutomationRef.current = false;
         wallpaperAutomationTimerRef.current = null;
@@ -2948,7 +2989,38 @@ export function DesktopUI({
         icon: enabled ? <Sparkles className="text-celestial-saturn" /> : <Box className="text-white/40" />
       });
     }
-  }, [t, addNotification]);
+  }, [t, addNotification, syncWallpaperModeView]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: undefined | (() => void);
+
+    void systemService.getWallpaperMode()
+      .then(enabled => {
+        if (!disposed) syncWallpaperModeView(enabled);
+      })
+      .catch(error => console.error('Failed to read wallpaper mode:', error));
+
+    const hasTauriRuntime = Boolean(
+      (window as any).__TAURI_INTERNALS__ || (window as any).__TAURI_IPC__ || (window as any).__TAURI__,
+    );
+    if (hasTauriRuntime) {
+      void import('@tauri-apps/api/event')
+        .then(({ listen }) => listen<{ enabled?: boolean }>('lumi:wallpaper-mode-changed', event => {
+          if (!disposed) syncWallpaperModeView(Boolean(event.payload?.enabled));
+        }))
+        .then(stop => {
+          if (disposed) stop();
+          else unlisten = stop;
+        })
+        .catch(error => console.error('Failed to listen for wallpaper mode changes:', error));
+    }
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [syncWallpaperModeView]);
 
   const toggleWallpaperMode = useCallback(() => {
     applyWallpaperMode(!isWallpaperMode);
@@ -3013,42 +3085,6 @@ export function DesktopUI({
     socket.on('mcp:activity', handler);
     return () => { socket.off('mcp:activity', handler); };
   }, [socket, addNotification]);
-
-  const upsertBackgroundWorkflowTask = useCallback((task: BackgroundWorkflowTask) => {
-    if (!task?.id) return;
-    setBackgroundWorkflowTasks(prev => {
-      const existing = prev.findIndex(item => item.id === task.id);
-      const nextTask = { ...prev[existing], ...task };
-      const next = existing >= 0
-        ? prev.map(item => item.id === task.id ? nextTask : item)
-        : [nextTask, ...prev];
-      return next.slice(0, 6);
-    });
-
-    if (['completed', 'failed', 'cancelled'].includes(task.status)) {
-      window.setTimeout(() => {
-        setBackgroundWorkflowTasks(prev => prev.filter(item => item.id !== task.id));
-        backgroundTaskStatusRef.current.delete(task.id);
-      }, 12000);
-    }
-  }, []);
-
-  const cancelBackgroundWorkflowTask = useCallback((taskId: string) => {
-    socket?.emit('agent:background_cancel', { taskId });
-    setBackgroundWorkflowTasks(prev => prev.map(task =>
-      task.id === taskId ? { ...task, status: 'cancelling' } : task
-    ));
-  }, [socket]);
-
-  useEffect(() => {
-    fetch('/api/autonomy/background-tasks', { credentials: 'include' })
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        if (!Array.isArray(data?.tasks)) return;
-        data.tasks.slice(0, 6).forEach((task: BackgroundWorkflowTask) => upsertBackgroundWorkflowTask(task));
-      })
-      .catch(() => {});
-  }, [upsertBackgroundWorkflowTask]);
 
   // Workflow status listener — agent:status, agent:tool_call, agent:response, agent:error
   useEffect(() => {
@@ -3309,14 +3345,12 @@ export function DesktopUI({
     const onDelegation = (data: any) => {
       const task = normalizeBackgroundTask(data);
       if (!task) return;
-      upsertBackgroundWorkflowTask(task);
       recordBackgroundTaskStep(task);
     };
 
     const onBackgroundTaskUpdate = (data: any) => {
       const task = normalizeBackgroundTask(data);
       if (!task) return;
-      upsertBackgroundWorkflowTask(task);
       recordBackgroundTaskStep(task);
     };
 
@@ -3447,7 +3481,6 @@ export function DesktopUI({
     t.workflowError,
     t.workflowResponseReady,
     t.workflowToolFailed,
-    upsertBackgroundWorkflowTask,
     workDomain,
   ]);
 
@@ -3586,9 +3619,8 @@ export function DesktopUI({
       setKnowledgeOpen(prev => !prev);
       return;
     }
-    if (tab === 'chat') {
-      setChatOpen(prev => !prev);
-      setActiveTab(tab);
+    if (tab === 'chat' || tab === 'command-center' || tab === 'team') {
+      openCommandCenter(tab === 'team' ? 'team' : 'office');
       return;
     }
     if (tab === 'memory-avatar') {
@@ -3607,7 +3639,7 @@ export function DesktopUI({
       setWindowOrder(prev => [...prev, tab]);
     }
     setActiveTab(tab);
-  }, [focusedWindow, minimizedWindows, openMemoryAvatar, openWindows, setActiveTab]);
+  }, [focusedWindow, minimizedWindows, openCommandCenter, openMemoryAvatar, openWindows, setActiveTab]);
 
   const closeWindow = useCallback((tab: string) => {
     try { sounds.playClick(); } catch {}
@@ -3693,7 +3725,6 @@ export function DesktopUI({
     const appWindow = windowApi.getCurrentWindow();
 
     await appWindow.show().catch(() => {});
-    await appWindow.setAlwaysOnTop(false).catch(() => {});
     await appWindow.setSkipTaskbar(false).catch(() => {});
     await appWindow.setShadow(false).catch(() => {});
     await appWindow.setResizable(true).catch(() => {});
@@ -3770,11 +3801,14 @@ export function DesktopUI({
           toast.error(fallbackErr?.message || err?.message || (uiMessage('desktop-ui.failed-to-expand-lumi.3f04f30125', (lang === 'zh') ? 'zh' : 'en')));
         }
       }
+      // Native and fallback widget exit both restore ordinary window flags.
+      // Re-apply Lumi's independent Command Center / Wallpaper contract.
+      await systemService.setAlwaysOnTop(chatOpen || isWallpaperModeRef.current).catch(() => {});
     }
     if (nextSurface) {
       window.setTimeout(() => toggleWindow(nextSurface), 120);
     }
-  }, [isTauri, lang, restoreDesktopWidgetFallback, toggleWindow]);
+  }, [chatOpen, isTauri, lang, restoreDesktopWidgetFallback, toggleWindow]);
 
   const hideDesktopWidgetMode = async () => {
     try { sounds.playClick(); } catch {}
@@ -3806,6 +3840,7 @@ export function DesktopUI({
         if (value === 'sync') return 'devices';
         if (value === 'avatar-studio' || value === 'sound') return 'personalization';
         if (value === 'world' || value === 'nexus' || value === 'nexus-view' || value === 'cloud-canvas') return 'nexus';
+        if (value === 'chat' || value === 'team' || value === 'command-center') return 'command-center';
         return value;
       };
 
@@ -3834,6 +3869,7 @@ export function DesktopUI({
           return;
         }
         if (windowId === 'nexus') {
+          setNexusReturnTarget('home');
           setViewMode('world');
           setActiveTab('home');
           return;
@@ -3851,9 +3887,8 @@ export function DesktopUI({
           setActiveTab('knowledge');
           return;
         }
-        if (windowId === 'chat') {
-          setChatOpen(true);
-          setActiveTab('chat');
+        if (windowId === 'command-center') {
+          openCommandCenter(value === 'team' ? 'team' : 'office');
           return;
         }
         if (windowId === 'notifications') {
@@ -3907,8 +3942,9 @@ export function DesktopUI({
           setKnowledgeOpen(false);
           return;
         }
-        if (windowId === 'chat') {
+        if (windowId === 'command-center') {
           setChatOpen(false);
+          setActiveTab('home');
           return;
         }
         if (windowId === 'nexus') {
@@ -4119,6 +4155,18 @@ export function DesktopUI({
         }
         if (registeredSurface) {
           if (registeredSurface.settingsSection) setSettingsSection(registeredSurface.settingsSection);
+          const requestedCommandView = registeredSurface.commandCenterViewByAction?.[action];
+          if (requestedCommandView) {
+            openCommandCenter(requestedCommandView);
+            respond({
+              ok: true,
+              action,
+              target: registeredSurface.target,
+              surface: registeredSurface.id,
+              view: requestedCommandView,
+            });
+            return;
+          }
           if (action === 'open_avatar_studio') setPersonalizationSection('appearance');
           if (action === 'open_sound_studio') setPersonalizationSection('voice');
           openSurface(registeredSurface.target);
@@ -4149,6 +4197,7 @@ export function DesktopUI({
     focusedWindow,
     isDesktopWidgetMode,
     openMemoryAvatar,
+    openCommandCenter,
     openWindows,
     operationMode,
     orgConnection?.connected,
@@ -4178,6 +4227,8 @@ export function DesktopUI({
         appLauncherOpen: isSearchOpen,
         knowledgeOpen,
         chatOpen,
+        commandCenterOpen: chatOpen,
+        commandCenterView,
         notificationsOpen: isNotificationPanelOpen,
         memoryAvatarOpen: memoryLabOpen,
         meetingOpen: meetingNotesOpen || operationMode === 'meeting',
@@ -4223,6 +4274,8 @@ export function DesktopUI({
           appLauncherOpen: isSearchOpen,
           knowledgeOpen,
           chatOpen,
+          commandCenterOpen: chatOpen,
+          commandCenterView,
           notificationsOpen: isNotificationPanelOpen,
           memoryAvatarOpen: memoryLabOpen,
           runtimeLogOpen: openWindows.includes('kernel'),
@@ -4277,6 +4330,7 @@ export function DesktopUI({
     availableOrganizationWorkspaceViews,
     callState,
     chatOpen,
+    commandCenterView,
     clientPermissions,
     clientRuntime,
     callError,
@@ -4322,12 +4376,13 @@ export function DesktopUI({
 
   const desktopAppEntries = desktopIcons.map(def => ({
     id: def.windowId,
-    label: (t as any)[def.labelKey] || def.labelKey,
+    label: 'label' in def ? def.label : (t as any)[def.labelKey] || def.labelKey,
     icon: def.icon,
     color: def.colorClass,
   }));
   const utilityAppEntries = [
     { id: 'knowledge', label: t.knowledgeBase || 'Knowledge Base', icon: <BrainCircuit size={24} />, color: 'from-cyan-400 to-blue-600' },
+    { id: 'personalization', label: t.personalization || 'Personalization', icon: <Brush size={24} />, color: 'from-cyan-400 to-indigo-600' },
     { id: 'notifications', label: t.notificationsLabel || 'Notifications', icon: <Bell size={24} />, color: 'from-amber-500 to-orange-600' },
     { id: 'terminal', label: t.terminal || 'Terminal', icon: <TerminalIcon size={24} />, color: 'from-green-500 to-emerald-600' },
     { id: 'voice', label: t.voiceLabel || 'Voice', icon: <Volume2 size={24} />, color: 'from-pink-500 to-rose-600' },
@@ -4359,7 +4414,6 @@ export function DesktopUI({
     if (windowId === 'personality') return { w: '1050px', h: '720px' };
     if (windowId === 'generate') return { w: '1050px', h: '720px' };
     if (windowId === 'tools') return { w: '850px', h: '620px' };
-    if (windowId === 'team') return { w: '900px', h: '700px' };
     if (windowId === 'github-mcp') return { w: '850px', h: '620px' };
     if (windowId === 'notifications') return { w: '700px', h: '550px' };
     if (windowId === 'reminders') return { w: '650px', h: '620px' };
@@ -4374,7 +4428,7 @@ export function DesktopUI({
   const dockApps = [
     ...appIcons,
     ...openWindows
-      .filter(windowId => windowId !== 'chat' && !appIcons.some(app => app.id === windowId))
+      .filter(windowId => windowId !== 'chat' && windowId !== 'personalization' && !appIcons.some(app => app.id === windowId))
       .map(getWindowMeta),
   ];
   const operationModeOptions = [
@@ -4414,21 +4468,6 @@ export function DesktopUI({
   const pendingOperationModeOption = pendingOperationMode
     ? operationModeOptions.find(m => m.id === pendingOperationMode)
     : null;
-  const workflowHasExecution = workflowSteps.some(step =>
-    step.type === 'background' ||
-    step.type === 'confirmation' ||
-    step.type === 'tool_start' ||
-    step.type === 'tool_result' ||
-    step.type === 'error'
-  );
-  const workflowPanelVisible =
-    !chatOpen && (
-      agentStatus !== 'idle' ||
-      workflowSteps.length > 0 ||
-      workflowHasExecution ||
-      backgroundWorkflowTasks.length > 0
-    );
-
   const tutorialLabel = t.showTutorial || (uiMessage('desktop-ui.tutorial.67f6f569ce', (lang === 'zh') ? 'zh' : 'en'));
 
   const handleShellContextMenu = useCallback((e: React.MouseEvent) => {
@@ -4646,10 +4685,15 @@ export function DesktopUI({
               </motion.div>
 
               <motion.button
-                onClick={() => setViewMode('personal')}
+                onClick={() => {
+                  setViewMode('personal');
+                  if (nexusReturnTarget === 'command-center') openCommandCenter('office');
+                }}
                 className="lumi-ink-return-button group px-10 py-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full text-xs font-black text-white/60 tracking-[0.4em] uppercase transition-all backdrop-blur-2xl hover:text-white hover:border-white/20"
               >
-                {t.focusPersonalTerritory || 'Focus Personal Territory'}
+                {nexusReturnTarget === 'command-center'
+                  ? `${t.back || 'Back'} · ${uiMessage('command-center.title.c5bb6d0f01')}`
+                  : (t.focusPersonalTerritory || 'Focus Personal Territory')}
               </motion.button>
             </div>
 
@@ -4701,6 +4745,8 @@ export function DesktopUI({
               onCloseOrganization={() => {
                 if (activeTab === 'org') setActiveTab('home');
               }}
+              commandCenterOpen={chatOpen}
+              onOpenCommandCenter={() => openCommandCenter('office')}
             />
           </div>
 
@@ -4741,7 +4787,7 @@ export function DesktopUI({
                   title={isWallpaperMode ? (uiMessage('desktop-ui.exit-wallpaper-mode.9b9dd6514d', (lang === 'zh') ? 'zh' : 'en')) : (uiMessage('desktop-ui.wallpaper-mode.eb93c52005', (lang === 'zh') ? 'zh' : 'en'))}
                >
                  <Zap size={10} className={isWallpaperMode ? 'animate-pulse' : ''} />
-                 <span className="lumi-shell-wallpaper-label">{isWallpaperMode ? 'Fusion' : (uiMessage('desktop-ui.wallpaper.b2aa8da019', (lang === 'zh') ? 'zh' : 'en'))}</span>
+                 <span className="lumi-shell-wallpaper-label">{isWallpaperMode ? 'Fusion' : 'Wallpaper'}</span>
                </button>
             </div>
 
@@ -4854,17 +4900,6 @@ export function DesktopUI({
               : 'opacity-100 pointer-events-auto'
           }`}
         >
-          <button 
-            onClick={() => setViewMode(viewMode === 'personal' ? 'world' : 'personal')}
-            className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all group relative ${
-              viewMode === 'world' ? 'bg-celestial-saturn text-black' : 'bg-white/5 text-white/40 hover:bg-white/10'
-            }`}
-          >
-            {viewMode === 'world' ? <Cpu size={24} /> : <Globe size={24} />}
-            <div className="absolute -top-12 left-1/2 -translate-x-1/2 px-3 py-1 bg-black/80 rounded-lg text-xs font-black uppercase text-white opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-              {viewMode === 'world' ? (t.personalView || 'Personal View') : (t.nexusView || 'Nexus View')}
-            </div>
-          </button>
           <button
             data-lumi-target="knowledge"
             onClick={() => setKnowledgeOpen(prev => !prev)}
@@ -4879,10 +4914,24 @@ export function DesktopUI({
               {t.knowledgeBase || 'Knowledge Base'}
             </div>
           </button>
+          <button
+            data-lumi-target="personalization"
+            onClick={() => toggleWindow('personalization')}
+            className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all group relative ${
+              openWindows.includes('personalization')
+                ? 'bg-gradient-to-br from-cyan-400 to-indigo-600 text-white shadow-lg'
+                : 'bg-white/5 text-white/40 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <Brush size={24} />
+            <div className="absolute -top-12 left-1/2 -translate-x-1/2 px-3 py-1 bg-black/80 rounded-lg text-xs font-black uppercase text-white opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+              {t.personalization || 'Personalization'}
+            </div>
+          </button>
           <div className="lumi-dock-separator h-8 w-px shrink-0 bg-white/10 mx-2" />
           <AnimatePresence>
             {dockApps.map(app => {
-              const isActive = openWindows.includes(app.id) || (app.id === 'chat' && chatOpen);
+              const isActive = openWindows.includes(app.id) || (app.id === 'command-center' && chatOpen);
               return (
               <motion.button
                 key={app.id}
@@ -4891,7 +4940,7 @@ export function DesktopUI({
                 onClick={() => toggleWindow(app.id)}
                 className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all group relative ${
                   isActive
-                    ? `bg-gradient-to-br ${app.id === focusedWindow || app.id === 'chat' ? app.color : 'from-white/10 to-white/5'} text-white shadow-lg ${minimizedWindows.includes(app.id) ? 'opacity-40 translate-y-2' : ''}`
+                    ? `bg-gradient-to-br ${app.id === focusedWindow || app.id === 'command-center' ? app.color : 'from-white/10 to-white/5'} text-white shadow-lg ${minimizedWindows.includes(app.id) ? 'opacity-40 translate-y-2' : ''}`
                     : 'bg-white/5 text-white/40 hover:bg-white/10'
                 }`}
               >
@@ -5151,9 +5200,9 @@ export function DesktopUI({
             <div className="lumi-desktop-icon-canvas relative flex-1 w-full" style={{ margin: 0, padding: 0, minHeight: desktopIconAreaHeight }}>
               {desktopIcons.map((def, i) => {
                 const { x, y } = getDefaultDesktopIconPosition(i);
-                const label = (t as any)[def.labelKey] || def.labelKey;
-                const isIconOpen = openWindows.includes(def.windowId) || (def.windowId === 'chat' && chatOpen);
-                const isIconFocused = focusedWindow === def.windowId || (def.windowId === 'chat' && chatOpen);
+                const label = 'label' in def ? def.label : (t as any)[def.labelKey] || def.labelKey;
+                const isIconOpen = openWindows.includes(def.windowId) || (def.windowId === 'command-center' && chatOpen);
+                const isIconFocused = focusedWindow === def.windowId || (def.windowId === 'command-center' && chatOpen);
                 const handleClick = () => {
                   toggleWindow(def.windowId);
                 };
@@ -5486,19 +5535,6 @@ export function DesktopUI({
         )}
       </AnimatePresence>
 
-      {workflowPanelVisible && (
-        <Suspense fallback={null}>
-          <WorkflowPanel
-            visible={true}
-            agentStatus={agentStatus}
-            steps={workflowSteps}
-            t={t}
-            placement={isWallpaperMode ? 'center' : 'corner'}
-            backgroundTasks={backgroundWorkflowTasks}
-            onCancelBackgroundTask={cancelBackgroundWorkflowTask}
-          />
-        </Suspense>
-      )}
       <CursorGlow />
       <AnimatePresence>
         {wallpaperWorkPromptVisible && !isWallpaperMode && !chatOpen && (
@@ -5604,8 +5640,6 @@ export function DesktopUI({
                     <PersonalityEditor t={t} />
                   ) : windowId === 'tools' ? (
                     <ToolPanel />
-                  ) : windowId === 'team' ? (
-                    <TeamHub t={t} />
                   ) : windowId === 'github-mcp' ? (
                     <GitHubMCPBrowser t={t} />
                   ) : windowId === 'notifications' ? (
@@ -5684,7 +5718,7 @@ export function DesktopUI({
                     </div>
                   ) : windowId === 'terminal' ? (
                     <TerminalWindow t={t} onClose={() => closeWindow('terminal')} isActive={focusedWindow === 'terminal'} />
-                  ) : windowId === 'chat' ? (
+                  ) : windowId === 'chat' || windowId === 'team' || windowId === 'command-center' ? (
                     // Chat is now fullscreen overlay — this case should not be reached
                     null
                   ) : renderTabContent(windowId)}
@@ -5718,7 +5752,16 @@ export function DesktopUI({
             t={t}
             user={user}
             isOpen={chatOpen}
-            onClose={() => { setChatOpen(false); setChatPrefill(''); setChatPrefillSource('proactive'); }}
+            onClose={() => { setChatOpen(false); setActiveTab('home'); setChatPrefill(''); setChatPrefillSource('proactive'); }}
+            layout="command-center"
+            commandCenterView={commandCenterView}
+            onCommandCenterViewChange={setCommandCenterView}
+            onOpenNexus={() => {
+              setChatOpen(false);
+              setNexusReturnTarget('command-center');
+              setViewMode('world');
+              setActiveTab('home');
+            }}
             prefillMessage={chatPrefill}
             prefillSource={chatPrefillSource}
             onPrefillConsumed={() => { setChatPrefill(''); setChatPrefillSource('proactive'); }}
