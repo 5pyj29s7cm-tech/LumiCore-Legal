@@ -1627,6 +1627,7 @@ describe('semi-automated legal workflows', () => {
     expect(legalHubSource).toContain('legal_generate_litigation_packet');
     expect(legalHubSource).toContain('legal_external_research_plan');
     expect(legalHubSource).toContain('buildLegalCaseReadiness');
+    expect(legalHubSource).toContain('evaluateLegalCaseWorkflow');
     expect(legalHubSource).toContain('LEGAL_CASE_READINESS_TOOLS');
     expect(legalHubSource).not.toContain('buildLegalCaseActionSummary');
     expect(legalHubSource).not.toContain('Case Action Board');
@@ -1637,6 +1638,7 @@ describe('semi-automated legal workflows', () => {
     expect(uiMessagesSource).toContain('办案闭环');
     expect(legalHubSource).toContain('persistCase: true');
     expect(legalHubSource).toContain('legal_finalize_delivery_package');
+    expect(legalHubSource).toContain('onAddMaterial={!useOrgCases ? toolAddMaterial : undefined}');
     expect(legalHubSource).toContain('legal_process_notice_link');
     expect(legalHubSource).not.toContain('处理短信链接');
     expect(uiMessagesSource).toContain('处理短信链接');

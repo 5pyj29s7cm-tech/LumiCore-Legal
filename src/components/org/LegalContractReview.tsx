@@ -3,7 +3,7 @@ import { AlertCircle, AlertTriangle, Check, FileText, HelpCircle, Loader2, Shiel
 import { toast } from 'sonner';
 import { useApp } from '../../contexts/AppContext';
 import { useT } from '../../lib/useT';
-import type { LegalCaseFile } from '../../lib/legalCaseStore';
+import type { LegalCaseFile, LegalCaseMaterial } from '../../lib/legalCaseStore';
 import { LegalCaseContextBar } from './LegalCaseContextBar';
 import { uiMessage } from '../../i18n/uiMessages';
 import {
@@ -14,7 +14,13 @@ import {
 
 type RiskItem = ChinaContractRisk;
 
-export function LegalContractReview({ caseFile }: { caseFile?: LegalCaseFile | null }) {
+export function LegalContractReview({
+  caseFile,
+  onAddMaterial,
+}: {
+  caseFile?: LegalCaseFile | null;
+  onAddMaterial?: (type: LegalCaseMaterial['type'], title: string, content?: string, source?: LegalCaseMaterial['source']) => void;
+}) {
   const t = useT();
   const { workDomain, orgConnection } = useApp();
   const isZh = t.langCode !== 'en';
@@ -93,6 +99,10 @@ export function LegalContractReview({ caseFile }: { caseFile?: LegalCaseFile | n
       setResult(text);
       setRisks(parsedRisks);
       setSelectedRisk(parsedRisks[0] || null);
+      if (caseFile?.id && onAddMaterial) {
+        const caseTitle = caseFile.title || caseFile.party || caseFile.caseNumber || uiMessage('legal-case-search.case.8a53cf13fb');
+        onAddMaterial('contract', `${caseTitle} ${uiMessage('legal-contract-review.contract-review.d4cc309459')}`, text, 'tool');
+      }
       if (caseFile?.id) {
         window.dispatchEvent(new CustomEvent('lumi:org-legal-cases-changed', {
           detail: { caseId: caseFile.id, toolName: 'legal_review_contract' },
