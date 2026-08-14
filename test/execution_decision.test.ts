@@ -221,6 +221,7 @@ describe('Lumi execution decision', () => {
       'client_health_check',
       'adapter_registry_list',
       'adapter_health_check',
+      'adapter_auto_recover',
       'client_self_repair',
       'client_action',
       'client_repair_skill',

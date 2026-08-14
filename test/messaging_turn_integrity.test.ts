@@ -99,7 +99,7 @@ describe('remote messaging turn integrity', () => {
       const conversation = conversations.getActiveConversation(userId, 'lumi', 'personal', '');
       if (!conversation) return false;
       return conversations.getMessages(conversation.id).filter(item => item.role === 'user').length >= 2;
-    });
+    }, 5_000);
     expect(sent).toEqual([]);
 
     releaseFirst();

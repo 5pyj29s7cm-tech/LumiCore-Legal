@@ -30,6 +30,7 @@ import {
   setUnifiedRuntimeSupervisor,
   UnifiedRuntimeSupervisor,
 } from "./unified_supervisor";
+import { enforceProductVariantSkillBaseline } from "./product_variant_skills";
 
 interface BootstrapContext {
   server: any;
@@ -265,8 +266,12 @@ export async function bootstrap(ctx: BootstrapContext) {
   // depended on an MCP/CAD tool is not failed merely because startup discovery
   // was still in flight.
   const defaultSkillsInstalled = ensureProductVariantSkills();
+  const inheritedSkillsDisabled = enforceProductVariantSkillBaseline();
   if (defaultSkillsInstalled.length > 0) {
     console.log(`[Variant] Installed default ${PRODUCT_VARIANT.productLine} skills: ${defaultSkillsInstalled.join(', ')}`);
+  }
+  if (inheritedSkillsDisabled.length > 0) {
+    console.log(`[Variant] Disabled inherited non-${PRODUCT_VARIANT.productLine} skills: ${inheritedSkillsDisabled.join(', ')}`);
   }
   registerMCPTools(io).then(mcpTools => {
     if (mcpTools.length > 0) {

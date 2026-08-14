@@ -24,6 +24,7 @@ import {
   normalizeIndustryProductLine,
   type IndustryWorkflowContract,
 } from './workflow_contracts';
+import { workflowWorkspaceContext } from './workspace_context';
 
 export interface IndustryWorkflowScope {
   userId: string;
@@ -125,9 +126,13 @@ function buildTaskSummary(contract: IndustryWorkflowContract, sourceInput: strin
 }
 
 function buildHandoffPrompt(task: WorkTakeoverTask, contract: IndustryWorkflowContract): string {
+  const workspace = parseObject(workflowMetadata(task).context?.industryWorkspace);
   return [
     `Continue the existing industry workflow task ${task.id}; do not create a duplicate task.`,
     `Workflow: ${contract.title} (${contract.productLine}/${contract.entryId}).`,
+    workspace.id
+      ? `Bound ${String(workspace.kind || 'business')} workspace: ${String(workspace.name || workspace.id)} (${String(workspace.id)}). Reuse its attributes and do not guess another business target.`
+      : 'No business workspace is bound. Ask for the exact store, case, or entity identity before using account data or producing a target-specific external result.',
     `First call work_takeover_task_get with id=${task.id}, then execute the real domain tools required by the user's request.`,
     `Required local artifact labels: ${contract.requiredArtifactLabels.join(', ')}.`,
     `Required evidence terms: ${contract.expectedContentTerms.join(', ')}.`,
@@ -273,6 +278,8 @@ export function listCurrentIndustryWorkflowContracts(): IndustryWorkflowContract
 
 export function startIndustryWorkflow(input: StartIndustryWorkflowInput): IndustryWorkflowStartResult {
   const contract = contractForCurrentProduct(input.entryId);
+  const activeWorkspace = workflowWorkspaceContext(input);
+  const boundContext = { ...(input.context || {}), ...(activeWorkspace ? { industryWorkspace: activeWorkspace } : {}) };
   const sourceInput = compact(input.sourceInput, 12_000);
   const idempotencyKey = compact(input.idempotencyKey, 300);
   if (idempotencyKey) {
@@ -332,7 +339,7 @@ export function startIndustryWorkflow(input: StartIndustryWorkflowInput): Indust
         inputLength: sourceInput.length,
         requestId,
         conversationId: conversation.id,
-        context: input.context || {},
+        context: boundContext,
         contract: {
           requiredArtifactLabels: contract.requiredArtifactLabels,
           expectedContentTerms: contract.expectedContentTerms,
@@ -361,6 +368,7 @@ export function startIndustryWorkflow(input: StartIndustryWorkflowInput): Indust
     productLine: contract.productLine,
     entryId: contract.entryId,
     inputDigest: sha256(sourceInput),
+    workspace: activeWorkspace,
   };
   if (existingConversationTaskId) {
     const actionTask = (db.conversationActionTasks || []).find((candidate: any) => candidate.id === existingConversationTaskId);

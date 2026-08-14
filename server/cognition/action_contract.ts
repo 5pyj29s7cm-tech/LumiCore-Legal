@@ -134,13 +134,13 @@ function extractPrimaryTaskText(input: string): string {
 }
 
 const CURRENT_APP_REFERENCE_RE =
-  /(?:\u5728|\u5f80|\u7528).{0,16}(?:\u8fd9\u91cc\u9762|\u8fd9\u91cc|\u91cc\u9762|\u8fd9\u4e2a\u8f6f\u4ef6|\u5f53\u524d\u8f6f\u4ef6|\u521a\u6253\u5f00\u7684(?:\u8f6f\u4ef6|\u5e94\u7528|\u91cc\u9762)|(?:WPS(?:\s+Office)?|Word|Excel|PowerPoint|AutoCAD|CAD|\u5fae\u4fe1|WeChat|Chrome|\u753b\u56fe).{0,8}(?:\u91cc|\u91cc\u9762|\u4e2d|\u5185))|\b(?:in|inside)\b.{0,24}\b(?:this|current|opened|WPS|Word|Excel|PowerPoint|AutoCAD|WeChat|Chrome)\b.{0,12}\b(?:app|application|document)?/iu;
+  /(?:\u5728|\u5f80|\u7528).{0,16}(?:\u8fd9\u91cc\u9762|\u8fd9\u91cc|\u91cc\u9762|\u8fd9\u4e2a\u8f6f\u4ef6|\u5f53\u524d\u8f6f\u4ef6|\u521a\u6253\u5f00\u7684(?:\u8f6f\u4ef6|\u5e94\u7528|\u91cc\u9762)|(?:WPS(?:\s+Office)?|Word|Excel|PowerPoint|AutoCAD|CAD|Revit|SketchUp|Blender|Photoshop|Illustrator|3ds\s*Max|Chrome|Edge|WeChat|\u5fae\u4fe1|\u753b\u56fe|\u9177\u5bb6\u4e50|\u4e09\u7ef4\u5bb6|\u4e2d\u671b(?:CAD)?|\u6d69\u8fb0(?:CAD)?|\u5343\u725b|\u4eac\u9ea6|\u91d1\u8776|\u7528\u53cb|\u7545\u6377\u901a).{0,8}(?:\u91cc|\u91cc\u9762|\u4e2d|\u5185))|\b(?:in|inside)\b.{0,24}\b(?:this|current|opened|WPS|Word|Excel|PowerPoint|AutoCAD|Revit|SketchUp|Blender|Photoshop|Illustrator|3ds\s*Max|WeChat|Chrome|Edge)\b.{0,12}\b(?:app|application|document)?/iu;
 
 const CURRENT_APP_MUTATION_INTENT_RE =
   /(?:\u65b0\u5efa|\u521b\u5efa|\u5199\u5165|\u8f93\u5165|\u7c98\u8d34|\u5199|\u7f16\u8f91|\u4fee\u6539|\u4fdd\u5b58)|\b(?:new|create|write|type|paste|edit|modify|save)\b/iu;
 
 const AUTHORING_APP_TARGET_RE =
-  /(?:\bWPS(?:\s+Office)?\b|\bMicrosoft\s+Word\b|\bWord\b|\bExcel\b|\bPowerPoint\b|\bAutoCAD\b|\bCAD\b|\u91d1\u5c71\u6587\u5b57|\u753b\u56fe)/iu;
+  /(?:\bWPS(?:\s+Office)?\b|\bMicrosoft\s+Word\b|\bWord\b|\bExcel\b|\bPowerPoint\b|\bAutoCAD\b|\bCAD\b|\bRevit\b|\bSketchUp\b|\bBlender\b|\bPhotoshop\b|\bIllustrator\b|\b3ds\s*Max\b|\u91d1\u5c71\u6587\u5b57|\u753b\u56fe|\u9177\u5bb6\u4e50|\u4e09\u7ef4\u5bb6|\u4e2d\u671b(?:CAD)?|\u6d69\u8fb0(?:CAD)?|\u5343\u725b|\u4eac\u9ea6|\u91d1\u8776|\u7528\u53cb|\u7545\u6377\u901a)/iu;
 const APP_OPEN_INTENT_RE =
   /(?:\u6253\u5f00|\u542f\u52a8|\u8fd0\u884c|\u8fdb\u5165)|\b(?:open|launch|start|run)\b/iu;
 
@@ -178,8 +178,8 @@ export function extractCurrentAppTarget(input: string): string {
   if (recovered && !/^(?:none|null|unknown|n\/a)$/i.test(recovered)) return recovered;
 
   const primary = compact(extractPrimaryTaskText(raw));
-  const named = primary.match(/\b(WPS(?:\s+Office)?|Microsoft\s+Word|Word|Excel|PowerPoint|AutoCAD|WeChat|Chrome)\b/i)?.[1]
-    || primary.match(/(\u5fae\u4fe1|\u753b\u56fe)/u)?.[1];
+  const named = primary.match(/\b(WPS(?:\s+Office)?|Microsoft\s+Word|Word|Excel|PowerPoint|AutoCAD|Revit|SketchUp|Blender|Photoshop|Illustrator|3ds\s*Max|WeChat|Chrome|Edge)\b/i)?.[1]
+    || primary.match(/(\u5fae\u4fe1|\u753b\u56fe|\u9177\u5bb6\u4e50|\u4e09\u7ef4\u5bb6|\u4e2d\u671b(?:CAD)?|\u6d69\u8fb0(?:CAD)?|\u5343\u725b|\u4eac\u9ea6|\u91d1\u8776|\u7528\u53cb|\u7545\u6377\u901a)/u)?.[1];
   return compact(named);
 }
 

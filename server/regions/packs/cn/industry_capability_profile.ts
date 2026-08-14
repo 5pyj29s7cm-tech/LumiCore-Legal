@@ -218,6 +218,7 @@ export function formatIndustryCapabilityProfilePrompt(text?: unknown): string {
       ? `When this is an execution request and no existing industry task is named, call industry_workflow_start exactly once with entryId=${match.entry.entryId}. The server binds the current request from trusted turn context; never copy raw business text into tool arguments. Continue the returned task with real domain tools and verify it before claiming completion.`
       : 'For an industry execution request, select exactly one matching outcome workspace. If the target is genuinely ambiguous, ask one short clarification instead of creating multiple tasks.',
     'If a wt_task_* industry task is already named, continue that task and never create a duplicate. Capability questions and self-introductions explain this profile without starting tools.',
+    'Business-object continuity: read industry_workspace_status before resolving phrases such as current/this store, case, company, account or period. If no exact workspace is bound, use industry_workspace_bind from user-provided identity or ask one clarification; never guess a target.',
     'Automatic means local reading, analysis, preparation and archival inside the stated scope. It never bypasses the confirmation boundary or turns a draft/model statement into proof of external completion.',
   ].filter(Boolean).join('\n');
 }
@@ -231,6 +232,7 @@ export function formatIndustryWorkflowRoutingPrompt(text: unknown): string {
     `The current request matches this edition's ${match.entry.displayName} outcome workspace [${match.entry.entryId}].`,
     `Matched terms: ${match.matchedTerms.join(', ')}.`,
     `Start exactly one persistent task with industry_workflow_start(entryId=${match.entry.entryId}). The server binds and hashes the current request; do not copy raw business text into tool arguments.`,
+    'First read industry_workspace_status when the request depends on a store, case, company, account, taxpayer or period. Bind only an identity supplied by the user; do not infer an external target.',
     'Then use real domain capabilities. Before claiming completion, call industry_workflow_complete with the returned task id; it will bind current-turn tool receipts and run the server verifier.',
     `Confirmation boundary: ${match.entry.contract.confirmationBoundaries.join(' ')}`,
     'If an existing wt_task_* id is already present, continue it instead of starting another task. If the user is only asking about capability, explain the profile and do not execute tools.',
