@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { spawn, type ChildProcess } from "child_process";
 import { toolRegistry } from "../tools/registry";
-import { registerAllTools } from "../tools/definitions/index";
+import { registerProductVariantTools } from "../tools/definitions/index";
 import { mcpManager, registerMCPTools } from "../mcp";
 import { scheduler, registerScheduledTasks } from "../scheduler";
 import { isFirstBootComplete, persistFirstBootExploration, type SystemSnapshot } from "../autonomy/system_explorer";
@@ -227,9 +227,9 @@ export async function bootstrap(ctx: BootstrapContext) {
     }
   }
 
-  // Register all agent tools
-  registerAllTools(toolRegistry, { getDeepSeek: llm.getDeepSeek, getGemini: llm.getGemini, getOpenAI: llm.getOpenAI, getAnthropic: llm.getAnthropic, getQwen: llm.getQwen });
-  console.log(`[Tools] Registered ${toolRegistry.list().length} built-in tools`);
+  // Register the shared Lumi core plus this edition's domain-heavy tools.
+  registerProductVariantTools(toolRegistry, { getDeepSeek: llm.getDeepSeek, getGemini: llm.getGemini, getOpenAI: llm.getOpenAI, getAnthropic: llm.getAnthropic, getQwen: llm.getQwen });
+  console.log(`[Tools] Registered ${toolRegistry.list().length} ${PRODUCT_VARIANT.productLine} runtime tools`);
   const extensionHydration = await hydrateActiveExtensions(toolRegistry);
   if (extensionHydration.activated > 0 || extensionHydration.failed > 0) {
     console.log(`[Extensions] Active=${extensionHydration.activated}, boot-failed=${extensionHydration.failed}`);

@@ -49,6 +49,7 @@ import { registerRuntimeWorkTools } from './runtime_work_tools';
 import { registerCadWorkflowTools } from './cad_workflow_tools';
 import { registerExtensionRegistryTools } from './extension_registry_tools';
 import { registerIndustryWorkflowTools } from './industry_workflow_tools';
+import { PRODUCT_VARIANT } from '../../../shared/product_variant';
 
 export function registerAllTools(
   registry: ToolRegistry,
@@ -113,4 +114,89 @@ export function registerAllTools(
   if (llmGetters) {
     setSkillLLMGetters(llmGetters);
   }
+}
+
+
+/**
+ * Industry editions keep Lumi's cross-cutting core while registering only the
+ * domain-heavy tool families needed by the active product line. Optional
+ * extensions remain installable from Skill Hall, but do not silently expand
+ * the default runtime.
+ */
+export function registerProductVariantTools(
+  registry: ToolRegistry,
+  llmGetters?: {
+    getDeepSeek: () => any;
+    getGemini: () => any;
+    getOpenAI?: () => any;
+    getAnthropic?: () => any;
+    getQwen?: () => any;
+  },
+): void {
+  const productLine = PRODUCT_VARIANT.productLine;
+  if (!['design', 'legal', 'finance'].includes(productLine)) {
+    throw new Error(`Unsupported industry tool profile: ${productLine}`);
+  }
+
+  // Lumi core: conversation execution, memory/knowledge access, models,
+  // desktop/file work, messaging, external-agent coordination and receipts.
+  registerFileOpsTools(registry);
+  registerSystemOpsTools(registry);
+  registerWebOpsTools(registry);
+  registerWebLoginTools(registry);
+  registerDataOpsTools(registry);
+  registerDesktopTools(registry);
+  registerVerifyTools(registry);
+  registerSkillTools(registry);
+  registerOfficeTools(registry);
+  registerAgentTools(registry);
+  registerScreenMonitorTools(registry);
+  registerClipboardTools(registry);
+  registerOCRTools(registry);
+  registerPdfTools(registry);
+  registerDocumentTools(registry);
+  registerKnowledgeTools(registry);
+  registerWorkflowTools(registry);
+  registerInputTools(registry);
+  registerComputerUseTool(registry);
+  registerBiometricTools(registry);
+  registerClientSelfTools(registry);
+  registerModelConfigurationTools(registry);
+  registerExternalAppTools(registry);
+  registerExternalControlTools(registry);
+  registerAutonomyTools(registry);
+  registerCapabilityResearchTools(registry);
+  registerSleepTools(registry);
+  registerAdapterTools(registry);
+  registerSelfExtensionTools(registry);
+  registerUsageTools(registry);
+  registerWorkProductTools(registry);
+  registerWorkTakeoverTools(registry);
+  registerIndustryWorkflowTools(registry);
+  registerDesktopAiTools(registry);
+  registerExternalAiCollaborationTools(registry);
+  registerExternalAiHistoryTools(registry);
+  registerMessagingTools(registry);
+  registerDesktopWechatWatchTools(registry);
+  registerNetworkDiagnosticTools(registry);
+  registerRuntimeWorkTools(registry);
+  registerExtensionRegistryTools(registry);
+
+  if (productLine === 'design') {
+    registerImageTools(registry);
+    registerVideoTools(registry);
+    registerPythonTools(registry);
+    registerCadWorkflowTools(registry);
+    registerAuthorityResearchTools(registry);
+  } else if (productLine === 'legal') {
+    registerCalendarTools(registry);
+    registerLegalTools(registry);
+    registerAuthorityResearchTools(registry);
+  } else if (productLine === 'finance') {
+    registerCalendarTools(registry);
+    registerPythonTools(registry);
+    registerAuthorityResearchTools(registry);
+  }
+
+  if (llmGetters) setSkillLLMGetters(llmGetters);
 }

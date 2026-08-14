@@ -389,7 +389,7 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
   const industryWorkflowMatch = !conceptualCapabilityQuestion
     ? matchCurrentIndustryWorkflow(routingText)
     : null;
-  const industryWorkflowExecutionRequested = !conceptualCapabilityQuestion
+  const industryWorkflowExecutionDetected = !conceptualCapabilityQuestion
     && isCurrentIndustryWorkflowExecutionRequest(routingText);
   const operationMode = normalizeOperationMode(input.operationMode);
   const requestedMode = input.requestedMode || detectRequestedOperationMode(input.text);
@@ -410,6 +410,10 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
   const continuationNamesExternalTarget = continuationMayDriveAction
     && /(?:desktop_|wechat_|browser_|mcp_|AutoCAD|\bCAD\b|微信|浏览器)/iu.test(continuationContext); // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
   const clientActionIntent = rawClientActionIntent && !continuationNamesExternalTarget;
+  // Native client navigation has higher priority than industry execution.
+  // Words such as “生成” or “处理” may be part of a workspace name and must
+  // not create a task when the user only asked to open that workspace.
+  const industryWorkflowExecutionRequested = industryWorkflowExecutionDetected && !clientActionIntent;
   const currentActionContract = buildActionContract(input.text);
   const actionContract = currentActionContract.applies || !continuationMayDriveAction
     ? currentActionContract

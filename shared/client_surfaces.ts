@@ -7,6 +7,8 @@ export interface PersonalClientSurfaceDefinition {
   closeAfterUse?: boolean;
   settingsSection?: string;
   launcherIds?: readonly string[];
+  /** Spoken or typed names that must resolve to this native client surface. */
+  navigationAliases?: readonly string[];
   organizationView?: string;
   organizationViewByAction?: Readonly<Record<string, string>>;
   commandCenterViewByAction?: Readonly<Record<string, 'office' | 'team' | 'core'>>;
@@ -287,6 +289,7 @@ export const PERSONAL_CLIENT_SURFACES: readonly PersonalClientSurfaceDefinition[
     actions: ['open_legal_workspace'],
     useWhen: 'Open the real case workspace for matter facts, evidence, status, materials, and next actions.',
     launcherIds: ['legal-workspace'],
+    navigationAliases: ['案件工作台', '案件中心', '案件工作区'],
   },
   {
     id: 'legal-packet',
@@ -295,6 +298,7 @@ export const PERSONAL_CLIENT_SURFACES: readonly PersonalClientSurfaceDefinition[
     actions: ['open_legal_packet'],
     useWhen: 'Open the document workspace for pleadings, opinions, document versions, citations, and review.',
     launcherIds: ['legal-packet'],
+    navigationAliases: ['文书生成', '法律文书', '文书工作区'],
   },
   {
     id: 'legal-contract-review',
@@ -303,6 +307,7 @@ export const PERSONAL_CLIENT_SURFACES: readonly PersonalClientSurfaceDefinition[
     actions: ['open_legal_contract_review'],
     useWhen: 'Open the contract-review workspace for clauses, risks, sources, revisions, and lawyer verification.',
     launcherIds: ['legal-contract-review'],
+    navigationAliases: ['合同审查', '合同审核', '合同工作区'],
   },
   {
     id: 'legal-research',
@@ -311,6 +316,7 @@ export const PERSONAL_CLIENT_SURFACES: readonly PersonalClientSurfaceDefinition[
     actions: ['open_legal_research'],
     useWhen: 'Open the legal-research workspace for current statutes, authority, similar cases, and source records.',
     launcherIds: ['legal-research'],
+    navigationAliases: ['法条与类案', '法条类案', '法律检索'],
   },
   {
     id: 'legal-asset-trace',
@@ -319,6 +325,7 @@ export const PERSONAL_CLIENT_SURFACES: readonly PersonalClientSurfaceDefinition[
     actions: ['open_legal_asset_trace'],
     useWhen: 'Open the asset-trace workspace for lawful public clues, evidence grading, and human verification.',
     launcherIds: ['legal-asset-trace'],
+    navigationAliases: ['财产线索', '资产线索', '财产线索工作区'],
   },
   {
     id: 'legal-verify',
@@ -327,6 +334,7 @@ export const PERSONAL_CLIENT_SURFACES: readonly PersonalClientSurfaceDefinition[
     actions: ['open_legal_verify'],
     useWhen: 'Open the delivery gate for fact, citation, validity, jurisdiction, file, and lawyer-review checks.',
     launcherIds: ['legal-verify'],
+    navigationAliases: ['交付核验', '法律交付核验', '核验工作区'],
   },
   {
     id: 'legal-bid',
@@ -335,6 +343,7 @@ export const PERSONAL_CLIENT_SURFACES: readonly PersonalClientSurfaceDefinition[
     actions: ['open_legal_bid'],
     useWhen: 'Open the bid workspace for response matrices, missing materials, drafting, and verified delivery.',
     launcherIds: ['legal-bid'],
+    navigationAliases: ['标书制作', '法律标书', '标书工作区'],
   },
   {
     id: 'personalization',
