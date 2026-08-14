@@ -69,6 +69,8 @@ describe('industry workflow contracts', () => {
     expect(started.task.metadata.industryWorkflow.inputDigest).toMatch(/^[a-f0-9]{64}$/);
 
     const db = readDB();
+    const workflowConversation = db.conversations.find((conversation: any) => conversation.id === started.conversationId);
+    expect(workflowConversation?.agentId).toBe('lumi');
     const actionTask = db.conversationActionTasks.find((task: any) => task.id === started.conversationTaskId);
     expect(actionTask).toMatchObject({
       userId,

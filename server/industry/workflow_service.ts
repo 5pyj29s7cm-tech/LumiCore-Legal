@@ -297,7 +297,7 @@ export function startIndustryWorkflow(input: StartIndustryWorkflowInput): Indust
   const requestedConversationId = compact(input.conversationId, 200);
   const conversation = (requestedConversationId
     ? getConversationForScope(requestedConversationId, input.userId, input.domain, input.orgId)
-    : null) || getOrCreateActiveConversation(input.userId, '', input.domain, input.orgId);
+    : null) || getOrCreateActiveConversation(input.userId, 'lumi', input.domain, input.orgId);
   const requestedConversationTaskId = compact(input.conversationTaskId, 200);
   const existingConversationTaskId = requestedConversationTaskId && (readDB().conversationActionTasks || []).some((candidate: any) => (
     candidate.id === requestedConversationTaskId
