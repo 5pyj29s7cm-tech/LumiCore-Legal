@@ -26,6 +26,10 @@ import {
   formatIndustryWorkflowRoutingPrompt,
   matchCurrentIndustryWorkflow,
 } from '../regions/packs/cn/industry_capability_profile';
+import {
+  formatIndustryUserGuidancePrompt,
+  isIndustryGuidancePreferenceRequest,
+} from '../industry/user_guidance';
 
 type ToolDeclaration = ReturnType<ToolRegistry['getToolDeclarations']>[number];
 
@@ -182,9 +186,29 @@ function enhanceToolRouteForFlow(
   declarations: ToolDeclaration[],
   registry?: ToolRegistry,
 ): ToolRoute {
+  const available = new Set(declarations.map(declaration => declaration.function.name));
+  if (flow.industryGuidanceRequest) {
+    const toolNames = [
+      'industry_user_guide',
+      ...(isIndustryGuidancePreferenceRequest(flow.routeText)
+        ? ['industry_guidance_preference_set']
+        : []),
+    ].filter(name => available.has(name));
+    return {
+      ...route,
+      toolNames,
+      categories: unique([...route.categories, 'industry_guidance']),
+      reasons: unique([
+        ...route.reasons,
+        'user-learning turns use the read-only edition guide and never start a business workflow',
+      ]),
+      truncated: false,
+      hardAllowlist: true,
+      maxIterations: Math.min(route.maxIterations || 2, 2),
+    };
+  }
   if (route.hardAllowlist && !flow.industryWorkflowEntryId) return route;
 
-  const available = new Set(declarations.map(declaration => declaration.function.name));
   const additions = new Set<string>();
   const categories = [...route.categories];
   const reasons = [...route.reasons];
@@ -338,8 +362,23 @@ export function buildLumiExecutionDecision(input: LumiExecutionDecisionInput): L
     ? buildSelfRepairToolPolicy(input.flow.routeText || input.text, input.toolRegistry)
     : null;
   const clientActionToolPolicy = input.flow.clientActionOnlyTurn && !statusOnlyContinuation ? CLIENT_ACTION_TOOL_POLICY : null;
+  const industryGuidanceToolPolicy: ToolPolicy | null = input.flow.industryGuidanceRequest
+    ? {
+        allowedTools: [
+          'industry_user_guide',
+          ...(isIndustryGuidancePreferenceRequest(input.flow.routeText || input.text)
+            ? ['industry_guidance_preference_set']
+            : []),
+        ],
+        requireConfirmation: [],
+        forbiddenTools: [],
+        maxIterations: 2,
+      }
+    : null;
   const baseToolPolicy = input.isSanctuary || statusOnlyContinuation
     ? NO_TOOLS_POLICY
+    : industryGuidanceToolPolicy
+      ? industryGuidanceToolPolicy
     : selfRepairToolPolicy
       ? selfRepairToolPolicy
       : clientActionToolPolicy
@@ -428,6 +467,9 @@ export function buildLumiExecutionDecision(input: LumiExecutionDecisionInput): L
     !input.flow.industryWorkflowEntryId
       ? ''
       : formatIndustryWorkflowRoutingPrompt(input.flow.routeText || input.text),
+    input.flow.industryGuidanceRequest
+      ? formatIndustryUserGuidancePrompt(input.flow.routeText || input.text)
+      : '',
     !effectiveToolRoute && allowToolUse && !input.flow.clientActionOnlyTurn && !input.flow.selfRepairTurn
       ? 'No narrow tool route was selected. Use the base policy conservatively and ask one clarification if the work surface is unclear.'
       : '',

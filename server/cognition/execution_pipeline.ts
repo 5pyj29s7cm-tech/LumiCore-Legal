@@ -243,6 +243,8 @@ export function buildLumiExecutionPipeline(
     schemaVersion: 1,
     capabilityIds,
     taskLedgerRequired: Boolean(
+      !turnIntent.flow.industryGuidanceRequest
+      &&
       (!turnIntent.flow.industryWorkflowEntryId || turnIntent.flow.domain === 'work')
       && (
         turnIntent.flow.completionEvidenceNeeded

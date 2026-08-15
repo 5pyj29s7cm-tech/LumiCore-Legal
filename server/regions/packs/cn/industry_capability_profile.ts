@@ -217,7 +217,8 @@ export function formatIndustryCapabilityProfilePrompt(text?: unknown): string {
     match
       ? `When this is an execution request and no existing industry task is named, call industry_workflow_start exactly once with entryId=${match.entry.entryId}. The server binds the current request from trusted turn context; never copy raw business text into tool arguments. Continue the returned task with real domain tools and verify it before claiming completion.`
       : 'For an industry execution request, select exactly one matching outcome workspace. If the target is genuinely ambiguous, ask one short clarification instead of creating multiple tasks.',
-    'If a wt_task_* industry task is already named, continue that task and never create a duplicate. Capability questions and self-introductions explain this profile without starting tools.',
+    'If a wt_task_* industry task is already named, continue that task and never create a duplicate. Capability questions and self-introductions explain this profile without starting business work.',
+    'Usage and teaching questions follow the industry guidance contract: use the exact edition and active business context, explain at most three steps, and never create a task or perform a side effect unless the user explicitly asks to proceed.',
     'Business-object continuity: read industry_workspace_status before resolving phrases such as current/this store, case, company, account or period. If no exact workspace is bound, use industry_workspace_bind from user-provided identity or ask one clarification; never guess a target.',
     'Automatic means local reading, analysis, preparation and archival inside the stated scope. It never bypasses the confirmation boundary or turns a draft/model statement into proof of external completion.',
   ].filter(Boolean).join('\n');

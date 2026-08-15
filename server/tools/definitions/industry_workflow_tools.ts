@@ -9,6 +9,8 @@ import {
 } from '../../industry/workflow_service';
 import type { ToolContext } from '../types';
 import { registerIndustryWorkspaceTools } from './industry_workspace_tools';
+import { workflowWorkspaceContext } from '../../industry/workspace_context';
+import { registerIndustryGuidanceTools } from './industry_guidance_tools';
 
 // i18n-allow: The multilingual routing hints below are internal tool-selection
 // aliases for Chinese industry requests; they are never rendered as UI copy.
@@ -23,6 +25,7 @@ function scope(context?: ToolContext) {
 
 export function registerIndustryWorkflowTools(registry: ToolRegistry): void {
   registerIndustryWorkspaceTools(registry);
+  registerIndustryGuidanceTools(registry, context => workflowWorkspaceContext(scope(context)));
   registry.register({
     name: 'industry_capability_profile_get',
     description: 'Read the authoritative identity, outcome workspaces, automatic preparation actions, professional-review boundaries, and optional extensions for this exact Lumi industry edition.',
@@ -152,6 +155,8 @@ export function registerIndustryWorkflowTools(registry: ToolRegistry): void {
       }
       const excluded = new Set([
         'industry_capability_profile_get',
+        'industry_user_guide',
+        'industry_guidance_preference_set',
         'industry_workflow_start',
         'industry_workflow_complete',
         'work_takeover_task_get',

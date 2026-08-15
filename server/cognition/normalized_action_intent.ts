@@ -111,7 +111,15 @@ function correctionOrExplanation(text: string): NormalizedActionIntent | null {
   // i18n-allow: Chinese terse-complaint input recognition; not user-visible copy.
   const terseComplaint = // i18n-allow: Chinese terse-complaint input recognition; not user-visible copy.
     /^(?:(?:我操|卧槽|靠|妈的|搞什么|什么鬼)[，,\s]*)?(?:你|lumi)[^。！？!?\n]{0,20}(?:打开|发送|执行|操作|做|画)了[^。！？!?\n]{0,28}(?:什么|啥|为什么|怎么回事)[^。！？!?\n]*[啊呀呢吧。！？!?]*$/iu;
-  if (!negativeAuthorization.test(text) && !actionComplaint.test(text) && !terseComplaint.test(text)) return null;
+  // i18n-allow: Explicit correction prefaces remain explanation-only even when
+  // the rest of the sentence contains a tool or usage verb.
+  const explicitCorrection = /(?:\u4f60(?:\u641e\u9519|\u5f04\u9519)\u4e86?|\u4e0d\u662f\u8fd9\u4e2a\u610f\u601d|\u6211\u8bf4\u7684\u662f|\u6211\u53ea\u662f(?:\u95ee|\u60f3\u77e5\u9053))/u;
+  if (
+    !negativeAuthorization.test(text)
+    && !actionComplaint.test(text)
+    && !terseComplaint.test(text)
+    && !explicitCorrection.test(text)
+  ) return null;
   return {
     kind: 'correction_explanation',
     operation: 'explain',
