@@ -178,6 +178,30 @@ function statusQuery(text: string): NormalizedActionIntent | null {
     };
   }
 
+  // A question about the remaining gaps or next step of the current business
+  // object is a read-only continuation.  Negated phrases such as "不要重新生成
+  // 文件" must not let the embedded action words start a new artifact task.
+  // Keep this question-shaped and anchored so a fresh command such as
+  // "缺少材料，生成清单" still follows the normal action route.
+  // i18n-allow: Chinese result/status follow-up recognition; not user-visible copy.
+  const businessResultFollowup =
+    /^(?=.{0,180}$)(?=.*(?:这个|当前|本案|案子|案件|这(?:项|个)?(?:任务|工作|项目)|刚才|上一步))(?=.*(?:还缺什么|缺什么|还要补什么|要补什么|下一步(?:是什么|怎么做)|还要做什么|需要(?:谁|人工|律师)?确认什么))[\s\S]*[？?。!！]*$/u;
+  const rejectsNewArtifact = /(?:不要|无需|不必|不用).{0,10}(?:重新|再)?(?:生成|创建|制作|写入|保存|提交|发送)/u.test(text);
+  const requestsNewArtifact = /(?:请|帮我|现在|然后|并且|顺便|再|重新).{0,16}(?:生成|创建|制作|写入|保存|提交|发送)/u.test(text);
+  if (businessResultFollowup.test(text) && (!requestsNewArtifact || rejectsNewArtifact)) {
+    return {
+      kind: 'status_query',
+      operation: 'status',
+      subject: 'lumi',
+      target: 'recent_task',
+      payload: text,
+      sideEffectClass: 'none',
+      relation: 'status',
+      confidence: 0.97,
+      rule: 'business-result-followup-before-action',
+    };
+  }
+
   // i18n-allow: Chinese task-status input recognition; not user-visible copy.
   const explicitTaskStatus = // i18n-allow: Chinese task-status input recognition; not user-visible copy.
     /(?:(?:Auto\s*CAD|CAD|图|图纸|平面图|任务|这个|那个).{0,30}(?:画完|做完|完成|执行完|结束)(?:了)?(?:吗|没有|没|了没)|(?:Auto\s*CAD|CAD|任务).{0,30}(?:进度|状态|到哪|怎么样|什么情况)|(?:画|做|执行).{0,12}(?:完了吗|好了没|到哪了))/iu;

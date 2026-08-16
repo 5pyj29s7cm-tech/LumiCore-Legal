@@ -8,6 +8,7 @@ import {
   prepareConversationActionExecution,
   recoverOrphanedConversationActionExecutions,
 } from '../server/conversation/manager';
+import { recordsToTaskReceipts } from '../server/cognition/task_execution_ledger';
 
 describe('conversation action continuation state', () => {
   beforeAll(async () => {
@@ -226,6 +227,81 @@ describe('conversation action continuation state', () => {
         unfinished: true,
         activeRequestId: undefined,
         updatedAt: '2026-07-22T14:00:00.000Z',
+      });
+  });
+
+  it('recovers verified completion before converting an interrupted lease into a blocker', () => {
+    const userId = `conversation-receipt-recovery-${Date.now()}-${Math.random()}`;
+    const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
+    const taskId = `task-receipt-recovery-${Date.now()}-${Math.random()}`;
+    const goal = '请基于当前矩衡律师版验收案，为人民法院在线服务准备登录后由律师人工操作的协同工作区。只准备本地工作区，不要登录、不要上传、不要提交、不要缴费。';
+    const receipts = recordsToTaskReceipts([{
+      name: 'legal_prepare_filing_handoff',
+      arguments: { caseId: 'case-acceptance' },
+      result: JSON.stringify({ ok: true, status: 'completed', uploadCount: 14 }),
+      terminalVerification: {
+        status: 'verified' as const,
+        strategy: 'terminal_receipt' as const,
+        reason: 'The local filing handoff was recorded.',
+      },
+    }], '2026-07-22T13:59:00.000Z');
+    const db = readDB();
+    const actionState = {
+      version: 2 as const,
+      taskId,
+      goal,
+      latestInstruction: goal,
+      status: 'executing' as const,
+      unfinished: true,
+      latestBlocker: '',
+      activeRequestId: 'request-receipt-recovery',
+      assistantState: '',
+      toolSummaries: [],
+      appTarget: '',
+      sourcePaths: [],
+      evidenceTools: [],
+      receipts,
+      revision: 1,
+      updatedAt: '2026-07-22T13:59:00.000Z',
+    };
+    conversation.actionContinuationState = actionState;
+    db.conversationActionTasks.push({
+      id: taskId,
+      conversationId: conversation.id,
+      userId,
+      domain: 'personal',
+      orgId: '',
+      parentTaskId: '',
+      rootUserMessageId: '',
+      intentKind: 'legal_document',
+      operation: 'create',
+      goal,
+      target: 'local court-platform handoff',
+      status: 'executing',
+      blocker: '',
+      activeRequestId: 'request-receipt-recovery',
+      completionSource: '',
+      context: JSON.stringify({ actionState }),
+      revision: 1,
+      createdAt: '2026-07-22T13:58:00.000Z',
+      updatedAt: '2026-07-22T13:59:00.000Z',
+      completedAt: '',
+    });
+
+    expect(recoverOrphanedConversationActionExecutions('2026-07-22T14:00:00.000Z')).toBeGreaterThan(0);
+    expect(db.conversationActionTasks.find(task => task.id === taskId)).toMatchObject({
+      status: 'completed',
+      blocker: '',
+      activeRequestId: '',
+      completionSource: 'tool_receipt',
+      completedAt: '2026-07-22T14:00:00.000Z',
+    });
+    expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
+      .toMatchObject({
+        taskId,
+        status: 'completed',
+        unfinished: false,
+        completionSource: 'tool_receipt',
       });
   });
 

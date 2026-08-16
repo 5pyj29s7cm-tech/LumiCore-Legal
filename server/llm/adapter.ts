@@ -205,7 +205,7 @@ function collectArtifactRefs(text: string): string[] {
   return Array.from(refs).slice(0, 8);
 }
 
-function getPrimaryUserText(messages: NormalizedMessage[]): string {
+export function getPrimaryUserText(messages: NormalizedMessage[]): string {
   const rawContent = [...messages].reverse().find(m => m.role === 'user')?.content || '';
   if (typeof rawContent === 'string') return rawContent;
   if (!Array.isArray(rawContent)) return '';
@@ -814,9 +814,11 @@ function recordWorkflowIfToolsUsed(
   config: Pick<LLMConfig, 'userId' | 'domain' | 'orgId'>,
 ): void {
   if (executionLog.length === 0) return;
-  const rawContent = messages.find(m => m.role === 'user')?.content || '';
-  const userMsg = typeof rawContent === 'string' ? rawContent : Array.isArray(rawContent) ? rawContent.filter(c => c.type === 'text').map(c => (c as any).text).join(' ') : '';
-  const safeMsg = userMsg || '';
+  // Workflow learning belongs to the action that produced this execution
+  // trace.  Conversation history is ordered oldest -> newest, so recording
+  // the first user turn poisons learned patterns with an unrelated old goal.
+  // Reuse the same latest-user extraction as completion and iteration guards.
+  const safeMsg = getPrimaryUserText(messages);
   recordWorkflow({
     userId: config.userId || 'anonymous',
     domain: config.domain === 'work' ? 'work' : 'personal',

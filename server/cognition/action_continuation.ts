@@ -611,6 +611,16 @@ export function classifyConversationActionFollowupIntent(
 }
 
 /**
+ * Some status-shaped follow-ups ask for business content (remaining gaps,
+ * next steps, or review items), not merely the task lifecycle.  They still
+ * execute no tools, but must reach the language model with the persisted
+ * receipt context instead of being collapsed into "completed / N receipts".
+ */
+export function needsNaturalConversationActionStatusAnswer(text: string): boolean {
+  return normalizeActionIntent(text).rule === 'business-result-followup-before-action';
+}
+
+/**
  * Advance the durable conversation pointer from terminal tool evidence.
  * Referential/status turns inherit the original target; a concrete new turn
  * starts a fresh pointer and cannot accidentally absorb an older task.

@@ -21,6 +21,8 @@ import {
 import type { LumiTurnFlow } from "../cognition/turn_flow";
 import type { ToolExecutionRecord } from "../tools/types";
 import { getIndustryWorkflowTask, recordIndustryWorkflowExecution } from "../industry/workflow_service";
+import { bindIndustryWorkspaceContext } from '../industry/workspace_context';
+import * as LegalCases from '../org/legal_cases';
 import {
   formatIndustryCapabilityProfilePrompt,
   formatIndustryWorkflowRoutingPrompt,
@@ -517,6 +519,42 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
 
   router.post("/ai/chat", optionalAuth, handleChat);
   router.post("/chat", optionalAuth, handleChat);
+
+  router.post("/legal/client-case-sync", optionalAuth, asyncHandler(async (req, res) => {
+    const caseSnapshot = req.body?.case && typeof req.body.case === 'object' ? req.body.case : req.body;
+    const caseId = String(caseSnapshot?.id || '').trim();
+    if (!caseId) return res.status(400).json({ error: 'A client case id is required.' });
+    const userId = req.user?.uid || 'anonymous';
+    const requestScope = req.user ? resolveDomain(req.user) : { domain: 'personal' as const, orgId: '' };
+    const domain = requestScope.domain;
+    const orgId = requestScope.orgId;
+    const legalOrgId = resolveLegalCaseworkOrgId({ domain, userOrgId: orgId, userId });
+    const caseFile = LegalCases.upsertCaseSnapshot(legalOrgId, userId, caseSnapshot);
+    const active = bindIndustryWorkspaceContext({ userId, domain, orgId }, {
+      name: caseFile.title || caseFile.party || caseFile.caseNumber,
+      attributes: {
+        caseId: caseFile.id,
+        caseName: caseFile.title,
+        caseNumber: caseFile.caseNumber,
+        clientName: caseFile.party,
+        court: caseFile.court,
+        stage: caseFile.stage,
+      },
+    });
+    return res.json({ ok: true, status: 'synced', caseId: caseFile.id, activeWorkspace: active });
+  }));
+
+  router.delete("/legal/client-case-sync/:caseId", optionalAuth, asyncHandler(async (req, res) => {
+    const userId = req.user?.uid || 'anonymous';
+    const requestScope = req.user ? resolveDomain(req.user) : { domain: 'personal' as const, orgId: '' };
+    const legalOrgId = resolveLegalCaseworkOrgId({
+      domain: requestScope.domain,
+      userOrgId: requestScope.orgId,
+      userId,
+    });
+    const deleted = LegalCases.deleteCase(legalOrgId, userId, String(req.params?.caseId || '').trim());
+    return res.json({ ok: true, status: deleted ? 'deleted' : 'not_found', caseId: deleted?.id || '' });
+  }));
 
   router.post("/legal/tool/:toolName", optionalAuth, asyncHandler(async (req, res) => {
     const toolName = String(req.params?.toolName || '').trim();

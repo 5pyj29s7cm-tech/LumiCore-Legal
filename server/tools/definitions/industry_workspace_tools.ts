@@ -16,7 +16,7 @@ export function registerIndustryWorkspaceTools(registry: ToolRegistry): void {
     parameters: { type: 'object', properties: {}, required: [] },
     handler: async (_args, context) => { const activeScope = scope(context); return JSON.stringify({ ok: true, status: 'observed', active: getActiveIndustryWorkspaceContext(activeScope), available: listIndustryWorkspaceContexts(activeScope) }, null, 2) },
     permission: 'user', securityLevel: 'safe',
-    capability: capabilityContract({ id: 'industry.workspace.observe', family: 'industry', lane: 'industry', operation: 'observe', risk: 'low', sideEffects: [{ type: 'local_read', scope: 'edition-scoped persistent business workspace', reversible: true }], verification: { strategy: 'measured', required: true, requiredFields: ['ok', 'status', 'available'], requiredValues: { ok: true }, successStatuses: ['observed'], successSignals: ['server-owned active workspace state'], limitations: ['An unbound workspace must not be guessed from model memory.'] } }),
+    capability: capabilityContract({ id: 'industry.workspace.observe', family: 'industry', lane: 'industry', operation: 'observe', risk: 'low', sideEffects: [{ type: 'local_read', scope: 'edition-scoped persistent business workspace', reversible: true }], verification: { strategy: 'terminal_receipt', required: true, requiredFields: ['ok', 'status', 'available'], requiredValues: { ok: true }, successStatuses: ['observed'], successSignals: ['server-owned active workspace state'], limitations: ['An unbound workspace must not be guessed from model memory.'] } }),
     evidence: capabilityEvidence({ id: 'industry.workspace.observe', operation: 'observe', limitations: ['Reads local workspace identity only.'] }),
   });
   registry.register({

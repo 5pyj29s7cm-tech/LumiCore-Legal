@@ -7,6 +7,7 @@ import {
   hasCoreActionEvidence,
   hasCurrentAppSaveEvidence,
   hasCurrentAppUiMutationEvidence,
+  hasVerifiedExistingLocalPreparationArtifact,
   requiresCurrentAppUiMutation,
 } from '../cognition/action_contract';
 import { formatCnToolFailureDetail, isInternalExecutionDetail } from '../regions/packs/cn/voice_fast_path_messages';
@@ -571,7 +572,9 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
 
   const hasAnySuccess = successful.length > 0;
   const hasActionTool = successful.some(call => !INSPECTION_ONLY_TOOL_RE.test(call.name));
-  const hasFileProducer = successful.some(call =>
+  const hasVerifiedExistingArtifact = hasDomainCompletionEvidence
+    && hasVerifiedExistingLocalPreparationArtifact(successful, task);
+  const hasFileProducer = hasVerifiedExistingArtifact || successful.some(call =>
     FILE_PRODUCER_TOOL_RE.test(call.name) ||
     (
       !INSPECTION_ONLY_TOOL_RE.test(call.name) &&
@@ -594,7 +597,7 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
   let reasonCode: CompletionGuardResult['reasonCode'];
   if (!hasAnySuccess) {
     reason = '这一轮没有成功执行任何工具';
-  } else if (OPEN_CLAIM_RE.test(claimText) && !hasOpenTool) {
+  } else if (OPEN_CLAIM_RE.test(claimText) && !hasOpenTool && !hasVerifiedExistingArtifact) {
     reason = '回复声称已经打开或加载，但没有成功的打开/客户端动作记录';
   } else if (
     FILE_CREATION_CLAIM_RE.test(claimText)
@@ -603,7 +606,7 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
     && !hasPassingVerification
   ) {
     reason = '回复声称已经生成或保存产物，但没有成功的写入/生成/验收记录';
-  } else if (!hasActionTool && !hasPassingVerification && !pathsExist) {
+  } else if (!hasActionTool && !hasPassingVerification && !pathsExist && !hasVerifiedExistingArtifact) {
     reason = '\u6210\u529f\u6267\u884c\u4e86\u67e5\u8be2\u6216\u68c0\u67e5\u5de5\u5177\uff0c\u4f46\u8fd9\u4e9b\u7ed3\u679c\u4e0d\u662f\u5b8c\u6210\u5f53\u524d\u8bf7\u6c42\u6240\u9700\u7684\u6267\u884c\u8bc1\u636e'; // i18n-allow: reviewed Chinese evidence-accuracy reason.
     reasonCode = 'successful_irrelevant_evidence';
   }

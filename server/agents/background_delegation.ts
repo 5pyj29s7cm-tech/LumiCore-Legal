@@ -14,6 +14,7 @@ export interface BackgroundDelegationDecisionInput {
   sanctuary: boolean;
   directDesktop: boolean;
   prefersSequentialWorkflow: boolean;
+  industryWorkflow?: boolean;
   availableAgentCount: number;
 }
 
@@ -84,6 +85,7 @@ export function isForegroundMessagingRead(text: string): boolean {
 
 export function shouldDelegateWorkInBackground(input: BackgroundDelegationDecisionInput): BackgroundDelegationDecision {
   if (!input.text.trim()) return { shouldDelegate: false, reason: 'empty_text' };
+  const explicitlyRequested = hasExplicitBackgroundDelegationPreference(input.text);
   if (!input.allowToolUse) return { shouldDelegate: false, reason: 'tools_disabled' };
   if (input.clientActionOnly) return { shouldDelegate: false, reason: 'client_action_only' };
   if (input.clientSurfaceRequest) return { shouldDelegate: false, reason: 'client_surface_foreground' };
@@ -98,7 +100,9 @@ export function shouldDelegateWorkInBackground(input: BackgroundDelegationDecisi
   if (isForegroundMessagingSend(input.text)) return { shouldDelegate: false, reason: 'foreground_messaging_send' };
   if (!WORK_CATEGORY_ALLOWLIST.has(input.category || '')) return { shouldDelegate: false, reason: 'non_work_category' };
 
-  const explicitlyRequested = hasExplicitBackgroundDelegationPreference(input.text);
+  if (input.industryWorkflow && !explicitlyRequested) {
+    return { shouldDelegate: false, reason: 'industry_workflow_foreground' };
+  }
   if (input.continuationContext && !explicitlyRequested) {
     return { shouldDelegate: false, reason: 'foreground_task_continuation' };
   }

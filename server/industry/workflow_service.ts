@@ -420,6 +420,52 @@ export function getIndustryWorkflowTask(scope: IndustryWorkflowScope, taskId: st
   return metadata.productLine === productLine() && metadata.entryId ? task : null;
 }
 
+export function reconcileInterruptedIndustryWorkflowTasks(): number {
+  const line = productLine();
+  if (!line) return 0;
+  const db = readDB();
+  let reconciled = 0;
+  for (const actionTask of db.conversationActionTasks || []) {
+    if (!['blocked', 'cancelled', 'completed'].includes(String(actionTask.status || ''))) continue;
+    const context = parseObject(actionTask.context);
+    const industry = parseObject(context.industryWorkflow);
+    if (industry.productLine !== line) continue;
+    const workTakeoverTaskId = compact(industry.workTakeoverTaskId, 200);
+    if (!workTakeoverTaskId) continue;
+    const task = getWorkTakeoverTask(String(actionTask.userId || ''), workTakeoverTaskId);
+    if (!task || !['queued', 'in_progress'].includes(task.status)) continue;
+    const metadata = workflowMetadata(task);
+    if (metadata.productLine !== line) continue;
+    const verificationPassed = task.metadata?.workTakeoverVerification?.passed === true;
+    const nextStatus: WorkTakeoverStatus = actionTask.status === 'cancelled'
+      ? 'cancelled'
+      : actionTask.status === 'completed' && verificationPassed
+        ? 'delivered'
+        : 'blocked';
+    const blocker = nextStatus === 'blocked'
+      ? compact(actionTask.blocker, 1000) || 'The previous runtime ended before this industry workflow reached a verified terminal receipt.'
+      : '';
+    updateWorkTakeoverTask(task.userId, task.id, {
+      status: nextStatus,
+      blockedBy: blocker ? Array.from(new Set([...task.blockedBy, blocker])) : [],
+      metadata: {
+        industryWorkflowLastAttempt: {
+          ...(task.metadata?.industryWorkflowLastAttempt || {}),
+          status: nextStatus === 'delivered' ? 'passed' : nextStatus,
+          reason: blocker,
+          reconciledFromConversationTaskId: String(actionTask.id || ''),
+          at: new Date().toISOString(),
+        },
+      },
+      note: nextStatus === 'delivered'
+        ? 'Industry workflow reconciled from a verified completed conversation task.'
+        : 'Interrupted industry workflow reconciled from its persistent conversation task; no work was replayed.',
+    });
+    reconciled += 1;
+  }
+  return reconciled;
+}
+
 export function settleIndustryWorkflowConversationTask(
   task: WorkTakeoverTask,
   verification: WorkTakeoverResultVerification,

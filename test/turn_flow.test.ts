@@ -370,6 +370,33 @@ describe('Lumi turn flow', () => {
     expect(resultDemand.routeText).toContain('desktop_list_apps | items=2');
     expect(resultDemand.routeText).not.toContain('work_takeover');
 
+    const legalGapFollowup = buildLumiTurnFlow({
+      userId: 'turn_flow_legal_gap_followup_user',
+      text: '这个案子还缺什么？请接着刚才的结果直接回答，不要重新生成文件。',
+      continuationContext: [
+        '## Recent action continuation context',
+        'Recovered structured action state:',
+        '- followupIntent: status',
+        '- taskStatus: completed',
+        '- originalGoal: 生成案件推进清单',
+        '- unfinished: no',
+        'Recent tool evidence:',
+        '- legal_case_workflow_status | status=observed',
+        '- write_file | path=D:\\lumi_output\\案件推进清单.md | status=verified',
+      ].join('\n'),
+      channel: 'chat',
+      source: 'command-center-chat',
+      operationMode: 'assistant',
+    });
+
+    expect(legalGapFollowup.statusOnlyContinuation).toBe(true);
+    expect(legalGapFollowup.allowToolUseForTurn).toBe(false);
+    expect(legalGapFollowup.industryWorkflowEntryId).toBe('');
+    expect(legalGapFollowup.specialWorkflow).toBeNull();
+    expect(legalGapFollowup.workSurfaceRoute.artifactFirst).toBe(false);
+    expect(legalGapFollowup.completionEvidenceNeeded).toBe(false);
+    expect(legalGapFollowup.routeText).toContain('write_file');
+
     const statusQuestion = buildLumiTurnFlow({
       userId: 'turn_flow_current_intent_user',
       text: '你在干嘛',

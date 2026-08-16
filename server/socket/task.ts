@@ -76,6 +76,7 @@ import {
   buildRecentActionContinuationBridge,
   classifyConversationActionFollowupIntent,
   formatConversationActionTaskStatus,
+  needsNaturalConversationActionStatusAnswer,
 } from "../cognition/action_continuation";
 import {
   buildConfirmedStepContinuationNote,
@@ -255,7 +256,11 @@ export function registerTaskHandler(
           activeConversationForStatus?.actionContinuationState,
         )
       : null;
-    if (runningTask && activeMessageRelation === 'status') {
+    if (
+      runningTask
+      && activeMessageRelation === 'status'
+      && !needsNaturalConversationActionStatusAnswer(data.text)
+    ) {
       const activeConversation = activeConversationForStatus!;
       const statusText = getConversationActionStatus(
         activeConversation.id,
@@ -669,7 +674,10 @@ export function registerTaskHandler(
       return false;
     };
 
-    if (actionFollowupIntent === 'status') {
+    if (
+      actionFollowupIntent === 'status'
+      && !needsNaturalConversationActionStatusAnswer(data.text)
+    ) {
       const statusText = getConversationActionStatus(
         convForHistory.id,
         uid,

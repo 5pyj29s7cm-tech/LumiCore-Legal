@@ -80,8 +80,18 @@ const TOOL_ITERATION_LIMIT_RESPONSE_RE =
   /The tool loop reached its limit|Maximum tool call iterations reached|before Lumi could write the final answer|\u8fd9\u8f6e\u5de5\u5177(?:\u5904\u7406|\u8c03\u7528)\u6b21\u6570(?:\u5df2)?(?:\u5230\u8fbe|\u8fbe\u5230|\u5230)\u4e0a\u9650/iu;
 
 function resultTaskText(input: LumiResultFinalizerInput): string {
+  if (input.flow?.statusOnlyContinuation) {
+    return String(input.taskText || '').trim();
+  }
   const routed = String(input.flow?.routeText || '').trim();
   return routed || String(input.taskText || '').trim();
+}
+
+function hasRecoveredStatusEvidence(input: LumiResultFinalizerInput): boolean {
+  if (!input.flow?.statusOnlyContinuation) return false;
+  const routeText = String(input.flow.routeText || '');
+  return /(?:^|\s)- followupIntent:\s*status(?:\s|$)/i.test(routeText)
+    && /Recent tool evidence:\s+-\s+\S/i.test(routeText);
 }
 
 function leakedLegacyToolProtocol(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
@@ -1409,6 +1419,18 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
         level: 'warning',
         message: 'Response blamed a fictional user-switchable tool availability state without evidence.',
       },
+    };
+  }
+  // A status/recall turn may truthfully describe the immediately preceding
+  // completed task even though this turn intentionally executes no new tool.
+  // Accept it only when the continuation bridge carries concrete persisted
+  // tool evidence; protocol, mode and availability sanity checks above still
+  // apply, while evidence-free status claims continue through the guard.
+  if (hasRecoveredStatusEvidence(input)) {
+    return {
+      text: input.responseText,
+      blocked: false,
+      reason: 'Grounded status follow-up from persisted recent-action receipts.',
     };
   }
   const guard = guardCompletionClaims({

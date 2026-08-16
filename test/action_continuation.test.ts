@@ -7,6 +7,7 @@ import {
   extractRecentActionContinuationState,
   getRecoveredApplicationContinuationTarget,
   isRecoveredCurrentAppEditingContinuation,
+  needsNaturalConversationActionStatusAnswer,
   needsRecentActionContinuationContext,
 } from '../server/cognition/action_continuation';
 
@@ -40,6 +41,33 @@ describe('recent action continuation', () => {
     expect(classifyRecentActionFollowupIntent('你在搞什么东西啊去执行这个任务')).toBe('execute');
     expect(classifyRecentActionFollowupIntent('慢个屁')).toBe('execute');
     expect(classifyRecentActionFollowupIntent('别光说，快做')).toBe('execute');
+  });
+
+  it('recovers completed business work for a read-only gap follow-up', () => {
+    const completed = buildConversationActionContinuationState({
+      userText: '请基于当前案件生成一份可复核的案件推进清单。',
+      assistantText: '案件推进清单已生成。',
+      toolCalls: [{
+        name: 'write_file',
+        arguments: { path: 'D:\\lumi_output\\案件推进清单.md' },
+        result: 'File written: D:\\lumi_output\\案件推进清单.md',
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'artifact',
+          reason: 'file exists',
+        },
+      }],
+    });
+    const followup = '这个案子还缺什么？请接着刚才的结果直接回答，不要重新生成文件。';
+
+    expect(classifyConversationActionFollowupIntent(followup, completed)).toBe('status');
+    expect(needsNaturalConversationActionStatusAnswer(followup)).toBe(true);
+    expect(needsNaturalConversationActionStatusAnswer('完成了吗？')).toBe(false);
+    expect(needsRecentActionContinuationContext(followup)).toBe(true);
+    const bridge = buildRecentActionContinuationBridge(followup, [], completed);
+    expect(bridge).toContain('- followupIntent: status');
+    expect(bridge).toContain('Recent tool evidence:');
+    expect(bridge).toContain('write_file');
   });
 
   it('treats an ambiguous failure question as status only for an unfinished durable task', () => {

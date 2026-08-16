@@ -46,4 +46,22 @@ describe('normalized desktop intent priority', () => {
       kind: 'external_ai_history',
     });
   });
+
+  it('keeps business-result gap questions read-only despite negated artifact words', () => {
+    expect(normalizeActionIntent('这个案子还缺什么？请接着刚才的结果直接回答，不要重新生成文件。')).toMatchObject({
+      kind: 'status_query',
+      operation: 'status',
+      target: 'recent_task',
+      sideEffectClass: 'none',
+      relation: 'status',
+      rule: 'business-result-followup-before-action',
+    });
+    expect(normalizeActionIntent('这个案子下一步怎么做？')).toMatchObject({
+      kind: 'status_query',
+      operation: 'status',
+    });
+    expect(normalizeActionIntent('缺少材料，帮我重新生成案件清单')).not.toMatchObject({
+      kind: 'status_query',
+    });
+  });
 });

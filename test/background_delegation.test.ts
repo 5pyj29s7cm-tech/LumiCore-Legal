@@ -36,6 +36,26 @@ describe('background delegation', () => {
     expect(decision.reason).toBe('explicit_background_preference');
   });
 
+  it('keeps an implicit industry workflow in the foreground but still honors explicit delegation', () => {
+    expect(shouldDelegateWorkInBackground({
+      ...BASE,
+      text: '基于当前案件生成一份案件推进清单',
+      industryWorkflow: true,
+    })).toEqual({
+      shouldDelegate: false,
+      reason: 'industry_workflow_foreground',
+    });
+
+    expect(shouldDelegateWorkInBackground({
+      ...BASE,
+      text: '把当前案件推进清单交给子agent后台处理',
+      industryWorkflow: true,
+    })).toEqual({
+      shouldDelegate: true,
+      reason: 'explicit_background_preference',
+    });
+  });
+
   it('keeps an implicit continuation in the foreground even when it looks moderate', () => {
     const decision = shouldDelegateWorkInBackground({
       ...BASE,

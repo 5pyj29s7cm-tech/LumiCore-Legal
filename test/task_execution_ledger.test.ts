@@ -339,4 +339,35 @@ describe('durable conversation task execution ledger', () => {
     expect(receipts[0].result.length).toBeLessThan(record.result.length);
     expect(toolRecordSucceeded(taskReceiptsToRecords(receipts)[0])).toBe(true);
   });
+
+  it('completes a local court-platform handoff from verified legal and artifact receipts', () => {
+    const goal = '请基于当前矩衡律师版验收案，为人民法院在线服务准备一个登录后由律师人工操作的协同工作区，列出案件字段、材料清单和人工确认边界。只准备本地工作区，不要登录、不要上传、不要提交、不要缴费。';
+    const receipts = recordsToTaskReceipts([
+      {
+        name: 'legal_prepare_filing_handoff',
+        arguments: { caseId: 'case-acceptance' },
+        result: JSON.stringify({ ok: true, status: 'completed', uploadCount: 14 }),
+        terminalVerification: {
+          status: 'verified' as const,
+          strategy: 'terminal_receipt' as const,
+          reason: 'The local filing handoff was recorded.',
+        },
+      },
+      {
+        name: 'write_file',
+        arguments: { path: 'lumi_output/court-handoff.md' },
+        result: JSON.stringify({ ok: true, path: 'lumi_output/court-handoff.md' }),
+        terminalVerification: {
+          status: 'verified' as const,
+          strategy: 'artifact' as const,
+          reason: 'The local artifact exists and is non-empty.',
+        },
+      },
+    ]);
+
+    expect(taskCompletionFromReceipts(goal, receipts)).toMatchObject({
+      complete: true,
+      blocker: '',
+    });
+  });
 });

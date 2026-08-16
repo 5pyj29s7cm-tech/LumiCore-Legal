@@ -29,6 +29,7 @@ import {
 } from '../../../legal/statute_authority_refresh';
 import { loadStatuteAuthorityRefreshState } from '../../../legal/statute_authority_store';
 import { getDataDirectory } from '../../../config/data_path';
+import { getActiveIndustryWorkspaceContext } from '../../../industry/workspace_context';
 
 async function runLegalLLM(prompt: string, context?: any, maxTokens = 2048): Promise<string | null> {
   const getters = context?.llmGetters;
@@ -196,6 +197,29 @@ function sanitizeLegalWorkProductOutput(text: string): string {
 
 function textArg(args: Record<string, any>, key: string): string {
   return String(args[key] || '').trim();
+}
+
+function withActiveLegalWorkspace(args: Record<string, any>, context?: any): Record<string, any> {
+  try {
+    const active = getActiveIndustryWorkspaceContext({
+      userId: String(context?.userId || textArg(args, 'userId') || 'anonymous'),
+      domain: context?.domain === 'work' ? 'work' : 'personal',
+      orgId: context?.domain === 'work' ? String(context?.orgId || '') : '',
+    });
+    if (!active || active.productLine !== 'legal') return args;
+    const attributes = active.attributes || {};
+    return {
+      ...args,
+      caseId: textArg(args, 'caseId') || attributes.caseId || '',
+      caseName: textArg(args, 'caseName') || textArg(args, 'title') || attributes.caseName || active.name,
+      caseNumber: textArg(args, 'caseNumber') || attributes.caseNumber || '',
+      parties: textArg(args, 'parties') || attributes.clientName || '',
+      court: textArg(args, 'court') || attributes.court || '',
+      stage: textArg(args, 'stage') || attributes.stage || '',
+    };
+  } catch {
+    return args;
+  }
 }
 
 function legalWorkspaceId(args: Record<string, any>, context?: any): string {
@@ -1603,11 +1627,13 @@ async function reasoningMatrixHandler(args: Record<string, any>, context?: any):
 }
 
 async function caseWorkspaceHandler(args: Record<string, any>, context?: any): Promise<string> {
+  args = withActiveLegalWorkspace(args, context);
   const orgId = legalWorkspaceId(args, context);
   const userId = textArg(args, 'userId') || context?.userId || 'system';
   const caseName = textArg(args, 'caseName') || textArg(args, 'title') || '未命名案件';
   const role = roleLabel(textArg(args, 'role'));
-  const caseType = textArg(args, 'caseType') || textArg(args, 'cause') || '待确认案由';
+  const requestedCaseType = textArg(args, 'caseType') || textArg(args, 'cause');
+  const caseType = requestedCaseType || '待确认案由';
   const court = textArg(args, 'court');
   const parties = textArg(args, 'parties');
   const claims = textArg(args, 'claims') || textArg(args, 'objective');
@@ -1631,17 +1657,18 @@ async function caseWorkspaceHandler(args: Record<string, any>, context?: any): P
     if (!caseFile) {
       caseFile = LegalCases.listCases(orgId, caseName, 1, userId)[0] || null;
     }
+    const generatedNotes = [
+      claims ? `办理目标：${claims}` : '',
+      facts ? `事实摘要：${facts.slice(0, 2000)}` : '',
+      evidence ? `证据摘要：${evidence.slice(0, 1200)}` : '',
+    ].filter(Boolean).join('\n');
     const patch = {
       title: caseName,
-      party: parties || role,
-      cause: caseType,
-      court,
-      stage,
-      notes: [
-        claims ? `办理目标：${claims}` : '',
-        facts ? `事实摘要：${facts.slice(0, 2000)}` : '',
-        evidence ? `证据摘要：${evidence.slice(0, 1200)}` : '',
-      ].filter(Boolean).join('\n'),
+      party: parties || caseFile?.party || role,
+      cause: requestedCaseType || caseFile?.cause || caseType,
+      court: court || caseFile?.court || '',
+      stage: textArg(args, 'stage') ? stage : caseFile?.stage || stage,
+      notes: generatedNotes || caseFile?.notes || '',
     };
     caseFile = caseFile
       ? LegalCases.updateCase(orgId, userId, caseFile.id, patch) || caseFile
@@ -1749,6 +1776,7 @@ ${queries.map((query, index) => `${index + 1}. ${query}`).join('\n')}
 }
 
 async function caseWorkflowStatusHandler(args: Record<string, any>, context?: any): Promise<string> {
+  args = withActiveLegalWorkspace(args, context);
   const orgId = legalWorkspaceId(args, context);
   const userId = textArg(args, 'userId') || context?.userId || 'system';
   const caseName = textArg(args, 'caseName') || textArg(args, 'title') || textArg(args, 'query');
@@ -1819,17 +1847,45 @@ async function caseWorkflowStatusHandler(args: Record<string, any>, context?: an
     ? `${workflow.nextStep.label}：${workflow.nextStep.nextStep}（推荐 ${workflow.nextStep.tool}）`
     : '闭环已完成，进入持续复核和归档。';
   const title = caseFile?.title || caseName || '未命名案件';
+  const knownFacts = caseFile?.notes || facts || '待补充并由律师确认';
+  const materialSummary = (caseFile?.materials || []).length
+    ? (caseFile?.materials || []).slice(0, 20).map((material, index) => (
+        `${index + 1}. ${material.title}（${material.type}/${material.source}）${material.content ? `：${material.content.slice(0, 320)}` : ''}`
+      )).join('\n')
+    : (evidence || '暂无已归档材料');
+  const statusEvidenceText = [
+    evidence,
+    ...(caseFile?.materials || []).map(material => material.content || material.title),
+  ].filter(Boolean).join('\n');
+  const statusEvidenceRows = buildEvidenceReviewRows({
+    ...args,
+    caseType: caseFile?.cause || caseType,
+    facts: knownFacts,
+    evidence: statusEvidenceText,
+  });
+  const evidenceGapSummary = formatEvidenceGapList(statusEvidenceRows);
 
   return `# ${title} 案件闭环状态
 
 - 案件ID：${caseFile?.id || '未持久化/未匹配'}
 - 组织：${orgId}
+- 当事人：${caseFile?.party || parties || '待补充'}
+- 案由：${caseFile?.cause || caseType}
+- 法院/机构：${caseFile?.court || court || '待确认'}
 - 完成度：${workflow.doneCount}/${workflow.steps.length}（${workflow.completionRatio}%）
 - 阻断项：${workflow.blockedCount}
 - 待补项：${workflow.missingCount}
 - 可进入文书起草：${workflow.readyForDraft ? '是' : '否'}
 - 可进入正式交付：${workflow.readyForFormalDelivery ? '是' : '否'}
 - 下一动作：${next}
+
+## 已知事实与现有材料
+- 事实摘要：${knownFacts}
+
+${materialSummary}
+
+## 证据缺口与待核验事项
+${evidenceGapSummary}
 
 | 模块 | 状态 | 判断依据 | 下一步 | 推荐工具 |
 | --- | --- | --- | --- | --- |

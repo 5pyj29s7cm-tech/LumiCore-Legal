@@ -146,6 +146,7 @@ import {
   formatConversationActionTaskStatus,
   getRecoveredApplicationContinuationTarget,
   isUserObservedTaskCompletion,
+  needsNaturalConversationActionStatusAnswer,
   resolveRecentActionOpenTarget,
 } from "../cognition/action_continuation";
 import {
@@ -2300,7 +2301,10 @@ async function processVoiceInput(
     return;
   }
 
-  if (actionFollowupIntent === 'status') {
+  if (
+    actionFollowupIntent === 'status'
+    && !needsNaturalConversationActionStatusAnswer(actionIntentText)
+  ) {
     responseText = getConversationActionStatus(
       conversationTurn.conversation.id,
       session.userId,

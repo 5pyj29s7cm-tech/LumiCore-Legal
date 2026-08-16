@@ -81,6 +81,8 @@ export interface LumiTurnFlow {
   specialWorkflow: SkillWorkflowDescriptor | null;
   executionGovernance: LumiExecutionGovernance;
   completionEvidenceNeeded: boolean;
+  /** Read-only recall/status turn grounded by recovered conversation task evidence. */
+  statusOnlyContinuation?: boolean;
   routeText: string;
   promptOverlay: string;
 }
@@ -361,9 +363,9 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
   const continuationContext = compact(input.continuationContext);
   const hasContinuationContext = Boolean(continuationContext);
   const directActionFollowupIntent = classifyRecentActionFollowupIntent(input.text);
-  const recoveredActionFollowupIntent = /(?:^|\n)- followupIntent:\s*status(?:\s|$)/i.test(continuationContext)
+  const recoveredActionFollowupIntent = /(?:^|\s)- followupIntent:\s*status(?:\s|$)/i.test(continuationContext)
     ? 'status' as const
-    : /(?:^|\n)- followupIntent:\s*execute(?:\s|$)/i.test(continuationContext)
+    : /(?:^|\s)- followupIntent:\s*execute(?:\s|$)/i.test(continuationContext)
       ? 'execute' as const
       : 'none' as const;
   const actionFollowupIntent = directActionFollowupIntent !== 'none'
@@ -416,7 +418,9 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
   // Native client navigation has higher priority than industry execution.
   // Words such as “生成” or “处理” may be part of a workspace name and must
   // not create a task when the user only asked to open that workspace.
-  const industryWorkflowExecutionRequested = industryWorkflowExecutionDetected && !clientActionIntent;
+  const industryWorkflowExecutionRequested = industryWorkflowExecutionDetected
+    && !clientActionIntent
+    && !statusOnlyContinuation;
   const currentActionContract = buildActionContract(input.text);
   const normalizedActionIntent = normalizeActionIntent(input.text);
   const industryGuidanceRequest = !conceptualCapabilityQuestion
@@ -461,7 +465,7 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     && isDiagnosticOrRepairRequest(input.text);
   const clientActionOnlyTurn = !selfRepairTurn && clientActionIntent;
   const visionIntent = hasVisionIntent(routingText);
-  const workSurfaceRoute = resolveWorkSurfaceRoute(routingText);
+  const workSurfaceRoute = resolveWorkSurfaceRoute(statusOnlyContinuation ? '' : routingText);
   const recoveredCurrentAppEdit = isRecoveredCurrentAppEditingContinuation(routingText);
   const explicitBackgroundDelegation = hasExplicitBackgroundDelegationPreference(input.text);
   const allowToolUseForTurn = conceptualCapabilityQuestion || statusOnlyContinuation
@@ -480,7 +484,7 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
       explicitBackgroundDelegation ||
       industryWorkflowExecutionRequested ||
       shouldAllowToolUseForTurn(input.text, input.source, effectiveOperationMode);
-  const specialWorkflow = conceptualCapabilityQuestion || recoveredCurrentAppEdit
+  const specialWorkflow = conceptualCapabilityQuestion || statusOnlyContinuation || recoveredCurrentAppEdit
     ? null
     : matchSkillWorkflow(routingText, { targetIsLumi: input.targetIsLumi });
   const exposeAgentWork = !conceptualCapabilityQuestion && (explicitTeamExecution || shouldExposeAgentWork(input.text));
@@ -493,16 +497,22 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     workSurfaceRoute,
     workTakeover,
   });
-  const execution = conceptualCapabilityQuestion
+  const execution = conceptualCapabilityQuestion || statusOnlyContinuation
     ? {
         completionEvidenceNeeded: false,
         governance: {
           verificationIntent: 'none' as const,
-          verificationReason: 'conceptual capability explanation does not execute work',
+          verificationReason: conceptualCapabilityQuestion
+            ? 'conceptual capability explanation does not execute work'
+            : 'receipt-backed status follow-up does not execute new work',
           delegationIntent: 'none' as const,
-          delegationReason: 'conceptual capability explanation stays in the foreground conversation',
+          delegationReason: conceptualCapabilityQuestion
+            ? 'conceptual capability explanation stays in the foreground conversation'
+            : 'status follow-up stays in the foreground conversation',
           capabilityLearningIntent: 'none' as const,
-          capabilityLearningReason: 'the user asked how existing capability routing works',
+          capabilityLearningReason: conceptualCapabilityQuestion
+            ? 'the user asked how existing capability routing works'
+            : 'status follow-up reuses existing evidence instead of learning a capability',
           shouldInspectCapabilitiesFirst: false,
         },
       }
@@ -531,6 +541,7 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     specialWorkflow,
     executionGovernance: execution.governance,
     completionEvidenceNeeded: execution.completionEvidenceNeeded,
+    statusOnlyContinuation,
     routeText: !conceptualCapabilityQuestion && !statusOnlyContinuation && workTakeover.shouldResumeTask && workTakeover.routeText
       ? workTakeover.routeText
       : routingText,

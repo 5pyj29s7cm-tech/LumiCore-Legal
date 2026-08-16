@@ -87,6 +87,7 @@ import {
   classifyConversationActionFollowupIntent,
   formatConversationActionTaskStatus,
   getRecoveredApplicationContinuationTarget,
+  needsNaturalConversationActionStatusAnswer,
   resolveRecentActionOpenTarget,
 } from "../cognition/action_continuation";
 import {
@@ -1093,6 +1094,7 @@ export function registerChatHandler(
         visibleUserText,
         activeConversationForStatus?.actionContinuationState,
       ) === 'status'
+      && !needsNaturalConversationActionStatusAnswer(visibleUserText)
     ) {
       const activeConversation = activeConversationForStatus || getActiveConversation(
         uid,
@@ -1577,7 +1579,11 @@ export function registerChatHandler(
         visibleUserText,
         conversation?.actionContinuationState,
       );
-      if (conversationId && actionFollowupIntent === 'status') {
+      if (
+        conversationId
+        && actionFollowupIntent === 'status'
+        && !needsNaturalConversationActionStatusAnswer(visibleUserText)
+      ) {
         const statusText = getConversationActionStatus(conversationId, uid, visibleUserText, conversation?.actionContinuationState);
         emitAgent("agent:status", { status: "responding", agentName: personality.name });
         emitAgent("agent:response", { text: statusText, agentName: personality.name, finalized: true, blocked: false, reason: '' });
@@ -3013,6 +3019,7 @@ export function registerChatHandler(
           sanctuary: isSanctuary,
           directDesktop: workSurfaceRoute.directDesktop,
           prefersSequentialWorkflow,
+          industryWorkflow: Boolean(turnFlow.industryWorkflowEntryId),
           availableAgentCount: availableWorkerAgents.length,
         });
 

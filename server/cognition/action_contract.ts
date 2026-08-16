@@ -105,6 +105,33 @@ function matches(text: string, pattern: RegExp): boolean {
   return pattern.test(text);
 }
 
+export function isLocalPreparationWithoutPlatformAction(text: string): boolean {
+  // A platform may be the destination of a handoff without being the surface
+  // Lumi is being asked to control. Explicit local-preparation language plus
+  // an explicit prohibition on platform actions must win over incidental
+  // phrases such as "登录后由律师人工操作".
+  // i18n-allow: Chinese local handoff and external-action negation recognition.
+  const localPreparation = /(?:只|仅|仅仅|只需|仅需).{0,12}(?:准备|生成|创建|整理|列出).{0,24}(?:本地|离线).{0,16}(?:工作区|文件|文档|清单|材料|草稿)|\b(?:only|just)\s+(?:prepare|create|generate|organize|list).{0,48}\b(?:local|offline)\s+(?:workspace|file|document|checklist|materials?|draft)\b/iu.test(text);
+  const platformActionProhibited = /(?:不要|无需|不用|不得|禁止|不(?:要|需)).{0,16}(?:登录|打开网站|上传|提交|缴费|付款|发布|发送)|\b(?:do\s+not|don't|must\s+not|without)\s+(?:log\s*in|open\s+the\s+(?:site|website)|upload|submit|pay|publish|send)\b/iu.test(text);
+  return localPreparation && platformActionProhibited;
+}
+
+export function hasVerifiedExistingLocalPreparationArtifact(
+  records: ToolExecutionRecord[] = [],
+  taskText = '',
+): boolean {
+  if (!isLocalPreparationWithoutPlatformAction(taskText)) return false;
+  const expectsWorkspace = /(?:协同)?工作区|workspace/iu.test(taskText);
+  return records.some(record => {
+    if (record.error || record.name !== 'read_file' || String(record.result || '').trim().length < 80) return false;
+    if (record.terminalVerification && record.terminalVerification.status !== 'verified') return false;
+    const path = String(record.arguments?.path || record.arguments?.filePath || '').trim();
+    if (!path || !/\.(?:md|txt|docx|pdf)$/i.test(path)) return false;
+    const evidenceText = `${path}\n${String(record.result || '').slice(0, 500)}`;
+    return !expectsWorkspace || /(?:协同)?工作区|workspace/iu.test(evidenceText);
+  });
+}
+
 function extensionRegistryToolForAction(text: string): string | null {
   // i18n-allow: Multilingual signed-extension input recognition; not user-visible copy.
   const subject = /(?:\bext_[a-z0-9_.-]+\b|\b(?:signed\s+)?(?:extension|plugin)\b|\bopenai[-\s]?compatible\s+provider\b|\bcustom\s+(?:model\s+)?provider\b|\bprovider\s+registry\b|(?:Lumi\s*)?(?:签名扩展|扩展插件|插件扩展|插件|扩展|OpenAI\s*兼容(?:模型|Provider|提供商)?|自定义(?:模型)?\s*Provider|Provider\s*注册表))/iu.test(text);
@@ -702,6 +729,7 @@ export function buildActionContract(input: string): LumiActionContract {
 
   const text = compact(rawInput);
   if (!text) return NONE_CONTRACT;
+  const localPreparationWithoutPlatformAction = isLocalPreparationWithoutPlatformAction(text);
   if (
     normalizedIntent.kind === 'correction_explanation'
     || normalizedIntent.kind === 'client_navigation'
@@ -947,6 +975,7 @@ export function buildActionContract(input: string): LumiActionContract {
 
   if (
     matches(text, /\u767b\u5f55|\u6d4f\u89c8\u5668|\u6253\u5f00\u7f51\u7ad9|\u81ea\u52a8\u767b\u5f55|browser|login|log\s*in|website|site/i) &&
+    !localPreparationWithoutPlatformAction &&
     !matches(text, /\bCAD\b|\bDXF\b|\bDWG\b|AutoCAD|\u753b\u56fe|\u753b\u56fe\u7eb8|\u56fe\u7eb8|\u5e73\u9762\u56fe|\u65bd\u5de5\u56fe|\u88c5\u4fee|cad/i)
   ) {
     return withDefaults({
@@ -1918,6 +1947,13 @@ export function hasCoreActionEvidence(
     );
   }
   if (contract.kind === 'legal_document') {
+    const requestsLegalArtifact = /(?:生成|保存|创建|新建|制作|输出|导出|形成|准备).{0,48}(?:文书|文件|清单|工作区|交接单|起诉状|答辩状|代理词|意见书|材料包|底稿|报告|合同|协议|标书|目录|document|file|checklist|workspace|handoff|draft|report|contract|agreement|bid)/iu.test(taskText);
+    const produced = successful.some(record => /^(?:legal_generate_(?!citation_verification_report).+|legal_analyze_folder_and_draft_argument|legal_review_contract|legal_draft_contract|legal_finalize_delivery_package|legal_prepare_filing_handoff|create_docx|create_pdf|write_file)$/i.test(record.name));
+    if (requestsLegalArtifact) {
+      return produced
+        || hasVerifiedExistingLocalPreparationArtifact(successful, taskText)
+        || hasVerifiedManifestCapabilityEvidence(contract, successful);
+    }
     return successful.some(record => /legal_|read_|create_docx|write_file|desktop_path_info|work_product_verify/i.test(record.name))
       || hasVerifiedManifestCapabilityEvidence(contract, successful);
   }

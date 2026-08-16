@@ -1273,7 +1273,7 @@ export function recoverConversationActionTaskLeases(
 
   for (const task of tasks) {
     if (task.conversationId.startsWith('scheduler:')) continue;
-    if (!['planning', 'executing', 'waiting_confirmation'].includes(task.status)) continue;
+    if (task.status === 'completed' || task.status === 'cancelled') continue;
 
     const hasNewerTask = tasks.some(candidate => (
       candidate.id !== task.id
@@ -1282,12 +1282,52 @@ export function recoverConversationActionTaskLeases(
       && candidate.createdAt.localeCompare(task.createdAt) > 0
     ));
     const previousStatus = task.status;
-    const blocker = previousStatus === 'waiting_confirmation'
-      ? 'The pending confirmation expired when the previous runtime ended.'
-      : 'The previous runtime ended before this task reached a terminal receipt.';
     const context = parseObject(task.context);
     const actionState = normalizeConversationActionState(context.actionState);
     const orderingTimestamp = hasNewerTask ? task.updatedAt : now;
+    const completion = actionState
+      ? taskCompletionFromReceipts(actionState.goal || task.goal, actionState.receipts || [])
+      : { complete: false, blocker: '' };
+
+    // A process may have ended after durable verified receipts were written
+    // but before the final status transition was flushed. Reconcile those
+    // receipts first. Restart recovery must never overwrite verified business
+    // completion with a generic interrupted-runtime blocker.
+    if (completion.complete && actionState) {
+      task.status = 'completed';
+      task.blocker = '';
+      task.activeRequestId = '';
+      task.completionSource = 'tool_receipt';
+      task.completedAt = task.completedAt || now;
+      task.revision = Math.max(1, Number(task.revision) || 0) + 1;
+      task.updatedAt = orderingTimestamp;
+      task.context = JSON.stringify({
+        ...context,
+        receiptRecovery: {
+          recoveredAt: now,
+          priorStatus: previousStatus,
+          newerTaskAlreadyExists: hasNewerTask,
+        },
+        actionState: sanitizeState({
+          ...actionState,
+          version: 2,
+          status: 'completed',
+          unfinished: false,
+          latestBlocker: '',
+          activeRequestId: undefined,
+          completionSource: 'tool_receipt',
+          revision: Math.max(actionState.revision || 0, task.revision),
+          updatedAt: orderingTimestamp,
+        }),
+      });
+      recovered += 1;
+      continue;
+    }
+
+    if (!['planning', 'executing', 'waiting_confirmation'].includes(previousStatus)) continue;
+    const blocker = previousStatus === 'waiting_confirmation'
+      ? 'The pending confirmation expired when the previous runtime ended.'
+      : 'The previous runtime ended before this task reached a terminal receipt.';
 
     task.status = 'blocked';
     task.blocker = blocker;

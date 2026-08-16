@@ -4157,7 +4157,11 @@
   },
   "legal-hub.ask-lumi-in-work-workspace.6fe76d2092": {
     "en": "Ask Lumi in Work Workspace",
-    "zh": "去工作域 Lumi 引用"
+    "zh": "让 Lumi 继续处理"
+  },
+  "legal-hub.no-case-selected.runtime": {
+    "en": "No case selected",
+    "zh": "未选择案件"
   },
   "legal-hub.asset-trace.24d93c8873": {
     "en": "Asset trace",

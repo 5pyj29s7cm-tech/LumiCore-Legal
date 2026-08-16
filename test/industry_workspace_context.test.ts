@@ -4,6 +4,7 @@ import { ToolRegistry } from '../server/tools/registry';
 import { registerIndustryWorkflowTools } from '../server/tools/definitions/industry_workflow_tools';
 import { getIndustryWorkflowContracts } from '../server/industry/workflow_contracts';
 import { PRODUCT_VARIANT } from '../shared/product_variant';
+import { executeToolCall } from '../server/tools/execution_engine';
 
 beforeAll(async () => {
   const { initDatabase } = await import('../db_layer');
@@ -11,6 +12,23 @@ beforeAll(async () => {
 });
 
 describe('industry workspace context continuity', () => {
+  it('verifies an empty but successfully observed workspace list', async () => {
+    const registry = new ToolRegistry();
+    registerIndustryWorkflowTools(registry);
+    const record = await executeToolCall({
+      registry,
+      name: 'industry_workspace_status',
+      arguments: {},
+      context: {
+        userId: `empty_workspace_${PRODUCT_VARIANT.productLine}_${Date.now()}`,
+        domain: 'personal',
+        orgId: '',
+      },
+    });
+    expect(record.error).toBeUndefined();
+    expect(record.terminalVerification).toMatchObject({ status: 'verified', strategy: 'terminal_receipt' });
+  });
+
   it('binds one edition-specific business subject and inherits it into voice/chat workflows', async () => {
     const registry = new ToolRegistry();
     registerIndustryWorkflowTools(registry);
@@ -44,4 +62,3 @@ describe('industry workspace context continuity', () => {
     expect(isolated.active).toBeNull();
   });
 });
-

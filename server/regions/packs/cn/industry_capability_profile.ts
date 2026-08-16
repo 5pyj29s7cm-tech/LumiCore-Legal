@@ -82,7 +82,14 @@ const PROFILE_COPY: Record<IndustryProductLine, ProfileCopy> = {
     automaticActions: ['整理案件与材料', '生成内部文书和研究草稿', '检索已授权法源与类案', '归档证据、引用、版本和核验记录'],
     reviewRequiredActions: ['法律结论和正式法律意见', '签署、立案、付款和报送', '客户外发与正式交付', '任何需要执业律师承担责任的决定'],
     entries: {
-      workspace: { displayName: '案件工作台', summary: '统一案件事实、证据、争点、材料、状态和下一步。', routingTerms: ['案件工作台', '新建案件', '案件整理', '案件状态', '案件材料', 'case workspace', 'case intake'] },
+      workspace: {
+        displayName: '案件工作台',
+        summary: '统一案件事实、证据、争点、材料、状态和下一步。',
+        routingTerms: ['案件工作台', '新建案件', '案件整理', '案件状态', '案件材料', '案件推进', '案件推进清单', '推进清单', '案件计划', '证据缺口', '待补证据', 'case workspace', 'case intake'],
+        routingPatterns: [
+          /(?:当前|这个|本案|案件).{0,24}(?:推进|清单|已知事实|证据缺口|待补证据|下一步|律师确认)|(?:推进清单|证据缺口|待补证据).{0,24}(?:案件|本案|律师)/u,
+        ],
+      },
       packet: { displayName: '文书生成', summary: '基于当前案件生成可复核文书并保留版本和引用。', routingTerms: ['文书生成', '起诉状', '答辩状', '代理词', '法律意见书', '法律文书', 'legal document', 'litigation packet'] },
       'contract-review': {
         displayName: '合同审查',
@@ -218,6 +225,11 @@ export function formatIndustryCapabilityProfilePrompt(text?: unknown): string {
       ? `When this is an execution request and no existing industry task is named, call industry_workflow_start exactly once with entryId=${match.entry.entryId}. The server binds the current request from trusted turn context; never copy raw business text into tool arguments. Continue the returned task with real domain tools and verify it before claiming completion.`
       : 'For an industry execution request, select exactly one matching outcome workspace. If the target is genuinely ambiguous, ask one short clarification instead of creating multiple tasks.',
     'If a wt_task_* industry task is already named, continue that task and never create a duplicate. Capability questions and self-introductions explain this profile without starting business work.',
+    'User-facing answers and generated business files must use natural business language. Never expose internal tool ids, routing keys, capability lanes, receipt fields, or workflow protocol names unless the user explicitly asks for technical diagnostics.',
+    'Never invent business facts, dates, identities, amounts, source status, or completion metadata. Use only the active workspace and verified evidence; when a field is not grounded, omit it or mark it as pending confirmation.',
+    profile.productLine === 'legal'
+      ? 'For ordinary legal checklists, documents and chat answers, keep internal reasoning methods internal. Present facts, evidence, legal basis, risks, next actions and lawyer-review items directly; do not expose internal reasoning labels or implementation gates.'
+      : '',
     'Usage and teaching questions follow the industry guidance contract: use the exact edition and active business context, explain at most three steps, and never create a task or perform a side effect unless the user explicitly asks to proceed.',
     'Business-object continuity: read industry_workspace_status before resolving phrases such as current/this store, case, company, account or period. If no exact workspace is bound, use industry_workspace_bind from user-provided identity or ask one clarification; never guess a target.',
     'Automatic means local reading, analysis, preparation and archival inside the stated scope. It never bypasses the confirmation boundary or turns a draft/model statement into proof of external completion.',

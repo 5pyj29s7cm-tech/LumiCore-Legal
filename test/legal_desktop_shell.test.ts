@@ -33,6 +33,8 @@ describe('Legal desktop shell', () => {
     expect(hub).toContain('runLegalTool');
     expect(hub).toContain('LegalContractReview');
     expect(hub).toContain('LegalAssetTrace');
+    expect(hub).toContain('syncPersonalLegalCaseToRuntime(activeCase)');
+    expect(hub).not.toContain('Untitled legal case');
   });
 
   it('keeps every primary outcome mapped to a distinct legal workspace', () => {

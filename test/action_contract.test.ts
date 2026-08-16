@@ -469,6 +469,35 @@ describe('Lumi action contract', () => {
     expect(legalRemoteIntake.preferredTools).toContain('legal_generate_citation_verification_report');
   });
 
+  it('keeps an explicitly local court-platform handoff in the legal lane', () => {
+    const text = '请基于当前矩衡律师版验收案，为人民法院在线服务准备一个登录后由律师人工操作的协同工作区，列出案件字段、材料清单和人工确认边界。只准备本地工作区，不要登录、不要上传、不要提交、不要缴费。';
+    const contract = buildActionContract(text);
+
+    expect(contract.kind).toBe('legal_document');
+    expect(contract.preferredTools).toContain('legal_prepare_filing_handoff');
+    expect(contract.preferredTools).not.toContain('web_login_run');
+    expect(hasCoreActionEvidence(contract, [{
+      name: 'read_file',
+      arguments: { path: 'D:\\lumi_output\\矩衡律师版验收案_人民法院在线服务协同工作区.md' },
+      result: `# 矩衡律师版验收案·人民法院在线服务协同工作区\n${'x'.repeat(100)}`,
+      terminalVerification: {
+        status: 'verified',
+        strategy: 'terminal_receipt',
+        reason: 'The existing local artifact was read successfully.',
+      },
+    }], text)).toBe(true);
+    expect(hasCoreActionEvidence(contract, [{
+      name: 'read_file',
+      arguments: { path: 'D:\\source\\contract.md' },
+      result: `# 合同原文\n${'x'.repeat(100)}`,
+      terminalVerification: {
+        status: 'verified',
+        strategy: 'terminal_receipt',
+        reason: 'A source file was read.',
+      },
+    }], text)).toBe(false);
+  });
+
   it('classifies customer, ecommerce, and composite design work as evidence-gated operations', () => {
     expect(buildActionContract('Analyze this customer lead and advance the sales follow-up.').kind).toBe('customer_operations');
     expect(buildActionContract('Analyze this ecommerce campaign ROI and optimize the store listing.').kind).toBe('ecommerce_operations');

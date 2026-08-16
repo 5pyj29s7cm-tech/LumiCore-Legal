@@ -19,12 +19,14 @@ import { runLegalTool } from '../../lib/legalToolClient';
 import {
   clearLegalConsultationCaseId,
   createEmptyLegalCase,
+  deletePersonalLegalCaseFromRuntime,
   getActiveLegalCaseId,
   getLegalConsultationCaseId,
   LEGAL_CASES_CHANGED_EVENT,
   readLegalCaseFiles,
   setActiveLegalCaseId,
   setLegalConsultationCaseId,
+  syncPersonalLegalCaseToRuntime,
   writeLegalCaseFiles,
   type LegalCaseFile,
   type LegalCaseMaterial,
@@ -63,8 +65,8 @@ const LEGAL_WORKFLOW_ORDER: LegalView[] = [
 ];
 
 function legalCaseTitle(caseFile?: LegalCaseFile | null): string {
-  if (!caseFile) return 'Untitled legal case';
-  return caseFile.title || caseFile.party || caseFile.caseNumber || 'Untitled legal case';
+  if (!caseFile) return uiMessage('legal-hub.no-case-selected.runtime');
+  return caseFile.title || caseFile.party || caseFile.caseNumber || uiMessage('legal-hub.untitled-case.796e2578d9');
 }
 
 function resolveLegalCaseActiveId(cases: LegalCaseFile[], requestedId: string): string {
@@ -403,6 +405,16 @@ export function LegalHub({
   const activeCase = useMemo(() => {
     return cases.find(item => item.id === activeCaseId) || cases[0] || null;
   }, [activeCaseId, cases]);
+
+  useEffect(() => {
+    if (useOrgCases || !activeCase) return;
+    const timer = window.setTimeout(() => {
+      void syncPersonalLegalCaseToRuntime(activeCase).catch(error => {
+        console.warn('[LegalHub] Failed to synchronize the active case with Lumi runtime:', error);
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [activeCase, useOrgCases]);
   const isWorkflowView = view === 'workspace';
   const activeView = isWorkflowView ? workflowView : view;
   const currentStep = isWorkflowView
@@ -461,6 +473,8 @@ export function LegalHub({
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || uiMessage('legal-hub.failed-to-delete-case.34167edea4'));
+      } else {
+        await deletePersonalLegalCaseFromRuntime(deleteTarget.id);
       }
 
       const next = cases.filter(item => item.id !== deleteTarget.id);

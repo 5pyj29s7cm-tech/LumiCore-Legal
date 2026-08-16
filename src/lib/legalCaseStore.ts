@@ -222,6 +222,31 @@ export function getActiveLegalCase(): LegalCaseFile | null {
   return cases.find(item => item.id === activeId) || cases[0] || null;
 }
 
+export async function syncPersonalLegalCaseToRuntime(caseFile: LegalCaseFile): Promise<void> {
+  const response = await fetch('/api/legal/client-case-sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ case: caseFile }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to synchronize the current legal case.');
+  }
+}
+
+export async function deletePersonalLegalCaseFromRuntime(caseId: string): Promise<void> {
+  if (!caseId) return;
+  const response = await fetch(`/api/legal/client-case-sync/${encodeURIComponent(caseId)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to remove the legal case runtime snapshot.');
+  }
+}
+
 export function getLegalConsultationCase(): LegalCaseFile | null {
   const consultationId = getLegalConsultationCaseId();
   return consultationId ? getLegalCaseById(consultationId) : null;

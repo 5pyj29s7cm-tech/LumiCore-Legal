@@ -79,6 +79,9 @@ describe('industry capability profile and channel routing', () => {
     }
     const prompt = formatIndustryCapabilityProfilePrompt();
     expect(prompt).toContain(PRODUCT_VARIANT.displayName);
+    expect(prompt).toContain('Never expose internal tool ids');
+    expect(prompt).toContain('Never invent business facts, dates, identities, amounts');
+    if (profile.productLine === 'legal') expect(prompt).toContain('keep internal reasoning methods internal');
     const routedPrompt = formatIndustryCapabilityProfilePrompt(SCENARIOS[PRODUCT_VARIANT.productLine][0].command);
     expect(routedPrompt).toContain('trusted turn context');
     expect(routedPrompt).not.toContain('and the current user request');
@@ -119,6 +122,39 @@ describe('industry capability profile and channel routing', () => {
         expect(pipeline.execution.promptOverlay).toContain(`entryId=${scenario.entryId}`);
         expect(pipeline.capabilityPlan.taskLedgerRequired).toBe(false);
       }
+    }
+  });
+
+  it('routes a natural legal case-progress request identically across every channel', () => {
+    if (PRODUCT_VARIANT.productLine !== 'legal') return;
+    const registry = createRegistry();
+    const request = '请基于当前矩衡律师版验收案，先读取案件档案，生成一份可复核的案件推进清单，列出已知事实、证据缺口、下一步和需要律师确认的事项；不要发送、提交或对外发布。';
+    for (const [channel, source] of [
+      ['chat', 'chat'],
+      ['voice', 'voice'],
+      ['task', 'task'],
+      ['chat', 'feishu_bot'],
+    ] as const) {
+      const pipeline = buildLumiExecutionPipeline({
+        dispatch: {
+          userId: 'legal_progress_channel_user',
+          text: request,
+          channel,
+          source,
+          operationMode: channel === 'task' ? 'assistant' : 'chat',
+          targetIsLumi: true,
+        },
+        registry,
+        source,
+      });
+      expect(matchCurrentIndustryWorkflow(request)?.entry.entryId).toBe('workspace');
+      expect(pipeline.turnIntent.flow.industryWorkflowEntryId).toBe('workspace');
+      expect(pipeline.execution.toolPolicy.allowedTools).toEqual(expect.arrayContaining([
+        'industry_workspace_status',
+        'industry_workflow_start',
+        'legal_case_workflow_status',
+        'industry_workflow_complete',
+      ]));
     }
   });
 

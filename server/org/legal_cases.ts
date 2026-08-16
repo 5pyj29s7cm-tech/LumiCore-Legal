@@ -92,6 +92,106 @@ function normalizeText(value: unknown): string {
   return String(value || '').trim();
 }
 
+function normalizeSnapshotId(value: unknown): string {
+  const normalized = normalizeText(value).slice(0, 200);
+  if (!normalized || !/^[a-zA-Z0-9_.:@-]+$/.test(normalized)) {
+    throw new Error('A valid client case id is required.');
+  }
+  return normalized;
+}
+
+function normalizeSnapshotMaterial(
+  value: Partial<OrgLegalCaseMaterial>,
+  userId: string,
+): OrgLegalCaseMaterial {
+  const type = ['consultation', 'evidence', 'pleading', 'judgment', 'contract', 'note'].includes(String(value.type || ''))
+    ? value.type as LegalCaseMaterialType
+    : 'note';
+  const source = ['manual', 'meeting', 'feishu', 'wecom', 'wechat', 'tool', 'import'].includes(String(value.source || ''))
+    ? value.source as OrgLegalCaseMaterial['source']
+    : 'manual';
+  return {
+    id: normalizeText(value.id) || randomUUID(),
+    type,
+    title: normalizeText(value.title) || '案件材料',
+    content: normalizeText(value.content),
+    fileName: normalizeText(value.fileName) || undefined,
+    localPath: normalizeText(value.localPath) || undefined,
+    source,
+    createdBy: normalizeText(value.createdBy) || userId,
+    createdAt: normalizeText(value.createdAt) || now(),
+  };
+}
+
+/**
+ * Mirrors a client-owned case into the server case ledger without creating a
+ * second identity. Chat, voice and direct legal tools can then resolve the
+ * exact case selected in the client instead of searching the source tree.
+ */
+export function upsertCaseSnapshot(
+  orgId: string,
+  userId: string,
+  input: Partial<OrgLegalCaseFile> & { id: string },
+): OrgLegalCaseFile {
+  const store = readStore();
+  const caseId = normalizeSnapshotId(input.id);
+  const index = store.cases.findIndex(item => item.orgId === orgId && item.id === caseId);
+  const current = index >= 0 ? store.cases[index] : null;
+  if (current && getOrganizationResourcePolicy(orgId, 'legal_case', caseId).policy) {
+    assertOrganizationResourceAccess({
+      orgId,
+      actorUserId: userId,
+      resourceType: 'legal_case',
+      resourceId: caseId,
+      permission: 'write',
+      ownerUserId: current.createdBy,
+    });
+  }
+  const ts = now();
+  const stage = ['consultation', 'filing', 'trial', 'judgment', 'enforcement', 'closed'].includes(String(input.stage || ''))
+    ? input.stage as LegalCaseStage
+    : current?.stage || 'consultation';
+  const materials = Array.isArray(input.materials)
+    ? input.materials.map(material => normalizeSnapshotMaterial(material, userId))
+    : current?.materials || [];
+  const caseFile: OrgLegalCaseFile = {
+    id: caseId,
+    orgId,
+    title: normalizeText(input.title) || current?.title || '未命名案件',
+    caseNumber: normalizeText(input.caseNumber),
+    party: normalizeText(input.party),
+    cause: normalizeText(input.cause),
+    court: normalizeText(input.court),
+    judge: normalizeText(input.judge),
+    stage,
+    hearingDate: normalizeText(input.hearingDate),
+    judgmentDate: normalizeText(input.judgmentDate),
+    appealDeadline: normalizeText(input.appealDeadline),
+    enforcementDeadline: normalizeText(input.enforcementDeadline),
+    notes: normalizeText(input.notes),
+    materials,
+    assetTraceWorkflow: input.assetTraceWorkflow && typeof input.assetTraceWorkflow === 'object'
+      ? input.assetTraceWorkflow
+      : current?.assetTraceWorkflow,
+    createdBy: current?.createdBy || userId,
+    updatedBy: userId,
+    createdAt: normalizeText(input.createdAt) || current?.createdAt || ts,
+    updatedAt: ts,
+  };
+  if (index >= 0) store.cases[index] = caseFile;
+  else store.cases.unshift(caseFile);
+  writeStore(store);
+  EDB.logAudit({
+    orgId,
+    userId,
+    action: current ? 'legal_case.client_snapshot.update' : 'legal_case.client_snapshot.create',
+    resourceType: 'legal_case',
+    resourceId: caseId,
+    details: { title: caseFile.title, caseNumber: caseFile.caseNumber, materialCount: materials.length },
+  });
+  return caseFile;
+}
+
 export function evaluateCaseWorkflow(
   caseFile: Partial<OrgLegalCaseFile>,
   options: LegalCaseWorkflowOptions = {},

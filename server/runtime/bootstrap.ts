@@ -31,6 +31,7 @@ import {
   UnifiedRuntimeSupervisor,
 } from "./unified_supervisor";
 import { enforceProductVariantSkillBaseline } from "./product_variant_skills";
+import { reconcileInterruptedIndustryWorkflowTasks } from "../industry/workflow_service";
 
 interface BootstrapContext {
   server: any;
@@ -188,6 +189,10 @@ export async function bootstrap(ctx: BootstrapContext) {
     const recoveredTasks = recoverOrphanedConversationActionExecutions();
     if (recoveredTasks > 0) {
       console.warn(`[Bootstrap] Recovered ${recoveredTasks} orphaned conversation task lease(s)`);
+    }
+    const reconciledIndustryTasks = reconcileInterruptedIndustryWorkflowTasks();
+    if (reconciledIndustryTasks > 0) {
+      console.warn(`[Bootstrap] Reconciled ${reconciledIndustryTasks} interrupted industry workflow task(s) without replaying tools`);
     }
     if (llm.refreshLocalModels) {
       const localModels = await llm.refreshLocalModels();

@@ -405,6 +405,49 @@ describe('Lumi result finalizer', () => {
     expect(result.notification?.type).toBe('work_product_guard');
   });
 
+  it('allows a read-only follow-up to summarize persisted completion receipts without a new write', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const responseText = '这个案子目前还缺送达凭证、验收异议记录和对方付款安排；刚才的案件推进清单已经生成，本轮没有重新生成文件。';
+    const result = finalizeLumiResponse({
+      taskText: '这个案子还缺什么？请接着刚才的结果直接回答，不要重新生成文件。',
+      responseText,
+      toolRecords: [],
+      source: 'chat',
+      flow: {
+        statusOnlyContinuation: true,
+        routeText: [
+          '这个案子还缺什么？请接着刚才的结果直接回答，不要重新生成文件。',
+          '## Recent action continuation context',
+          'Recovered structured action state:',
+          '- followupIntent: status',
+          '- taskStatus: completed',
+          'Recent tool evidence:',
+          '- write_file | path=D:\\lumi_output\\案件推进清单.md | status=verified',
+        ].join('\n'),
+      } as any,
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toBe(responseText);
+    expect(result.reason).toContain('persisted recent-action receipts');
+  });
+
+  it('does not trust a status-shaped completion claim without recovered receipts', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const result = finalizeLumiResponse({
+      taskText: '这个案子还缺什么？',
+      responseText: '案件推进清单已经生成。',
+      toolRecords: [],
+      source: 'chat',
+      flow: {
+        statusOnlyContinuation: true,
+        routeText: 'Recovered structured action state:\n- followupIntent: status\n- taskStatus: completed',
+      } as any,
+    });
+
+    expect(result.blocked).toBe(true);
+  });
+
   it('does not bypass the generic guard when no task contract is recognized', async () => {
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
 
