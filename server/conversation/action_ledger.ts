@@ -20,6 +20,7 @@ import type {
   ModelGraphArbitrationReceipt,
   ModelGraphNodeReceipt,
 } from '../agents/model_execution_graph';
+import { getCurrentIndustryCapabilityProfile } from '../regions/packs/cn/industry_capability_profile';
 import { reconcileConversationFocusThread } from './focus_threads';
 
 export interface ConversationActionTaskRow {
@@ -478,6 +479,54 @@ export function appendConversationActionReceipts(
     appended.push(row);
   });
   return appended;
+}
+
+/**
+ * Bind a read-only observation to the closest existing durable task. This
+ * preserves a receipt without manufacturing a new task for a status query.
+ */
+export function appendReadOnlyConversationActionReceipts(
+  db: any,
+  input: {
+    conversationId: string;
+    userId: string;
+    records: ToolExecutionRecord[];
+    anchors: string[];
+    preferredIntentKinds?: string[];
+    turnId?: string;
+    requestId?: string;
+    now?: string;
+  },
+): ConversationActionReceiptRow[] {
+  ensureTables(db);
+  const anchors = input.anchors.map(value => String(value || '').trim()).filter(Boolean);
+  const preferred = new Set(input.preferredIntentKinds || []);
+  const candidates = (db.conversationActionTasks as ConversationActionTaskRow[])
+    .filter(task => task.conversationId === input.conversationId && task.userId === input.userId)
+    // The receipt must describe an existing piece of work. Attaching it to a
+    // prior read/status row would keep the accidental status task alive.
+    .filter(task => task.operation !== 'read' && task.intentKind !== 'status_query')
+    .map(task => {
+      const haystack = `${task.goal}\n${task.target}`;
+      let score = 0;
+      anchors.forEach((anchor, index) => {
+        if (haystack.includes(anchor)) score += Math.max(4, 16 - index * 3);
+      });
+      if (preferred.has(task.intentKind)) score += 3;
+      if (task.status === 'completed') score += 1;
+      return { task, score };
+    })
+    .filter(candidate => candidate.score > 0)
+    .sort((left, right) => right.score - left.score || right.task.updatedAt.localeCompare(left.task.updatedAt));
+  const task = candidates[0]?.task;
+  if (!task) return [];
+  return appendConversationActionReceipts(db, {
+    task,
+    records: input.records,
+    turnId: input.turnId,
+    requestId: input.requestId,
+    now: input.now,
+  });
 }
 
 /**
@@ -1178,19 +1227,43 @@ export function findConversationActionTask(
   ensureTables(db);
   const intent = normalizeActionIntent(input.query || '');
   const query = String(input.query || '').toLowerCase();
+  const verifiedTaskIds = new Set((db.conversationActionReceipts as ConversationActionReceiptRow[])
+    .filter(receipt => receipt.outcome === 'verified_success')
+    .map(receipt => receipt.taskId));
   return (db.conversationActionTasks as ConversationActionTaskRow[])
     .filter(task => task.conversationId === input.conversationId && task.userId === input.userId)
     .map(task => {
-      const haystack = `${task.intentKind} ${task.goal} ${task.target}`.toLowerCase();
+      const taskContext = parseObject(task.context);
+      const workflowContext = parseObject(taskContext.industryWorkflow);
+      const haystack = [
+        task.intentKind,
+        task.goal,
+        task.target,
+        workflowContext.entryId,
+        workflowContext.productLine,
+        workflowContext.workspace?.name,
+      ].filter(Boolean).join(' ').toLowerCase();
       let score = 0;
       if (intent.target && haystack.includes(intent.target.toLowerCase())) score += 8;
       if (intent.target === 'AutoCAD' && /cad|图纸|平面图/i.test(haystack)) score += 8; // i18n-allow: Chinese CAD task matching; not user-visible copy.
       if (intent.kind !== 'status_query' && intent.kind !== 'none' && task.intentKind === intent.kind) score += 6;
       if (query && haystack.includes(query)) score += 3;
-      return { task, score };
+      const state = conversationActionStateFromTask(task);
+      const hasVerifiedReceipt = verifiedTaskIds.has(task.id) || Boolean(state?.receipts?.some(receipt => (
+        receipt.outcome === 'success' && receipt.terminalVerification?.status === 'verified'
+      )));
+      const evidenceRank = task.status === 'completed' && task.completionSource === 'tool_receipt' && hasVerifiedReceipt
+        ? 3
+        : hasVerifiedReceipt
+          ? 2
+          : task.status === 'blocked' && !(state?.receipts || []).length
+            ? 0
+            : 1;
+      return { task, score, evidenceRank, normalizedGoal: task.goal.trim().toLowerCase() };
     })
     .sort((left, right) => (
       right.score - left.score
+      || (left.normalizedGoal === right.normalizedGoal ? right.evidenceRank - left.evidenceRank : 0)
       || (query
         ? right.task.updatedAt.localeCompare(left.task.updatedAt)
         : right.task.createdAt.localeCompare(left.task.createdAt)
@@ -1236,12 +1309,368 @@ export function getConversationActionStateFromLedger(
   return conversationActionStateFromTask(findConversationActionTask(db, input));
 }
 
+function industryWorkflowStatusLabel(status: ConversationTaskStatus, finalReceiptVerified = true): string {
+  if (status === 'completed') return finalReceiptVerified
+    ? '已完成（最终回执已验证）'
+    : '已完成（无行业最终回执）';
+  if (status === 'waiting_confirmation') return '等待确认';
+  if (status === 'blocked') return '受阻';
+  if (status === 'cancelled') return '已取消';
+  if (status === 'executing') return '执行中';
+  return '准备中';
+}
+
+function receiptPayload(receipt: any): Record<string, any> {
+  if (receipt?.receipt && typeof receipt.receipt === 'object') return receipt.receipt;
+  return parseObject(receipt?.result);
+}
+
+function describeIndustryConfirmationBoundary(values: unknown[]): string[] {
+  const text = values.map(String).join(' ').toLowerCase();
+  const labels: string[] = [];
+  const add = (label: string) => { if (!labels.includes(label)) labels.push(label); };
+  if (/customer messages?|communications?|\bmessages?\b|send(?:ing)?/.test(text)) add('发送客户消息');
+  if (/publish|publishing/.test(text)) add('发布内容');
+  if (/refund/.test(text)) add('退款');
+  if (/compensation/.test(text)) add('赔偿');
+  if (/binding promises?|promise/.test(text)) add('承诺处理结果');
+  if (/price changes?|repric/.test(text)) add('改价');
+  if (/listing changes?|\blisting\b|\bdelisting\b|list(?:ing)?\s+(?:or\s+)?delist/.test(text)) add('上下架');
+  if (/external store changes?|store mutation|platform mutation/.test(text)) add('店铺外部修改');
+  if (/advertising spend|\bad spend\b|campaign spend/.test(text)) add('广告投放');
+  if (/product selection/.test(text)) add('选品');
+  if (/procurement|purchas(?:e|ing)/.test(text)) add('采购');
+  if (/submit|submission|filing/.test(text)) add('提交或申报');
+  if (/payment/.test(text)) add('付款');
+  if (/sign(?:ing|ature)?/.test(text)) add('签署');
+  if (/formal legal opinions?/.test(text)) add('正式法律意见');
+  if (/client delivery|external delivery|external submission/.test(text)) add('客户外发或外部报送');
+  if (/licensed lawyer approval|professional approval/.test(text)) add('执业律师复核');
+  return labels;
+}
+
+interface IndustryWorkflowLedgerSummary {
+  workflowType: string;
+  status: string;
+  keyResults: string[];
+  deliverables: string[];
+  confirmationBoundaries: string[];
+  blocker: string;
+}
+
+function summarizeIndustryWorkflowLedger(
+  task: ConversationActionTaskRow,
+  state: ConversationActionContinuationState,
+): IndustryWorkflowLedgerSummary | null {
+  const context = parseObject(task.context);
+  if (!context.industryWorkflow) return null;
+  const receipts = state.receipts || [];
+  const start = receipts.find(receipt => receipt.name === 'industry_workflow_start');
+  const completion = [...receipts].reverse().find(receipt => (
+    receipt.name === 'industry_workflow_complete'
+    && receipt.outcome === 'success'
+    && receipt.terminalVerification?.status === 'verified'
+  ));
+  const startResult = receiptPayload(start);
+  const deterministicCompletion = [...receipts].reverse().find(receipt => {
+    if (!receipt.name.startsWith('industry_')) return false;
+    if (['industry_workflow_start', 'industry_workspace_status', 'industry_workflow_complete'].includes(receipt.name)) return false;
+    if (receipt.outcome !== 'success' || receipt.terminalVerification?.status !== 'verified') return false;
+    const payload = receiptPayload(receipt);
+    return payload.ok === true
+      && (payload.status === 'verified' || payload.verification?.passed === true || payload.verification?.status === 'passed');
+  });
+  const terminalCompletion = completion || deterministicCompletion;
+  const completionResult = receiptPayload(terminalCompletion);
+  const workflowTask = parseObject(completionResult.task);
+  const workflowType = String(startResult?.entry?.displayName || workflowTask.title || context.industryWorkflow.entryId || '行业工作流');
+  const workspaceName = String(context.industryWorkflow?.workspace?.name || '').trim();
+  const meaningfulArtifacts = (Array.isArray(workflowTask.artifacts) ? workflowTask.artifacts : [])
+    .filter((artifact: any) => artifact && (
+      String(artifact.status || '').toLowerCase() !== 'planned'
+      || artifact.content
+      || artifact.filePath
+      || artifact.url
+    ));
+  const verificationChecks = Array.isArray(completionResult?.verification?.checks)
+    ? completionResult.verification.checks
+    : [];
+  const verifiedArtifactLabels = verificationChecks
+    .filter((check: any) => check?.id === 'artifact_labels' && check?.passed === true)
+    .flatMap((check: any) => String(check.detail || '')
+      .replace(/^(?:已记录|recorded)\s*[：:]\s*/iu, '')
+      .split(/[、,，;；]/u)
+      .map((label: string) => label.trim())
+      .filter(Boolean));
+  const deliverables = [...new Set([...meaningfulArtifacts
+    .map((artifact: any) => String(artifact.label || '').trim())
+    .filter(Boolean), ...verifiedArtifactLabels])];
+  const draftCount = Array.isArray(workflowTask.drafts) ? workflowTask.drafts.length : 0;
+  const verificationPassed = completionResult?.verification?.passed === true
+    || completionResult?.verificationStatus === 'passed'
+    || completionResult?.verification?.status === 'passed'
+    || completionResult?.status === 'verified';
+  const keyResults: string[] = [];
+  if (workspaceName) keyResults.push(`绑定并沿用“${workspaceName}”工作区`);
+  if (draftCount) keyResults.push(`生成并归档 ${draftCount} 份草稿`);
+  const deterministicMessage = deterministicCompletion
+    ? String(completionResult.message || '').split(/\r?\n/u).map(line => line.trim().replace(/[。；;]+$/u, '')).find(Boolean)
+    : '';
+  if (deterministicMessage) keyResults.push(deterministicMessage);
+  if (verificationPassed) keyResults.push('最终结果校验通过');
+  if (!keyResults.length) {
+    const verifiedReceipts = receipts.filter(receipt => (
+      receipt.outcome === 'success' && receipt.terminalVerification?.status === 'verified'
+    )).length;
+    keyResults.push(verifiedReceipts ? `核对 ${verifiedReceipts} 个已验证执行回执` : '尚无可验证执行结果');
+  }
+  const confirmationRequired = Array.isArray(workflowTask.confirmationRequired)
+    ? workflowTask.confirmationRequired
+    : [];
+  const verifiedConfirmationBoundaries = verificationChecks
+    .filter((check: any) => check?.id === 'confirmation_boundaries' && check?.passed === true)
+    .map((check: any) => String(check.detail || '').trim())
+    .filter(Boolean);
+  return {
+    workflowType,
+    status: industryWorkflowStatusLabel(task.status, Boolean(terminalCompletion)),
+    keyResults,
+    deliverables,
+    confirmationBoundaries: describeIndustryConfirmationBoundary([
+      ...confirmationRequired,
+      ...verifiedConfirmationBoundaries,
+    ]),
+    blocker: String(task.blocker || '').trim(),
+  };
+}
+
+function formatIndustryWorkflowLedgerStatus(
+  task: ConversationActionTaskRow,
+  state: ConversationActionContinuationState,
+): string | null {
+  const summary = summarizeIndustryWorkflowLedger(task, state);
+  if (!summary) return null;
+  const did = [...summary.keyResults];
+  if (summary.deliverables.length) did.push(`形成交付物“${summary.deliverables.slice(0, 3).join('、')}”`);
+  const didNot = summary.confirmationBoundaries.length
+    ? `未执行${summary.confirmationBoundaries.join('、')}；这些动作仍需逐项确认和真实平台回执。`
+    : '没有把未验证步骤描述成已完成。';
+  const blocker = summary.blocker ? `\n阻塞原因：${summary.blocker}` : '';
+  return [
+    `任务类型：${summary.workflowType}`,
+    `当前状态：${summary.status}`,
+    `已做：${did.join('；')}。`,
+    `未做：${didNot}${blocker}`,
+  ].join('\n');
+}
+
+function industryTaskEvidenceRank(db: any, task: ConversationActionTaskRow): number {
+  const state = conversationActionStateFromTask(task);
+  const hasVerifiedReceipt = (db.conversationActionReceipts as ConversationActionReceiptRow[])
+    .some(receipt => receipt.taskId === task.id && receipt.outcome === 'verified_success')
+    || Boolean(state?.receipts?.some(receipt => (
+      receipt.outcome === 'success' && receipt.terminalVerification?.status === 'verified'
+    )));
+  if (task.status === 'completed' && task.completionSource === 'tool_receipt' && hasVerifiedReceipt) return 3;
+  if (hasVerifiedReceipt) return 2;
+  if (task.status === 'blocked' && !(state?.receipts || []).length) return 0;
+  return 1;
+}
+
+function findLatestIndustryTaskForEntry(
+  db: any,
+  input: { conversationId: string; userId: string; entryId: string; acrossConversations?: boolean },
+): ConversationActionTaskRow | null {
+  const currentConversation = Array.isArray(db.conversations)
+    ? db.conversations.find((conversation: any) => conversation.id === input.conversationId)
+    : null;
+  const expectedDomain = String(currentConversation?.domain || 'personal');
+  const expectedOrgId = String(currentConversation?.orgId || '');
+  const candidates = (Array.isArray(db.conversationActionTasks) ? db.conversationActionTasks : [])
+    .filter(task => {
+      if (task.userId !== input.userId) return false;
+      if (input.acrossConversations) {
+        if (String(task.domain || 'personal') !== expectedDomain || String(task.orgId || '') !== expectedOrgId) return false;
+      } else if (task.conversationId !== input.conversationId) {
+        return false;
+      }
+      const workflow = parseObject(parseObject(task.context).industryWorkflow);
+      if (String(workflow.entryId || '') !== input.entryId) return false;
+      const state = conversationActionStateFromTask(task);
+      return Boolean(state?.receipts?.some(receipt => (
+        receipt.name === 'industry_workflow_start'
+        || receipt.name === 'industry_workflow_complete'
+        || (receipt.name.startsWith('industry_') && receipt.name !== 'industry_workspace_status')
+      )));
+    })
+    .map(task => ({
+      task,
+      evidenceRank: industryTaskEvidenceRank(db, task),
+      normalizedGoal: task.goal.trim().toLowerCase(),
+    }))
+    .sort((left, right) => (
+      left.normalizedGoal === right.normalizedGoal
+        ? right.evidenceRank - left.evidenceRank || right.task.updatedAt.localeCompare(left.task.updatedAt)
+        : right.task.updatedAt.localeCompare(left.task.updatedAt)
+    ));
+  return candidates[0]?.task || null;
+}
+
+const LEGACY_LEGAL_RECEIPTS_BY_ENTRY: Record<string, string[]> = {
+  workspace: ['legal_case_workspace'],
+  packet: ['legal_generate_argument_or_opinion', 'legal_generate_litigation_packet'],
+  'contract-review': ['legal_review_contract'],
+  research: ['legal_search_case', 'legal_search_statute', 'legal_authority_source_status', 'legal_search_external_authorities'],
+  'asset-trace': ['legal_trace_assets', 'legal_equity_penetration'],
+  verify: ['legal_verify_archived_delivery', 'legal_generate_citation_verification_report', 'legal_finalize_delivery_package'],
+  bid: ['legal_generate_bid'],
+};
+
+function findLatestVerifiedLegacyLegalTaskForEntry(
+  db: any,
+  input: { conversationId: string; userId: string; entryId: string },
+): ConversationActionTaskRow | null {
+  const acceptedReceipts = new Set(LEGACY_LEGAL_RECEIPTS_BY_ENTRY[input.entryId] || []);
+  if (!acceptedReceipts.size) return null;
+  const currentConversation = Array.isArray(db.conversations)
+    ? db.conversations.find((conversation: any) => conversation.id === input.conversationId)
+    : null;
+  const expectedDomain = String(currentConversation?.domain || 'personal');
+  const expectedOrgId = String(currentConversation?.orgId || '');
+  return (Array.isArray(db.conversationActionTasks) ? db.conversationActionTasks : [])
+    .filter((task: ConversationActionTaskRow) => {
+      if (task.userId !== input.userId) return false;
+      if (String(task.domain || 'personal') !== expectedDomain || String(task.orgId || '') !== expectedOrgId) return false;
+      const state = conversationActionStateFromTask(task);
+      return Boolean(state?.receipts?.some(receipt => (
+        acceptedReceipts.has(receipt.name)
+        && receipt.outcome === 'success'
+        && receipt.terminalVerification?.status === 'verified'
+      )));
+    })
+    .sort((left: ConversationActionTaskRow, right: ConversationActionTaskRow) => (
+      industryTaskEvidenceRank(db, right) - industryTaskEvidenceRank(db, left)
+      || right.updatedAt.localeCompare(left.updatedAt)
+    ))[0] || null;
+}
+
+function formatLegacyLegalLedgerSection(
+  task: ConversationActionTaskRow,
+  entry: { entryId: string; displayName: string; contract: { confirmationBoundaries: string[] } },
+): string {
+  const state = conversationActionStateFromTask(task);
+  const receipts = (state?.receipts || []).filter(receipt => (
+    (LEGACY_LEGAL_RECEIPTS_BY_ENTRY[entry.entryId] || []).includes(receipt.name)
+    && receipt.outcome === 'success'
+    && receipt.terminalVerification?.status === 'verified'
+  ));
+  const receiptText = receipts.map(receipt => String(receipt.result || '')).join('\n');
+  const caseId = receiptText.match(/案件\s*ID[：:]\s*([\w-]+)/iu)?.[1] || '';
+  const completion = receiptText.match(/完成度[：:]\s*(\d+\s*\/\s*\d+(?:（\d+%）|\s*\(\d+%\))?)/u)?.[1]?.trim() || '';
+  const cannotDeliver = /不可正式交付/u.test(receiptText);
+  const keyResultByEntry: Record<string, string> = {
+    workspace: [caseId ? `案件 ID ${caseId}` : '', completion ? `案件闭环完成度 ${completion}` : '', '案件字段与缺失材料已持久化'].filter(Boolean).join('；'),
+    packet: '诉前应对策略律师复核草稿已归档；未知事实、证据和法源保留待确认边界',
+    'contract-review': '合同风险点、修改建议、待确认信息与律师复核边界已形成',
+    research: '已记录权威法源状态、法条与类案的可核验结果及缺口',
+    'asset-trace': '已记录外部数据源状态、可核验线索与待人工核验项，未补造资产信息',
+    verify: cannotDeliver
+      ? '交付核验结论为不可正式交付；事实、法源、时效、管辖、文件和律师复核缺口已列明'
+      : '事实、法源、时效、管辖、文件和律师复核状态已核验',
+    bid: '内部投标响应工作底稿已形成；缺失的主体、资质、业绩、人员、报价、保证金和签章信息保留待填写或待确认',
+  };
+  const deliverableByEntry: Record<string, string> = {
+    workspace: '案件工作台记录与案件闭环状态',
+    packet: '诉前应对策略律师复核草稿（案件账本正文）',
+    'contract-review': '合同审查结果（仅依据原文）',
+    research: '法源与类案检索状态记录',
+    'asset-trace': '财产线索快速筛查报告与数据源状态记录',
+    verify: '已归档文书交付核验报告',
+    bid: '园区 AI 法律服务试点项目内部投标响应工作底稿',
+  };
+  const boundaries = describeIndustryConfirmationBoundary(entry.contract.confirmationBoundaries || []);
+  return [
+    `【${entry.displayName}】`,
+    `最近任务状态：${industryWorkflowStatusLabel(task.status, receipts.length > 0)}`,
+    `关键结果：${keyResultByEntry[entry.entryId] || `已核对 ${receipts.length} 个最终验证回执`}`,
+    `交付物：${deliverableByEntry[entry.entryId] || '已验证的法律工作底稿'}`,
+    `确认边界：${boundaries.length ? `${boundaries.join('、')}仍需执业律师逐项确认和真实平台回执` : '没有把未验证步骤描述成已完成'}`,
+  ].join('\n');
+}
+
+function formatMultiIndustryWorkflowLedgerStatus(
+  db: any,
+  input: { conversationId: string; userId: string; query?: string },
+): string | null {
+  const query = String(input.query || '').trim();
+  const profile = getCurrentIndustryCapabilityProfile();
+  if (!profile || !/(?:状态|账本|回执|最近任务|关键结果|交付物|确认边界)/u.test(query)) return null;
+  const requestedEntries = profile.entries.filter(entry => query.includes(entry.displayName));
+  if (requestedEntries.length < 2) return null;
+
+  const sections = requestedEntries.map(entry => {
+    const industryTask = findLatestIndustryTaskForEntry(db, {
+      conversationId: input.conversationId,
+      userId: input.userId,
+      entryId: entry.entryId,
+      acrossConversations: true,
+    });
+    const task = industryTask || (profile.productLine === 'legal'
+      ? findLatestVerifiedLegacyLegalTaskForEntry(db, {
+          conversationId: input.conversationId,
+          userId: input.userId,
+          entryId: entry.entryId,
+        })
+      : null);
+    if (!task) {
+      return [
+        `【${entry.displayName}】`,
+        '最近任务状态：无已存在的行业任务记录',
+        '关键结果：无可验证执行结果',
+        '交付物：无最终回执记录',
+        '确认边界：无任务回执，未执行任何外部修改',
+      ].join('\n');
+    }
+    const state = conversationActionStateFromTask(task);
+    const summary = state ? summarizeIndustryWorkflowLedger(task, state) : null;
+    if (!summary && profile.productLine === 'legal') {
+      return formatLegacyLegalLedgerSection(task, entry);
+    }
+    if (!summary) {
+      return [
+        `【${entry.displayName}】`,
+        `最近任务状态：${industryWorkflowStatusLabel(task.status)}`,
+        '关键结果：无可验证执行结果',
+        '交付物：无最终回执记录',
+        `确认边界：${task.blocker ? `任务受阻：${task.blocker}` : '没有把未验证步骤描述成已完成'}`,
+      ].join('\n');
+    }
+    return [
+      `【${entry.displayName}】`,
+      `最近任务状态：${summary.status}`,
+      `关键结果：${summary.keyResults.join('；')}${summary.blocker ? `；阻塞原因：${summary.blocker}` : ''}`,
+      `交付物：${summary.deliverables.length ? summary.deliverables.join('、') : '最终回执中未记录交付物'}`,
+      `确认边界：${summary.confirmationBoundaries.length ? `${summary.confirmationBoundaries.join('、')}仍需逐项确认和真实平台回执` : '没有把未验证步骤描述成已完成'}`,
+    ].join('\n');
+  });
+  return [
+    `行业任务账本汇总（${profile.displayName}）`,
+    ...sections,
+    '本次仅查询既有任务账本与最终回执；未重新执行工作流、未调用外部工具、未创建新任务、未进行外部修改。',
+  ].join('\n\n');
+}
+
 export function formatConversationActionLedgerStatus(
   db: any,
   input: { conversationId: string; userId: string; query?: string },
 ): string | null {
-  const state = getConversationActionStateFromLedger(db, input);
+  const multiIndustryStatus = formatMultiIndustryWorkflowLedgerStatus(db, input);
+  if (multiIndustryStatus) return multiIndustryStatus;
+  const task = findConversationActionTask(db, input);
+  const state = conversationActionStateFromTask(task);
   if (!state) return null;
+  const industryStatus = task ? formatIndustryWorkflowLedgerStatus(task, state) : null;
+  if (industryStatus) return industryStatus;
   return formatConversationActionTaskStatus(state);
 }
 

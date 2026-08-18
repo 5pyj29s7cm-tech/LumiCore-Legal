@@ -1,5 +1,7 @@
+import fs from 'node:fs';
 import { guardCompletionClaims } from '../work_product/completion_guard';
 import type { ToolExecutionRecord } from '../tools/types';
+import { decodeToolResult } from '../tools/result_envelope';
 import type { LumiTurnFlow } from './turn_flow';
 import { formatDesktopObservationResult } from './desktop_observation';
 import {
@@ -489,6 +491,189 @@ function formatGroundedSimpleDesktopOpenResult(
   return isChineseText(actionText)
     ? CN_VOICE_FAST_PATH_MESSAGES.opened(requestedTarget)
     : `Opened ${requestedTarget}.`;
+}
+
+function formatGroundedLegalWorkspaceResult(
+  input: LumiResultFinalizerInput,
+): LumiResultFinalizerResult | null {
+  const actionText = resultTaskText(input);
+  const contract = taskActionContract(input);
+  if (
+    contract.kind !== 'legal_workspace'
+    || !hasCoreActionEvidence(contract, input.toolRecords || [], actionText)
+  ) return null;
+
+  const record = [...(input.toolRecords || [])].reverse().find(candidate => (
+    candidate.name === 'legal_case_workspace'
+    && !candidate.error
+    && candidate.terminalVerification?.status === 'verified'
+  ));
+  if (!record) return null;
+
+  const decoded = decodeToolResult(String(record.result || ''));
+  const receipt = record.receipt && typeof record.receipt === 'object' && !Array.isArray(record.receipt)
+    ? record.receipt as Record<string, any>
+    : decoded.receipt && typeof decoded.receipt === 'object' && !Array.isArray(decoded.receipt)
+      ? decoded.receipt as Record<string, any>
+      : null;
+  const content = String(receipt?.content || decoded.content || '').trim();
+  const caseId = content.match(/案件ID：\s*([0-9a-z_-]+)/iu)?.[1] || '';
+  const caseName = content.match(/^#\s+(.+?)\s+案件工作台\s*$/mu)?.[1]?.trim() || '';
+  const stage = content.match(/^-\s*阶段：\s*(.+)$/mu)?.[1]?.trim() || '待确认';
+  const parties = content.match(/^-\s*当事人：\s*(.+)$/mu)?.[1]?.trim() || '待补充';
+  const facts = content.match(/^-\s*事实摘要：\s*(.+)$/mu)?.[1]?.trim() || '待补充';
+  const missingSection = content.match(/##\s*六、证据缺口与补强清单\s*\r?\n([\s\S]*?)(?=\r?\n##\s|$)/u)?.[1] || '';
+  const missingMaterials = missingSection
+    .split(/\r?\n/)
+    .map(line => line.replace(/^\s*-\s*/, '').trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  const changedCaseIds = Array.isArray(receipt?.changedCaseIds)
+    ? receipt.changedCaseIds.map((value: unknown) => String(value || '').trim()).filter(Boolean)
+    : [];
+  const receiptVerified = receipt?.ok === true
+    && receipt?.persisted === true
+    && caseId
+    && changedCaseIds.includes(caseId);
+  if (!receiptVerified || !caseName) return null;
+
+  const requestedQuotedName = actionText.match(/(?:案件名|案件名称)\s*[“"']([^”"']+)[”"']/u)?.[1]?.trim();
+  if (requestedQuotedName && requestedQuotedName !== caseName) return null;
+
+  return {
+    text: [
+      '已创建并核对案件工作台。',
+      `- 案件：${caseName}`,
+      `- 案件ID：${caseId}`,
+      `- 已保存：阶段 ${stage}；当事人 ${parties}；事实摘要 ${facts}`,
+      `- 缺失材料：${missingMaterials.length ? missingMaterials.join('；') : '当前回执未列出，需律师继续核对原件、来源和证明目的'}`,
+      '- 任务回执：已验证（legal_case_workspace）',
+      '- 边界：未补造证据；法律结论、正式外发、提交、签署和缴费仍需执业律师复核或确认。',
+    ].join('\n'),
+    blocked: false,
+    reason: 'Grounded legal case-workspace result from a verified persisted receipt.',
+  };
+}
+
+function markdownSectionItems(content: string, heading: RegExp, limit: number): string[] {
+  const lines = String(content || '').replace(/\r/g, '').split('\n');
+  const start = lines.findIndex(line => /^#{1,6}\s+/.test(line) && heading.test(line));
+  if (start < 0) return [];
+  const items: string[] = [];
+  for (const rawLine of lines.slice(start + 1)) {
+    if (/^#{1,6}\s+/.test(rawLine)) break;
+    const line = rawLine.trim();
+    if (!line || /^\|?\s*:?-{3,}/.test(line)) continue;
+    if (/^\|/.test(line)) {
+      const cells = line.split('|').map(cell => cell.trim()).filter(Boolean);
+      if (cells.length >= 2 && !/^(?:\u5b57\u6bb5|\u5185\u5bb9|\u6765\u6e90)$/u.test(cells[0])) {
+        items.push(`${cells[0]}：${cells[1]}`);
+      }
+    } else {
+      items.push(line.replace(/^[-*]\s*|^\d+[.、]\s*/u, ''));
+    }
+    if (items.length >= limit) break;
+  }
+  return items;
+}
+
+function formatGroundedLegalDraftResult(
+  input: LumiResultFinalizerInput,
+): LumiResultFinalizerResult | null {
+  const actionText = resultTaskText(input);
+  const contract = taskActionContract(input);
+  const safeDraftRequest = /(?:\u8349\u7a3f|\u590d\u6838\u7a3f|\u5de5\u4f5c\u5e95\u7a3f)/u.test(actionText)
+    && /(?:\u4e0d\u8981|\u4e0d\u5f97|\u7981\u6b62|\u672a|\u4e0d)(?:[^\u3002\uff1b\n]{0,28})(?:\u53d1\u9001|\u63d0\u4ea4|\u7b7e\u7f72|\u7b7e\u53d1|\u7f34\u8d39)/u.test(actionText);
+  if (
+    contract.kind !== 'legal_document'
+    || !safeDraftRequest
+    || !hasCoreActionEvidence(contract, input.toolRecords || [], actionText)
+  ) return null;
+
+  const records = input.toolRecords || [];
+  const verified = (record: ToolExecutionRecord) => (
+    !record.error
+    && record.terminalVerification?.status === 'verified'
+    && Boolean(String(record.result || '').trim())
+  );
+  const legalProducer = [...records].reverse().find(record => (
+    verified(record)
+    && /^(?:legal_generate_argument_or_opinion|legal_case_strategy|legal_generate_litigation_packet|legal_review_contract|legal_draft_contract)$/i.test(record.name)
+  ));
+  const fileProducer = [...records].reverse().find(record => (
+    verified(record)
+    && /^(?:write_file|create_docx|create_pdf)$/i.test(record.name)
+    && artifactPathFromRecord(record)
+  ));
+  const producer = legalProducer || fileProducer;
+  if (!producer) return null;
+
+  let content = '';
+  if (legalProducer) {
+    const receipt = legalProducer.receipt && typeof legalProducer.receipt === 'object' && !Array.isArray(legalProducer.receipt)
+      ? legalProducer.receipt as Record<string, any>
+      : null;
+    content = String(receipt?.content || legalProducer.result || '').trim();
+  } else if (fileProducer) {
+    const filePath = artifactPathFromRecord(fileProducer);
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.isFile() && stat.size > 0 && stat.size <= 1_000_000 && /\.(?:md|txt)$/i.test(filePath)) {
+        content = fs.readFileSync(filePath, 'utf8').trim();
+      }
+    } catch {}
+  }
+  if (content.length < 120) return null;
+
+  const title = content.match(/^#\s+(.+)$/mu)?.[1]?.trim() || '\u5f8b\u5e08\u590d\u6838\u8349\u7a3f';
+  const facts = markdownSectionItems(content, /(?:\u5df2\u77e5\u4e8b\u5b9e|\u4e8b\u5b9e\u6458\u8981|\u6848\u4ef6\u4e8b\u5b9e\u8303\u56f4|\u6848\u4ef6\u57fa\u672c\u4fe1\u606f|\u529e\u7406\u76ee\u6807)/u, 4);
+  const review = markdownSectionItems(content, /(?:\u9700\u8981\u5f8b\u5e08\u590d\u6838|\u5f8b\u5e08\u590d\u6838\u6e05\u5355|\u590d\u6838\u6e05\u5355)/u, 5);
+  const filePath = fileProducer ? artifactPathFromRecord(fileProducer) : '';
+  const failedIndustryCalls = records.filter(record => (
+    Boolean(record.error)
+    && /^(?:legal_case_strategy|legal_generate_argument_or_opinion)$/i.test(record.name)
+  )).length;
+
+  return {
+    text: [
+      `\u5df2\u751f\u6210\u5e76\u6838\u5bf9\u300a${title}\u300b\u3002`,
+      facts.length ? `- \u8349\u7a3f\u8981\u70b9\uff1a${facts.join('\uff1b')}` : '',
+      review.length ? `- \u5f8b\u5e08\u590d\u6838\u70b9\uff1a${review.join('\uff1b')}` : '',
+      filePath ? `- \u4ea7\u7269\uff1a${filePath}` : '- \u4ea7\u7269\uff1a\u5df2\u5f52\u6863\u5230\u5f53\u524d\u6848\u4ef6\u5de5\u4f5c\u53f0',
+      `- \u4efb\u52a1\u56de\u6267\uff1a\u5df2\u9a8c\u8bc1\uff08${producer.name}\uff09`,
+      failedIndustryCalls > 0
+        ? `- \u6267\u884c\u8bf4\u660e\uff1a\u884c\u4e1a\u751f\u6210\u5de5\u5177\u8d85\u65f6 ${failedIndustryCalls} \u6b21\uff0c\u5df2\u7528\u53ef\u9a8c\u8bc1\u672c\u5730\u8349\u7a3f\u515c\u5e95\uff0c\u672a\u628a\u8d85\u65f6\u8bf4\u6210\u6210\u529f\u3002`
+        : '',
+      '- \u8fb9\u754c\uff1a\u672a\u53d1\u9001\u3001\u672a\u63d0\u4ea4\u3001\u672a\u7b7e\u7f72\uff1b\u672a\u77e5\u4e8b\u5b9e\u548c\u6cd5\u6e90\u4ecd\u9700\u6267\u4e1a\u5f8b\u5e08\u590d\u6838\u3002',
+    ].filter(Boolean).join('\n'),
+    blocked: false,
+    reason: 'Grounded legal draft summary from verified industry or local artifact receipt.',
+  };
+}
+
+function formatGroundedContractReviewResult(
+  input: LumiResultFinalizerInput,
+): LumiResultFinalizerResult | null {
+  const actionText = resultTaskText(input);
+  if (!/(?:合同审查|审查.{0,24}(?:合同|协议|条款)|(?:合同|协议|条款).{0,24}(?:审查|复核))/u.test(actionText)) {
+    return null;
+  }
+  const record = [...(input.toolRecords || [])].reverse().find(item => (
+    item.name === 'legal_review_contract'
+    && !item.error
+    && item.terminalVerification?.status === 'verified'
+  ));
+  if (!record) return null;
+  const receipt = record.receipt && typeof record.receipt === 'object' && !Array.isArray(record.receipt)
+    ? record.receipt as Record<string, any>
+    : null;
+  const content = String(receipt?.content || record.result || '').trim();
+  if (content.length < 80) return null;
+  return {
+    text: `${content}\n\n- 实际使用能力：legal_review_contract\n- 结果验证：已通过结构化工具回执验证。\n- 外部动作：未发送、未提交、未签署。`,
+    blocked: false,
+    reason: 'Grounded contract review from a verified legal_review_contract receipt.',
+  };
 }
 
 function recordHasTerminalSuccess(record: ToolExecutionRecord): boolean {
@@ -1421,6 +1606,23 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       },
     };
   }
+  // Edition identity, onboarding and capability-boundary questions are
+  // deliberate zero-tool conversation turns. Their deterministic answer may
+  // contain words such as "complete", "generate" or "automatic" while
+  // describing supported work; those are capability descriptions, not claims
+  // that work ran in this turn. Keep protocol/mode/availability guards above,
+  // then preserve the explanation instead of applying an action completion
+  // contract to the wording of the user's question.
+  if (
+    input.flow?.conceptualCapabilityQuestion
+    && (input.toolRecords || []).length === 0
+  ) {
+    return {
+      text: input.responseText,
+      blocked: false,
+      reason: 'Zero-tool capability or edition identity explanation.',
+    };
+  }
   // A status/recall turn may truthfully describe the immediately preceding
   // completed task even though this turn intentionally executes no new tool.
   // Accept it only when the continuation bridge carries concrete persisted
@@ -1508,6 +1710,12 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   ) {
     return { text: input.responseText, blocked: false };
   }
+  const groundedLegalWorkspace = formatGroundedLegalWorkspaceResult(input);
+  if (groundedLegalWorkspace) return groundedLegalWorkspace;
+  const groundedContractReview = formatGroundedContractReviewResult(input);
+  if (groundedContractReview) return groundedContractReview;
+  const groundedLegalDraft = formatGroundedLegalDraftResult(input);
+  if (groundedLegalDraft) return groundedLegalDraft;
   const groundedBlankCadDocument = formatGroundedBlankAutoCadDocumentResult(input);
   if (groundedBlankCadDocument) return groundedBlankCadDocument;
   const groundedWpsMutation = formatGroundedWpsMutationResult(input);

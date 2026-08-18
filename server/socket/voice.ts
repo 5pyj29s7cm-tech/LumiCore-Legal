@@ -94,6 +94,8 @@ import { buildCapabilityMetaResponse, isCapabilityMetaQuestion } from "../cognit
 import { buildLumiOperatingKernelPrompt } from "../cognition/operating_kernel";
 import { persistLumiPostTurnLearning } from "../cognition/post_turn_learning";
 import { persistWorkTakeoverTurnExecution } from "../work_takeover/execution_writeback";
+import { appendReadOnlyConversationActionReceipts } from "../conversation/action_ledger";
+import { parseLegalCaseStatus } from "../cognition/legal_case_status";
 import { canAutoApproveAction } from "../tools/action_constitution";
 import { isConfirmationBlockedToolRecord } from '../tools/confirmation_block';
 import {
@@ -1315,7 +1317,7 @@ async function processVoiceInput(
     );
   } catch {}
   let voiceUserMessagePersisted = false;
-  const persistVoiceUserMessage = (cognitiveIntent = 'voice_received') => {
+  const persistVoiceUserMessage = (cognitiveIntent = 'voice_received', skipActionContinuation = false) => {
     if (voiceUserMessagePersisted) return;
     addMessage({
       userId: session.userId,
@@ -1335,6 +1337,7 @@ async function processVoiceInput(
       orgId: voiceScope.orgId,
       requestId,
       deferActionPreparation: true,
+      skipActionContinuation,
     });
     voiceUserMessagePersisted = true;
     socket.emit('chat:conversation_updated', {
@@ -1604,7 +1607,7 @@ async function processVoiceInput(
     actionIntentText,
     conversationTurn.conversation.actionContinuationState,
   );
-  const actionTaskExecution = turnFlow.conceptualCapabilityQuestion
+  const actionTaskExecution = turnFlow.conceptualCapabilityQuestion || turnFlow.specialWorkflow?.createsTask === false
     ? { state: null, kind: 'conversation' as const }
     : userObservedCompletion
     ? {
@@ -1772,6 +1775,7 @@ async function processVoiceInput(
       cognitiveIntent?: string;
       llmWasCalled?: boolean;
       source?: string;
+      skipActionContinuation?: boolean;
     } = {},
   ) => {
     if (voiceAssistantMessagePersisted || !String(text || '').trim()) return;
@@ -1791,6 +1795,7 @@ async function processVoiceInput(
       domain: voiceScope.domain,
       orgId: voiceScope.orgId,
       requestId,
+      skipActionContinuation: options.skipActionContinuation === true,
     });
     voiceAssistantMessagePersisted = true;
     scheduleVoiceSummary(conversationId);
@@ -2075,6 +2080,33 @@ async function processVoiceInput(
       });
     }
     return executionWriteback;
+  };
+  const persistVoiceReadOnlyWorkflowReceipts = (records: ToolExecutionRecord[], workflowId: string) => {
+    if (records.length === 0) return [];
+    const db = readDB();
+    const statusText = records
+      .filter(record => record.name === 'legal_case_workflow_status' && !record.error)
+      .map(record => String(record.result || ''))
+      .join('\n');
+    const status = parseLegalCaseStatus(statusText);
+    const receiptRecords = records.map((record, index) => ({
+      ...record,
+      turnId: requestId,
+      requestId,
+      idempotencyKey: `readonly:${workflowId}:${requestId}:${record.name}:${index}`,
+    }));
+    const appended = appendReadOnlyConversationActionReceipts(db, {
+      conversationId: conversationTurn.conversation.id,
+      userId: session.userId,
+      records: receiptRecords,
+      anchors: [status?.caseId || '', status?.title || ''],
+      preferredIntentKinds: ['legal_workspace', 'legal_document'],
+      turnId: requestId,
+      requestId,
+    });
+    if (appended.length) writeDB(db);
+    else logger.warn(`[Audio] ${workflowId} could not bind its read-only receipt to an existing task.`);
+    return appended;
   };
   let sentenceIdx = 0;
   const ttsPromises: Promise<void>[] = [];
@@ -2634,14 +2666,18 @@ async function processVoiceInput(
     if (finalizedWorkflow.notification) {
       emitAgent('agent:notification', finalizedWorkflow.notification);
     }
-    persistVoiceTakeoverExecution(responseText, {
-      toolRecords: toolResults,
-      source: specialWorkflow.source,
-      sourceInteractionId: `voice_workflow_${Date.now()}`,
-      finalizationBlocked: finalizedWorkflow.blocked,
-      assistantTextTrusted: !finalizedWorkflow.blocked,
-      finalizationReason: finalizedWorkflow.reason,
-    });
+    if (specialWorkflow.createsTask === false) {
+      persistVoiceReadOnlyWorkflowReceipts(toolResults, specialWorkflow.id);
+    } else {
+      persistVoiceTakeoverExecution(responseText, {
+        toolRecords: toolResults,
+        source: specialWorkflow.source,
+        sourceInteractionId: `voice_workflow_${Date.now()}`,
+        finalizationBlocked: finalizedWorkflow.blocked,
+        assistantTextTrusted: !finalizedWorkflow.blocked,
+        finalizationReason: finalizedWorkflow.reason,
+      });
+    }
     const finalizedWorkflowSpeech = finalizedWorkflow.blocked || !workflowSpeechSummary
       ? finalizedWorkflow
       : finalizeLumiResponse({
@@ -2669,12 +2705,13 @@ async function processVoiceInput(
       cognitiveIntent: finalizedWorkflow.blocked ? 'work_product_guard' : (specialWorkflow.id || 'skill_workflow'),
       llmWasCalled: false,
       source: specialWorkflow.source,
+      skipActionContinuation: specialWorkflow.createsTask === false,
     });
     queueFinalizedSpeech(workflowSpeechText);
     await Promise.allSettled(ttsPromises);
     if (!isCurrentTurn()) return;
     const conv = getOrCreateActiveConversation(session.userId, session.agentId, voiceScope.domain, voiceScope.orgId);
-    persistVoiceUserMessage(turnDispatch.boundary);
+    persistVoiceUserMessage(turnDispatch.boundary, specialWorkflow.createsTask === false);
     persistSidecarConversation(conv.id);
     session.isProcessing = false;
     session.isSpeaking = false;

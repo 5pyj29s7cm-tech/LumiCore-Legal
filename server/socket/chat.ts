@@ -20,6 +20,7 @@ import { getStoredOperationMode, saveStoredOperationMode } from "../cognition/op
 import { buildInteractionModeOverlay } from "../cognition/turn_flow";
 import { buildLumiCapabilitySelection } from "../cognition/capability_selection";
 import { buildLumiExecutionPipeline } from "../cognition/execution_pipeline";
+import { isCurrentIndustryMultiWorkspaceLedgerStatusRequest } from "../regions/packs/cn/industry_capability_profile";
 import { shouldRunLegacyDirectExecution } from "../cognition/legacy_route_policy";
 import { bindCapabilityExecutionPlanTask } from "../cognition/capability_execution_plan";
 import { buildForegroundMessagingArguments, executeForegroundMessagingAction } from "../cognition/foreground_messaging_execution";
@@ -39,6 +40,8 @@ import { buildCapabilityMetaResponse } from "../cognition/capability_meta";
 import { buildLumiOperatingKernelPrompt } from "../cognition/operating_kernel";
 import { persistLumiPostTurnLearning } from "../cognition/post_turn_learning";
 import { persistWorkTakeoverTurnExecution } from "../work_takeover/execution_writeback";
+import { appendReadOnlyConversationActionReceipts } from "../conversation/action_ledger";
+import { parseLegalCaseStatus } from "../cognition/legal_case_status";
 import { formatClientSelfPrompt } from "../client/self_model";
 import { canAutoApproveAction } from "../tools/action_constitution";
 import {
@@ -513,7 +516,8 @@ export function shouldRunVisibleActionPreflight(userText: string, attachments: C
   const text = userText || '';
   if (extractExplicitLocalPaths(text).length > 0) return true;
   const mentionsFileLocation = /\b(?:desktop|downloads?|documents?)\b|(?:\u684c\u9762|\u4e0b\u8f7d|\u6587\u6863)/iu.test(text);
-  const namesSpecificFile = LOCAL_READABLE_EXT_RE.test(text) || /["“][^"”]{2,}["”]/u.test(text);
+  const namesSpecificFile = LOCAL_READABLE_EXT_RE.test(text)
+    || /(?:\u6587\u4ef6|\u6587\u6863|\u9644\u4ef6|\u5408\u540c|\u534f\u8bae)(?:\u540d|\u540d\u5b57|\u540d\u79f0)?(?:\u4e3a|\u53eb|\u662f)?\s*["\u201c][^"\u201d]{2,}["\u201d]/u.test(text);
   return LOCAL_ACTION_VERB_RE.test(text) && LOCAL_ACTION_OBJECT_RE.test(text) && (mentionsFileLocation || namesSpecificFile);
 }
 
@@ -1031,6 +1035,13 @@ export function registerChatHandler(
       if (!recordChatExecutionEvent(executionScope, requestId, event, normalizedPayload)) return;
       io.to(executionRoom).emit(event, normalizedPayload);
     };
+    const emitConversationUpdated = (payload: Record<string, any>) => {
+      io.to(executionRoom).emit('chat:conversation_updated', {
+        ...payload,
+        requestId,
+        originSocketId: socket.id,
+      });
+    };
     console.log('[ChatHandler] domain:', resolvedDomain, 'orgId:', resolvedOrgId);
 
     // Request ids are idempotency keys. Socket.IO may deliver a buffered emit
@@ -1090,10 +1101,13 @@ export function registerChatHandler(
     ) : null;
     if (
       existingSession
-      && classifyConversationActionFollowupIntent(
-        visibleUserText,
-        activeConversationForStatus?.actionContinuationState,
-      ) === 'status'
+      && (
+        classifyConversationActionFollowupIntent(
+          visibleUserText,
+          activeConversationForStatus?.actionContinuationState,
+        ) === 'status'
+        || isCurrentIndustryMultiWorkspaceLedgerStatusRequest(visibleUserText)
+      )
       && !needsNaturalConversationActionStatusAnswer(visibleUserText)
     ) {
       const activeConversation = activeConversationForStatus || getActiveConversation(
@@ -1302,7 +1316,7 @@ export function registerChatHandler(
           emitAgent("agent:response", { text: responseText, agentName: "Lumi", finalized: true, blocked: false, reason: '' });
           addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'user', content: storedUserContent, domain: resolvedDomain, orgId: resolvedOrgId, cognitiveIntent: 'task_cancel' });
           addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'assistant', content: responseText, domain: resolvedDomain, orgId: resolvedOrgId, cognitiveIntent: 'task_cancel' });
-          socket.emit('chat:conversation_updated', { conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
+          emitConversationUpdated({ conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
           emitAgent("agent:status", { status: "idle" });
           releaseChatSession();
           return;
@@ -1574,14 +1588,48 @@ export function registerChatHandler(
         }
         return executionWriteback;
       };
+      const persistReadOnlyWorkflowReceipts = (
+        records: ToolExecutionRecord[],
+        workflowId: string,
+      ) => {
+        if (!conversationId || records.length === 0) return [];
+        const db = readDB();
+        const statusText = records
+          .filter(record => record.name === 'legal_case_workflow_status' && !record.error)
+          .map(record => String(record.result || ''))
+          .join('\n');
+        const status = parseLegalCaseStatus(statusText);
+        const receiptRecords = records.map((record, index) => ({
+          ...record,
+          turnId: requestId,
+          requestId,
+          idempotencyKey: `readonly:${workflowId}:${requestId}:${record.name}:${index}`,
+        }));
+        const appended = appendReadOnlyConversationActionReceipts(db, {
+          conversationId,
+          userId: uid,
+          records: receiptRecords,
+          anchors: [status?.caseId || '', status?.title || ''],
+          preferredIntentKinds: ['legal_workspace', 'legal_document'],
+          turnId: requestId,
+          requestId,
+        });
+        if (!appended.length) {
+          console.warn(`[ChatHandler] ${workflowId} could not bind its read-only receipt to an existing task.`);
+          return [];
+        }
+        writeDB(db);
+        return appended;
+      };
 
       const actionFollowupIntent = classifyConversationActionFollowupIntent(
         visibleUserText,
         conversation?.actionContinuationState,
       );
+      const explicitMultiIndustryLedgerStatus = isCurrentIndustryMultiWorkspaceLedgerStatusRequest(visibleUserText);
       if (
         conversationId
-        && actionFollowupIntent === 'status'
+        && (actionFollowupIntent === 'status' || explicitMultiIndustryLedgerStatus)
         && !needsNaturalConversationActionStatusAnswer(visibleUserText)
       ) {
         const statusText = getConversationActionStatus(conversationId, uid, visibleUserText, conversation?.actionContinuationState);
@@ -1589,7 +1637,7 @@ export function registerChatHandler(
         emitAgent("agent:response", { text: statusText, agentName: personality.name, finalized: true, blocked: false, reason: '' });
         addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'user', content: storedUserContent, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId });
         addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'assistant', content: statusText, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId, cognitiveIntent: 'task_status' });
-        socket.emit('chat:conversation_updated', { conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
+        emitConversationUpdated({ conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
         emitAgent("agent:status", { status: "idle" });
         releaseChatSession();
         return;
@@ -1604,7 +1652,7 @@ export function registerChatHandler(
         if (conversationId) {
           addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'user', content: storedUserContent, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId });
           addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'assistant', content: recentFailureExplanation, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId });
-          socket.emit('chat:conversation_updated', { conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
+          emitConversationUpdated({ conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
         }
         persistChatLearning(recentFailureExplanation, {
           sourceInteractionId: `${interactionId}_recent_failure_explanation`,
@@ -1728,7 +1776,7 @@ export function registerChatHandler(
           if (conversationId) {
             addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'user', content: storedUserContent, personality: personality.id, mode: directlyAppliedMode, domain: resolvedDomain, orgId: resolvedOrgId });
             addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'assistant', content: responseText, personality: personality.id, mode: directlyAppliedMode, cognitiveIntent: finalizedMode.blocked ? 'work_product_guard' : undefined, domain: resolvedDomain, orgId: resolvedOrgId });
-            socket.emit('chat:conversation_updated', { conversationId, agentId: conversationAgentId, source: 'chat_mode', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
+            emitConversationUpdated({ conversationId, agentId: conversationAgentId, source: 'chat_mode', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
           }
           if (!finalizedMode.blocked) {
             persistChatLearning(responseText, {
@@ -1746,7 +1794,9 @@ export function registerChatHandler(
       const specialWorkflow = turnFlow.specialWorkflow;
       if (specialWorkflow) {
         const workflowExecutionDecision = executionPipeline.execution;
-        const workflowTaskExecution = conversationId
+        const workflowTaskExecution = specialWorkflow.createsTask === false
+          ? { state: null, kind: 'conversation' as const }
+          : conversationId
           ? prepareConversationActionExecution({
               conversationId,
               userId: uid,
@@ -1845,23 +1895,28 @@ export function registerChatHandler(
         if (finalizedWorkflow.notification) {
           emitAgent('agent:notification', finalizedWorkflow.notification);
         }
-        persistChatTakeoverExecution(workflowResponseText, {
-          toolRecords: workflowToolCalls,
-          source: specialWorkflow.source,
-          sourceInteractionId: `${interactionId}_workflow`,
-          capabilitySelection: executionPipeline.capabilityPlan,
-          finalizationBlocked: finalizedWorkflow.blocked,
-          assistantTextTrusted: !finalizedWorkflow.blocked,
-          finalizationReason: finalizedWorkflow.reason,
-        });
+        if (specialWorkflow.createsTask === false) {
+          persistReadOnlyWorkflowReceipts(workflowToolCalls, specialWorkflow.id);
+        } else {
+          persistChatTakeoverExecution(workflowResponseText, {
+            toolRecords: workflowToolCalls,
+            source: specialWorkflow.source,
+            sourceInteractionId: `${interactionId}_workflow`,
+            capabilitySelection: executionPipeline.capabilityPlan,
+            finalizationBlocked: finalizedWorkflow.blocked,
+            assistantTextTrusted: !finalizedWorkflow.blocked,
+            finalizationReason: finalizedWorkflow.reason,
+          });
+        }
 
         if (conversationId) {
-          addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'user', content: storedUserContent, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId });
+          const readOnlyWorkflow = specialWorkflow.createsTask === false;
+          addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'user', content: storedUserContent, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId, requestId, skipActionContinuation: readOnlyWorkflow });
           for (const tc of workflowToolCalls) {
             const tcSummary = summarizeToolRecordForPersistence(tc);
             addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'tool', content: tcSummary, domain: resolvedDomain, orgId: resolvedOrgId });
           }
-          addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'assistant', content: workflowResponseText, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId, toolCalls: workflowToolCalls.length ? workflowToolCalls : undefined, cognitiveIntent: finalizedWorkflow.blocked ? 'work_product_guard' : undefined });
+          addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'assistant', content: workflowResponseText, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId, toolCalls: workflowToolCalls.length ? workflowToolCalls : undefined, cognitiveIntent: finalizedWorkflow.blocked ? 'work_product_guard' : undefined, requestId, skipActionContinuation: readOnlyWorkflow });
         }
 
         try {
@@ -1895,7 +1950,7 @@ export function registerChatHandler(
           reason: finalizedWorkflow.reason || '',
         });
         if (conversationId) {
-          socket.emit('chat:conversation_updated', { conversationId, agentId: conversationAgentId, source: specialWorkflow.source, rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
+          emitConversationUpdated({ conversationId, agentId: conversationAgentId, source: specialWorkflow.source, rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
         }
         if (!finalizedWorkflow.blocked) {
           persistChatLearning(workflowResponseText, {
@@ -2230,7 +2285,7 @@ export function registerChatHandler(
           addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'user', content: storedUserContent, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId });
           addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'assistant', content: finalized.text, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId, toolCalls: confirmationRecords, cognitiveIntent: finalized.blocked ? 'work_product_guard' : 'confirmation' });
           scheduleChatSummary(conversationId);
-          socket.emit('chat:conversation_updated', { conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
+          emitConversationUpdated({ conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
         }
         persistChatTakeoverExecution(finalized.text, {
           toolRecords: confirmationRecords,
@@ -2369,7 +2424,7 @@ export function registerChatHandler(
           reason: finalizedWorkflowQuick.reason || '',
         });
         if (conversationId) {
-          socket.emit('chat:conversation_updated', {
+          emitConversationUpdated({
             conversationId,
             agentId: conversationAgentId,
             source: 'workflow',
@@ -2514,7 +2569,7 @@ export function registerChatHandler(
             }
             addMessage({ userId: uid, agentId: conversationAgentId, conversationId, role: 'assistant', content: quickResponseText, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId, toolCalls: quickToolRecords.length ? quickToolRecords : undefined, cognitiveIntent: quickFinalized.blocked ? 'work_product_guard' : undefined });
             scheduleChatSummary(conversationId);
-            socket.emit('chat:conversation_updated', { conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
+            emitConversationUpdated({ conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
           }
           if (!quickFinalized.blocked) {
             persistChatLearning(quickResponseText, {
@@ -3118,7 +3173,7 @@ export function registerChatHandler(
                     toolCalls: toolCalls?.length ? toolCalls : undefined,
                     cognitiveIntent: guarded ? 'work_product_guard' : undefined,
                   });
-                  socket.emit('chat:conversation_updated', { conversationId, agentId: conversationAgentId, source: 'background_delegation', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
+                  emitConversationUpdated({ conversationId, agentId: conversationAgentId, source: 'background_delegation', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
                 }
                 if (deliverToConversation) {
                   const db = readDB();
@@ -3907,7 +3962,7 @@ export function registerChatHandler(
       });
       // Re-emit conversation_updated AFTER response so the client syncs from API with complete data
       if (conversationId) {
-        socket.emit('chat:conversation_updated', { conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
+        emitConversationUpdated({ conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId });
       }
       emitAgent("agent:status", { status: "idle" });
 

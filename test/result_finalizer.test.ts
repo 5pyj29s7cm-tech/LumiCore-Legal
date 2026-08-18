@@ -4,6 +4,121 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('Lumi result finalizer', () => {
+  it('keeps a zero-tool edition introduction even when it describes work Lumi can complete', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const responseText = '\u6211\u662f Lumi \u5f8b\u5e08\u5ba2\u6237\u5b9a\u5236\u7248\u3002\u6211\u53ef\u4ee5\u5e2e\u4f60\u5b8c\u6210\u6750\u6599\u6574\u7406\u548c\u6587\u4e66\u8349\u7a3f\uff0c\u4f46\u6b63\u5f0f\u7ed3\u8bba\u5fc5\u987b\u7531\u6267\u4e1a\u5f8b\u5e08\u590d\u6838\u3002';
+    const result = finalizeLumiResponse({
+      taskText: '\u4f60\u662f\u8c01\uff0c\u80fd\u5e2e\u5f8b\u5e08\u5b8c\u6210\u54ea\u4e9b\u5de5\u4f5c\uff1f',
+      responseText,
+      toolRecords: [],
+      source: 'chat',
+      flow: {
+        conceptualCapabilityQuestion: true,
+      } as any,
+    });
+
+    expect(result).toMatchObject({ blocked: false, text: responseText });
+  });
+
+  it('formats a newly created legal case workspace from its verified persisted receipt', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const caseId = 'case_new_legal_001';
+    const content = [
+      '# \u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7 \u6848\u4ef6\u5de5\u4f5c\u53f0',
+      '',
+      '## \u4e00\u3001\u6848\u4ef6\u7a7a\u95f4',
+      `- \u6848\u4ef6ID\uff1a${caseId}`,
+      '- \u9636\u6bb5\uff1a\u8bc9\u524d',
+      '- \u5f53\u4e8b\u4eba\uff1a\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8\uff1b\u4e59\u65b9\u793a\u4f8b\u516c\u53f8',
+      '- \u4e8b\u5b9e\u6458\u8981\uff1a\u4e89\u8bae\u91d1\u989d\uff1a\u4eba\u6c11\u5e01800000\u5143',
+      '',
+      '## \u516d\u3001\u8bc1\u636e\u7f3a\u53e3\u4e0e\u8865\u5f3a\u6e05\u5355',
+      '- 1. \u5f85\u6574\u7406\u8bc1\u636e\u6750\u6599\uff1a\u9700\u8865\u5145\u8bc1\u636e\u540d\u79f0\u3001\u6765\u6e90\u3001\u9875\u7801\u548c\u539f\u4ef6\u72b6\u6001',
+      '',
+      '## \u4e03\u3001\u6cd5\u6e90\u4e0e\u7c7b\u6848\u68c0\u7d22\u987a\u5e8f',
+    ].join('\n');
+    const result = finalizeLumiResponse({
+      taskText: '\u65b0\u5efa\u4e00\u4e2a\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0\uff0c\u6848\u4ef6\u540d\u201c\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u201d\uff0c\u5f53\u4e8b\u4eba\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8\u3001\u4e59\u65b9\u793a\u4f8b\u516c\u53f8\uff0c\u4e89\u8bae\u91d1\u989d80\u4e07\u5143\uff0c\u9636\u6bb5\u4e3a\u8bc9\u524d\u3002\u53ea\u4f7f\u7528\u8fd9\u4e9b\u4e8b\u5b9e\uff0c\u4e0d\u8981\u8865\u9020\u8bc1\u636e\uff1b\u521b\u5efa\u5b8c\u6210\u540e\u544a\u8bc9\u6211\u6848\u4ef6ID\u3001\u5df2\u4fdd\u5b58\u5b57\u6bb5\u3001\u7f3a\u5931\u6750\u6599\u548c\u4efb\u52a1\u56de\u6267\u72b6\u6001\u3002',
+      responseText: '\u5df2\u7ecf\u521b\u5efa\u5e76\u4fdd\u5b58\u6848\u4ef6\u5de5\u4f5c\u53f0\u3002',
+      toolRecords: [{
+        name: 'legal_case_workspace',
+        arguments: {},
+        result: content,
+        receipt: {
+          ok: true,
+          status: 'updated',
+          persisted: true,
+          changedCaseIds: [caseId],
+          articleIds: [],
+          artifacts: [],
+          content,
+        },
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'terminal_receipt',
+          reason: 'verified',
+        },
+      }],
+      source: 'command-center-chat',
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toContain(caseId);
+    expect(result.text).toContain('\u9636\u6bb5 \u8bc9\u524d');
+    expect(result.text).toContain('\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8\uff1b\u4e59\u65b9\u793a\u4f8b\u516c\u53f8');
+    expect(result.text).toContain('\u4eba\u6c11\u5e01800000\u5143');
+    expect(result.text).toContain('\u4efb\u52a1\u56de\u6267\uff1a\u5df2\u9a8c\u8bc1\uff08legal_case_workspace\uff09');
+    expect(result.text).not.toContain('\u6211\u8fd8\u4e0d\u80fd\u8bf4\u8fd9\u4ef6\u4e8b\u5df2\u7ecf\u5b8c\u6210');
+  });
+
+  it('summarizes a safe legal review draft from the verified industry receipt', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const content = [
+      '# \u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u8bc9\u524d\u5e94\u5bf9\u7b56\u7565\u8349\u7a3f',
+      '',
+      '## \u4e8c\u3001\u5df2\u77e5\u4e8b\u5b9e',
+      '1. \u7532\u65b9\u4e3a\u6d4b\u8bd5\u516c\u53f8\uff0c\u4e59\u65b9\u4e3a\u793a\u4f8b\u516c\u53f8\u3002',
+      '2. \u4e89\u8bae\u91d1\u989d\u4e3a80\u4e07\u5143\u3002',
+      '',
+      '## \u4e94\u3001\u9700\u8981\u5f8b\u5e08\u590d\u6838\u7684\u70b9',
+      '1. \u6211\u65b9\u8eab\u4efd\u548c\u7acb\u573a\u5f85\u786e\u8ba4\u3002',
+      '2. \u8bc1\u636e\u539f\u4ef6\u548c\u6765\u6e90\u5f85\u786e\u8ba4\u3002',
+      '',
+      '## \u516d\u3001\u8fb9\u754c\u58f0\u660e',
+      '- \u672a\u53d1\u9001\u3001\u672a\u63d0\u4ea4\u3001\u672a\u7b7e\u7f72\u3002',
+    ].join('\n');
+    const result = finalizeLumiResponse({
+      taskText: '\u57fa\u4e8e\u6848\u4ef6\u5de5\u4f5c\u53f0\u5df2\u4fdd\u5b58\u4e8b\u5b9e\uff0c\u751f\u6210\u4e00\u4efd\u8bc9\u524d\u5e94\u5bf9\u7b56\u7565\u5f8b\u5e08\u590d\u6838\u8349\u7a3f\u3002\u4e0d\u8981\u53d1\u9001\u3001\u63d0\u4ea4\u6216\u7b7e\u7f72\u3002',
+      responseText: '\u6587\u4ef6\u5df2\u751f\u6210\u3002',
+      toolRecords: [{
+        name: 'legal_generate_argument_or_opinion',
+        arguments: { documentType: '\u5e94\u5bf9\u7b56\u7565' },
+        result: content,
+        receipt: {
+          ok: true,
+          status: 'generated',
+          persisted: true,
+          changedCaseIds: ['case_001'],
+          articleIds: [],
+          artifacts: [],
+          content,
+        },
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'terminal_receipt',
+          reason: 'verified',
+        },
+      }],
+      source: 'command-center-chat',
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toContain('\u8349\u7a3f\u8981\u70b9');
+    expect(result.text).toContain('\u7532\u65b9\u4e3a\u6d4b\u8bd5\u516c\u53f8');
+    expect(result.text).toContain('\u5f8b\u5e08\u590d\u6838\u70b9');
+    expect(result.text).toContain('\u5df2\u9a8c\u8bc1\uff08legal_generate_argument_or_opinion\uff09');
+    expect(result.text).toContain('\u672a\u53d1\u9001\u3001\u672a\u63d0\u4ea4\u3001\u672a\u7b7e\u7f72');
+  });
   it.each([
     '\u5f53\u524d\u4f1a\u8bdd\u53ea\u6302\u8f7d\u4e86\u4e24\u4e2a\u5de5\u5177\uff0c\u8bb0\u5fc6\u5e93\u68c0\u7d22\u5de5\u5177\u6ca1\u6302\u8f7d\u3002',
     '\u5f53\u524d\u804a\u5929\u6a21\u5f0f\u672c\u8eab\u6ca1\u5e26\u5de5\u5177\uff0c\u7ffb\u4e0d\u4e86\u8bb0\u5fc6\u5e93\u3002',
@@ -1459,6 +1574,57 @@ describe('Lumi result finalizer', () => {
           result: '\u73b0\u884c\u6709\u6548\u6cd5\u5f8b\u786c\u95e8\u69db\uff1a\u901a\u8fc7\n\u5df2\u5e9f\u6b62/\u5931\u6548\u98ce\u9669\uff1a0',
         },
       ],
+      source: 'chat',
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toBe(responseText);
+  });
+
+  it('keeps a verified internal bid working draft that explicitly forbids citations and submission', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const taskText = '\u4e3a\u201c\u56ed\u533aAI\u6cd5\u5f8b\u670d\u52a1\u8bd5\u70b9\u9879\u76ee\u201d\u5236\u4f5c\u5185\u90e8\u6295\u6807\u54cd\u5e94\u5de5\u4f5c\u5e95\u7a3f\uff1b\u4e0d\u5f97\u5f15\u7528\u65e0\u6cd5\u6838\u9a8c\u7684\u5177\u4f53\u6cd5\u6761\u6216\u6848\u4f8b\uff1b\u4e0d\u8981\u4e0a\u4f20\u3001\u53d1\u9001\u3001\u63d0\u4ea4\u3001\u7b7e\u7f72\u6216\u6295\u6807\u3002';
+    const responseText = '# \u5185\u90e8\u6295\u6807\u5de5\u4f5c\u5e95\u7a3f\n\u5df2\u751f\u6210\u5e76\u5f52\u6863\u5de5\u4f5c\u5e95\u7a3f\u3002\n## \u6b63\u5f0f\u6295\u6807\u963b\u65ad\u9879\n\u8d44\u8d28\u3001\u62a5\u4ef7\u3001\u4fdd\u8bc1\u91d1\u548c\u7b7e\u7ae0\u5747\u5f85\u786e\u8ba4\u3002\n\u672c\u8f6e\u4ec5\u662f\u5185\u90e8\u5e95\u7a3f\uff0c\u672a\u4e0a\u4f20\u3001\u672a\u53d1\u9001\u3001\u672a\u63d0\u4ea4\u3001\u672a\u7b7e\u7f72\u3001\u672a\u6295\u6807\u3002';
+    const result = finalizeLumiResponse({
+      taskText,
+      responseText,
+      toolRecords: [{
+        name: 'legal_generate_bid',
+        arguments: { projectName: '\u56ed\u533aAI\u6cd5\u5f8b\u670d\u52a1\u8bd5\u70b9\u9879\u76ee', useModel: false },
+        result: responseText,
+        receipt: { ok: true, status: 'generated', persisted: true },
+        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'internal draft archived' },
+      } as any],
+      source: 'chat',
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toBe(responseText);
+  });
+
+  it('keeps a receipt-backed delivery assessment when the document remains blocked', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const taskText = '针对案件工作台中已归档的律师复核草稿执行交付核验，核对引用、时效、管辖、文件状态和律师复核边界；不要重新生成文书。';
+    const responseText = [
+      '# 已归档文书交付核验',
+      '## 逐项结果',
+      '- 阻断：草稿未检测到可核验的现行法条引用。',
+      '## 总体结论',
+      '- 不可正式交付；本轮只完成核验，没有重新生成文书。',
+      '## 执行记录',
+      '- 任务回执状态：核验已完成并形成结构化回执。',
+    ].join('\n');
+    const result = finalizeLumiResponse({
+      taskText,
+      responseText,
+      toolRecords: [{
+        id: 'delivery-verification',
+        name: 'legal_verify_archived_delivery',
+        arguments: { caseId: 'case-1', materialTitle: '律师复核草稿' },
+        result: responseText,
+        receipt: { ok: true, status: 'verified', persisted: false },
+        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'read-only assessment' },
+      } as any],
       source: 'chat',
     });
 

@@ -4,6 +4,7 @@ import { PRODUCT_VARIANT } from '../shared/product_variant';
 import {
   formatIndustryCapabilityProfilePrompt,
   getCurrentIndustryCapabilityProfile,
+  isCurrentIndustryMultiWorkspaceLedgerStatusRequest,
   isCurrentIndustryWorkflowExecutionRequest,
   matchCurrentIndustryWorkflow,
 } from '../server/regions/packs/cn/industry_capability_profile';
@@ -62,6 +63,12 @@ function createRegistry(): ToolRegistry {
 }
 
 describe('industry capability profile and channel routing', () => {
+  it('keeps a multi-workspace ledger replay read-only', () => {
+    const query = '律师版文字验收：请只根据已经存在的行业任务账本和最终回执，分别列出“案件工作台、文书生成、合同审查、法条与类案、财产线索、交付核验、标书制作”的最近任务状态、关键结果、交付物和确认边界；不要重新执行工作流。';
+    expect(isCurrentIndustryMultiWorkspaceLedgerStatusRequest(query)).toBe(true);
+    expect(isCurrentIndustryWorkflowExecutionRequest(query)).toBe(false);
+  });
+
   it('exposes one authoritative profile that matches the edition workspaces', () => {
     const profile = getCurrentIndustryCapabilityProfile()!;
     expect(profile.variantId).toBe(PRODUCT_VARIANT.variantId);

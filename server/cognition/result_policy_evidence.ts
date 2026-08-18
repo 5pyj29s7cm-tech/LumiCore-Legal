@@ -16,19 +16,34 @@ export function hasContinuousStockWatchEvidence(records: ToolExecutionRecord[]):
 }
 
 export function requiresLegalCurrentLawGate(text: string): boolean {
+  const normalized = String(text || '');
+  const strictInternalBidDraft =
+    /(?:\u5185\u90e8|\u5de5\u4f5c\u5e95\u7a3f|\u8349\u7a3f|\u5f85\u590d\u6838)/u.test(normalized)
+    && /(?:\u6807\u4e66|\u6295\u6807\u54cd\u5e94|\bbid\b|\btender\b)/iu.test(normalized)
+    && /(?:\u4e0d\u5f97|\u4e0d\u8981|\u4e0d)\u5f15\u7528[^\u3002\uff1b;\n]{0,48}(?:\u5177\u4f53\u6cd5\u6761|\u6cd5\u6761|\u6848\u4f8b)/u.test(normalized)
+    && /(?:\u4e0d\u8981|\u4e0d\u5f97|\u672a)[^\u3002\n]{0,100}(?:\u4e0a\u4f20|\u53d1\u9001|\u63d0\u4ea4|\u7b7e\u7f72|\u6295\u6807)/u.test(normalized);
+  // An explicitly internal bid working draft that forbids unverified legal
+  // citations and every external submission action is not a formal legal
+  // deliverable. Preserve its verified draft and blocker list; the current-law
+  // gate remains mandatory once the user asks for a formal/submittable package.
+  if (strictInternalBidDraft) return false;
   if (
-    /(?:\u68c0\u7d22\u8ba1\u5212|\u68c0\u7d22\u884c\u52a8\u5355|\u5916\u90e8\u68c0\u7d22|\u6765\u6e90\u767b\u8bb0|\u6388\u6743\u534f\u4f5c|\u88c1\u5224\u6587\u4e66\u7f51|\u4eba\u6c11\u6cd5\u9662\u6848\u4f8b\u5e93|\u6cd5\u8749|\bAlpha\b|\u4f01\u67e5\u67e5|research plan|source register|authorized collaboration)/iu.test(text || '') &&
-    !/(?:\u8d77\u8bc9\u72b6|\u8981\u7d20\u5f0f\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u8d28\u8bc1\u610f\u89c1|\u4ee3\u7406\u8bcd|\u6cd5\u5f8b\u610f\u89c1\u4e66|\u59d4\u6258\u624b\u7eed|\u7acb\u6848\u6750\u6599|\u8bc1\u636e\u76ee\u5f55|\u5408\u540c|\u534f\u8bae|\u6807\u4e66|\u6295\u6807\u4e66|\u6b63\u5f0f\u6587\u4e66|\u4ea4\u4ed8\u5305|pleading|complaint|defense|legal\s+opinion|contract|agreement|bid|tender|filing\s+packet|evidence\s+catalog)/iu.test(text || '')
+    /(?:\u68c0\u7d22\u8ba1\u5212|\u68c0\u7d22\u884c\u52a8\u5355|\u5916\u90e8\u68c0\u7d22|\u6765\u6e90\u767b\u8bb0|\u6388\u6743\u534f\u4f5c|\u88c1\u5224\u6587\u4e66\u7f51|\u4eba\u6c11\u6cd5\u9662\u6848\u4f8b\u5e93|\u6cd5\u8749|\bAlpha\b|\u4f01\u67e5\u67e5|research plan|source register|authorized collaboration)/iu.test(normalized) &&
+    !/(?:\u8d77\u8bc9\u72b6|\u8981\u7d20\u5f0f\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u8d28\u8bc1\u610f\u89c1|\u4ee3\u7406\u8bcd|\u6cd5\u5f8b\u610f\u89c1\u4e66|\u59d4\u6258\u624b\u7eed|\u7acb\u6848\u6750\u6599|\u8bc1\u636e\u76ee\u5f55|\u5408\u540c|\u534f\u8bae|\u6807\u4e66|\u6295\u6807\u4e66|\u6b63\u5f0f\u6587\u4e66|\u4ea4\u4ed8\u5305|pleading|complaint|defense|legal\s+opinion|contract|agreement|bid|tender|filing\s+packet|evidence\s+catalog)/iu.test(normalized)
   ) {
     return false;
   }
   return /(?:\u8d77\u8bc9\u72b6|\u8981\u7d20\u5f0f\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u8d28\u8bc1\u610f\u89c1|\u4ee3\u7406\u8bcd|\u6cd5\u5f8b\u610f\u89c1\u4e66|\u59d4\u6258\u624b\u7eed|\u7acb\u6848\u6750\u6599|\u8bc1\u636e\u76ee\u5f55|\u5408\u540c|\u534f\u8bae|\u6807\u4e66|\u6295\u6807\u4e66|\u6587\u4e66|\u8bc9\u72b6|pleading|complaint|defense|legal\s+opinion|contract|agreement|bid|tender|filing\s+packet|evidence\s+catalog)/iu
-    .test(text || '');
+    .test(normalized);
 }
 
 export function claimsLegalDocumentCompletion(text: string): boolean {
+  const normalized = String(text || '');
+  if (/(?:不可|不能|尚未|还不能|未能|不具备).{0,20}(?:正式交付|正式使用|标记为完成|直接使用|直接提交)|(?:正式交付|正式使用).{0,12}(?:阻断|未通过|待确认)/u.test(normalized)) {
+    return false;
+  }
   return /(?:\u5df2\u7ecf|\u5df2|\u5b8c\u6210|\u751f\u6210|\u51fa\u5177|\u4ea4\u4ed8|\u6b63\u5f0f|\u53ef\u76f4\u63a5\u4f7f\u7528|\u53ef\u4ee5\u76f4\u63a5\u4f7f\u7528|\u53ef\u63d0\u4ea4|\u53ef\u7acb\u6848|\u53ef\u7528|completed|created|generated|ready|formal|deliverable)/iu
-    .test(text || '');
+    .test(normalized);
 }
 
 export function hasLegalDocumentProductionEvidence(records: ToolExecutionRecord[]): boolean {

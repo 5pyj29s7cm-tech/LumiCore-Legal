@@ -13,6 +13,7 @@ import {
   requiresCadGeometryExtractionOnly,
   requiresCurrentAppUiMutation,
   requiresAutoCadMcpPlayback,
+  requiresDesktopAiCollaboration,
   requiresAuthenticatedWebResult,
   requiresVisibleAutoCadExecution,
   requiresExternalAiHistory,
@@ -33,6 +34,25 @@ describe('Lumi action contract', () => {
 
     const collaboration = buildActionContract('Ask ChatGPT and Claude for independent answers, then collect and compare them.');
     expect(collaboration.kind).toBe('external_ai_collaboration');
+  });
+
+  it('does not treat a no-model-memory legal research boundary as external AI collaboration', () => {
+    const text = '律师版实机验收·法条与类案：基于四号案件ID d2789373-effc-404c-aff6-25f101267790，只使用当前已配置且可核验的权威来源，输出检索问题、来源状态、可核验结果与缺口。若来源未配置或结果无法核验，必须明确写无法完成检索，禁止凭模型记忆编造法条、案号、法院或裁判规则。不要登录外部网站，不要发送、提交或签署。完成后告诉我实际使用了什么能力以及任务回执状态。';
+    expect(requiresDesktopAiCollaboration(text)).toBe(false);
+    expect(requiresAuthenticatedWebResult(text)).toBe(false);
+    expect(buildActionContract(text).kind).toBe('legal_document');
+  });
+
+  it('accepts a verified archived-delivery assessment without requiring a new document artifact', () => {
+    const task = '针对案件工作台中已归档的律师复核草稿执行交付核验，输出阻断项和是否可正式交付，不要重新生成文书。';
+    const record = {
+      id: 'delivery-verification',
+      name: 'legal_verify_archived_delivery',
+      arguments: { caseId: 'case-1', materialTitle: '律师复核草稿' },
+      result: '# 已归档文书交付核验\n## 总体结论\n- 不可正式交付。',
+      terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'read-only assessment' },
+    } as any;
+    expect(hasCoreActionEvidence(buildActionContract(task), [record], task)).toBe(true);
   });
   it('treats editing inside the current app as a desktop action contract', () => {
     const contract = buildActionContract('\u5728\u8fd9\u91cc\u9762\u5199\u4e00\u7bc7\u68c0\u8ba8\u4e66\u7ed9\u6211');
@@ -793,5 +813,20 @@ describe('Lumi action contract', () => {
     expect(prompt).toContain('Core action');
     expect(prompt).toContain('Preparation is not completion');
     expect(prompt).toContain('Required completion evidence');
+  });
+});
+
+describe('legal workspace action contract', () => {
+  it('does not apply legal-document delivery gates to a named case workspace', () => {
+    const text = '\u65b0\u5efa\u4e00\u4e2a\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0\uff0c\u6848\u4ef6\u540d\u201c\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u201d\uff0c\u5f53\u4e8b\u4eba\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8\u3001\u4e59\u65b9\u793a\u4f8b\u516c\u53f8\uff0c\u4e89\u8bae\u91d1\u989d80\u4e07\u5143\uff0c\u9636\u6bb5\u4e3a\u8bc9\u524d\u3002\u53ea\u4f7f\u7528\u8fd9\u4e9b\u4e8b\u5b9e\uff0c\u4e0d\u8981\u8865\u9020\u8bc1\u636e\uff1b\u521b\u5efa\u5b8c\u6210\u540e\u544a\u8bc9\u6211\u6848\u4ef6ID\u3001\u5df2\u4fdd\u5b58\u5b57\u6bb5\u3001\u7f3a\u5931\u6750\u6599\u548c\u4efb\u52a1\u56de\u6267\u72b6\u6001\u3002';
+    const contract = buildActionContract(text);
+    expect(contract.kind).toBe('legal_workspace');
+    expect(contract.requiredEvidence).toContain('a persisted caseId and saved party/stage/fact fields');
+    expect(hasCoreActionEvidence(contract, [{
+      id: 'legal-workspace',
+      name: 'legal_case_workspace',
+      arguments: { caseName: '\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7' },
+      result: '# \u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u5e76\u8d2d\u6848 \u6848\u4ef6\u5de5\u4f5c\u53f0\n- \u6848\u4ef6ID\uff1acase_123',
+    }], text)).toBe(true);
   });
 });

@@ -523,3 +523,68 @@ describe('recent action continuation', () => {
     expect(bridge).not.toContain('六张业务图表');
   });
 });
+
+describe('new action isolation', () => {
+  it('keeps a self-contained new case command separate from an older completed task', () => {
+    const text = '\u65b0\u5efa\u4e00\u4e2a\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0\uff0c\u6848\u4ef6\u540d\u201c\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u201d\uff0c\u521b\u5efa\u5b8c\u6210\u540e\u544a\u8bc9\u6211\u6848\u4ef6ID\u548c\u4efb\u52a1\u56de\u6267\u72b6\u6001\u3002';
+    expect(classifyConversationActionFollowupIntent(text, {
+      version: 2,
+      taskId: 'old-task',
+      status: 'completed',
+      goal: '\u6253\u5f00\u6848\u4ef6\u5de5\u4f5c\u53f0',
+      latestInstruction: '\u6253\u5f00\u6848\u4ef6\u5de5\u4f5c\u53f0',
+      appTarget: '',
+      sourcePaths: [],
+      latestBlocker: '',
+      unfinished: false,
+      evidenceTools: ['client_action'],
+      assistantState: '',
+      toolSummaries: [],
+      receipts: [],
+      revision: 1,
+      updatedAt: new Date().toISOString(),
+    })).toBe('none');
+  });
+
+  it('keeps a contextual legal drafting command separate from old task status', () => {
+    const text = '\u57fa\u4e8e\u521a\u521b\u5efa\u7684\u6848\u4ef6ID case_new_001\uff0c\u53ea\u4f7f\u7528\u6848\u4ef6\u5de5\u4f5c\u53f0\u91cc\u5df2\u7ecf\u4fdd\u5b58\u7684\u4e8b\u5b9e\uff0c\u751f\u6210\u4e00\u4efd\u8bc9\u524d\u5e94\u5bf9\u7b56\u7565\u5f8b\u5e08\u590d\u6838\u8349\u7a3f\u3002\u5b8c\u6210\u540e\u544a\u8bc9\u6211\u8349\u7a3f\u5185\u5bb9\u548c\u4efb\u52a1\u56de\u6267\u72b6\u6001\u3002';
+    expect(classifyConversationActionFollowupIntent(text, {
+      version: 2,
+      taskId: 'old-task',
+      status: 'completed',
+      goal: '\u4f60\u662f\u8c01\uff1f',
+      latestInstruction: '\u4f60\u662f\u8c01\uff1f',
+      appTarget: '',
+      sourcePaths: [],
+      latestBlocker: '',
+      unfinished: false,
+      evidenceTools: [],
+      assistantState: '',
+      toolSummaries: [],
+      receipts: [],
+      revision: 1,
+      updatedAt: new Date().toISOString(),
+    })).toBe('none');
+  });
+
+  it('keeps a labeled authority-research command separate from old task status', () => {
+    const text = '律师版实机验收·法条与类案：基于四号案件ID d2789373-effc-404c-aff6-25f101267790，只使用当前已配置且可核验的权威来源，输出检索问题、来源状态、可核验结果与缺口。若来源未配置或结果无法核验，必须明确写无法完成检索，禁止凭模型记忆编造法条、案号、法院或裁判规则。不要登录外部网站，不要发送、提交或签署。完成后告诉我实际使用了什么能力以及任务回执状态。';
+    expect(classifyConversationActionFollowupIntent(text, {
+      version: 2,
+      taskId: 'old-navigation-task',
+      status: 'completed',
+      goal: '打开法条与类案工作区，只执行客户端导航，不要检索，不要打开外部网站。',
+      latestInstruction: '打开法条与类案工作区，只执行客户端导航，不要检索，不要打开外部网站。',
+      appTarget: '',
+      sourcePaths: [],
+      latestBlocker: '',
+      unfinished: false,
+      evidenceTools: ['client_action'],
+      assistantState: '',
+      toolSummaries: [],
+      receipts: [],
+      revision: 1,
+      updatedAt: new Date().toISOString(),
+    })).toBe('none');
+  });
+});

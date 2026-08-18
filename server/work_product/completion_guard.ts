@@ -134,11 +134,11 @@ const SELF_CLAIM_EXPLANATION_RE =
   /^(?:已完成|写好了|写完了|已新建|正在执行|现在就做|马上动手)\s*(?:是|表示|意味着|属于|这个词|这句话|这种说法)/u;
 
 const OPEN_CLAIM_RE =
-  /(?:已经|已|都)?[^。！？\n]{0,12}(?:打开|加载)|(?:打开了|加载好了)|\b(?:opened|launched)\b/i;
+  /(?:(?:已经|成功|均已|都已|已)[^。！？\n]{0,12}(?:打开|加载))|(?:(?:打开|加载)(?:成功|完成|好了|完毕|了))|\b(?:opened|launched|loaded)(?:\s+successfully)?\b/i;
 
 const FILE_CREATION_CLAIM_RE =
   // i18n-allow: Chinese file-production claim recognition pattern; not user-visible copy.
-  /(?:已经|已|都)?[^。！？\n]{0,18}(?:生成|新建|创建|保存|输出|写入|写好|写完|导出)|(?:生成好了|新建好了|创建好了|保存好了|输出好了|写好了|写完了)|\b(?:created|saved|exported|generated)\b/i;
+  /(?:(?:已经|均已|都已|已)[^。！？\n]{0,18}(?:生成|新建|创建|保存|输出|写入|写好|写完|导出))|(?:生成好了|新建好了|创建好了|保存好了|输出好了|写好了|写完了)|\b(?:created|saved|exported|generated)(?:\s+successfully)?\b/i;
 
 const COMMUNICATION_CLAIM_RE =
   // i18n-allow: user-visible completion-claim recognition; not response copy.

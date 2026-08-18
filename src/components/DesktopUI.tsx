@@ -129,6 +129,7 @@ import {
   type ViewportSize,
 } from '@/lib/desktopLayout';
 import { PRODUCT_VARIANT } from '../../shared/product_variant';
+import { isClientSurfaceRendered, waitForClientSurfaceRendered } from '../lib/clientSurfaceCommit';
 
 const IDLE_AWAY_SECONDS = 5 * 60;
 const RETURN_IDLE_SECONDS = 30;
@@ -398,6 +399,7 @@ function OSWindow({
       {/* Invisible drag boundary fills the viewport so windows can be dragged freely */}
       <div ref={constrainRef} className="fixed inset-0 pointer-events-none z-0" />
       <motion.div
+        data-lumi-rendered-surface={isMinimized ? undefined : id}
         drag={!isMaximized && !isMinimized}
         dragListener={false}
         dragControls={dragControls}
@@ -1723,6 +1725,9 @@ export function DesktopUI({
     setChatLoaded(true);
     setChatOpen(true);
     setActiveTab('command-center');
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('lumi:focus-command-input'));
+    }, 80);
   }, [setActiveTab]);
 
   const openProactiveChat = useCallback((detail: ProactiveChatDetail) => {
@@ -3529,6 +3534,14 @@ export function DesktopUI({
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'Enter') {
+        e.preventDefault();
+        setIsSearchOpen(false);
+        setIsControlCenterOpen(false);
+        setIsNotificationPanelOpen(false);
+        openCommandCenter('office');
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
         setIsSearchOpen(true);
@@ -3570,7 +3583,7 @@ export function DesktopUI({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [endCall, getVoiceScopeOptions, interrupt, isControlCenterOpen, isSearchOpen, isWallpaperMode, selectedVoiceId, startCall, toggleWallpaperMode]);
+  }, [endCall, getVoiceScopeOptions, interrupt, isControlCenterOpen, isSearchOpen, isWallpaperMode, openCommandCenter, selectedVoiceId, startCall, toggleWallpaperMode]);
 
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
@@ -3863,6 +3876,14 @@ export function DesktopUI({
           return;
         }
 
+        if (windowId !== 'command-center') {
+          setChatOpen(false);
+          if (windowId !== 'knowledge') setKnowledgeOpen(false);
+          if (windowId !== 'app-launcher') setIsSearchOpen(false);
+          if (windowId !== 'memory-avatar') setMemoryLabOpen(false);
+          if (windowId !== 'nexus') setViewMode('personal');
+        }
+
         if (windowId === 'home') {
           setOpenWindows([]);
           setMinimizedWindows([]);
@@ -4045,7 +4066,18 @@ export function DesktopUI({
         }
         if (action === 'refresh_client_state') {
           window.dispatchEvent(new CustomEvent('lumi:client-state-refresh'));
-          respond({ ok: true, action, mode: operationMode, activeTab, openWindows, widgetMode: isDesktopWidgetMode });
+          respond({
+            ok: true,
+            action,
+            mode: operationMode,
+            activeTab,
+            openWindows,
+            widgetMode: isDesktopWidgetMode,
+            renderedSurfaces: [
+              isClientSurfaceRendered('command-center') ? 'command-center' : null,
+              isClientSurfaceRendered('chat') ? 'chat' : null,
+            ].filter(Boolean),
+          });
           return;
         }
         if (action === 'enter_widget_mode' || action === 'show_desktop_widget') {
@@ -4167,24 +4199,50 @@ export function DesktopUI({
           const requestedCommandView = registeredSurface.commandCenterViewByAction?.[action];
           if (requestedCommandView) {
             openCommandCenter(requestedCommandView);
+            const rendered = await waitForClientSurfaceRendered('command-center');
+            if (!rendered) {
+              reject('Lumi command center state changed, but the visible surface did not render.');
+              return;
+            }
+            window.dispatchEvent(new CustomEvent('lumi:client-state-refresh'));
             respond({
               ok: true,
               action,
               target: registeredSurface.target,
               surface: registeredSurface.id,
               view: requestedCommandView,
+              rendered: true,
             });
             return;
           }
           if (action === 'open_avatar_studio') setPersonalizationSection('appearance');
           if (action === 'open_sound_studio') setPersonalizationSection('voice');
           openSurface(registeredSurface.target);
+          const requiresWindowCommit = ![
+            'home',
+            'nexus',
+            'app-launcher',
+            'org',
+            'knowledge',
+            'command-center',
+            'notifications',
+            'memory-avatar',
+          ].includes(registeredSurface.target);
+          if (requiresWindowCommit) {
+            const rendered = await waitForClientSurfaceRendered(registeredSurface.target);
+            if (!rendered) {
+              reject(`Lumi client state changed, but ${registeredSurface.target} did not render visibly.`);
+              return;
+            }
+            window.dispatchEvent(new CustomEvent('lumi:client-state-refresh'));
+          }
           respond({
             ok: true,
             action,
             target: registeredSurface.target,
             surface: registeredSurface.id,
             section: registeredSurface.settingsSection || '',
+            rendered: requiresWindowCommit ? true : undefined,
           });
           return;
         }

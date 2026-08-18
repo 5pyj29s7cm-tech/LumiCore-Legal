@@ -6,6 +6,12 @@ import type { CapabilityExecutionPlan } from '../cognition/capability_execution_
 import { authorizeCapabilityPlanTool } from '../cognition/capability_execution_plan';
 import { executeToolCall } from '../tools/execution_engine';
 import { desktopAutomationWorkflow } from './bundled/desktop-automation/workflow_manifest';
+import { legalContractReviewWorkflow } from './bundled/legal-casework/contract_review_workflow';
+import { legalBidDraftWorkflow } from './bundled/legal-casework/bid_draft_workflow';
+import { legalAuthorityResearchWorkflow } from './bundled/legal-casework/authority_research_workflow';
+import { legalDeliveryVerificationWorkflow } from './bundled/legal-casework/delivery_verification_workflow';
+import { legalDraftWorkflow } from './bundled/legal-casework/draft_workflow';
+import { legalCaseStatusWorkflow } from './bundled/legal-casework/status_workflow';
 
 export type SkillWorkflowDesktopRelay = (name: string, args?: Record<string, any>) => Promise<any>;
 export type SkillWorkflowSpeak = (line: string) => number | Promise<number>;
@@ -43,6 +49,8 @@ export interface SkillWorkflowDescriptor {
   statusDetail: string;
   chatSpeech: { minMs: number; maxMs: number; msPerChar: number };
   fallbackText: string;
+  /** Read-only status workflows must not create or replace a persistent task. */
+  createsTask?: boolean;
   /** Complete deterministic adapter surface. Semantic selection stays in the plan. */
   requiredTools: string[];
   match: (text: string, context?: SkillWorkflowMatchContext) => boolean;
@@ -91,6 +99,12 @@ export async function executeSkillWorkflowAdapter(input: {
 
 const SKILL_WORKFLOWS: SkillWorkflowDescriptor[] = [
   desktopAutomationWorkflow,
+  legalDeliveryVerificationWorkflow,
+  legalBidDraftWorkflow,
+  legalAuthorityResearchWorkflow,
+  legalCaseStatusWorkflow,
+  legalContractReviewWorkflow,
+  legalDraftWorkflow,
 ];
 
 export function listSkillWorkflows(): SkillWorkflowDescriptor[] {

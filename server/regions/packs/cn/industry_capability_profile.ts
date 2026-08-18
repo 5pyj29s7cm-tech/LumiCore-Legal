@@ -196,9 +196,21 @@ export function matchCurrentIndustryWorkflow(text: unknown): IndustryWorkflowMat
   return candidates[0];
 }
 
+export function isCurrentIndustryMultiWorkspaceLedgerStatusRequest(text: unknown): boolean {
+  const normalized = String(text || '').trim();
+  const profile = getCurrentIndustryCapabilityProfile();
+  if (!normalized || !profile) return false;
+  const requestedWorkspaceCount = profile.entries
+    .filter(entry => normalized.includes(entry.displayName)).length;
+  return requestedWorkspaceCount >= 2
+    && /(?:分别|逐项|各自|行业任务账本|最终回执|最近任务)/u.test(normalized)
+    && /(?:状态|进度|结果|关键结果|交付物|确认边界|回执)/u.test(normalized);
+}
+
 export function isCurrentIndustryWorkflowExecutionRequest(text: unknown): boolean {
   const normalized = String(text || '').trim();
   if (!matchCurrentIndustryWorkflow(normalized)) return false;
+  if (isCurrentIndustryMultiWorkspaceLedgerStatusRequest(normalized)) return false;
   if (/(?:是什么|有哪些|能做什么|会做什么|怎么用|如何使用|介绍一下|支持吗|能不能|可不可以|可以吗|会不会|为什么|怎么回事|做完了吗|完成了吗|好了吗|进度|状态|结果呢|what\s+(?:is|are|can)|how\s+(?:to|do|does)|can\s+(?:you|it)|status|progress)[？?。.!！]*$/iu.test(normalized)) return false;
   return /(?:请|帮我|给我|替我|开始|启动|继续|执行|处理|整理|生成|制作|创建|输出|分析|汇总|核对|检查|审查|审核|检索|查找|查一下|查一查|预测|准备|导入|归档|做一|做个|做份|做一下|看一下|看一看|算一下|算一算|review|analy[sz]e|generate|create|prepare|start|run|check|audit|draft|build|produce|reconcile|forecast|file)/iu.test(normalized);
 }

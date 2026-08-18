@@ -2,6 +2,49 @@ import { describe, expect, it } from 'vitest';
 import { guardCompletionClaims } from '../server/work_product/completion_guard';
 
 describe('completion guard desktop action handling', () => {
+  it('does not mistake a source-access instruction inside verified legal research for an open claim', () => {
+    const task = '律师版实机验收·法条与类案：基于四号案件ID d2789373-effc-404c-aff6-25f101267790，只使用当前已配置且可核验的权威来源，输出检索问题、来源状态、可核验结果与缺口。若来源未配置或结果无法核验，必须明确写无法完成检索，禁止凭模型记忆编造法条、案号、法院或裁判规则。不要登录外部网站，不要发送、提交或签署。完成后告诉我实际使用了什么能力以及任务回执状态。';
+    const response = '法条候选来自本地权威快照。未配置来源只能由律师打开授权网页人工核验；本轮未自动登录任何外部网站。实际使用能力：legal_search_statute、legal_search_case。任务回执状态：已验证。';
+    const result = guardCompletionClaims({
+      task,
+      response,
+      toolCalls: [{
+        name: 'legal_search_statute',
+        arguments: { query: '买卖合同纠纷' },
+        result: '{"ok":true,"status":"observed","content":"现行有效候选"}',
+        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'Observed source result.' },
+      }],
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toBe(response);
+  });
+
+  it('keeps a verified read-only delivery assessment even when its next step mentions generating a file', () => {
+    const task = '针对案件工作台中已归档的律师复核草稿执行交付核验，不要重新生成文书，输出是否可正式交付和任务回执状态。';
+    const response = [
+      '# 已归档文书交付核验',
+      '- 草稿文件状态：数据库正文存在，但不能证明 DOCX/PDF 交付文件已生成。',
+      '- 不可正式交付；本轮只完成核验，没有重新生成文书。',
+      '- 下一步：生成可核对的本地交付文件，并由承办律师完成复核确认。',
+      '- 任务回执状态：核验已完成并形成结构化回执。',
+    ].join('\n');
+    const result = guardCompletionClaims({
+      task,
+      response,
+      toolCalls: [{
+        id: 'delivery-verification',
+        name: 'legal_verify_archived_delivery',
+        arguments: { caseId: 'case-1' },
+        result: response,
+        receipt: { ok: true, status: 'verified', persisted: false },
+        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'read-only assessment' },
+      } as any],
+    });
+    expect(result.blocked).toBe(false);
+    expect(result.text).toBe(response);
+  });
+
   it('accepts an idempotently verified existing local legal handoff artifact', () => {
     const task = '请基于当前矩衡律师版验收案，为人民法院在线服务准备登录后由律师人工操作的协同工作区。只准备本地工作区，不要登录、不要上传、不要提交、不要缴费。';
     const result = guardCompletionClaims({

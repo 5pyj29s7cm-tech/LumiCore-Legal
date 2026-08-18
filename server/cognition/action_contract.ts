@@ -8,6 +8,7 @@ import {
 import { classifyRuntimeWorkIntent } from './runtime_work_intent';
 import { CN_ACTION_CONTRACT_BLOCKERS } from '../regions/packs/cn/voice_fast_path_messages';
 import { normalizeActionIntent } from './normalized_action_intent';
+import { isLegalCaseReadOnlyStatusRequest } from './legal_case_status';
 
 export type LumiActionContractKind =
   | 'none'
@@ -25,6 +26,7 @@ export type LumiActionContractKind =
   | 'external_ai_history'
   | 'external_ai_collaboration'
   | 'extension_registry'
+  | 'legal_workspace'
   | 'legal_document'
   | 'desktop_operation'
   | 'artifact_work';
@@ -65,6 +67,7 @@ const ACTION_CAPABILITY_REQUIREMENTS: Partial<Record<LumiActionContractKind, Act
   external_ai_history: [{ lanes: ['agents'], operations: ['observe', 'create', 'mutate'], terms: ['external', 'ai', 'history', 'conversation', 'sync', 'authorization'] }],
   external_ai_collaboration: [{ lanes: ['agents', 'web', 'desktop'], operations: ['communicate', 'observe'], terms: ['external', 'ai', 'collaboration', 'answer', 'session', 'route'] }],
   extension_registry: [{ lanes: ['system'], operations: ['observe', 'test', 'mutate'], terms: ['extension', 'registry', 'provider', 'plugin', 'compatibility', 'rollback'] }],
+  legal_workspace: [{ lanes: ['industry'], operations: ['observe', 'create', 'mutate'], terms: ['legal', 'case', 'workspace', 'ledger', 'status'] }],
   legal_document: [{ lanes: ['industry', 'web', 'office'], terms: ['legal', 'law', 'case', 'citation', 'court', 'document'] }],
   desktop_operation: [{ lanes: ['desktop'], operations: ['observe', 'mutate', 'test'], terms: ['desktop', 'window', 'application', 'native', 'screen', 'open'] }],
   artifact_work: [{ lanes: ['files', 'office', 'media'], operations: ['observe', 'create', 'mutate', 'test'], terms: ['file', 'document', 'artifact', 'create', 'verify'] }],
@@ -261,13 +264,20 @@ export function isSimpleDesktopOpenRequest(input: string): boolean {
 
 export function requiresDesktopAiCollaboration(input: string): boolean {
   const text = compact(extractPrimaryTaskText(input));
+  const positiveText = text.replace(
+    /(?:不要|不得|禁止|严禁|无需|不需要|不能|别|避免)[^。！？!?；;\n]{0,96}(?:AI|模型|agent|智能体)[^。！？!?；;\n]*/giu,
+    ' ',
+  );
   // i18n-allow: multilingual desktop-AI surface recognition; not user-visible copy.
-  const hasAiSurface = /(?:WorkBuddy|Codex|ChatGPT|Claude|Gemini|DeepSeek|Kimi|豆包|通义|文心|Perplexity|Cursor|Copilot|Ollama|LM\s*Studio|Cherry\s*Studio|AnythingLLM|外部\s*AI|桌面\s*AI|AI\s*(?:工具|客户端|app))/iu.test(text)
-    // i18n-allow: generic AI-target recognition; not user-visible copy.
-    || /(?:AI|模型|agent|智能体)/iu.test(text);
+  const hasNamedAiSurface = /(?:WorkBuddy|Codex|ChatGPT|Claude|Gemini|DeepSeek|Kimi|豆包|通义|文心|Perplexity|Cursor|Copilot|Ollama|LM\s*Studio|Cherry\s*Studio|AnythingLLM|外部\s*AI|桌面\s*AI|AI\s*(?:工具|客户端|app))/iu.test(positiveText);
+  // Generic words such as "模型" and "智能体" are collaboration targets
+  // only when a positive sentence actually directs work to or requests an
+  // answer from them.  A safety boundary such as "禁止凭模型记忆编造" must
+  // not divert an industry research task into the external-AI lane.
+  const hasGenericAiCollaborationTarget = /(?:问(?!题)(?:一下|问)?|询问|发给|发送给|交给|让|跟|和).{0,48}(?:AI|模型|agent|智能体)|(?:AI|模型|agent|智能体).{0,48}(?:聊天|对话|讨论|回答|协同|合作|汇总|对比)/iu.test(positiveText);
   // i18n-allow: multilingual collaboration-action recognition; not user-visible copy.
-  const hasCollaborationAction = /(?:问(?:一下|问)?|询问|发给|发送给|交给|跟|和|同).{0,48}(?:聊天|聊|对话|说|问|讨论)|(?:聊天|对话|讨论|回答|结果|总结|对比|汇总)|\b(?:ask|send\s+to|hand\s+off|chat|talk|discuss|answer|collect|compare|summari[sz]e)\b/iu.test(text);
-  return hasAiSurface && hasCollaborationAction;
+  const hasCollaborationAction = /(?:问(?!题)(?:一下|问)?|询问|发给|发送给|交给|跟|和).{0,48}(?:聊天|聊|对话|说|问|讨论)|(?:聊天|对话|讨论|回答|结果|总结|对比|汇总)|\b(?:ask|send\s+to|hand\s+off|chat|talk|discuss|answer|collect|compare|summari[sz]e)\b/iu.test(positiveText);
+  return (hasNamedAiSurface || hasGenericAiCollaborationTarget) && hasCollaborationAction;
 }
 
 export function requiresExternalAiHistory(input: string): boolean {
@@ -493,8 +503,12 @@ export function hasBlankAutoCadDocumentEvidence(records: ToolExecutionRecord[] =
 export function requiresAuthenticatedWebResult(input: string): boolean {
   const text = compact(input);
   if (!text) return false;
-  const hasAccountSurface = /\u767b\u5f55|\u81ea\u52a8\u767b\u5f55|\u8d26\u53f7|\u8d26\u6237|\u4f1a\u8bdd|login|log\s*in|sign\s*in|account|session/i.test(text);
-  const hasTargetWork = /\u67e5|\u627e|\u641c|\u68c0\u7d22|\u8bfb|\u4e0b\u8f7d|\u6253\u5f00|find|search|query|look\s*up|fetch|download/i.test(text);
+  const positiveText = text.replace(
+    /(?:不要|不得|禁止|严禁|无需|不需要|不能|别|避免)[^。！？!?；;\n]{0,96}(?:登录|账号|账户|会话|login|log\s*in|sign\s*in|account|session)[^。！？!?；;\n]*/giu,
+    ' ',
+  );
+  const hasAccountSurface = /\u767b\u5f55|\u81ea\u52a8\u767b\u5f55|\u8d26\u53f7|\u8d26\u6237|\u4f1a\u8bdd|login|log\s*in|sign\s*in|account|session/i.test(positiveText);
+  const hasTargetWork = /\u67e5|\u627e|\u641c|\u68c0\u7d22|\u8bfb|\u4e0b\u8f7d|\u6253\u5f00|find|search|query|look\s*up|fetch|download/i.test(positiveText);
   return hasAccountSurface && hasTargetWork;
 }
 
@@ -594,6 +608,50 @@ function buildLegalDocumentContract(): LumiActionContract {
     verificationTools: ['legal_case_reasoning_matrix', 'legal_authority_source_status', 'legal_refresh_authoritative_sources', 'legal_generate_citation_verification_report', 'legal_finalize_delivery_package', 'legal_search_statute', 'read_docx', 'read_pdf', 'desktop_path_info', 'work_product_verify'],
     nextStep: '\u5148\u62ff\u5230\u4e8b\u5b9e\u3001\u8bc1\u636e\u3001\u8bc9\u8bbc\u76ee\u6807\u548c\u7ba1\u8f96\u7b49\u4fe1\u606f\uff0c\u518d\u8d77\u8349\u6216\u5ba1\u9605\u3002',
     caution: 'Do not present general legal guidance as a complete formal argument. External court, case-law, and company-research platforms support authorized collaboration, result archiving, and pre-delivery verification only. Material legal decisions require review by a qualified lawyer.',
+  });
+}
+
+function buildLegalWorkspaceContract(): LumiActionContract {
+  return withDefaults({
+    kind: 'legal_workspace',
+    label: 'Legal case workspace',
+    coreAction: 'Create or update the exact named legal case workspace and preserve only user-supplied case identity and facts.',
+    preparationIsNotCompletion: [
+      'opening the case-workspace page',
+      'reading a different previously active case',
+      'creating a document or research plan instead of binding the requested case identity',
+    ],
+    requiredEvidence: [
+      'legal_case_workspace receipt for the exact requested case name',
+      'a persisted caseId and saved party/stage/fact fields',
+      'missing material and professional-review boundaries reported without fabricated evidence',
+    ],
+    preferredTools: ['legal_case_workspace', 'industry_workspace_bind', 'legal_case_workflow_status'],
+    verificationTools: ['legal_case_workflow_status', 'industry_workspace_status'],
+    nextStep: 'Bind the exact case identity, persist only supplied facts, then read back the same caseId and missing fields.',
+    caution: 'A case workspace is not a legal document or formal legal conclusion and does not require the current-law delivery gate.',
+  });
+}
+
+function buildLegalCaseStatusContract(): LumiActionContract {
+  return withDefaults({
+    kind: 'legal_workspace',
+    label: 'Legal case status lookup',
+    coreAction: 'Read the currently bound legal case from the persistent case ledger without creating or mutating a case or document.',
+    preparationIsNotCompletion: [
+      'guessing from model memory',
+      'creating a new task',
+      'reading a different active case',
+      'opening or calling an external platform',
+    ],
+    requiredEvidence: [
+      'a verified legal_case_workflow_status receipt for the exact persisted caseId',
+      'requested facts copied from that receipt without invention',
+    ],
+    preferredTools: ['legal_case_workflow_status'],
+    verificationTools: ['legal_case_workflow_status'],
+    nextStep: 'Read the bound case once and answer only the requested identity, facts, progress, or receipt fields.',
+    caution: 'This is a read-only status turn. It must not create a task, generate a document, delegate to an agent, or call an external platform.',
   });
 }
 
@@ -781,6 +839,7 @@ export function buildActionContract(input: string): LumiActionContract {
       caution: 'Never execute arbitrary plugin code, embed credentials in a manifest, widen signed permissions, or bypass the unified tool policy and receipt pipeline.',
     });
   }
+  if (isLegalCaseReadOnlyStatusRequest(text)) return buildLegalCaseStatusContract();
   if (normalizedIntent.kind === 'status_query') return NONE_CONTRACT;
   if (isInformationOnlyQuestion(text)) return NONE_CONTRACT;
   // Blank AutoCAD creation has a dedicated verified COM path. It remains a
@@ -973,8 +1032,12 @@ export function buildActionContract(input: string): LumiActionContract {
     });
   }
 
+  const positiveBrowserAccountText = text.replace(
+    /(?:不要|不得|禁止|严禁|无需|不需要|不能|别|避免)[^。！？!?；;\n]{0,96}(?:登录|浏览器|打开网站|外部网站|网页|网站|login|log\s*in|browser|website|site)[^。！？!?；;\n]*/giu,
+    ' ',
+  );
   if (
-    matches(text, /\u767b\u5f55|\u6d4f\u89c8\u5668|\u6253\u5f00\u7f51\u7ad9|\u81ea\u52a8\u767b\u5f55|browser|login|log\s*in|website|site/i) &&
+    matches(positiveBrowserAccountText, /\u767b\u5f55|\u6d4f\u89c8\u5668|\u6253\u5f00\u7f51\u7ad9|\u81ea\u52a8\u767b\u5f55|browser|login|log\s*in|website|site/i) &&
     !localPreparationWithoutPlatformAction &&
     !matches(text, /\bCAD\b|\bDXF\b|\bDWG\b|AutoCAD|\u753b\u56fe|\u753b\u56fe\u7eb8|\u56fe\u7eb8|\u5e73\u9762\u56fe|\u65bd\u5de5\u56fe|\u88c5\u4fee|cad/i)
   ) {
@@ -1027,6 +1090,10 @@ export function buildActionContract(input: string): LumiActionContract {
     });
   }
 
+  if (/(?:\u6807\u4e66|\u6295\u6807|\u62db\u6807|\bbid\b|\btender\b)/iu.test(text)) {
+    return buildLegalDocumentContract();
+  }
+
   if (matches(text, /\u80a1\u7968|\u76ef\u76d8|\u884c\u60c5|\u62a5\u4ef7|\u5927\u76d8|\u6da8\u8dcc|\bk\u7ebf\b|stock|quote|market|ticker/i)) {
     return withDefaults({
       kind: 'stock_monitor',
@@ -1052,6 +1119,10 @@ export function buildActionContract(input: string): LumiActionContract {
       nextStep: '\u5148\u786e\u8ba4\u6807\u7684\u3001\u5468\u671f\u548c\u89e6\u53d1\u6761\u4ef6\uff0c\u518d\u8bfb\u53d6\u5e26\u65f6\u95f4\u6233\u7684\u884c\u60c5\u6216\u521b\u5efa\u76ef\u76d8\u4efb\u52a1\u3002',
       caution: '\u4e0d\u80fd\u628a\u4e00\u6b21\u6027\u884c\u60c5\u56de\u7b54\u8bf4\u6210\u6b63\u5728\u6301\u7eed\u76ef\u76d8\u3002',
     });
+  }
+
+  if (/(?:\u65b0\u5efa|\u521b\u5efa|\u5efa\u7acb|\u66f4\u65b0|\u7ed1\u5b9a|\u9009\u62e9).{0,32}(?:\u6848\u4ef6\u5de5\u4f5c\u53f0|\u6848\u4ef6\u7a7a\u95f4|\u6d4b\u8bd5\u6848\u4ef6)|(?:\u6848\u4ef6\u5de5\u4f5c\u53f0|\u6848\u4ef6\u7a7a\u95f4).{0,24}(?:\u65b0\u5efa|\u521b\u5efa|\u5efa\u7acb|\u66f4\u65b0|\u7ed1\u5b9a|\u9009\u62e9)/u.test(text)) {
+    return buildLegalWorkspaceContract();
   }
 
   if (isLegalEntryTurn(text) || matches(text, /\u5f8b\u5e08|\u4ee3\u7406\u8bcd|\u8d77\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u5408\u540c|\u534f\u8bae|\u8d22\u4ea7\u7ebf\u7d22|\u88ab\u6267\u884c\u4eba|\u80a1\u6743\u7a7f\u900f|\u8d22\u4ea7\u4fdd\u5168|\u5b9e\u9645\u63a7\u5236\u4eba|\u5931\u4fe1|\u9650\u5236\u6d88\u8d39|\u6cd5\u5f8b\u4f1a\u8bae|\u5f8b\u5e08\u4f1a\u8bae|\u529e\u6848\u4f1a\u8bae|\u6848\u4ef6\u4f1a\u8bae|\u4f1a\u8bae\u7eaa\u8981.*\u6848\u4ef6|\u6c9f\u901a\u8bb0\u5f55.*\u6848\u4ef6|\u4e09\u6bb5\u8bba|\u5927\u524d\u63d0|\u5c0f\u524d\u63d0|\u6db5\u6444|legal|lawyer|pleading|contract|agreement|asset|enforcement|equity|shareholder/i)) {
@@ -1946,7 +2017,32 @@ export function hasCoreActionEvidence(
       /(?:alert|watchlist|reminder|scheduled|monitoring|workflow|price\s*alert|market\s*alert|\u9884\u8b66|\u63d0\u9192|\u76ef\u76d8\u4efb\u52a1|\u76d1\u63a7\u4efb\u52a1)/iu.test(String(record.result || ''))
     );
   }
+  if (contract.kind === 'legal_workspace') {
+    if (isLegalCaseReadOnlyStatusRequest(taskText)) {
+      return successful.some(record => {
+        if (record.name !== 'legal_case_workflow_status') return false;
+        const result = String(record.result || '');
+        return /案件ID：\s*[0-9a-z_-]+/iu.test(result)
+          && /案件闭环状态/u.test(result);
+      });
+    }
+    return successful.some(record => {
+      if (record.name !== 'legal_case_workspace') return false;
+      const result = String(record.result || '');
+      return /\u6848\u4ef6ID\uff1a\s*[0-9a-z_-]+/iu.test(result)
+        && /\u6848\u4ef6\u5de5\u4f5c\u53f0/u.test(result);
+    });
+  }
   if (contract.kind === 'legal_document') {
+    const requestsArchivedDeliveryVerification = /(?:交付核验|交付检查|文书核验)/u.test(taskText)
+      && /(?:已归档|案件工作台|草稿文件状态|律师复核边界)/u.test(taskText);
+    if (requestsArchivedDeliveryVerification) {
+      return successful.some(record => (
+        record.name === 'legal_verify_archived_delivery'
+        && /已归档文书交付核验/u.test(String(record.result || ''))
+        && /总体结论/u.test(String(record.result || ''))
+      ));
+    }
     const requestsLegalArtifact = /(?:生成|保存|创建|新建|制作|输出|导出|形成|准备).{0,48}(?:文书|文件|清单|工作区|交接单|起诉状|答辩状|代理词|意见书|材料包|底稿|报告|合同|协议|标书|目录|document|file|checklist|workspace|handoff|draft|report|contract|agreement|bid)/iu.test(taskText);
     const produced = successful.some(record => /^(?:legal_generate_(?!citation_verification_report).+|legal_analyze_folder_and_draft_argument|legal_review_contract|legal_draft_contract|legal_finalize_delivery_package|legal_prepare_filing_handoff|create_docx|create_pdf|write_file)$/i.test(record.name));
     if (requestsLegalArtifact) {

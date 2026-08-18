@@ -51,6 +51,7 @@ import {
   shouldDisplayAgentResponse,
 } from '@/lib/agentResponseDelivery';
 import { buildChatConversationScopeKey } from '@/lib/chatConversationScope';
+import { shouldReloadPersistedConversation } from '@/lib/conversationSync';
 import { useFocusThreads } from '@/hooks/useFocusThreads';
 import { CommandCenterPanel } from './CommandCenterPanel';
 import type { CommandCenterView } from './commandCenterTypes';
@@ -659,6 +660,21 @@ export function AgentChatPage({
   const [optimizationProgress, setOptimizationProgress] = useState(0);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
   const pendingAttachmentsRef = useRef<ChatAttachment[]>([]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const frame = requestAnimationFrame(() => messageInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const focusCommandInput = () => {
+      requestAnimationFrame(() => messageInputRef.current?.focus());
+    };
+    window.addEventListener('lumi:focus-command-input', focusCommandInput);
+    return () => window.removeEventListener('lumi:focus-command-input', focusCommandInput);
+  }, [isOpen]);
   const [conversationAttachments, setConversationAttachments] = useState<ChatAttachment[]>([]);
   const conversationAttachmentsRef = useRef<ChatAttachment[]>([]);
   const attachmentConversationIdRef = useRef('');
@@ -1685,6 +1701,8 @@ export function AgentChatPage({
       conversationId: string;
       agentId: string;
       source?: string;
+      requestId?: string;
+      originSocketId?: string;
       rolledOver?: boolean;
       previousConversationId?: string;
     }) => {
@@ -1699,8 +1717,12 @@ export function AgentChatPage({
         });
       }
       if (currentConversationId && data.conversationId !== currentConversationId && !isCurrentRollover) return;
-      const isExternalMessagingSync = /^(wechat|feishu|wecom)_bot$/.test(String(data.source || ''));
-      if (data.source === 'chat' || (textChatActiveRef.current && !isExternalMessagingSync)) return;
+      if (!shouldReloadPersistedConversation({
+        event: data,
+        currentConversationId,
+        currentSocketId: socket.id,
+        activeRequestId: activeChatRequestIdRef.current,
+      })) return;
       if (streamingMsgId.current) streamingMsgId.current = null;
       fetch(scopedConversationUrl(`/api/conversations/${data.conversationId}/messages?limit=${CHAT_HISTORY_LIMIT}`))
         .then(r => r.json())
@@ -1940,6 +1962,24 @@ export function AgentChatPage({
       setIsCreatingConversation(false);
     }
   }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, isCreatingConversation, scopedConversationUrl, setDraftText]);
+
+  useEffect(() => {
+    if (!isOpen || !isOfficeCommandCenter) return;
+    const handleCommandCenterShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey) return;
+      if (event.key.toLowerCase() === 'n') {
+        event.preventDefault();
+        void startNewTextConversation();
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        window.setTimeout(() => messageInputRef.current?.focus(), 120);
+      }
+    };
+    window.addEventListener('keydown', handleCommandCenterShortcut, true);
+    return () => window.removeEventListener('keydown', handleCommandCenterShortcut, true);
+  }, [isOfficeCommandCenter, isOpen, startNewTextConversation]);
 
   const loadConversationHistory = useCallback(async () => {
     setConversationHistoryLoading(true);
@@ -2774,6 +2814,8 @@ export function AgentChatPage({
     <AnimatePresence>
       {isOpen && (
         <motion.div
+          data-lumi-rendered-surface={layout === 'command-center' ? 'command-center' : 'chat'}
+          data-lumi-command-center-view={layout === 'command-center' ? commandCenterView : undefined}
           initial={{ opacity: 0, y: 18, scale: 0.985 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: 10, scale: 0.99 }}

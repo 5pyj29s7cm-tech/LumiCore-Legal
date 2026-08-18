@@ -74,6 +74,7 @@ const REGISTERED_CLIENT_SURFACE_RULES: ReadonlyArray<{ pattern: RegExp; target: 
   });
 
 const CLIENT_SURFACE_RULES: ReadonlyArray<{ pattern: RegExp; target: string; action: string }> = [
+  { pattern: /(?:Lumi\s*)?指挥中心|command\s*center/iu, target: 'command-center', action: 'open_command_center' }, // i18n-allow: Multilingual Lumi surface aliases.
   { pattern: /(?:聊天界面|聊天窗口|聊天面板|侧边聊天|side\s*chat|chat\s*(?:window|panel)?)/iu, target: 'chat', action: 'open_chat' }, // i18n-allow: Multilingual Lumi surface aliases.
   { pattern: /(?:中枢世界|中枢|世界视图|nexus|world\s*view)/iu, target: 'nexus', action: 'open_nexus' }, // i18n-allow: Multilingual Lumi surface aliases.
   { pattern: /(?:技能大厅|技能中心|skill\s*(?:hall|center))/iu, target: 'skills', action: 'open_skills' }, // i18n-allow: Multilingual Lumi surface aliases.
@@ -96,6 +97,28 @@ function trimSlot(value: string): string {
   return String(value || '')
     .replace(/^[\s“”‘’「」『』"']+|[\s“”‘’「」『』"'，。！？!?：:；;、]+$/gu, '')
     .trim();
+}
+
+/**
+ * A complete foreground command may ask Lumi to report IDs, receipts or
+ * status after the requested action finishes. Those trailing reporting words
+ * describe the expected result; they do not turn the whole turn into a
+ * read-only lookup of an older task.
+ */
+function hasExplicitFreshActionRequest(text: string): boolean {
+  const firstClause = String(text || '').trim().split(/[\u3002\uff1b;\uff01!\uff1f?\n]/u, 1)[0].trim();
+  if (!firstClause) return false;
+  // Test/replay prompts and industry commands often prefix the actual work
+  // with a short label (for example "律师版实机验收·法条与类案："). Strip
+  // that label before deciding whether trailing words such as "状态" or
+  // "回执" describe the expected output of a fresh task.
+  const operativeClause = firstClause
+    .replace(/^[^\uff1a:\r\n]{1,48}[\uff1a:]\s*/u, '')
+    .trim();
+  const startsWithAction = /^(?:(?:\u8bf7|\u9ebb\u70e6|\u73b0\u5728|\u5148|\u5e2e\u6211|\u7ed9\u6211|\u66ff\u6211|\u8bf7\u4f60|\u8bf7\u5e2e\u6211)[\uff0c,\s]*){0,3}(?:\u65b0\u5efa|\u521b\u5efa|\u5efa\u7acb|\u751f\u6210|\u5236\u4f5c|\u5f00\u59cb|\u6267\u884c|\u5904\u7406|\u6574\u7406|\u5ba1\u67e5|\u5ba1\u6838|\u5206\u6790|\u68c0\u7d22|\u8f93\u51fa|\u6838\u5bf9|\u51c6\u5907|\u5bfc\u5165|\u5f52\u6863|\b(?:create|start|run|execute|generate|prepare|review|analy[sz]e|process|search|output|import|archive)\b)/iu.test(operativeClause);
+  const contextualAction = /^(?:\u57fa\u4e8e|\u6839\u636e|\u7ed3\u5408|\u9488\u5bf9|\u56f4\u7ed5|\u4f9d\u7167|\u6309\u7167|\u4f7f\u7528|\u53ea\u4f7f\u7528|\u4e3a)[\s\S]{1,320}?(?:\u6267\u884c|\u751f\u6210(?!\u7684)|\u8d77\u8349|\u5236\u4f5c|\u5efa\u7acb|\u521b\u5efa|\u5ba1\u67e5|\u5904\u7406|\u6574\u7406|\u5206\u6790|\u68c0\u7d22|\u8f93\u51fa|\u6838\u5bf9|\u5bfc\u5165|\u5f52\u6863|\b(?:run|execute|create|generate|draft|prepare|review|process|analy[sz]e|search|output|import|archive)\b)/iu.test(operativeClause);
+  if (!startsWithAction && !contextualAction) return false;
+  return !/(?:\u5b8c\u6210\u4e86?\u5417|\u505a\u5b8c\u4e86?\u5417|\u597d\u4e86\u5417|\u6709\u6ca1\u6709|\u600e\u4e48\u6837|\u5982\u4f55)(?:[\uff0c,\s]*)?$/u.test(operativeClause);
 }
 
 function correctionOrExplanation(text: string): NormalizedActionIntent | null {
@@ -134,6 +157,7 @@ function correctionOrExplanation(text: string): NormalizedActionIntent | null {
 }
 
 function statusQuery(text: string): NormalizedActionIntent | null {
+  if (hasExplicitFreshActionRequest(text)) return null;
   // i18n-allow: Chinese client-state input recognition; not user-visible copy.
   const clientState = /(?:检查|查看|告诉我|现在).{0,18}(?:你的|lumi\s*的)?(?:模式|模态|运行模式|模)状态|(?:你现在|当前).{0,12}(?:是什么|什么)?模式/iu;
   if (clientState.test(text)) {

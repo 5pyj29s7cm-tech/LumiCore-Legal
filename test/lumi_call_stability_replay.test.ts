@@ -36,6 +36,74 @@ function actionState(overrides: Partial<ConversationActionContinuationState>): C
 }
 
 describe('Lumi field-call stability replay', () => {
+  it('replays verified legacy legal receipts across conversations without rerunning work', () => {
+    const query = '律师版文字验收：请只根据已经存在的行业任务账本和最终回执，分别列出“案件工作台、文书生成、合同审查、法条与类案、财产线索、交付核验、标书制作”的最近任务状态、关键结果、交付物和确认边界；不要重新执行工作流。';
+    const receiptByEntry: Record<string, { name: string; result: string }> = {
+      workspace: { name: 'legal_case_workspace', result: '# 验收案 案件工作台\n- 案件ID：case-verified\n- 完成度：5/10（50%）' },
+      packet: { name: 'legal_generate_argument_or_opinion', result: '# 应对策略律师复核草稿' },
+      contract: { name: 'legal_review_contract', result: '# 合同审查结果（仅依据原文）' },
+      research: { name: 'legal_search_statute', result: '已记录法源状态与缺口' },
+      asset: { name: 'legal_trace_assets', result: '未配置外部来源；待人工确认' },
+      verify: { name: 'legal_verify_archived_delivery', result: '## 总体结论\n- 不可正式交付。' },
+      bid: { name: 'legal_generate_bid', result: '# 内部投标响应工作底稿' },
+    };
+    const tasks = Object.entries(receiptByEntry).map(([key, receipt], index) => ({
+      id: `legacy-${key}`,
+      conversationId: 'historical-conversation',
+      userId: 'legal-user',
+      domain: 'personal',
+      orgId: '',
+      parentTaskId: '',
+      rootUserMessageId: '',
+      intentKind: 'legal_document',
+      operation: 'write',
+      goal: `legacy ${key}`,
+      target: '',
+      status: 'completed',
+      blocker: '',
+      activeRequestId: '',
+      completionSource: 'tool_receipt',
+      context: JSON.stringify({
+        actionState: actionState({
+          taskId: `legacy-${key}`,
+          receipts: [{
+            id: `receipt-${key}`,
+            key: `${receipt.name}:{}`,
+            name: receipt.name,
+            arguments: {},
+            result: receipt.result,
+            error: '',
+            outcome: 'success',
+            terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'verified' },
+            recordedAt: `2026-08-16T12:00:0${index}.000Z`,
+          }],
+        }),
+      }),
+      revision: 1,
+      createdAt: `2026-08-16T12:00:0${index}.000Z`,
+      updatedAt: `2026-08-16T12:00:0${index}.000Z`,
+      completedAt: `2026-08-16T12:00:0${index}.000Z`,
+    }));
+    const db: any = {
+      conversations: [{ id: 'current-conversation', userId: 'legal-user', domain: 'personal', orgId: '' }],
+      conversationActionTasks: tasks,
+      conversationActionReceipts: [],
+    };
+
+    const result = formatConversationActionLedgerStatus(db, {
+      conversationId: 'current-conversation',
+      userId: 'legal-user',
+      query,
+    });
+
+    expect(result).toContain('【案件工作台】\n最近任务状态：已完成（最终回执已验证）');
+    expect(result).toContain('案件 ID case-verified');
+    expect(result).toContain('【文书生成】\n最近任务状态：已完成（最终回执已验证）');
+    expect(result).toContain('【交付核验】\n最近任务状态：已完成（最终回执已验证）');
+    expect(result).toContain('不可正式交付');
+    expect(result).toContain('【标书制作】\n最近任务状态：已完成（最终回执已验证）');
+  });
+
   it('treats inbound sender language as read-only in both channel routes', () => {
     const variants = [
       '看一下张勇最近给我发什么消息了',

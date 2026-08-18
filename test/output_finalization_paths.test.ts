@@ -226,6 +226,9 @@ describe('finalized output paths', () => {
     expect(chat).toContain("cognitiveIntent: finalized.blocked ? 'work_product_guard' : 'confirmation'");
     expect(chat).toContain('if (!finalized.blocked) {');
     expect(chat).toContain("cognitiveIntent: finalizedWorkflow.blocked ? 'work_product_guard' : specialWorkflow.id");
+    expect(chat).toContain("if (specialWorkflow.createsTask === false)");
+    expect(chat).toContain("persistReadOnlyWorkflowReceipts(workflowToolCalls, specialWorkflow.id)");
+    expect(chat).toContain("skipActionContinuation: readOnlyWorkflow");
     expect(chat).toContain("cognitiveIntent: guarded ? 'work_product_guard' : undefined");
     expect(chat).toContain("cognitiveIntent: guarded ? 'work_product_guard' : cognition.intent.category");
     expect(chat).toContain('persistBackgroundResult(completionText, backgroundToolRecords, finalizedBackground.blocked, deliver)');
@@ -262,7 +265,7 @@ describe('finalized output paths', () => {
     expect(workflowPath).toContain('toolCalls: workflowQuickToolRecords.length ? workflowQuickToolRecords : undefined');
     expect(workflowPath).toContain("cognitiveIntent: finalizedWorkflowQuick.blocked ? 'work_product_guard' : undefined");
     expect(workflowPath.indexOf('emitAgent("agent:response"')).toBeLessThan(
-      workflowPath.indexOf("socket.emit('chat:conversation_updated'"),
+      workflowPath.indexOf('emitConversationUpdated({'),
     );
     expect(workflowPath).toContain('if (!finalizedWorkflowQuick.blocked) {');
     expect(workflowPath).toContain('trackTopic(conversationId, topic)');

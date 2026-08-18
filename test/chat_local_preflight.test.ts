@@ -24,6 +24,13 @@ describe('chat local action preflight', () => {
     )).toBe(true);
   });
 
+  it('does not treat a quoted drafting placeholder as a desktop filename', () => {
+    expect(shouldRunVisibleActionPreflight(
+      '\u57fa\u4e8e\u6848\u4ef6\u5de5\u4f5c\u53f0\u5df2\u4fdd\u5b58\u4e8b\u5b9e\uff0c\u751f\u6210\u8bc9\u524d\u5e94\u5bf9\u7b56\u7565\u5f8b\u5e08\u590d\u6838\u8349\u7a3f\uff0c\u672a\u77e5\u5185\u5bb9\u5199\u201c\u5f85\u786e\u8ba4\u201d\uff0c\u4e0d\u8981\u8865\u9020\u5408\u540c\u65e5\u671f\u3002',
+      [],
+    )).toBe(false);
+  });
+
   it('keeps ordinary desktop control on Lumi but honors an explicit team request', () => {
     const ordinary = '\u5217\u51fa\u684c\u9762\u6587\u4ef6';
     expect(shouldAttemptOrchestration({

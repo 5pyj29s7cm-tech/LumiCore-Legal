@@ -20,6 +20,88 @@ beforeAll(async () => {
   ({ registerWebLoginTools } = await import('../server/tools/definitions/web_login_tools'));
 });
 
+describe('legal case identity isolation', () => {
+  it('recovers explicitly labelled case slots when the planner omits them', async () => {
+    const registry = createLegalRegistry();
+    const actionIntent = '\u65b0\u5efa\u4e00\u4e2a\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0\uff0c\u6848\u4ef6\u540d\u201c\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e09\u53f7\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u201d\uff0c\u5f53\u4e8b\u4eba\u7532\u65b9\u65b0\u7532\u516c\u53f8\u3001\u4e59\u65b9\u65b0\u4e59\u516c\u53f8\uff0c\u4e89\u8bae\u91d1\u989d80\u4e07\u5143\uff0c\u9636\u6bb5\u4e3a\u8bc9\u524d\u3002';
+    const output = await registry.execute('legal_case_workspace', {
+      facts: '\u7532\u65b9\u65b0\u7532\u516c\u53f8\u4e0e\u4e59\u65b9\u65b0\u4e59\u516c\u53f8\u5b58\u5728\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\uff0c\u4e89\u8bae\u91d1\u989d80\u4e07\u5143\u3002',
+    }, {
+      userId: `legal-slot-recovery-${Date.now()}`,
+      domain: 'personal',
+      source: 'chat',
+      actionIntent,
+    });
+
+    expect(output).toContain('# \u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e09\u53f7\u4e70\u5356\u5408\u540c\u7ea0\u7eb7 \u6848\u4ef6\u5de5\u4f5c\u53f0');
+    expect(output).toContain('- \u5f53\u4e8b\u4eba\uff1a\u65b0\u7532\u516c\u53f8\uff1b\u65b0\u4e59\u516c\u53f8');
+    expect(output).toContain('- \u9636\u6bb5\uff1a\u8bc9\u524d');
+  });
+
+  it('creates a different explicitly named case and preserves planner aliases', async () => {
+    const registry = createLegalRegistry();
+    const userId = `legal-case-isolation-${Date.now()}`;
+    const context = { userId, domain: 'personal' as const, source: 'chat' };
+    const first = await registry.execute('legal_case_workspace', {
+      caseName: '\u65e7\u6848\u4ef6',
+      parties: '\u65e7\u7532\uff1b\u65e7\u4e59',
+      stage: '\u8bc9\u524d',
+    }, context);
+    const firstId = first.match(/\u6848\u4ef6ID\uff1a([^\s]+)/u)?.[1];
+
+    const second = await registry.execute('legal_case_workspace', {
+      // The planner may copy the currently active case ID even when the user
+      // explicitly asks for a new case. The tool must trust the fresh user
+      // intent over that stale model-supplied identity.
+      caseId: firstId,
+      caseName: '\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7',
+      partyA: '\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8',
+      partyB: '\u4e59\u65b9\u793a\u4f8b\u516c\u53f8',
+      disputeAmount: 800000,
+      stage: '\u8bc9\u524d',
+    }, {
+      ...context,
+      actionIntent: '\u65b0\u5efa\u4e00\u4e2a\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0\uff0c\u6848\u4ef6\u540d\u201c\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u201d',
+    });
+    const secondId = second.match(/\u6848\u4ef6ID\uff1a([^\s]+)/u)?.[1];
+
+    expect(firstId).toBeTruthy();
+    expect(secondId).toBeTruthy();
+    expect(secondId).not.toBe(firstId);
+    expect(second).toContain('\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8\uff1b\u4e59\u65b9\u793a\u4f8b\u516c\u53f8');
+    expect(second).toContain('\u4e70\u5356\u5408\u540c\u7ea0\u7eb7');
+    expect(second).toContain('\u4e89\u8bae\u91d1\u989d\uff1a\u4eba\u6c11\u5e01800000\u5143');
+    expect(second).toContain('- \u9636\u6bb5\uff1a\u8bc9\u524d');
+
+    const sameNameReplay = await registry.execute('legal_case_workspace', {
+      caseId: secondId,
+      caseName: '\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7',
+      partyA: '\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8',
+      partyB: '\u4e59\u65b9\u793a\u4f8b\u516c\u53f8',
+      disputeAmount: 800000,
+      stage: '\u8bc9\u524d',
+    }, {
+      ...context,
+      actionIntent: '\u65b0\u5efa\u4e00\u4e2a\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0\uff0c\u6848\u4ef6\u540d\u201c\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u201d',
+    });
+    const replayId = sameNameReplay.match(/\u6848\u4ef6ID\uff1a([^\s]+)/u)?.[1];
+    expect(replayId).toBeTruthy();
+    expect(replayId).not.toBe(secondId);
+
+    const third = await registry.execute('legal_case_workspace', {
+      caseId: secondId,
+      caseName: '\u5355\u4f4d\u683c\u5f0f\u6d4b\u8bd5\u6848',
+      disputeAmount: '80\u4e07\u5143',
+      stage: '\u8bc9\u524d',
+    }, {
+      ...context,
+      actionIntent: '\u65b0\u5efa\u5355\u4f4d\u683c\u5f0f\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0',
+    });
+    expect(third).toContain('\u4e89\u8bae\u91d1\u989d\uff1a\u4eba\u6c11\u5e0180\u4e07\u5143');
+    expect(third).not.toContain('80\u4e07\u5143\u5143');
+  });
+});
+
 afterAll(() => {
   if (originalOpenAIKey === undefined) delete process.env.OPENAI_API_KEY;
   else process.env.OPENAI_API_KEY = originalOpenAIKey;
@@ -33,6 +115,22 @@ function createLegalRegistry() {
 }
 
 describe('semi-automated legal workflows', () => {
+  it('keeps the saved fact scope explicit in a strategy draft fallback', async () => {
+    const registry = createLegalRegistry();
+    const output = await registry.execute('legal_generate_argument_or_opinion', {
+      caseName: '\u4e8b\u5b9e\u8303\u56f4\u6d4b\u8bd5\u6848',
+      documentType: '\u5e94\u5bf9\u7b56\u7565',
+      caseType: '\u4e70\u5356\u5408\u540c\u7ea0\u7eb7',
+      facts: '\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8\uff1b\u4e59\u65b9\u793a\u4f8b\u516c\u53f8\uff1b\u4e89\u8bae\u91d1\u989d80\u4e07\u5143\u3002',
+      evidence: '\u5f53\u524d\u672a\u63d0\u4f9b\u53ef\u6838\u9a8c\u7684\u539f\u59cb\u8bc1\u636e\u3002',
+      persistCase: false,
+    });
+
+    expect(output).toContain('## \u4e00\u3001\u6848\u4ef6\u4e8b\u5b9e\u8303\u56f4');
+    expect(output).toContain('\u4e89\u8bae\u91d1\u989d80\u4e07\u5143');
+    expect(output).toContain('\u5f53\u524d\u672a\u63d0\u4f9b\u53ef\u6838\u9a8c\u7684\u539f\u59cb\u8bc1\u636e');
+  });
+
   it('drafts plaintiff litigation packets with manual filing gates', async () => {
     const registry = createLegalRegistry();
 

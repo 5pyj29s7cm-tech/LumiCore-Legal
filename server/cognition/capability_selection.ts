@@ -167,6 +167,19 @@ function selectLane(input: LumiCapabilitySelectionInput): Pick<LumiCapabilitySel
   ];
   const actionContract = buildActionContract(text);
 
+  // A concrete workflow match is already a semantic decision for this turn.
+  // It must win over incidental client/capability wording such as “完成后告诉
+  // 我实际使用了什么能力”, otherwise the adapter is omitted from the
+  // execution plan even though turn_flow selected it.
+  if (input.dispatch.boundary === 'skill_workflow' || flow.specialWorkflow) {
+    const workflow = flow.specialWorkflow;
+    return {
+      lane: 'skill_workflow',
+      primary: workflow ? `${workflow.skillId}/${workflow.id}` : 'matched skill workflow',
+      reasons: [...reasons, 'a learned repeatable workflow matched this turn'],
+    };
+  }
+
   if (input.dispatch.boundary === 'client_action' && actionContract.kind !== 'external_ai_history') {
     return {
       lane: 'client_surface',
@@ -193,15 +206,6 @@ function selectLane(input: LumiCapabilitySelectionInput): Pick<LumiCapabilitySel
         'a successful desktop_open receipt recovered the target application',
         'the newest referential instruction edits inside that application and must not be reclassified from its text payload',
       ],
-    };
-  }
-
-  if (input.dispatch.boundary === 'skill_workflow' || flow.specialWorkflow) {
-    const workflow = flow.specialWorkflow;
-    return {
-      lane: 'skill_workflow',
-      primary: workflow ? `${workflow.skillId}/${workflow.id}` : 'matched skill workflow',
-      reasons: [...reasons, 'a learned repeatable workflow matched this turn'],
     };
   }
 
