@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "variantId": "legal-client",
   "displayName": "Lumi 律师客户定制版",
   "productLine": "legal",
@@ -10,20 +10,39 @@
     "mobileAppIdentifier": "com.lumiai.legal",
     "dataDirectoryName": "LumiOS-Legal",
     "updaterChannel": "lumi-legal",
-    "defaultSkills": ["legal-casework"],
-    "modules": ["legal-workbench", "case-management", "evidence-workflows"]
+    "defaultSkills": [
+      "legal-casework"
+    ],
+    "modules": [
+      "legal-workbench",
+      "case-management",
+      "evidence-workflows"
+    ]
   },
   "upstream": {
     "repository": "https://github.com/5pyj29s7cm-tech/lumi-CEO.git",
     "branch": "main",
     "baselineCommit": "a778bd972f912d56252419c6ea31d22453e1eca2",
-    "lastSyncedCommit": "9fd16ed4032e52a9e99646b1397b67a1cafada4b"
+    "lastSyncedCommit": "44df247096418db05c05f8782417b74f18c823eb"
   },
   "repository": "https://github.com/5pyj29s7cm-tech/lumi-legal-client.git",
   "syncPolicy": {
     "coreToVariant": "merge reviewed upstream releases",
-    "variantToCore": "cherry-pick reviewed generic commits"
+    "variantToCore": "cherry-pick reviewed generic commits",
+    "defaultBranchUpdate": "verified fast-forward only"
   },
   "createdAt": "2026-08-03",
-  "lastSyncedAt": "2026-08-13T22:28:00+08:00"
+  "lastSyncedAt": "2026-08-23T01:21:22.271Z",
+  "delivery": {
+    "localBranch": "variant/legal-client",
+    "remoteBranch": "main",
+    "defaultBranch": "main"
+  },
+  "verification": {
+    "requiredGates": [
+      "lint",
+      "test",
+      "build"
+    ]
+  }
 }
