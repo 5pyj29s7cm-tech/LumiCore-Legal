@@ -11,6 +11,17 @@ beforeAll(async () => {
   await initDatabase();
 });
 
+function trustedLocalContext(userId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    userId,
+    authenticated: true,
+    authRole: 'user',
+    localExecution: true,
+    executionBoundary: 'trusted_local' as const,
+    ...overrides,
+  };
+}
+
 describe('industry workspace context continuity', () => {
   it('verifies an empty but successfully observed workspace list', async () => {
     const registry = new ToolRegistry();
@@ -19,11 +30,10 @@ describe('industry workspace context continuity', () => {
       registry,
       name: 'industry_workspace_status',
       arguments: {},
-      context: {
-        userId: `empty_workspace_${PRODUCT_VARIANT.productLine}_${Date.now()}`,
+      context: trustedLocalContext(`empty_workspace_${PRODUCT_VARIANT.productLine}_${Date.now()}`, {
         domain: 'personal',
         orgId: '',
-      },
+      }),
     });
     expect(record.error).toBeUndefined();
     expect(record.terminalVerification).toMatchObject({ status: 'verified', strategy: 'terminal_receipt' });
@@ -33,7 +43,11 @@ describe('industry workspace context continuity', () => {
     const registry = new ToolRegistry();
     registerIndustryWorkflowTools(registry);
     const userId = `industry_subject_${PRODUCT_VARIANT.productLine}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const context = { userId, domain: 'personal' as const, source: 'voice', actionIntent: 'continue current business work' } as any;
+    const context = trustedLocalContext(userId, {
+      domain: 'personal' as const,
+      source: 'voice',
+      actionIntent: 'continue current business work',
+    }) as any;
     const fields: Record<string, Record<string, string>> = {
       ecommerce: { name: 'North store', platform: 'douyin', storeId: 'store-001', reportingPeriod: '2026-08' },
       legal: { name: 'Zhang contract case', caseId: 'case-001', caseNumber: '(2026) test 1', court: 'Test Court' },

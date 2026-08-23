@@ -2,6 +2,8 @@ import './helpers';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { ToolRegistry } from '../server/tools/registry';
+import { registerAllTools } from '../server/tools/definitions';
 
 const declarations = [
   'client_get_state',
@@ -138,10 +140,18 @@ async function selectCapability(input: {
   operationMode?: string;
   targetIsLumi?: boolean;
   continuationContext?: string;
+  registeredContracts?: boolean;
 }) {
   const { buildLumiTurnDispatch } = await import('../server/cognition/turn_dispatch');
   const { buildLumiExecutionDecision } = await import('../server/cognition/execution_decision');
   const { buildLumiCapabilitySelection } = await import('../server/cognition/capability_selection');
+  const registry = input.registeredContracts
+    ? (() => {
+        const value = new ToolRegistry();
+        registerAllTools(value);
+        return value;
+      })()
+    : undefined;
 
   const dispatch = buildLumiTurnDispatch({
     channel: input.channel || 'chat',
@@ -153,12 +163,14 @@ async function selectCapability(input: {
   const execution = buildLumiExecutionDecision({
     flow: dispatch.flow,
     text: input.continuationContext ? dispatch.flow.routeText : input.text,
-    toolDeclarations: declarations,
+    toolDeclarations: registry?.getToolDeclarations() || declarations,
+    toolRegistry: registry,
   });
   const selection = buildLumiCapabilitySelection({
     dispatch,
     execution,
     text: input.continuationContext ? dispatch.flow.routeText : input.text,
+    registry,
   });
 
   return { dispatch, execution, selection };
@@ -179,7 +191,7 @@ describe('Lumi capability selection', () => {
 
     expect(selection.lane).toBe('conversation');
     expect(selection.preferredTools).toEqual([]);
-    expect(selection.promptOverlay).toContain('Selected lane: conversation');
+    expect(selection.promptOverlay).toContain('Suggested lane: conversation');
   });
 
   it('selects capability learning before treating Lumi improvement as generic tools', async () => {
@@ -197,7 +209,7 @@ describe('Lumi capability selection', () => {
     expect(selection.promptOverlay).toContain('Do not hard-code an industry demo into Lumi core');
   });
 
-  it('keeps ordinary self-introduction conversational and reserves workflow execution for explicit demos', async () => {
+  it('keeps chat workflow matches advisory, including explicit demos', async () => {
     const { dispatch, selection } = await selectCapability({
       userId: 'capability_selection_skill_user',
       text: 'Lumi, introduce yourself',
@@ -214,10 +226,13 @@ describe('Lumi capability selection', () => {
       operationMode: 'assistant',
       targetIsLumi: true,
     });
-    expect(demo.dispatch.boundary).toBe('skill_workflow');
+    expect(demo.dispatch.boundary).not.toBe('skill_workflow');
+    expect(demo.dispatch.flow.specialWorkflow).toBeNull();
+    expect(demo.dispatch.flow.workflowHint?.id).toBe('self_intro_demo');
+    expect(demo.dispatch.flow.workflowRouting).toBe('model_hint');
     expect(demo.selection.lane).toBe('skill_workflow');
     expect(demo.selection.primary).toContain('self_intro_demo');
-    expect(demo.selection.promptOverlay).toContain('not a fixed script');
+    expect(demo.selection.promptOverlay).toContain('model owns the final respond-versus-act decision');
   });
 
   it('treats task center turns as persistent task work', async () => {
@@ -231,7 +246,7 @@ describe('Lumi capability selection', () => {
 
     expect(dispatch.boundary).toBe('task_center');
     expect(selection.lane).toBe('task_center');
-    expect(selection.preferredTools).toContain('work_takeover_task_advance');
+    expect(selection.promptOverlay).toContain('persistent work');
   });
 
   it('continues active work takeover state instead of starting from scratch', async () => {
@@ -608,6 +623,7 @@ describe('Lumi capability selection', () => {
       text: '\u8bed\u97f3\u4f1a\u8bae\u8bb0\u5f55\uff1a\u6839\u636e\u8fd9\u4e2a\u6848\u5b50\u751f\u6210\u7b54\u8fa9\u72b6\u548c\u8d28\u8bc1\u610f\u89c1',
       channel: 'voice',
       operationMode: 'assistant',
+      registeredContracts: true,
     });
 
     expect(selection.lane).toBe('legal_casework');

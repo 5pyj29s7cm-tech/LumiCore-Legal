@@ -44,6 +44,20 @@ export function buildVoiceConfirmationChannelScope(input: {
   };
 }
 
+/** Stable across Socket.IO reconnects for one persisted conversation. */
+export function buildConversationConfirmationChannelScope(input: {
+  source?: string; domain?: string; orgId?: string; conversationId: string; taskId?: string;
+}): PendingConfirmationScope {
+  const taskId = String(input.taskId || '').trim();
+  return {
+    source: String(input.source || 'chat'),
+    domain: String(input.domain || ''),
+    orgId: String(input.orgId || ''),
+    channelId: `conversation:${String(input.conversationId || '').trim()}`,
+    ...(taskId ? { taskId } : {}),
+  };
+}
+
 const pendingById = new Map<string, PendingToolConfirmation>();
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 const SECRET_KEY_RE = /password|passkey|secret|token|api.?key|credential|otp|captcha|verification.?code/i;
@@ -65,20 +79,20 @@ function confirmationTarget(args: Record<string, any>): string {
     args.contact
     || args.recipient
     || args.target
+    || args.path
     || args.channelId
     || args.chatId
     || args.url
+    || args.proposalId
     || '',
   ).trim().slice(0, 300);
 }
 
 function confirmationPayloadDigest(args: Record<string, any>): string {
-  const payload = {
-    message: args.message ?? args.text ?? args.content ?? args.draft ?? '',
-    filePath: args.filePath ?? args.path ?? args.attachment ?? '',
-    submission: args.payload ?? args.body ?? args.data ?? '',
-  };
-  return crypto.createHash('sha256').update(JSON.stringify(stableValue(payload))).digest('hex');
+  // Bind every exact argument, including long tails and identity pins. A
+  // selective payload projection allowed two materially different patches to
+  // share the same user-visible digest.
+  return crypto.createHash('sha256').update(JSON.stringify(stableValue(args || {}))).digest('hex');
 }
 
 function sanitizeValue(value: any, depth = 0): any {
@@ -91,6 +105,54 @@ function sanitizeValue(value: any, depth = 0): any {
     key,
     SECRET_KEY_RE.test(key) ? '[redacted]' : sanitizeValue(item, depth + 1),
   ]));
+}
+
+function confirmationSafeArgs(toolName: string, args: Record<string, any>): Record<string, any> {
+  if (toolName === 'self_improvement_stage_patch') {
+    const patch = String(args.patch || '');
+    const paths = Array.from(new Set(patch.split(/\r?\n/)
+      .filter(line => line.startsWith('+++ b/'))
+      .map(line => line.slice(6).trim())
+      .filter(Boolean)));
+    return {
+      proposalId: String(args.proposalId || ''),
+      expectedBaseCommit: String(args.expectedBaseCommit || ''),
+      expectedDeliveryBranch: String(args.expectedDeliveryBranch || ''),
+      commitMessage: String(args.commitMessage || ''),
+      patchReview: {
+        sha256: crypto.createHash('sha256').update(patch, 'utf8').digest('hex'),
+        bytes: Buffer.byteLength(patch, 'utf8'),
+        lines: patch.split(/\r?\n/).length,
+        changedPaths: paths,
+        fullPatch: patch,
+      },
+    };
+  }
+  if (toolName !== 'desktop_write_text_file') return sanitizeValue(args || {});
+  const content = String(args.content ?? '');
+  return {
+    path: String(args.path || ''),
+    encoding: String(args.encoding || 'utf-8'),
+    overwritePolicy: String(args.overwritePolicy || 'fail_if_exists'),
+    contentSummary: {
+      characters: content.length,
+      sha256: crypto.createHash('sha256').update(content, 'utf8').digest('hex'),
+      preview: content.slice(0, 120),
+      truncated: content.length > 120,
+    },
+  };
+}
+
+function confirmationModelSafeArgs(pending: PendingToolConfirmation): Record<string, any> {
+  if (pending.toolName !== 'self_improvement_stage_patch') return pending.safeArgs;
+  const review = pending.safeArgs.patchReview || {};
+  return {
+    ...pending.safeArgs,
+    patchReview: {
+      ...review,
+      fullPatch: `[omitted from model continuation; user reviewed exact SHA-256 ${review.sha256 || pending.payloadDigest}]`,
+    },
+  };
 }
 
 function matchesScope(pending: PendingToolConfirmation, scope?: PendingConfirmationScope): boolean {
@@ -143,7 +205,7 @@ export function recordPendingConfirmation(
     target: confirmationTarget(args),
     payloadDigest: confirmationPayloadDigest(args),
     exactArgs: stableValue(args || {}),
-    safeArgs: sanitizeValue(args || {}),
+    safeArgs: confirmationSafeArgs(toolName, args || {}),
     actionIntent: String(scope.actionIntent || '').trim(),
     source,
     domain: scope.domain || '',
@@ -209,7 +271,18 @@ export function isExplicitConfirmationReply(text: string): boolean {
 }
 
 export function isConfirmationCancellation(text: string): boolean {
-  return /^(?:\u53d6\u6d88|\u4e0d\u8981\u6267\u884c|\u505c\u6b62\u6267\u884c|\u4e0d\u540c\u610f|\u62d2\u7edd|cancel|deny|reject|stop)[\u3002\uff01\uff1f.!?\s]*$/iu.test(String(text || '').trim());
+  const normalized = String(text || '').trim();
+  if (/^(?:\u4e0d\u8981\u6267\u884c|\u505c\u6b62\u6267\u884c|\u4e0d\u540c\u610f|\u62d2\u7edd|cancel|deny|reject|stop)[\u3002\uff01\uff1f.!?\s]*$/iu.test(normalized)) {
+    return true;
+  }
+  if (/^(?:\u53d6\u6d88|\u505c\u6b62)[\u3002\uff01\uff1f.!?\s]*$/u.test(normalized)) return true;
+  if (!/^(?:\u53d6\u6d88|\u505c\u6b62)/u.test(normalized)) return false;
+  // Natural cancellations often name the pending recipient/action and then
+  // ask Lumi to confirm that nothing was sent. Accept that full sentence as
+  // long as it explicitly refers to a confirmation/action boundary. Do not
+  // classify unrelated domain commands such as "取消订单" as confirmation
+  // cancellation.
+  return /(?:\u521a\u624d|\u521a\u521a|\u4e4b\u524d|\u4e0a\u4e00\u4e2a|\u5916\u53d1|\u53d1\u9001|\u63d0\u4ea4|\u53d1\u5e03|\u786e\u8ba4|\u64cd\u4f5c|\u4efb\u52a1)/u.test(normalized.slice(0, 180));
 }
 
 export function formatPendingConfirmationPrompt(pending: PendingToolConfirmation): string {
@@ -223,7 +296,7 @@ export function formatPendingConfirmationPrompt(pending: PendingToolConfirmation
     `Tool: ${pending.toolName}`,
     `Target: ${pending.target || '(current verified target)'}`,
     `Payload digest: ${pending.payloadDigest}`,
-    `Arguments (secrets redacted): ${JSON.stringify(pending.safeArgs)}`,
+    `Arguments (secrets redacted): ${JSON.stringify(confirmationModelSafeArgs(pending))}`,
   ].join('\n');
 }
 

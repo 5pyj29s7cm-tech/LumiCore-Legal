@@ -1,7 +1,12 @@
 import type { ToolPolicy } from '../personality/types';
 import type { ToolRegistry } from '../tools/registry';
 import type { ConversationActionContinuationState } from './action_continuation';
-import { normalizeActionIntent, type NormalizedActionIntent } from './normalized_action_intent';
+import {
+  isExplicitArtifactCreationText,
+  isExternalCommitConfirmationOnlyRequest,
+  normalizeActionIntent,
+  type NormalizedActionIntent,
+} from './normalized_action_intent';
 import {
   buildLumiCapabilitySelection,
   type LumiCapabilitySelection,
@@ -30,6 +35,8 @@ import {
   type CapabilityExecutionPlan,
 } from './capability_execution_plan';
 import { recordRoutingShadowComparison } from '../runtime/capability_metrics';
+import { hasExplicitNoMutationInstruction } from './tool_intent';
+import { buildActionContract } from './action_contract';
 
 export interface LumiCapabilityPlan extends LumiCapabilitySelection {
   schemaVersion: 1;
@@ -114,6 +121,97 @@ function applyAdditionalForbiddenTools(
         ? `Entry authorization boundary forbids: ${additions.join(', ')}.`
         : '',
     ].filter(Boolean).join('\n'),
+  };
+}
+
+function applyCurrentTurnNoMutationConstraint(
+  execution: LumiExecutionDecision,
+  registry: ToolRegistry,
+  text: string,
+): LumiExecutionDecision {
+  // A confirmation-only external-commit request deliberately says both
+  // "prepare to send" and "do not send now". It must expose the exact
+  // external tool so the executor can create a bound pending confirmation;
+  // the confirmation gate, not the generic read-only filter, prevents the
+  // side effect. Ordinary negative commands remain fully read-only.
+  if (isExternalCommitConfirmationOnlyRequest(text)) return execution;
+  // "Create this exact file, but do not modify other files / send / publish"
+  // is a scoped artifact boundary, not a veto of the requested local write.
+  // The artifact route already removes messaging, client-surface and desktop
+  // launch tools, while the executor still binds the write to the explicit
+  // path supplied in this turn.
+  if (isExplicitArtifactCreationText(text)) return execution;
+  const normalizedIntent = normalizeActionIntent(text);
+  // A bounded Lumi client navigation request may explicitly prohibit opening
+  // other applications or changing content. That wording is a scope fence,
+  // not a veto of the requested in-client navigation itself. The hardened
+  // client-action policy already limits the turn to client_get_state and the
+  // exact client_action route, so keep it intact while every unrelated
+  // mutation remains unavailable.
+  if (
+    normalizedIntent.kind === 'client_navigation'
+    && normalizedIntent.operation === 'navigate'
+    && normalizedIntent.sideEffectClass === 'none'
+    && normalizedIntent.target
+  ) return execution;
+  if (
+    normalizedIntent.kind === 'desktop_operation'
+    && normalizedIntent.operation === 'navigate'
+    && normalizedIntent.sideEffectClass === 'none'
+    && normalizedIntent.target
+  ) return execution;
+  // An explicitly requested persistent Lumi task is an internal ledger write.
+  // A clause such as "do not send any messages" fences the later external
+  // step; it must not veto creation of the requested local task record.
+  if (
+    normalizedIntent.kind === 'work_task'
+    && normalizedIntent.operation === 'create'
+    && normalizedIntent.sideEffectClass === 'local_write'
+  ) return execution;
+  const actionContract = buildActionContract(text);
+  // A requested local deliverable may explicitly fence only consequential
+  // external actions (send/submit/publish/sign). That boundary must not erase
+  // the local workflow ledger and artifact tools needed to produce the draft.
+  // A separate prohibition on create/write/save still takes the strict
+  // read-only path below.
+  const externalCommitOnlyFence = actionContract.applies
+    && actionContract.kind !== 'none'
+    && /(?:不要|别|禁止|无需|不用|请勿|勿)[^。！？!?\n]{0,48}(?:发送|提交|发布|签署|对外)/u.test(text) // i18n-allow: reviewed input-recognition regex.
+    && !/(?:不要|别|禁止|无需|不用|请勿|勿)[^。！？!?\n]{0,24}(?:修改|改动|改写|写入|保存|覆盖|创建|新建|生成|删除)(?:文件|文档|内容|数据)?/u.test(text); // i18n-allow: reviewed input-recognition regex.
+  if (externalCommitOnlyFence) {
+    const externalCommitTools = registry.getCapabilityManifest(undefined)
+      .filter(entry => (
+        entry.operation === 'communicate'
+        || entry.sideEffects.some(effect => (
+          effect.type === 'external_communication'
+          || effect.type === 'external_state_change'
+        ))
+      ))
+      .map(entry => entry.toolName);
+    const restricted = applyAdditionalForbiddenTools(execution, externalCommitTools);
+    return {
+      ...restricted,
+      promptOverlay: [
+        execution.promptOverlay,
+        'Current-turn external-commit boundary: local reading, analysis, drafting, verification, and explicitly requested local persistence remain available. Do not send, submit, publish, sign, or mutate an external system.',
+      ].join('\n'),
+    };
+  }
+  if (!hasExplicitNoMutationInstruction(text)) return execution;
+  const mutationTools = registry.getCapabilityManifest(undefined)
+    .filter(entry => (
+      entry.operation === 'create'
+      || entry.operation === 'mutate'
+      || entry.sideEffects.some(effect => effect.type !== 'local_read')
+    ))
+    .map(entry => entry.toolName);
+  const restricted = applyAdditionalForbiddenTools(execution, mutationTools);
+  return {
+    ...restricted,
+    promptOverlay: [
+      execution.promptOverlay,
+      'Current-turn read-only boundary: the user explicitly prohibited modification. Read/inspect/answer only; do not create, edit, save, send, submit, control, or mutate any state.',
+    ].join('\n'),
   };
 }
 
@@ -213,12 +311,16 @@ export function buildLumiExecutionPipeline(
     manifest: unrestrictedManifest,
   });
   const execution = applyAdditionalForbiddenTools(
-    applySelectedWorkflowAdapterPolicy(
-      applyLumiRoutingShadowGuard(legacyExecution, shadowComparison),
-      turnIntent,
+    applyCurrentTurnNoMutationConstraint(
+      applySelectedWorkflowAdapterPolicy(
+        applyLumiRoutingShadowGuard(legacyExecution, shadowComparison),
+        turnIntent,
+        input.registry,
+        input.personalityToolPolicy,
+        input.isSanctuary,
+      ),
       input.registry,
-      input.personalityToolPolicy,
-      input.isSanctuary,
+      input.dispatch.text,
     ),
     input.additionalForbiddenTools,
   );

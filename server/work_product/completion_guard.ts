@@ -201,11 +201,11 @@ function stripNegatedClaimClauses(value: string): string {
       ' ',
     )
     .replace(
-      /(?:\u6ca1\u6709|\u6ca1|\u5e76\u672a|\u5c1a\u672a|\u672a\u66fe|\u4e0d\u4f1a|\u4e0d\u80fd|\u4e0d\u5e94|\u4e0d\u8981|\u7981\u6b62|\u672a)(?=[^\u3002\uFF1B\uFF01\uFF1F\n\r]{0,48}(?:\u5b8c\u6210|\u505a\u5b8c|\u505a\u597d|\u641e\u5b9a|\u6253\u5f00|\u542f\u52a8|\u53d1\u9001|\u751f\u6210|\u65b0\u5efa|\u521b\u5efa|\u4fdd\u5b58|\u5bfc\u51fa|\u5199\u5165|\u5199\u597d|\u5199\u5b8c|\u8bfb\u53d6|\u67e5\u770b|\u6267\u884c|\u5904\u7406))[^\u3002\uFF1B\uFF01\uFF1F\n\r]*/gu,
+      /(?:\u6ca1\u6709|\u6ca1|\u5e76\u672a|\u5c1a\u672a|\u672a\u66fe|\u4e0d\u4f1a|\u4e0d\u80fd|\u4e0d\u5e94|\u4e0d\u8981|\u7981\u6b62|\u672a)(?=[^\u3002\uFF1B\uFF01\uFF1F\n\r]{0,48}(?:\u5b8c\u6210|\u505a\u5b8c|\u505a\u597d|\u641e\u5b9a|\u6253\u5f00|\u542f\u52a8|\u53d1\u9001|\u751f\u6210|\u65b0\u5efa|\u521b\u5efa|\u4fdd\u5b58|\u5bfc\u51fa|\u5199\u5165|\u5199\u597d|\u5199\u5b8c|\u8bfb\u53d6|\u67e5\u770b|\u8c03\u7528|\u4f7f\u7528|\u6267\u884c|\u5904\u7406))[^\u3002\uFF1B\uFF01\uFF1F\n\r]*/gu,
       ' ',
     )
     .replace(
-      /\b(?:did\s+not|didn't|does\s+not|doesn't|have\s+not|haven't|has\s+not|hasn't|will\s+not|won't|cannot|can't|must\s+not|do\s+not|don't|never)\b(?=[^.;!?\n\r]{0,64}\b(?:complete|open|launch|send|create|generate|save|export|read|view)\b)[^.;!?\n\r]*/giu,
+      /\b(?:did\s+not|didn't|does\s+not|doesn't|have\s+not|haven't|has\s+not|hasn't|will\s+not|won't|cannot|can't|must\s+not|do\s+not|don't|never)\b(?=[^.;!?\n\r]{0,64}\b(?:complete|open|launch|send|create|generate|save|export|read|view|call|use|execute|run)\b)[^.;!?\n\r]*/giu,
       ' ',
     );
 }
@@ -433,22 +433,22 @@ function unverifiedCompletionReceipts(
 
 function buildExecutionStatusGuardedResponse(
   task: string,
-  reason: string,
+  _reason: string,
   failed: ToolExecutionRecord[],
 ): string {
   const isZh = /[\u3400-\u9fff]/.test(task);
   const lastFailure = summarizeFailedToolCalls(failed, isZh);
   if (!isZh) {
     return [
-      `I cannot honestly say I am executing this yet: ${reason}`,
-      lastFailure ? `Latest blocker: ${lastFailure}.` : 'No successful current-turn tool execution was recorded.',
-      'I need to run the real tool first, then report the verified progress.',
+      'That action has not started successfully.',
+      lastFailure ? `Concrete blocker: ${lastFailure}.` : 'Concrete blocker: the executor did not select or start a tool that can perform the requested action.',
+      'The task context remains intact. Lumi should retry the real tool route internally and interrupt you only if a specific permission or missing input is required.',
     ].filter(Boolean).join('\n');
   }
   return [
-    `\u6211\u8fd8\u4e0d\u80fd\u8bf4\u6b63\u5728\u6267\u884c\uff1a${reason}\u3002`, // i18n-allow: reviewed Chinese execution-guard response.
-    lastFailure ? `\u6700\u8fd1\u7684\u963b\u585e\u70b9\uff1a${lastFailure}\u3002` : '\u8fd9\u4e00\u8f6e\u6ca1\u6709\u8bb0\u5f55\u5230\u6210\u529f\u7684\u771f\u5b9e\u5de5\u5177\u6267\u884c\u3002', // i18n-allow: reviewed Chinese execution-guard response.
-    '\u6211\u9700\u8981\u5148\u771f\u6b63\u8c03\u7528\u5bf9\u5e94\u5de5\u5177\uff0c\u518d\u6309\u5f53\u524d\u8f6e\u56de\u6267\u6c47\u62a5\u8fdb\u5ea6\u3002', // i18n-allow: reviewed Chinese execution-guard response.
+    '\u8fd9\u9879\u64cd\u4f5c\u8fd8\u6ca1\u6709\u6210\u529f\u542f\u52a8\u3002', // i18n-allow: reviewed Chinese execution-guard response.
+    lastFailure ? `\u5177\u4f53\u963b\u585e\uff1a${lastFailure}\u3002` : '\u5177\u4f53\u963b\u585e\uff1a\u6267\u884c\u5668\u6ca1\u6709\u9009\u4e2d\u6216\u542f\u52a8\u80fd\u591f\u5b8c\u6210\u8be5\u8bf7\u6c42\u7684\u5de5\u5177\u3002', // i18n-allow: reviewed Chinese execution-guard response.
+    '\u4efb\u52a1\u4e0a\u4e0b\u6587\u4f1a\u4fdd\u7559\uff1bLumi \u5e94\u8be5\u5728\u5185\u90e8\u91cd\u8bd5\u771f\u5b9e\u5de5\u5177\u94fe\uff0c\u53ea\u6709\u786e\u5b9e\u9700\u8981\u4f60\u7684\u6743\u9650\u6216\u8865\u5145\u4fe1\u606f\u65f6\u624d\u6253\u65ad\u4f60\u3002', // i18n-allow: reviewed Chinese execution-guard response.
   ].filter(Boolean).join('\n');
 }
 
@@ -555,6 +555,13 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
   const actionContract = buildActionContract(task);
   const hasDomainCompletionEvidence = actionContract.applies
     && hasCoreActionEvidence(actionContract, toolCalls, task);
+  // Persistent-task creation has its own receipt contract. Once that exact
+  // contract is satisfied, do not run the response through generic
+  // file/desktop heuristics: wording such as "created and persisted" is about
+  // the internal task ledger, not a file artifact or desktop mutation.
+  if (actionContract.kind === 'work_task' && hasDomainCompletionEvidence) {
+    return { text: response, blocked: false };
+  }
   const unverifiedReceipts = hasDomainCompletionEvidence
     ? []
     : unverifiedCompletionReceipts(claimText, successful);

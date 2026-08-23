@@ -88,6 +88,15 @@ export interface CapabilityAdapterContract {
   implementations: Partial<Record<'windows' | 'macos' | 'linux' | 'web', string>>;
 }
 
+export interface CapabilityReconciliationContract {
+  /** Stable capability ids whose uncertain commits this read-only adapter can verify. */
+  reconcilesCapabilityIds: string[];
+  /** Only this dedicated field is accepted as commit-state evidence. */
+  outcomeField: 'reconciliationStatus';
+  committedValues: string[];
+  notCommittedValues: string[];
+}
+
 /**
  * Stable capability metadata shared by discovery, model exposure, execution,
  * diagnostics, and client self-awareness. A tool may add richer metadata, but
@@ -126,6 +135,8 @@ export interface ToolCapabilityMetadata {
   provenance?: Partial<CapabilityProvenance>;
   /** Optional platform adapter contract. */
   adapter?: CapabilityAdapterContract;
+  /** Explicit semantic pairing for a read-only unknown-outcome reconciler. */
+  reconciliation?: CapabilityReconciliationContract;
   /** Marks a capability unavailable for new plans while preserving migration data. */
   deprecated?: boolean;
   /** Stable replacement capability id when deprecated. */
@@ -179,6 +190,7 @@ export interface CapabilityManifestEntry {
   deprecated: boolean;
   replacedBy?: string;
   adapter?: CapabilityAdapterContract;
+  reconciliation?: CapabilityReconciliationContract;
   modeSecurity: Partial<Record<CapabilityMode, SecurityLevel>>;
   domains: string[];
   intents: string[];
@@ -189,12 +201,49 @@ export interface CapabilityManifestEntry {
 
 export interface ToolContext {
   userId?: string;
+  /** True only when an external principal was authenticated by the transport. */
+  authenticated?: boolean;
+  /** Authenticated account role, such as user or admin. */
+  authRole?: string;
+  /** Authenticated organization membership role for work-domain execution. */
+  orgRole?: string;
+  /** True only for a cryptographically admitted native desktop session or an exact locally admitted durable task. */
+  localExecution?: boolean;
+  /**
+   * Transport-owned capability boundary.  Payloads and model output may never
+   * set or widen it.  Remote entries are deny-by-default even when the account
+   * itself is authenticated.
+   */
+  executionBoundary?: 'trusted_local' | 'remote_restricted' | 'trusted_system';
+  /** Narrow service grant for an explicitly configured connector. It grants
+   * user-level admission only and never system/admin permission. */
+  trustedServiceExecution?: boolean;
+  /** Trusted internal execution marker used only by system-permission tools. */
+  systemExecution?: boolean;
   /** Durable execution correlation shared by task, confirmation and receipt ledgers. */
   taskId?: string;
   conversationId?: string;
+  /** Owning conversation agent/personality for durable delegated work. */
+  conversationAgentId?: string;
+  personalityId?: string;
   turnId?: string;
   requestId?: string;
+  /** Exact reasoning route inherited by a durable delegated task. */
+  modelRouting?: {
+    provider?: string;
+    model?: string;
+    selectionMode?: 'pinned' | 'ordered_fallback' | 'auto';
+    fallbackCandidates?: import('../llm/user_preferences').UserLLMFallbackCandidate[];
+    allowCloudFallback?: boolean;
+  };
   idempotencyKey?: string;
+  /**
+   * Canonical calls that already executed before this model/tool-loop segment,
+   * such as the exact receipt produced after consuming a one-time user
+   * confirmation. They are evidence and deduplication/recovery state only:
+   * the loop must never emit their lifecycle callback or execute them again.
+   */
+  priorToolRecords?: ToolExecutionRecord[];
   /** Runtime consumer for the current DesktopExecutionPlan state machine. */
   desktopExecutionTracker?: import('../desktop/execution_runtime').DesktopExecutionTracker;
   /** Canonical registry injected by ToolRegistry for nested workflow/tool execution. */
@@ -243,6 +292,8 @@ export interface ToolContext {
   onProgress?: (step: string) => void;
   /** Lifecycle callback fired immediately before an LLM-selected tool begins. */
   onToolStart?: (call: { id?: string; name: string; arguments: Record<string, any> }) => void;
+  /** Fired only after policy/confirmation checks, immediately before an adapter handler starts. */
+  onAdapterStart?: (call: { name: string; attempt: number }) => void | Promise<void>;
   /** LLM provider getters for tools that need to call vision/text models internally */
   llmGetters?: {
     getDeepSeek: () => any;
@@ -342,6 +393,8 @@ export interface ToolExecutionRecord {
   result: string;
   /** Machine-readable handler receipt, separated from user/model-facing content. */
   receipt?: unknown;
+  /** True only when the canonical registry crossed the adapter invocation boundary. */
+  adapterStarted?: boolean;
   error?: string;
   /** Evidence metadata copied from the invoked tool definition. */
   evidence?: {
@@ -359,6 +412,7 @@ export interface ToolExecutionRecord {
     risk: CapabilityRisk;
     sideEffects: CapabilitySideEffect[];
     verification: CapabilityVerification;
+    reconciliation?: CapabilityReconciliationContract;
   };
   /** Terminal verification is distinct from handler return/success. */
   terminalVerification?: {

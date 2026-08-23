@@ -118,6 +118,13 @@ describe('background delegation', () => {
       ...BASE,
       directDesktop: true,
     }).shouldDelegate).toBe(false);
+
+    expect(shouldDelegateWorkInBackground({
+      ...BASE,
+      text: '请打开 Windows 计算器，打开后核验当前活动窗口。',
+      complexity: 'moderate',
+      capabilityLane: 'desktop_control',
+    })).toEqual({ shouldDelegate: false, reason: 'desktop_control_foreground' });
   });
 
   it('keeps foreground WeChat sends out of background delegation', () => {

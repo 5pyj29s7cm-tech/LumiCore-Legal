@@ -12,13 +12,13 @@ export interface WaitForClientSurfaceOptions {
 function normalizeSurfaceId(surfaceId: string): string {
   const normalized = String(surfaceId || '').trim().toLowerCase();
   if (!/^[a-z0-9-]+$/.test(normalized)) {
-    throw new Error(`Invalid Lumi client surface id: ${surfaceId}`);
+    throw new Error('Invalid Lumi client surface id: ' + surfaceId);
   }
   return normalized;
 }
 
 export function getRenderedClientSurfaceSelector(surfaceId: string): string {
-  return `[data-lumi-rendered-surface="${normalizeSurfaceId(surfaceId)}"]`;
+  return '[data-lumi-rendered-surface="' + normalizeSurfaceId(surfaceId) + '"]';
 }
 
 export function isClientSurfaceRendered(

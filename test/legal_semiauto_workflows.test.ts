@@ -20,18 +20,28 @@ beforeAll(async () => {
   ({ registerWebLoginTools } = await import('../server/tools/definitions/web_login_tools'));
 });
 
+function trustedLocalContext(userId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    userId,
+    authenticated: true,
+    authRole: 'user',
+    localExecution: true,
+    executionBoundary: 'trusted_local' as const,
+    ...overrides,
+  };
+}
+
 describe('legal case identity isolation', () => {
   it('recovers explicitly labelled case slots when the planner omits them', async () => {
     const registry = createLegalRegistry();
     const actionIntent = '\u65b0\u5efa\u4e00\u4e2a\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0\uff0c\u6848\u4ef6\u540d\u201c\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e09\u53f7\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u201d\uff0c\u5f53\u4e8b\u4eba\u7532\u65b9\u65b0\u7532\u516c\u53f8\u3001\u4e59\u65b9\u65b0\u4e59\u516c\u53f8\uff0c\u4e89\u8bae\u91d1\u989d80\u4e07\u5143\uff0c\u9636\u6bb5\u4e3a\u8bc9\u524d\u3002';
     const output = await registry.execute('legal_case_workspace', {
       facts: '\u7532\u65b9\u65b0\u7532\u516c\u53f8\u4e0e\u4e59\u65b9\u65b0\u4e59\u516c\u53f8\u5b58\u5728\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\uff0c\u4e89\u8bae\u91d1\u989d80\u4e07\u5143\u3002',
-    }, {
-      userId: `legal-slot-recovery-${Date.now()}`,
+    }, trustedLocalContext(`legal-slot-recovery-${Date.now()}`, {
       domain: 'personal',
       source: 'chat',
       actionIntent,
-    });
+    }));
 
     expect(output).toContain('# \u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e09\u53f7\u4e70\u5356\u5408\u540c\u7ea0\u7eb7 \u6848\u4ef6\u5de5\u4f5c\u53f0');
     expect(output).toContain('- \u5f53\u4e8b\u4eba\uff1a\u65b0\u7532\u516c\u53f8\uff1b\u65b0\u4e59\u516c\u53f8');
@@ -41,7 +51,7 @@ describe('legal case identity isolation', () => {
   it('creates a different explicitly named case and preserves planner aliases', async () => {
     const registry = createLegalRegistry();
     const userId = `legal-case-isolation-${Date.now()}`;
-    const context = { userId, domain: 'personal' as const, source: 'chat' };
+    const context = trustedLocalContext(userId, { domain: 'personal' as const, source: 'chat' });
     const first = await registry.execute('legal_case_workspace', {
       caseName: '\u65e7\u6848\u4ef6',
       parties: '\u65e7\u7532\uff1b\u65e7\u4e59',

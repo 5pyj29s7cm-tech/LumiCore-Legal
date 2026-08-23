@@ -51,6 +51,12 @@ import {
   setConversationActionExecutionStatus,
   updateConversationActionFocus,
 } from "../conversation/manager";
+import {
+  formatConversationExecutionFactAnswer,
+  getConversationExecutionFacts,
+  isConversationExecutionFactQuestion,
+} from "../conversation/execution_facts";
+import { resolveExactConversationCorrection } from "../conversation/exact_correction";
 import { scheduleConversationSummary } from "../conversation/summary_scheduler";
 import { processInput, CognitiveContext, extractSentiment } from "../cognition";
 import {
@@ -68,6 +74,11 @@ import { CONVERSATIONAL_MEMORY_EVIDENCE } from "../memory/types";
 import { searchKnowledgeBase } from "../org/kb";
 import {
   buildDeterministicClientNavigationCommand,
+  buildDeterministicExternalCommitConfirmationCommand,
+  buildDeterministicKnowledgeInspectionCommand,
+  buildDeterministicLocalDesktopNavigationCommand,
+  buildDeterministicWorkTaskCreateCommand,
+  buildDeterministicWpsDocumentCommand,
   buildQuickCommandToolPolicy,
   matchQuickCommand,
 } from "../cognition/quick_commands";
@@ -89,6 +100,10 @@ import { buildForegroundMessagingArguments, executeForegroundMessagingAction } f
 import { buildDesktopExecutionStabilityPolicy } from "../cognition/desktop_execution_stability";
 import { createDesktopExecutionTracker, withDesktopExecutionReceipt } from "../desktop/execution_runtime";
 import { finalizeLumiResponse } from "../cognition/result_finalizer";
+import {
+  recoverBlockedExecutionOnce,
+  sanitizeExecutionResponseForDelivery,
+} from "../cognition/execution_guard_recovery";
 import { buildLumiRuntimeCapabilityContext } from "../cognition/capability_context";
 import { buildCapabilityMetaResponse, isCapabilityMetaQuestion } from "../cognition/capability_meta";
 import { buildLumiOperatingKernelPrompt } from "../cognition/operating_kernel";
@@ -120,9 +135,20 @@ import { getIdleState } from "../context/activity_stream";
 import { formatProactiveSuggestionForPrompt, getRecentProactiveSuggestion } from "../context/proactive_triggers";
 import { buildVisionRoutingOverlay } from "../cognition/vision_routing";
 import { createDesktopRelay } from "./desktop_relay";
-import { resolveSocketScope, scopedEmotionalStateKey } from "./scope";
+import {
+  buildSocketToolSecurityContext,
+  resolveSocketScope,
+  scopedEmotionalStateKey,
+} from "./scope";
 import { hasClientActionOnlyIntent, hasExplicitToolIntent, isUserCorrectionOrExplanationQuestion } from "../cognition/tool_intent";
 import { setRealtimeVoiceSessionActive } from "../autonomy/foreground_activity";
+import {
+  executionBoundaryPromptOverlay,
+  restrictSystemPromptForExecutionBoundary,
+  restrictToolPolicyForExecutionBoundary,
+  restrictVisibleToolNamesForExecutionBoundary,
+  restrictVisibleToolRouteForExecutionBoundary,
+} from "../tools/remote_policy";
 import { buildForegroundWeChatReadArgs, buildForegroundWeChatSendArgs } from "../agents/nl_chainer";
 import {
   isSpeechClearlyDirectedAwayFromLumi,
@@ -1253,18 +1279,21 @@ async function processVoiceInput(
   let finalAgentResponseDelivered = false;
   const emitAgent = (event: string, payload: any = {}) => {
     if (session.activeTurnRequestId !== requestId) return;
+    const publicPayload = event === 'agent:response'
+      ? sanitizeExecutionResponseForDelivery(payload, { task: actionIntentText })
+      : payload;
     socket.emit(event, {
-      ...payload,
-      source: payload.source || 'voice',
-      channel: payload.channel || 'voice',
+      ...publicPayload,
+      source: publicPayload.source || 'voice',
+      channel: publicPayload.channel || 'voice',
       requestId,
     });
-    if (event === 'agent:response' && payload.finalized === true) {
+    if (event === 'agent:response' && publicPayload.finalized === true) {
       finalAgentResponseDelivered = true;
     }
     if (
       session.pipelineAbortController !== pipelineAbort
-      && (event === 'agent:error' || (event === 'agent:response' && payload.finalized === true))
+      && (event === 'agent:error' || (event === 'agent:response' && publicPayload.finalized === true))
     ) {
       session.activeTurnRequestId = null;
     }
@@ -1275,7 +1304,12 @@ async function processVoiceInput(
     emitVoiceWorkProgress(socket, session, requestId, 'planning', CN_VOICE_WORK_MESSAGES.workAccepted);
     startVoiceWorkHeartbeat(socket, session, requestId);
   }
-  const voiceScope = { domain: session.domain, orgId: session.orgId };
+  const voiceScope = {
+    domain: session.domain,
+    orgId: session.orgId,
+    orgRole: String(socket.data?.authenticatedOrgRole || '') || undefined,
+  };
+  const toolSecurityContext = buildSocketToolSecurityContext(socket, voiceScope);
   const confirmationScope = buildVoiceConfirmationChannelScope({
     domain: voiceScope.domain,
     orgId: voiceScope.orgId,
@@ -1584,6 +1618,27 @@ async function processVoiceInput(
       executionPipeline.normalizedIntent,
     );
   }
+  if (!preMatchedQuickResult && !clientActionOnlyTurn) {
+    preMatchedQuickResult = buildDeterministicExternalCommitConfirmationCommand(
+      executionPipeline.normalizedIntent,
+      userText,
+    );
+  }
+  if (!preMatchedQuickResult && !clientActionOnlyTurn) {
+    preMatchedQuickResult = buildDeterministicKnowledgeInspectionCommand(userText);
+  }
+  if (!preMatchedQuickResult && !clientActionOnlyTurn) {
+    preMatchedQuickResult = buildDeterministicWorkTaskCreateCommand(userText);
+  }
+  if (!preMatchedQuickResult && !clientActionOnlyTurn) {
+    preMatchedQuickResult = buildDeterministicWpsDocumentCommand(userText);
+  }
+  if (!preMatchedQuickResult && !clientActionOnlyTurn) {
+    preMatchedQuickResult = buildDeterministicLocalDesktopNavigationCommand(
+      executionPipeline.normalizedIntent,
+      userText,
+    );
+  }
   session.isBackgroundWork = executionDecision.allowToolUse;
   session.activeWorkStatus = executionDecision.allowToolUse ? 'planning' : 'idle';
   if (executionDecision.allowToolUse && !session.workHeartbeatTimer) {
@@ -1602,7 +1657,16 @@ async function processVoiceInput(
     capabilityExecutionPlan: executionPipeline.executionPlan,
   });
   const desktopExecutionTracker = createDesktopExecutionTracker(desktopExecutionPolicy.executionPlan);
-  const routedToolPolicy = executionDecision.toolPolicy;
+  const routedToolPolicy = restrictToolPolicyForExecutionBoundary(
+    executionDecision.toolPolicy,
+    toolSecurityContext.executionBoundary,
+  );
+  executionDecision.toolPolicy = routedToolPolicy;
+  executionDecision.maxIterations = routedToolPolicy.maxIterations;
+  executionDecision.toolRoute = restrictVisibleToolRouteForExecutionBoundary(
+    executionDecision.toolRoute,
+    toolSecurityContext.executionBoundary,
+  );
   const actionFollowupIntent = classifyConversationActionFollowupIntent(
     actionIntentText,
     conversationTurn.conversation.actionContinuationState,
@@ -1676,6 +1740,7 @@ async function processVoiceInput(
       { requestId },
     );
   }
+  const remoteRestricted = toolSecurityContext.executionBoundary === 'remote_restricted';
   logger.info(`[Audio] tool gate: ${executionDecision.allowToolUse ? 'enabled' : 'chat-only'} mode=${operationMode} effective=${effectiveOperationMode} surface=${turnFlow.surface} clientActionOnly=${clientActionOnlyTurn} selfRepair=${selfRepairTurn} capabilityLane=${capabilitySelection.lane} trace=${intentTrace.summary} route=${executionDecision.toolRoute ? `${executionDecision.toolRoute.toolNames.length}/${executionDecision.toolRoute.totalAvailable}` : 'none'}`);
   emitAgent('agent:intent_trace', intentTrace);
   if (executionDecision.toolRoute) {
@@ -1689,14 +1754,24 @@ async function processVoiceInput(
       trace: intentTrace,
     });
   }
+  const visiblePreferredTools = restrictVisibleToolNamesForExecutionBoundary(
+    capabilitySelection.preferredTools,
+    toolSecurityContext.executionBoundary,
+  );
   emitAgent('agent:capability_selection', {
-    lane: capabilitySelection.lane,
-    primary: capabilitySelection.primary,
-    reasons: capabilitySelection.reasons,
-    preferredTools: capabilitySelection.preferredTools,
+    lane: remoteRestricted
+      ? (visiblePreferredTools.length > 0 ? 'web_or_account' : 'conversation')
+      : capabilitySelection.lane,
+    primary: remoteRestricted
+      ? (visiblePreferredTools[0] || 'conversation')
+      : capabilitySelection.primary,
+    reasons: remoteRestricted
+      ? ['remote execution boundary applied']
+      : capabilitySelection.reasons,
+    preferredTools: visiblePreferredTools,
     source: 'voice',
   });
-  if (desktopExecutionPolicy.applies) {
+  if (desktopExecutionPolicy.applies && toolSecurityContext.executionBoundary !== 'remote_restricted') {
     emitAgent('agent:desktop_execution_policy', {
       reason: desktopExecutionPolicy.reason,
       evidenceTools: desktopExecutionPolicy.evidenceTools,
@@ -1705,37 +1780,51 @@ async function processVoiceInput(
       source: 'voice',
     });
   }
-  const opModeOverlay = '\n\n' + buildInteractionModeOverlay(turnFlow);
-  const workSurfaceOverlay = workSurfaceRoute.promptOverlay ? '\n\n' + workSurfaceRoute.promptOverlay : '';
-  const visionRoutingOverlay = visionIntent && effectiveOperationMode !== 'meeting' ? '\n\n' + buildVisionRoutingOverlay(session.userId, routedUserText) : '';
-  const interactionOverlay = executionDecision.allowToolUse
-    ? toolVoiceOverlay
-    : baseVoiceOverlay + '\n\n## Interaction Mode\nThis turn is chat-only. Do not call tools, operate the desktop, assemble a team, or claim that you are taking actions. Answer naturally unless the user gives an explicit command.';
+  const opModeOverlay = remoteRestricted ? '' : '\n\n' + buildInteractionModeOverlay(turnFlow);
+  const workSurfaceOverlay = workSurfaceRoute.promptOverlay && !remoteRestricted ? '\n\n' + workSurfaceRoute.promptOverlay : '';
+  const visionRoutingOverlay = visionIntent && effectiveOperationMode !== 'meeting' && !remoteRestricted ? '\n\n' + buildVisionRoutingOverlay(session.userId, routedUserText) : '';
+  const interactionOverlay = remoteRestricted
+    ? baseVoiceOverlay
+    : executionDecision.allowToolUse
+      ? toolVoiceOverlay
+      : baseVoiceOverlay + '\n\n## Interaction Mode\nThis turn is chat-only. Do not call tools, operate the desktop, assemble a team, or claim that you are taking actions. Answer naturally unless the user gives an explicit command.';
 
-  const clientSelfPrompt = '\n\n' + formatClientSelfPrompt(session.userId, voiceScope);
-  const dispatchOverlay = '\n\n' + turnDispatch.promptOverlay;
-  const executionOverlay = '\n\n' + executionDecision.promptOverlay;
-  const capabilitySelectionOverlay = '\n\n' + capabilitySelection.promptOverlay;
-  const desktopExecutionOverlay = desktopExecutionPolicy.promptOverlay ? '\n\n' + desktopExecutionPolicy.promptOverlay : '';
-  const turnFlowOverlay = '\n\n' + turnFlow.promptOverlay;
-  const runtimeCapabilityOverlay = '\n\n' + buildLumiRuntimeCapabilityContext({
-    userId: session.userId,
-    text: turnFlow.routeText,
-    flow: turnFlow,
-    toolRegistry,
-    domain: voiceScope.domain,
-    orgId: voiceScope.orgId,
-  });
-  const operatingKernelOverlay = '\n\n' + buildLumiOperatingKernelPrompt({
-    channel: 'voice',
-    flow: turnFlow,
-  });
+  const clientSelfPrompt = remoteRestricted
+    ? ''
+    : '\n\n' + formatClientSelfPrompt(session.userId, voiceScope);
+  const dispatchOverlay = remoteRestricted ? '' : '\n\n' + turnDispatch.promptOverlay;
+  const executionOverlay = '\n\n' + executionBoundaryPromptOverlay(
+    executionDecision.promptOverlay,
+    toolSecurityContext.executionBoundary,
+  );
+  const capabilitySelectionOverlay = remoteRestricted ? '' : '\n\n' + capabilitySelection.promptOverlay;
+  const desktopExecutionOverlay = desktopExecutionPolicy.promptOverlay && !remoteRestricted ? '\n\n' + desktopExecutionPolicy.promptOverlay : '';
+  const turnFlowOverlay = remoteRestricted ? '' : '\n\n' + turnFlow.promptOverlay;
+  const runtimeCapabilityOverlay = remoteRestricted
+    ? ''
+    : '\n\n' + buildLumiRuntimeCapabilityContext({
+        userId: session.userId,
+        text: turnFlow.routeText,
+        flow: turnFlow,
+        toolRegistry,
+        domain: voiceScope.domain,
+        orgId: voiceScope.orgId,
+      });
+  const operatingKernelOverlay = remoteRestricted
+    ? ''
+    : '\n\n' + buildLumiOperatingKernelPrompt({
+        channel: 'voice',
+        flow: turnFlow,
+      });
   const proactiveContextOverlay = proactiveContextPrompt ? `\n\n${proactiveContextPrompt}` : '';
   const actionContinuationOverlay = actionContinuationBridge ? `\n\n${actionContinuationBridge}` : '';
   const organizationKnowledgeOverlay = voiceOrganizationKnowledge
     ? `\n\n## Company Knowledge Base\n${voiceOrganizationKnowledge}\n\nUse this authorized organization knowledge when relevant and cite article titles when referencing it.`
     : '';
-  const voiceSystemPrompt = fullPersonalityPrompt + interactionOverlay + opModeOverlay + workSurfaceOverlay + visionRoutingOverlay + buildVoiceReplyStyleOverlay() + proactiveContextOverlay + actionContinuationOverlay + clientSelfPrompt + topicContext + organizationKnowledgeOverlay + dispatchOverlay + turnFlowOverlay + executionOverlay + capabilitySelectionOverlay + desktopExecutionOverlay + runtimeCapabilityOverlay + operatingKernelOverlay + (executionDecision.allowToolUse ? `\n${GENERIC_TOOL_PLANNING_PROMPT}` : '');
+  const voiceSystemPrompt = restrictSystemPromptForExecutionBoundary(
+    fullPersonalityPrompt,
+    toolSecurityContext.executionBoundary,
+  ) + interactionOverlay + opModeOverlay + workSurfaceOverlay + visionRoutingOverlay + buildVoiceReplyStyleOverlay() + proactiveContextOverlay + actionContinuationOverlay + clientSelfPrompt + topicContext + organizationKnowledgeOverlay + dispatchOverlay + turnFlowOverlay + executionOverlay + capabilitySelectionOverlay + desktopExecutionOverlay + runtimeCapabilityOverlay + operatingKernelOverlay + (executionDecision.allowToolUse && !remoteRestricted ? `\n${GENERIC_TOOL_PLANNING_PROMPT}` : '');
 
   const userLLMPrefs = getScopedPreferredLLM(session.userId, voiceScope);
   const provider = userLLMPrefs.provider || 'deepseek';
@@ -1889,6 +1978,7 @@ async function processVoiceInput(
     'desktop_list_files',
     'desktop_list_apps',
     'desktop_path_info',
+    'desktop_write_text_file',
     'desktop_open',
     'desktop_show_lumi_window',
     'desktop_run_command',
@@ -1975,6 +2065,7 @@ async function processVoiceInput(
   };
 
   const toolContext = {
+    ...toolSecurityContext,
     userId: session.userId,
     taskId: actionTaskExecution.state?.taskId || requestId,
     conversationId: conversationTurn.conversation.id,
@@ -2294,6 +2385,51 @@ async function processVoiceInput(
       flushSentence(sentence);
     }
   };
+
+  const deterministicConversationResponse = (() => {
+    if (isConversationExecutionFactQuestion(actionIntentText)) {
+      return {
+        text: formatConversationExecutionFactAnswer(getConversationExecutionFacts({
+          conversationId: conversationTurn.conversation.id,
+          userId: session.userId,
+          domain: voiceScope.domain,
+          orgId: voiceScope.orgId,
+        }), actionIntentText),
+        intent: 'execution_facts',
+        source: 'voice_conversation_execution_facts',
+      };
+    }
+    const corrected = resolveExactConversationCorrection(actionIntentText, recentVoiceHistory);
+    return corrected
+      ? { text: corrected, intent: 'exact_correction', source: 'voice_exact_correction' }
+      : null;
+  })();
+  if (deterministicConversationResponse) {
+    responseText = deterministicConversationResponse.text;
+    emitAgent('agent:response', {
+      text: responseText,
+      agentName: 'Lumi',
+      source: deterministicConversationResponse.source,
+      finalized: true,
+      blocked: false,
+      reason: deterministicConversationResponse.intent,
+    });
+    persistVoiceAssistantMessage(conversationTurn.conversation.id, responseText, {
+      cognitiveIntent: deterministicConversationResponse.intent,
+      llmWasCalled: false,
+      source: deterministicConversationResponse.source,
+    });
+    queueFinalizedSpeech(responseText);
+    await Promise.allSettled(ttsPromises);
+    if (!isCurrentTurn()) return;
+    persistSidecarConversation(conversationTurn.conversation.id);
+    session.isProcessing = false;
+    session.isSpeaking = false;
+    session.activeWorkStatus = 'idle';
+    socket.emit('audio:status', { status: 'listening', requestId });
+    emitAgent('agent:status', { status: 'idle' });
+    return;
+  }
 
   if (userObservedCompletion) {
     const conversation = conversationTurn.conversation;
@@ -2831,6 +2967,7 @@ async function processVoiceInput(
       let quickToolResult = '';
       let quickToolError: string | undefined;
       let quickToolRecord: ToolExecutionRecord | null = null;
+      const quickToolRecords: ToolExecutionRecord[] = [];
       if (quickResult.toolCall && session.isActive) {
         const correlationId = `qc-${Date.now()}`;
         const shouldEmitQuickTool = !isDirectDesktopTool(quickResult.toolCall.name);
@@ -2844,6 +2981,7 @@ async function processVoiceInput(
             toolPolicy: buildQuickCommandToolPolicy(routedToolPolicy, quickResult.toolCall.name),
           },
         });
+        quickToolRecords.push(quickToolRecord);
         quickToolResult = quickToolRecord.result || '';
         quickToolError = quickToolRecord.error;
         if (quickToolRecord.error && shouldEmitQuickTool) {
@@ -2866,18 +3004,45 @@ async function processVoiceInput(
         } else if (quickToolError) {
           quickResponseText = `\u8fd9\u6b21\u6ca1\u6709\u5b8c\u6210\uff1a${quickToolError}`;
         }
+        if (!quickToolRecord.error && quickResult.followUpToolCalls?.length) {
+          for (const followUp of quickResult.followUpToolCalls) {
+            const followUpCorrelationId = `qc-verify-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const followUpRecord = await executeToolCall({
+              registry: toolRegistry,
+              id: followUpCorrelationId,
+              name: followUp.name,
+              arguments: followUp.arguments,
+              context: {
+                ...toolContext,
+                source: 'voice_quick_command_verification',
+                toolPolicy: buildQuickCommandToolPolicy(routedToolPolicy, followUp.name),
+              },
+            });
+            quickToolRecords.push(followUpRecord);
+            if (!isDirectDesktopTool(followUp.name)) {
+              emitAgent("agent:tool_call", {
+                correlationId: followUpCorrelationId,
+                name: followUp.name,
+                arguments: followUp.arguments,
+                ...(followUpRecord.error
+                  ? { error: followUpRecord.error }
+                  : { result: formatToolResultForUi(followUpRecord.result) }),
+              });
+            }
+          }
+        }
       }
       const quickFinalized = finalizeLumiResponse({
         taskText: actionIntentText,
         responseText: quickResponseText,
-        toolRecords: quickToolRecord ? [quickToolRecord] : [],
+        toolRecords: quickToolRecords,
         source: 'voice',
         flow: turnFlow,
       });
       quickResponseText = quickFinalized.text;
       if (quickFinalized.notification) emitAgent('agent:notification', quickFinalized.notification);
       persistVoiceTakeoverExecution(quickResponseText, {
-        toolRecords: quickToolRecord ? [quickToolRecord] : [],
+        toolRecords: quickToolRecords,
         source: 'voice_quick_command',
         sourceInteractionId: `voice_quick_${Date.now()}`,
         finalizationBlocked: quickFinalized.blocked,
@@ -2893,7 +3058,7 @@ async function processVoiceInput(
         reason: quickFinalized.reason || '',
       });
       persistVoiceAssistantMessage(conversationTurn.conversation.id, quickResponseText, {
-        toolCalls: quickToolRecord ? [quickToolRecord] : undefined,
+        toolCalls: quickToolRecords.length ? quickToolRecords : undefined,
         cognitiveIntent: quickFinalized.blocked ? 'work_product_guard' : 'quick_command',
         llmWasCalled: false,
         source: 'quick_command',
@@ -2912,7 +3077,7 @@ async function processVoiceInput(
       emitAgent("agent:status", { status: "idle" });
       if (!quickFinalized.blocked) {
         persistVoiceLearning(responseText, {
-          toolRecords: quickToolRecord ? [quickToolRecord] : [],
+          toolRecords: quickToolRecords,
           sourceInteractionId: `voice_quick_${Date.now()}`,
           logLabel: 'voice quick command',
         });
@@ -3220,6 +3385,10 @@ async function processVoiceInput(
 
     // ── Orchestrator: complex/moderate tasks → multi-agent decomposition ──
     let usedOrchestrator = false;
+    let recoveryConversationMessages: NormalizedMessage[] = [
+      { role: 'system', content: voiceSystemPrompt },
+      { role: 'user', content: routedUserText },
+    ];
     const complexity = classifyComplexity(routedUserText, { userId: session.userId, personalityId: session.personalityId });
     const shouldOrchestrate = shouldAttemptOrchestration({
       channel: 'voice',
@@ -3254,6 +3423,7 @@ async function processVoiceInput(
         const orchResult = await runOrchestratedTask(
           routedUserText,
           {
+            ...toolSecurityContext,
             userId: session.userId,
             personalityId: session.personalityId,
             domain: voiceScope.domain,
@@ -3283,13 +3453,7 @@ async function processVoiceInput(
                 : `Running ${record.name}`;
             if (isTerminalOrchestrationToolEvent(record)) {
               session.activeWorkToolCalls++;
-              toolResults.push({
-                id: record.id,
-                name: record.name,
-                arguments: record.arguments || {},
-                result: record.result || '',
-                error: record.error,
-              });
+              toolResults.push({ ...record, result: record.result || '' });
             }
             // Direct desktop relays already emit their own start/result lifecycle.
             // Re-emitting here would duplicate every visible tool event.
@@ -3340,18 +3504,21 @@ async function processVoiceInput(
       const recentMsgs = getMessagesByTokenBudget(conv.id);
       const voiceHistory: NormalizedMessage[] = normalizeVoiceHistory(recentMsgs);
 
-      const messages: any[] = [
+      const messages: NormalizedMessage[] = [
         { role: 'system', content: voiceSystemPrompt },
         ...voiceHistory,
         { role: 'user', content: routedUserText },
       ];
+      // Keep the same bounded, persisted conversation context for an internal
+      // execution recovery pass instead of reducing the task to one sentence.
+      recoveryConversationMessages = messages;
 
       voiceToolLoop: for (let iter = 0; iter < maxIterations; iter++) {
       if (pipelineAbort?.signal.aborted) break;
 
       logger.info(`[Audio] LLM iter ${iter + 1}/${maxIterations}: provider=${provider} model=${effectiveModel}`);
       const toolDeclarations = executionDecision.allowToolUse
-        ? toolRegistry.getToolDeclarationsForPolicy(routedToolPolicy)
+        ? toolRegistry.getToolDeclarationsForPolicy(routedToolPolicy, { context: toolContext })
         : [];
 
       const streamResult = await makeLLMCallStreaming(
@@ -3492,17 +3659,138 @@ async function processVoiceInput(
     if (finalizedDesktopRecords.length > toolResults.length) {
       toolResults.push(...finalizedDesktopRecords.slice(toolResults.length));
     }
-    const finalResponse = finalizeLumiResponse({
-      taskText: actionIntentText,
+    let finalResponse: ReturnType<typeof finalizeLumiResponse> = pendingConfirmationCreatedThisTurn
+      ? {
+          text: CN_TASK_EXECUTION_MESSAGES.waitingConfirmation(
+            actionTaskExecution.state?.goal || actionIntentText,
+          ),
+          blocked: false,
+          reason: 'waiting_confirmation',
+        }
+      : finalizeLumiResponse({
+          taskText: actionIntentText,
+          responseText,
+          toolRecords: taskAwareRecords(toolResults),
+          source: 'voice',
+          flow: turnFlow,
+        });
+    const guardRecovery = await recoverBlockedExecutionOnce({
+      task: routedUserText,
       responseText,
-      toolRecords: taskAwareRecords(toolResults),
-      source: 'voice',
-      flow: turnFlow,
+      finalization: finalResponse,
+      allowToolUse: executionDecision.allowToolUse,
+      pendingConfirmation: Boolean(pendingConfirmationCreatedThisTurn),
+      aborted: !isCurrentTurn(),
+      isAborted: () => !isCurrentTurn(),
+      isPendingConfirmation: () => Boolean(pendingConfirmationCreatedThisTurn),
+      toolRecords: toolResults,
+      attempt: async ({ instruction, priorToolRecords, recordTool }) => {
+        logger.warn('[Audio] Recovering blocked execution internally.');
+          const recovery = await runWithTools(
+            [
+              ...recoveryConversationMessages,
+              { role: 'assistant', content: responseText },
+              { role: 'user', content: instruction },
+          ],
+          toolRegistry,
+          {
+            provider,
+            model: effectiveModel,
+            userId: session.userId,
+            domain: voiceScope.domain,
+            orgId: voiceScope.orgId,
+            signal: pipelineAbort.signal,
+            ...reasoningRoutePolicy,
+          },
+          record => {
+            recordTool(record);
+            if (isDirectDesktopTool(record.name)) return;
+            emitToolLifecycle({
+              correlationId: record.id || `voice-guard-recovery-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              name: record.name,
+              arguments: record.arguments,
+              result: record.error ? undefined : formatToolResultForUi(record.result),
+              error: record.error,
+            });
+          },
+          Math.max(2, Math.min(12, routedToolPolicy.maxIterations || maxIterations || 8)),
+          llmGetters.getDeepSeek,
+          llmGetters.getGemini,
+          llmGetters.getOpenAI,
+          llmGetters.getAnthropic,
+          llmGetters.getQwen,
+          undefined,
+          {
+            ...toolContext,
+            source: 'voice_guard_recovery',
+            priorToolRecords,
+            isCancelled: () => !isCurrentTurn(),
+            onToolStart: call => {
+              if (isDirectDesktopTool(call.name)) return;
+              emitToolLifecycle({
+                correlationId: call.id || `voice-guard-recovery-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                name: call.name,
+                arguments: call.arguments,
+              });
+            },
+          },
+          llmGetters.getOllama,
+          llmGetters.getLmStudio,
+          llmGetters.getArk,
+          llmGetters.getXiaomi,
+          llmGetters.getKimi,
+          llmGetters.getGlm,
+          llmGetters.getRelay,
+        );
+        for (const usage of recovery.usageRecords) {
+          recordTokenUsage(
+            session.userId,
+            usage.provider,
+            usage.model,
+            {
+              promptTokens: usage.promptTokens,
+              completionTokens: usage.completionTokens,
+              totalTokens: usage.totalTokens,
+            },
+            `voice_guard_recovery_${Date.now()}`,
+            'voice',
+          );
+        }
+        return {
+          text: recovery.text,
+          toolRecords: withDesktopExecutionReceipt(recovery.toolCalls, desktopExecutionTracker),
+        };
+      },
+      finalize: (candidateText, records) => pendingConfirmationCreatedThisTurn
+        ? {
+            text: CN_TASK_EXECUTION_MESSAGES.waitingConfirmation(
+              actionTaskExecution.state?.goal || actionIntentText,
+            ),
+            blocked: false,
+            reason: 'waiting_confirmation',
+          }
+        : finalizeLumiResponse({
+            taskText: actionIntentText,
+            responseText: candidateText,
+            toolRecords: taskAwareRecords(records),
+            source: 'voice_guard_recovery',
+            flow: turnFlow,
+          }),
     });
+    if (!isCurrentTurn()) return;
+    finalResponse = guardRecovery.finalization;
+    toolResults = withDesktopExecutionReceipt(guardRecovery.toolRecords, desktopExecutionTracker);
     responseText = finalResponse.text;
     if (finalResponse.blocked) {
       logger.warn(`[Audio] Completion claim blocked: ${finalResponse.reason}`);
       if (finalResponse.notification) emitAgent("agent:notification", finalResponse.notification);
+      if (actionTaskExecution.state?.taskId && turnFlow.allowToolUseForTurn) {
+        setConversationActionExecutionStatus(conversationTurn.conversation.id, session.userId, 'blocked', {
+          blocker: finalResponse.reason || 'The current work product did not pass final verification.',
+          assistantState: responseText,
+          requestId: '',
+        });
+      }
     }
 
     persistVoiceTakeoverExecution(responseText, {

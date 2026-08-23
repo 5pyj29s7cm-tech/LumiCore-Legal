@@ -36,4 +36,3 @@ describe('desktop voice surface state synchronization', () => {
     expect(chat).toContain("source: 'voice'");
   });
 });
-

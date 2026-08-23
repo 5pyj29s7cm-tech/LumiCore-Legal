@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildActionContract,
   claimsCurrentAppSaveCompletion,
+  extractExplicitArtifactTextRequirements,
   extractCurrentAppTarget,
   formatActionContractPrompt,
   hasCoreActionEvidence,
@@ -17,9 +18,123 @@ import {
   requiresAuthenticatedWebResult,
   requiresVisibleAutoCadExecution,
   requiresExternalAiHistory,
+  requiresArtifactPostWriteReadback,
 } from '../server/cognition/action_contract';
 
 describe('Lumi action contract', () => {
+  it('keeps a named persistent-task ledger status query out of runtime task control', () => {
+    const text = '\u4e3b\u7a0b\u5e8f\u4efb\u52a1\u72b6\u6001\u9a8c\u6536\uff1a\u8bf7\u67e5\u8be2\u4efb\u52a1\u201c\u9752\u7a79\u5ba2\u6237\u8ddf\u8fdb\u95ed\u73af\u201d\u7684\u6301\u4e45\u72b6\u6001\uff0c\u53ea\u6839\u636e\u4efb\u52a1\u8d26\u672c\u56de\u7b54\u4efb\u52a1\u7f16\u53f7\u3001\u5f53\u524d\u72b6\u6001\u3001\u5f53\u524d\u6b65\u9aa4\u3001\u540e\u7eed\u6b65\u9aa4\u548c\u786e\u8ba4\u8fb9\u754c\uff0c\u4e0d\u8981\u6267\u884c\u4efb\u4f55\u5916\u90e8\u52a8\u4f5c\u3002';
+
+    expect(buildActionContract(text)).toMatchObject({ applies: false, kind: 'none' });
+  });
+
+  it('recognizes an explicit arrow-ordered write then readback requirement', () => {
+    expect(requiresArtifactPostWriteReadback(
+      '\u5fc5\u987b\u4e25\u683c\u6309\u201c\u8bfb\u53d6\u6e90\u6587\u4ef6\u2192\u5199\u5165\u76ee\u6807\u6587\u4ef6\u2192\u91cd\u65b0\u8bfb\u53d6\u76ee\u6807\u6587\u4ef6\u201d\u7684\u987a\u5e8f\u6267\u884c\u3002',
+    )).toBe(true);
+  });
+
+  it('keeps explicit local customer documents on the artifact contract', () => {
+    expect(buildActionContract('读取 D:\\work\\customer-brief.txt，并在 D:\\work\\customer-followup.md 创建客户跟进方案并验证文件').kind)
+      .toBe('artifact_work');
+    expect(buildActionContract('先聊一句：你认为这份方案最需要客户补充什么？不要修改文件。').kind)
+      .toBe('none');
+    expect(buildActionContract('分析这个客户线索并推进销售跟进').kind)
+      .toBe('customer_operations');
+  });
+
+  it('keeps the field TXT creation request on the artifact contract despite a negated software clause', () => {
+    const contract = buildActionContract('在 C:\\Users\\Administrator\\Documents 创建 Lumi现场验收_晨星716.txt，写三行，重读核验，不外发，不开其他软件');
+    expect(contract.kind).toBe('artifact_work');
+    expect(contract.preferredTools).toContain('write_file');
+    expect(contract.verificationTools).toEqual(expect.arrayContaining([
+      'desktop_path_info',
+      'work_product_verify',
+    ]));
+  });
+
+  it('does not treat a read-only knowledge-base inventory as artifact creation', () => {
+    const contract = buildActionContract('请检查当前个人知识库是否可用，报告文档数量、已索引数量和最近错误。只读取真实状态，不导入、不修改任何内容。');
+    expect(contract.kind).toBe('none');
+  });
+
+  it('accepts a requested artifact readback only when it follows the write', () => {
+    const task = '在 C:\\Users\\Administrator\\Documents 创建 Lumi现场验收_晨星716.txt，写入后重读核验';
+    const contract = buildActionContract(task);
+    const target = 'C:\\Users\\Administrator\\Documents\\Lumi现场验收_晨星716.txt';
+    const read = { name: 'extract_document_text', arguments: { filePath: target }, result: '三行内容' };
+    const write = { name: 'write_file', arguments: { path: target }, result: `File written: ${target}` };
+    expect(hasCoreActionEvidence(contract, [read, write], task)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [write, read], task)).toBe(true);
+  });
+
+  it('accepts native semantic text writes with a later same-path readback', () => {
+    const target = 'C:\\Users\\me\\Desktop\\note.txt';
+    const task = `After creating the file, read it back and verify the exact content. Target: ${target}`;
+    const contract = buildActionContract(task);
+    const write = {
+      name: 'desktop_write_text_file',
+      arguments: { path: target, content: 'hello' },
+      result: JSON.stringify({ ok: true, status: 'verified', readBackMatched: true }),
+      terminalVerification: { status: 'verified' as const, strategy: 'measured' as const, reason: 'native byte read-back matched' },
+      capability: {
+        capabilityId: 'desktop.files.text.write',
+        lane: 'files' as const,
+        operation: 'mutate' as const,
+        risk: 'high' as const,
+        sideEffects: [{ type: 'local_write' as const, scope: 'one exact native host text-file path', reversible: false }],
+        verification: {
+          strategy: 'measured' as const,
+          required: true,
+          requiredFields: ['path', 'readBackMatched'],
+          requiredValues: { readBackMatched: true },
+          successSignals: ['native byte read-back matched'],
+          limitations: [],
+        },
+      },
+    };
+    const read = {
+      name: 'read_file',
+      arguments: { path: target },
+      result: 'hello',
+      terminalVerification: { status: 'verified' as const, strategy: 'terminal_receipt' as const, reason: 'text read returned' },
+    };
+
+    expect(contract.kind).toBe('artifact_work');
+    expect(hasCoreActionEvidence(contract, [read, write], task)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [write, read], task)).toBe(true);
+  });
+
+  it('requires both exact launch and matching active-window evidence for launch verification', () => {
+    const task = '请打开 Windows 计算器。打开后读取当前活动窗口，只有窗口标题和进程能证明是计算器时才报告完成。';
+    const contract = buildActionContract(task);
+    const opened = {
+      name: 'desktop_open',
+      arguments: { target: '计算器' },
+      result: JSON.stringify({ status: 'verified', targetMatched: true, verified: true, actualTarget: { title: '计算器', processName: 'CalculatorApp.exe' } }),
+      terminalVerification: { status: 'verified' as const, strategy: 'state_diff' as const, reason: 'matched' },
+    };
+    const active = {
+      name: 'desktop_active_window',
+      arguments: {},
+      result: JSON.stringify({ title: '计算器', processName: 'CalculatorApp.exe' }),
+    };
+    expect(contract.kind).toBe('desktop_operation');
+    expect(hasCoreActionEvidence(contract, [opened], task)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [opened, active], task)).toBe(true);
+  });
+
+  it('does not treat the letters ai inside a local main path as an external AI surface', () => {
+    const text = '读取 D:\\lumiOS\\.codex-run\\acceptance-main\\customer-brief.txt，然后根据文件里的事实，在 D:\\lumiOS\\.codex-run\\acceptance-main\\customer-followup.md 创建中文跟进方案。这是本地文件任务，直接执行并验证文件。';
+
+    expect(buildActionContract(text).kind).toBe('artifact_work');
+  });
+
+  it('extracts only explicitly required exact artifact strings', () => {
+    expect(extractExplicitArtifactTextRequirements('在“已知风险”里明确写出“负责人：刘工”，其他事实不变。'))
+      .toEqual(['负责人：刘工']);
+  });
+
   it('separates authorized external AI history reads from new external AI submissions', () => {
     const text = '读取 ChatGPT 里的聊天历史并同步新增消息';
     const contract = buildActionContract(text);
@@ -53,6 +168,14 @@ describe('Lumi action contract', () => {
       terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'read-only assessment' },
     } as any;
     expect(hasCoreActionEvidence(buildActionContract(task), [record], task)).toBe(true);
+  });
+
+  it('keeps negated model-memory and browser constraints out of active collaboration routes', () => {
+    const text = '律师版实机验收·法条与类案：基于案件ID case-001，只使用当前已配置且可核验的权威来源，输出检索问题、来源状态和可核验结果。禁止凭模型记忆编造法条，不要登录外部网站；完成后告诉我任务回执状态。';
+    expect(requiresDesktopAiCollaboration(text)).toBe(false);
+    expect(requiresAuthenticatedWebResult(text)).toBe(false);
+    expect(buildActionContract(text).kind).not.toBe('external_ai_collaboration');
+    expect(buildActionContract(text).kind).not.toBe('browser_account');
   });
   it('treats editing inside the current app as a desktop action contract', () => {
     const contract = buildActionContract('\u5728\u8fd9\u91cc\u9762\u5199\u4e00\u7bc7\u68c0\u8ba8\u4e66\u7ed9\u6211');

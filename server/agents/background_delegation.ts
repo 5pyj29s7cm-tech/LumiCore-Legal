@@ -13,6 +13,7 @@ export interface BackgroundDelegationDecisionInput {
   selfRepair: boolean;
   sanctuary: boolean;
   directDesktop: boolean;
+  capabilityLane?: string;
   prefersSequentialWorkflow: boolean;
   industryWorkflow?: boolean;
   availableAgentCount: number;
@@ -100,6 +101,9 @@ export function shouldDelegateWorkInBackground(input: BackgroundDelegationDecisi
   if (input.selfRepair) return { shouldDelegate: false, reason: 'self_repair' };
   if (input.sanctuary) return { shouldDelegate: false, reason: 'sanctuary_agent' };
   if (input.directDesktop) return { shouldDelegate: false, reason: 'direct_desktop_visible_work' };
+  if (input.capabilityLane === 'desktop_control' && !explicitlyRequested) {
+    return { shouldDelegate: false, reason: 'desktop_control_foreground' };
+  }
   if (input.prefersSequentialWorkflow) return { shouldDelegate: false, reason: 'artifact_first_sequential_workflow' };
   if (isBackgroundMetaInquiry(input.text)) return { shouldDelegate: false, reason: 'background_meta_inquiry' };
   if (isBackgroundAppInspection(input.text)) return { shouldDelegate: false, reason: 'background_app_inspection' };

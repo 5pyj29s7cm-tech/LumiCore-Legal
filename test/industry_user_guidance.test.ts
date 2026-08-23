@@ -20,6 +20,17 @@ function createRegistry(): ToolRegistry {
   return registry;
 }
 
+function trustedLocalContext(userId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    userId,
+    authenticated: true,
+    authRole: 'user',
+    localExecution: true,
+    executionBoundary: 'trusted_local' as const,
+    ...overrides,
+  };
+}
+
 function pipelineFor(text: string, channel: 'chat' | 'voice' = 'chat') {
   const registry = createRegistry();
   return buildLumiExecutionPipeline({
@@ -69,8 +80,9 @@ describe('industry user guidance', () => {
       '\u4f60\u641e\u9519\u4e86\uff0c\u6211\u53ea\u662f\u95ee\u8fd9\u4e2a\u9875\u9762\u600e\u4e48\u7528',
     );
     expect(pipeline.turnIntent.flow.industryGuidanceRequest).toBe(false);
-    expect(pipeline.execution.toolPolicy.allowedTools || []).not.toContain('industry_user_guide');
-    expect(pipeline.execution.toolPolicy.allowedTools || []).not.toContain('industry_workflow_start');
+    expect(pipeline.turnIntent.flow.modelToolAccess).toBe('manifest');
+    expect(pipeline.execution.toolRoute?.hardAllowlist).not.toBe(true);
+    expect(pipeline.execution.promptOverlay).not.toContain('## Industry User Guidance');
   });
 
   it('recognizes a real workspace usage question for this exact edition', () => {
@@ -82,13 +94,13 @@ describe('industry user guidance', () => {
 
   it('returns the exact edition contract with no more than three steps and no execution claim', async () => {
     const registry = createRegistry();
-    const result = JSON.parse(await registry.execute('industry_user_guide', {}, {
-      userId: 'industry_guidance_read_user',
+    const result = JSON.parse(await registry.execute('industry_user_guide', {}, trustedLocalContext(
+      'industry_guidance_read_user', {
       domain: 'personal',
       actionIntent: '\u8fd9\u4e2a\u5b9a\u5236\u7248\u600e\u4e48\u7528',
       routedTaskText: '\u8fd9\u4e2a\u5b9a\u5236\u7248\u600e\u4e48\u7528',
       source: 'voice',
-    }));
+    })));
 
     expect(result).toMatchObject({
       ok: true,
@@ -115,11 +127,10 @@ describe('industry user guidance', () => {
     const saved = JSON.parse(await registry.execute('industry_guidance_preference_set', {
       level: 'skilled',
       mode: 'guided',
-    }, {
-      userId,
+    }, trustedLocalContext(userId, {
       domain: 'personal',
       source: 'chat',
-    }));
+    })));
     expect(saved).toMatchObject({
       ok: true,
       status: 'saved',
@@ -137,12 +148,11 @@ describe('industry user guidance', () => {
       orgId: '',
     })).toMatchObject({ level: 'beginner', mode: 'explain' });
 
-    const guided = JSON.parse(await registry.execute('industry_user_guide', {}, {
-      userId,
+    const guided = JSON.parse(await registry.execute('industry_user_guide', {}, trustedLocalContext(userId, {
       domain: 'personal',
       actionIntent: '\u4e0b\u4e00\u6b65\u5e94\u8be5\u600e\u4e48\u505a',
       source: 'chat',
-    }));
+    })));
     expect(guided.effectivePreference.mode).toBe('guided');
     expect(guided.responseContract.guidedExecutionLimit).toContain('one explicitly requested');
     expect(guided.responseContract.externalCommitRequiresExactConfirmation).toBe(true);

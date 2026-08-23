@@ -16,6 +16,20 @@ function getAutonomousReportRoot(): string {
   return path.dirname(getDataPath(path.join('autonomy', 'reports', '.keep')));
 }
 
+type HostFilesystemContext = Pick<ToolContext, 'cwd' | 'localExecution' | 'source'>;
+
+/**
+ * Host filesystem tools are a desktop capability, not a network API.  A
+ * transport must positively establish loopback/native execution before these
+ * handlers may inspect the user's machine.  Context-free calls remain
+ * available to trusted in-process code and unit tests.
+ */
+function assertHostFilesystemAccess(context?: HostFilesystemContext): void {
+  if (context?.localExecution === false) {
+    throw new Error('Host filesystem access is available only from the local desktop client.');
+  }
+}
+
 function resolveWritePath(inputPath: string, context?: Pick<ToolContext, 'cwd' | 'autonomous'>): string {
   const requestedPath = resolveSafePath(inputPath, context?.cwd);
   if (!context?.autonomous) return requestedPath;
@@ -101,23 +115,44 @@ function requirePathArg(args: Record<string, any>, keys: string[], toolName: str
   return value;
 }
 
-async function readFileHandler(args: Record<string, any>, context?: { cwd?: string }): Promise<string> {
+async function readFileHandler(
+  args: Record<string, any>,
+  context?: Pick<ToolContext, 'cwd' | 'desktopRelay' | 'localExecution' | 'source'>,
+): Promise<string> {
+  assertHostFilesystemAccess(context);
   const inputPath = requirePathArg(args, ['path', 'filePath', 'filepath', 'targetPath', 'target'], 'read_file');
   const targetPath = resolveSafePath(inputPath, context?.cwd);
-  const stat = fs.statSync(targetPath);
-  if (stat.isDirectory()) {
-    throw new Error(`"${targetPath}" is a directory, not a file.`);
+  try {
+    const stat = fs.statSync(targetPath);
+    if (stat.isDirectory()) {
+      throw new Error(`"${targetPath}" is a directory, not a file.`);
+    }
+    if (stat.size > 100 * 1024) {
+      throw new Error(`File too large (${(stat.size / 1024).toFixed(1)}KB). Max 100KB.`);
+    }
+    return fs.readFileSync(targetPath, 'utf-8');
+  } catch (localError) {
+    const canUseNativePath = /^(?:~[\\/]|[a-z]:[\\/]|\/)/i.test(inputPath.trim());
+    if (!context?.desktopRelay || !canUseNativePath) throw localError;
+    const relayed = await context.desktopRelay('desktop_read_text_file', { path: inputPath.trim() });
+    let receipt: any;
+    try {
+      receipt = JSON.parse(relayed);
+    } catch {
+      throw new Error('The native desktop client returned no structured text-file read receipt');
+    }
+    if (receipt?.success !== true || typeof receipt.content !== 'string') {
+      throw new Error(String(receipt?.error || 'The native desktop client could not read the text file'));
+    }
+    return receipt.content;
   }
-  if (stat.size > 100 * 1024) {
-    throw new Error(`File too large (${(stat.size / 1024).toFixed(1)}KB). Max 100KB.`);
-  }
-  return fs.readFileSync(targetPath, 'utf-8');
 }
 
 async function writeFileHandler(
   args: Record<string, any>,
-  context?: Pick<ToolContext, 'cwd' | 'autonomous'>,
+  context?: Pick<ToolContext, 'cwd' | 'autonomous' | 'localExecution' | 'source'>,
 ): Promise<string> {
+  assertHostFilesystemAccess(context);
   const inputPath = requirePathArg(args, ['path', 'filePath', 'filepath', 'targetPath', 'target'], 'write_file');
   const targetPath = resolveWritePath(inputPath, context);
 
@@ -143,7 +178,8 @@ async function writeFileHandler(
   return `File written: ${targetPath} (${content.length} bytes)`;
 }
 
-async function listDirectoryHandler(args: Record<string, any>, context?: { cwd?: string }): Promise<string> {
+async function listDirectoryHandler(args: Record<string, any>, context?: HostFilesystemContext): Promise<string> {
+  assertHostFilesystemAccess(context);
   const targetPath = resolveSafePath(args.path || '.', context?.cwd);
   const stat = fs.statSync(targetPath);
   if (!stat.isDirectory()) {
@@ -172,7 +208,8 @@ async function listDirectoryHandler(args: Record<string, any>, context?: { cwd?:
   return JSON.stringify(results, null, 2);
 }
 
-async function searchFilesHandler(args: Record<string, any>, context?: { cwd?: string }): Promise<string> {
+async function searchFilesHandler(args: Record<string, any>, context?: HostFilesystemContext): Promise<string> {
+  assertHostFilesystemAccess(context);
   const directory = resolveSafePath(args.directory || '.', context?.cwd);
   const pattern = args.pattern || '*';
   const regex = simpleGlobToRegex(pattern);
@@ -205,7 +242,8 @@ async function searchFilesHandler(args: Record<string, any>, context?: { cwd?: s
   return JSON.stringify(results.slice(0, maxResults), null, 2);
 }
 
-async function grepFilesHandler(args: Record<string, any>, context?: { cwd?: string }): Promise<string> {
+async function grepFilesHandler(args: Record<string, any>, context?: HostFilesystemContext): Promise<string> {
+  assertHostFilesystemAccess(context);
   const directory = resolveSafePath(args.directory || '.', context?.cwd);
   const pattern = args.pattern || '';
   if (!pattern) throw new Error('Search pattern is required.');
@@ -284,7 +322,8 @@ async function grepFilesHandler(args: Record<string, any>, context?: { cwd?: str
   return lines.join('\n');
 }
 
-async function readFilesBatchHandler(args: Record<string, any>, context?: { cwd?: string }): Promise<string> {
+async function readFilesBatchHandler(args: Record<string, any>, context?: HostFilesystemContext): Promise<string> {
+  assertHostFilesystemAccess(context);
   const paths: string[] = args.paths || args.filePaths || args.filepaths || [];
   if (!paths.length) throw new Error('At least one file path is required.');
   if (paths.length > 10) throw new Error('Maximum 10 files per batch request.');

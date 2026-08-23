@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const source = (relativePath: string) => fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8');
+const source = (relativePath: string) => fs
+  .readFileSync(path.join(process.cwd(), relativePath), 'utf8')
+  .replace(/\r\n/g, '\n');
 
 describe('macOS wallpaper mode recovery', () => {
   it('enables the native transparent-window capability required by macOS', () => {
@@ -16,8 +18,9 @@ describe('macOS wallpaper mode recovery', () => {
     expect(rust).toMatch(/#\[cfg\(target_os = "macos"\)\]\r?\n\s*let _ = window\.set_skip_taskbar\(false\);/);
     expect(rust).toContain('"Exit Wallpaper Mode"');
     expect(rust).toContain('tauri::RunEvent::Reopen { .. }');
-    expect(rust).toContain('let _ = show_main_window_impl(app);');
+    expect(rust).toContain('show_main_window_impl(app, "macos_reopen");');
     expect(rust).toContain('tauri_plugin_single_instance::init(|app, _args, _cwd|');
+    expect(rust).toContain('show_main_window_impl(app, "single_instance");');
     expect(rust).toContain('"lumi:wallpaper-mode-changed"');
     expect(rust).toContain('get_wallpaper_mode');
   });

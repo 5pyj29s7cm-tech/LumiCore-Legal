@@ -30,7 +30,7 @@ describe('verified inline contract review workflow', () => {
     expect(workflow?.requiredTools).toEqual(['legal_review_contract']);
   });
 
-  it('keeps the matched workflow above incidental capability/client wording', () => {
+  it('keeps the matched workflow as a model hint without taking Chat routing away from the model', () => {
     const registry = new ToolRegistry();
     registerLegalTools(registry);
     const pipeline = buildLumiExecutionPipeline({
@@ -46,16 +46,12 @@ describe('verified inline contract review workflow', () => {
       },
       registry,
     });
-    expect(pipeline.turnIntent.flow.specialWorkflow?.id).toBe('verified_inline_contract_review');
-    expect(pipeline.capabilityPlan.lane).toBe('skill_workflow');
-    expect(pipeline.executionPlan.nodes).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        type: 'skill',
-        executionRole: 'adapter',
-        capabilityId: 'legal-casework/verified_inline_contract_review',
-      }),
-      expect.objectContaining({ toolName: 'legal_review_contract' }),
-    ]));
+    expect(pipeline.turnIntent.flow.workflowHint?.id).toBe('verified_inline_contract_review');
+    expect(pipeline.turnIntent.flow.workflowRouting).toBe('model_hint');
+    expect(pipeline.turnIntent.flow.specialWorkflow).toBeNull();
+    expect(pipeline.turnIntent.flow.modelToolAccess).toBe('manifest');
+    expect(pipeline.execution.toolPolicy.allowedTools).toContain('legal_review_contract');
+    expect(pipeline.execution.promptOverlay).not.toContain('Selected workflow adapter is restricted to:');
   });
 
   it('does not hijack contract drafting or a general how-to question', () => {
@@ -93,7 +89,15 @@ describe('verified inline contract review workflow', () => {
         omitSpecificLawCitations: true,
         persistCase: false,
       },
-      context: { userId: 'vitest-contract-review', orgId: '', domain: 'personal' },
+      context: {
+        userId: 'vitest-contract-review',
+        orgId: '',
+        domain: 'personal',
+        authenticated: true,
+        authRole: 'user',
+        localExecution: true,
+        executionBoundary: 'trusted_local',
+      },
     });
     expect(record.error).toBeUndefined();
     expect(record.terminalVerification?.status).toBe('verified');

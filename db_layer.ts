@@ -4,12 +4,21 @@ import path from 'path';
 import { createHash } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { getDataPath, getDataRoot } from './server/config/data_path';
+import { acquireDataRootLease } from './server/runtime/data_root_lease';
 import { isolateLegacyGuardSummaryState } from './server/conversation/guard_history';
 import {
   configureExternalCommitJournal,
   type ExternalCommitJournalAdapter,
   type ExternalCommitJournalEntry,
 } from './server/tools/external_commit_journal';
+
+// Production persistence is process-exclusive per canonical Lumi data root.
+// Acquire synchronously before even the legacy migration can inspect/copy data.
+// Vitest isolates intentionally share/reload modules; subprocess lease tests
+// opt back in explicitly through LUMI_ENFORCE_DATA_ROOT_LEASE.
+if (process.env.VITEST !== 'true' || process.env.LUMI_ENFORCE_DATA_ROOT_LEASE === '1') {
+  acquireDataRootLease();
+}
 
 // Auto-migrate data from old location (project directory) to user directory on first run
 function migrateDataFromOldLocation() {
@@ -67,6 +76,7 @@ const PERFORMANCE_INDEX_SQL = [
   `CREATE INDEX IF NOT EXISTS idx_model_routing_conversation_completed ON model_routing_receipts(conversationId, completedAt)`,
   `CREATE INDEX IF NOT EXISTS idx_model_routing_request ON model_routing_receipts(requestId)`,
   `CREATE INDEX IF NOT EXISTS idx_model_routing_selected ON model_routing_receipts(selectedProvider, selectedModel, completedAt)`,
+  `CREATE INDEX IF NOT EXISTS idx_chat_execution_receipts_expiry ON chat_execution_terminal_receipts(expiresAt)`,
   `CREATE INDEX IF NOT EXISTS idx_read_only_tool_patterns_scope ON read_only_tool_patterns(userId, domain, orgId, updatedAt)`,
   `CREATE INDEX IF NOT EXISTS idx_background_tasks_user_status ON background_delegation_tasks(userId, status, updatedAt)`,
   `CREATE INDEX IF NOT EXISTS idx_background_tasks_lease ON background_delegation_tasks(status, leaseExpiresAt)`,
@@ -739,6 +749,22 @@ function createTables(): Promise<void> {
         startedAt TEXT NOT NULL,
         completedAt TEXT NOT NULL,
         durationMs INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_execution_terminal_receipts (
+        userId TEXT NOT NULL,
+        domain TEXT NOT NULL DEFAULT 'personal',
+        orgId TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'chat',
+        conversationId TEXT NOT NULL DEFAULT '',
+        requestId TEXT NOT NULL,
+        status TEXT NOT NULL,
+        event TEXT NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}',
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL,
+        expiresAt TEXT NOT NULL,
+        PRIMARY KEY (userId, domain, orgId, source, conversationId, requestId)
       );
 
       CREATE TABLE IF NOT EXISTS read_only_tool_patterns (
@@ -1703,6 +1729,14 @@ function scheduleDatabaseFlush(delayMs = 100): void {
 
 function configureSqliteExternalCommitJournal(): void {
   const adapter: ExternalCommitJournalAdapter = {
+    async lookup(idempotencyKey) {
+      await writeLock;
+      const rows = await query<ExternalCommitJournalEntry>(
+        'SELECT * FROM external_commit_journal WHERE idempotencyKey = ? LIMIT 1',
+        [idempotencyKey],
+      );
+      return rows[0] || null;
+    },
     async claim(entry) {
       return withDatabaseWriteLock(async () => {
         await run(
@@ -1781,19 +1815,20 @@ async function flushDatabaseStrict(): Promise<void> {
     clearTimeout(writeDebounceTimer);
     writeDebounceTimer = null;
   }
-  await writeLock;
-  if (persistedRevision < writeRevision || dbDirty) {
-    const targetRevision = writeRevision;
-    writeInFlight = true;
-    try {
-      await persistMemoryDB();
-      persistedRevision = Math.max(persistedRevision, targetRevision);
-      recordSuccessfulDatabaseFlush();
-    } catch (error) {
-      recordDatabaseFlushFailure(error);
-      throw error;
+  await withDatabaseWriteLock(async () => {
+    if (persistedRevision < writeRevision || dbDirty) {
+      const targetRevision = writeRevision;
+      writeInFlight = true;
+      try {
+        await persistMemoryDB();
+        persistedRevision = Math.max(persistedRevision, targetRevision);
+        recordSuccessfulDatabaseFlush();
+      } catch (error) {
+        recordDatabaseFlushFailure(error);
+        throw error;
+      }
     }
-  }
+  });
 }
 
 /**

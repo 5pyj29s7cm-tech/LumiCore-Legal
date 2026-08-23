@@ -36,4 +36,25 @@ describe('command center navigation contract', () => {
     expect(desktop).toContain("setNexusReturnTarget('command-center')");
     expect(desktop).toContain("if (nexusReturnTarget === 'command-center') openCommandCenter('office')");
   });
+
+  it('hands native window focus to the chat input when the command center opens or returns', () => {
+    const desktop = source('src/components/DesktopUI.tsx');
+    const chat = source('src/components/AgentChatPage.tsx');
+    const rust = source('src-tauri/src/lib.rs');
+    expect(desktop).toContain('await getCurrentWindow().setFocus()');
+    expect(desktop).toContain('await getCurrentWebview().setFocus()');
+    expect(desktop).toContain("window.dispatchEvent(new CustomEvent('lumi:focus-command-input'))");
+    expect(desktop).toContain("listen('lumi:open-command-center'");
+    expect(desktop).toContain("openCommandCenter('office')");
+    expect(chat).toContain("window.addEventListener('focus', focusCommandInput)");
+    expect(chat).toContain("document.addEventListener('visibilitychange', restoreVisibleCommandInput)");
+    expect(chat).toContain("focus({ preventScroll: true })");
+    expect(rust).toContain('const COMMAND_CENTER_SHORTCUT: &str = "Ctrl+Shift+Enter"');
+    expect(rust).toContain('show_main_window_impl(app, "command_center_shortcut")');
+    expect(rust).toContain('fn focus_webview(&self) -> Result<(), String>');
+    expect(rust).toContain('webview.set_focus().map_err(|error| error.to_string())');
+    expect(rust).toContain('WINDOW_ACTIVATION_DIAGNOSTIC_EVENT');
+    expect(rust).toContain('app.emit(COMMAND_CENTER_EVENT, ())');
+    expect(rust).toContain('app.global_shortcut().unregister_all()');
+  });
 });

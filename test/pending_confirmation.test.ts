@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  buildConversationConfirmationChannelScope,
+  buildVoiceConfirmationChannelScope,
   clearAllPendingConfirmationsForTests,
   consumePendingConfirmation,
   formatPendingConfirmationPrompt,
   formatPendingConfirmationRequest,
   getPendingConfirmation,
+  isConfirmationCancellation,
   isExplicitConfirmationReply,
   recordPendingConfirmation,
 } from '../server/tools/pending_confirmation';
@@ -67,6 +70,62 @@ describe('One-time pending tool confirmations', () => {
     expect(request).toContain('Confirmation is required');
     expect(request).toContain('[redacted]');
     expect(request).not.toContain('super-secret-password');
+  });
+
+  it('binds and displays the exact self-improvement patch and activation identity', () => {
+    const common = {
+      proposalId: 'improvement_exact_1',
+      expectedBaseCommit: 'a'.repeat(40),
+      expectedDeliveryBranch: 'main',
+      commitMessage: 'improve docs',
+    };
+    const sharedPrefix = [
+      'diff --git a/docs/a.md b/docs/a.md',
+      '--- a/docs/a.md',
+      '+++ b/docs/a.md',
+      '@@ -1 +1 @@',
+      `-${'x'.repeat(520)}`,
+    ].join('\n');
+    const first = recordPendingConfirmation('self-review', 'self_improvement_stage_patch', {
+      ...common,
+      patch: `${sharedPrefix}\n+safe tail\n`,
+    });
+    const request = formatPendingConfirmationRequest(first);
+    expect(first.safeArgs.patchReview).toMatchObject({
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      changedPaths: ['docs/a.md'],
+      fullPatch: expect.stringContaining('+safe tail'),
+    });
+    expect(request).toContain('+safe tail');
+    const modelPrompt = formatPendingConfirmationPrompt(first);
+    expect(modelPrompt).toContain('omitted from model continuation');
+    expect(modelPrompt).not.toContain('+safe tail');
+
+    clearAllPendingConfirmationsForTests();
+    const changedTail = recordPendingConfirmation('self-review', 'self_improvement_stage_patch', {
+      ...common,
+      patch: `${sharedPrefix}\n+malicious tail\n`,
+    });
+    expect(changedTail.payloadDigest).not.toBe(first.payloadDigest);
+    expect(changedTail.safeArgs.patchReview.sha256).not.toBe(first.safeArgs.patchReview.sha256);
+
+    clearAllPendingConfirmationsForTests();
+    const activation = recordPendingConfirmation('self-review', 'self_improvement_activate', {
+      proposalId: 'improvement_exact_1',
+      expectedRepositoryId: 'b'.repeat(64),
+      expectedBaseCommit: 'a'.repeat(40),
+      expectedDeliveryBranch: 'main',
+      expectedStagedBranch: 'lumi/self-improvement/improvement-exact-1',
+      expectedStagedCommit: 'c'.repeat(40),
+      expectedTreeDigest: 'd'.repeat(64),
+      expectedPatchDigest: 'e'.repeat(64),
+      expectedVerificationProfile: 'standard',
+      expectedChangedPaths: ['docs/a.md'],
+    });
+    const activationRequest = formatPendingConfirmationRequest(activation);
+    for (const expected of ['b'.repeat(64), 'c'.repeat(40), 'd'.repeat(64), 'docs/a.md']) {
+      expect(activationRequest).toContain(expected);
+    }
   });
 
   it('keeps the original action context for deterministic continuation', () => {
@@ -183,6 +242,40 @@ describe('One-time pending tool confirmations', () => {
     })?.id).toBe(voice.id);
   });
 
+  it('keeps a voice confirmation available across separate utterance request ids', () => {
+    const scope = buildVoiceConfirmationChannelScope({
+      domain: 'personal', orgId: '', channelId: 'voice-stable-channel', taskId: 'durable-task-id',
+    });
+    const pending = recordPendingConfirmation(
+      'voice-stable-user',
+      'wechat_send_message',
+      { contact: '客户甲', message: '固定正文' },
+      'voice',
+      { ...scope, taskId: 'durable-task-id' },
+    );
+
+    expect(getPendingConfirmation('voice-stable-user', scope)?.id).toBe(pending.id);
+    expect(consumePendingConfirmation(
+      'voice-stable-user', pending.id, pending.toolName, pending.exactArgs, scope,
+    )).toBe(true);
+  });
+
+  it('keeps chat confirmation scope stable across transport reconnects', () => {
+    const scope = buildConversationConfirmationChannelScope({
+      source: 'chat', domain: 'personal', conversationId: 'conversation-1',
+    });
+    const pending = recordPendingConfirmation(
+      'chat-user',
+      'wechat_send_message',
+      { contact: '客户甲', message: '固定正文' },
+      'chat',
+      { ...scope, taskId: 'task-1' },
+    );
+
+    expect(scope.channelId).toBe('conversation:conversation-1');
+    expect(getPendingConfirmation('chat-user', scope)?.id).toBe(pending.id);
+  });
+
   it('recognizes a concise confirmation without treating ordinary messages as approval', () => {
     expect(isExplicitConfirmationReply('确认')).toBe(true);
     expect(isExplicitConfirmationReply('确认执行')).toBe(true);
@@ -190,5 +283,13 @@ describe('One-time pending tool confirmations', () => {
     expect(isExplicitConfirmationReply('好的')).toBe(true);
     expect(isExplicitConfirmationReply('可以')).toBe(true);
     expect(isExplicitConfirmationReply('确认一下这个文件内容')).toBe(false);
+  });
+
+  it('recognizes natural cancellation of the pending external confirmation', () => {
+    expect(isConfirmationCancellation('取消刚才的外发确认，不要发送。')).toBe(true);
+    expect(isConfirmationCancellation('取消刚才给“验收占位联系人”的外发确认，不要发送，不要打开微信。请明确告诉我是否已经取消以及消息是否发出。')).toBe(true);
+    expect(isConfirmationCancellation('取消')).toBe(true);
+    expect(isConfirmationCancellation('取消订单')).toBe(false);
+    expect(isConfirmationCancellation('取消明天下午的会议')).toBe(false);
   });
 });

@@ -12,7 +12,7 @@ describe('verified legal authority research workflow', () => {
     await initDatabase();
   });
 
-  it('routes substantive authority work to the deterministic legal workflow', () => {
+  it('keeps substantive authority work as a model hint inside the Chat manifest', () => {
     const registry = new ToolRegistry();
     registerProductVariantTools(registry);
     const pipeline = buildLumiExecutionPipeline({
@@ -22,9 +22,17 @@ describe('verified legal authority research workflow', () => {
       },
       registry,
     });
-    expect(pipeline.turnIntent.flow.specialWorkflow?.id).toBe('verified_authority_research');
-    expect(pipeline.capabilityPlan.lane).toBe('skill_workflow');
-    expect(pipeline.executionPlan.nodes.some(node => node.capabilityId === 'legal-casework/verified_authority_research')).toBe(true);
+    expect(pipeline.turnIntent.flow.workflowHint?.id).toBe('verified_authority_research');
+    expect(pipeline.turnIntent.flow.workflowRouting).toBe('model_hint');
+    expect(pipeline.turnIntent.flow.specialWorkflow).toBeNull();
+    expect(pipeline.turnIntent.flow.modelToolAccess).toBe('manifest');
+    expect(pipeline.execution.toolPolicy.allowedTools).toEqual(expect.arrayContaining([
+      'legal_case_workflow_status',
+      'legal_authority_source_status',
+      'legal_search_statute',
+      'legal_search_case',
+    ]));
+    expect(pipeline.execution.promptOverlay).not.toContain('Selected workflow adapter is restricted to:');
   });
 
   it('does not intercept navigation-only requests', () => {

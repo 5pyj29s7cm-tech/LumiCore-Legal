@@ -15,7 +15,7 @@ describe('verified archived legal delivery workflow', () => {
     await initDatabase();
   });
 
-  it('routes the exact delivery verification prompt to the deterministic legal workflow', () => {
+  it('keeps the exact delivery workflow as a model hint inside the Chat manifest', () => {
     const registry = new ToolRegistry();
     registerProductVariantTools(registry);
     const pipeline = buildLumiExecutionPipeline({
@@ -25,9 +25,12 @@ describe('verified archived legal delivery workflow', () => {
       },
       registry,
     });
-    expect(pipeline.turnIntent.flow.specialWorkflow?.id).toBe('verified_archived_delivery');
-    expect(pipeline.capabilityPlan.lane).toBe('skill_workflow');
-    expect(pipeline.executionPlan.nodes.some(node => node.capabilityId === 'legal-casework/verified_archived_delivery')).toBe(true);
+    expect(pipeline.turnIntent.flow.workflowHint?.id).toBe('verified_archived_delivery');
+    expect(pipeline.turnIntent.flow.workflowRouting).toBe('model_hint');
+    expect(pipeline.turnIntent.flow.specialWorkflow).toBeNull();
+    expect(pipeline.turnIntent.flow.modelToolAccess).toBe('manifest');
+    expect(pipeline.execution.toolPolicy.allowedTools).toContain('legal_verify_archived_delivery');
+    expect(pipeline.execution.promptOverlay).not.toContain('Selected workflow adapter is restricted to:');
   });
 
   it('does not intercept navigation-only or old-task status questions', () => {

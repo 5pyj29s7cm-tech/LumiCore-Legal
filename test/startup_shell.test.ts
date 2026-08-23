@@ -16,6 +16,7 @@ describe('desktop startup shell', () => {
     const startup = fs.readFileSync(path.join(process.cwd(), 'src/components/StartupSequence.tsx'), 'utf8');
 
     expect(desktopEntry).toContain('<StartupSequence ready={!shell.loading} />');
+    expect(desktopEntry).toContain('initializeSharedSocketRuntime();');
     expect(desktopUi).not.toContain('HardcoreBootSequence');
     expect(startup).not.toContain('Core Temperature');
     expect(startup).not.toContain('absolute inset-0 bg-white');
@@ -24,21 +25,23 @@ describe('desktop startup shell', () => {
   it('keeps the native window hidden until the dark webview shell has loaded', () => {
     const tauriConfig = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8'));
     const rustEntry = fs.readFileSync(path.join(process.cwd(), 'src-tauri/src/lib.rs'), 'utf8');
+    const activation = fs.readFileSync(path.join(process.cwd(), 'src-tauri/src/window_activation.rs'), 'utf8');
 
     expect(tauriConfig.app.windows[0].visible).toBe(false);
     expect(rustEntry).toContain('.on_page_load(move |webview, payload|');
     expect(rustEntry).toContain('PageLoadEvent::Finished');
-    expect(rustEntry).toContain('webview.window().show()');
+    expect(rustEntry).toContain('show_main_window_impl(webview.app_handle(), "page_load");');
+    expect(rustEntry).toContain('execute_window_activation_steps(restore_result, operations)');
+    expect(activation).toContain('step("show", operations.show())');
+    expect(activation).toContain('step("unminimize", operations.unminimize())');
+    expect(activation).toContain('step("focus_window", operations.focus_window())');
+    expect(activation).toContain('step("focus_webview", operations.focus_webview())');
   });
 
-  it('merges macOS media, automation, and protected-folder permission prompts at bundle time', () => {
+  it('keeps macOS media, automation, and protected-folder permission prompts in source configuration', () => {
     const tauriConfig = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8'));
     const plistPath = path.join(process.cwd(), 'src-tauri', tauriConfig.bundle.macOS.infoPlist);
     const infoPlist = fs.readFileSync(plistPath, 'utf8');
-    const macBuildWorkflow = fs.readFileSync(
-      path.join(process.cwd(), '.github/workflows/build-macos.yml'),
-      'utf8',
-    );
 
     expect(infoPlist).toContain('<key>NSCameraUsageDescription</key>');
     expect(infoPlist).toContain('<key>NSMicrophoneUsageDescription</key>');
@@ -48,10 +51,7 @@ describe('desktop startup shell', () => {
     expect(infoPlist).toContain('<key>NSDownloadsFolderUsageDescription</key>');
     expect(infoPlist).not.toContain('<key>CFBundleVersion</key>');
     expect(infoPlist).not.toContain('<key>CFBundleExecutable</key>');
-    expect(macBuildWorkflow).toContain("Print :NSCameraUsageDescription");
-    expect(macBuildWorkflow).toContain("Print :NSMicrophoneUsageDescription");
-    expect(macBuildWorkflow).toContain("Print :NSAppleEventsUsageDescription");
-    expect(macBuildWorkflow).toContain('CFBundleShortVersionString');
+    expect(fs.existsSync(path.join(process.cwd(), '.github/workflows/build-macos.yml'))).toBe(false);
   });
 
   it('keeps the legacy macOS open fallback after indexed and LaunchServices app lookup', () => {
@@ -121,21 +121,14 @@ describe('desktop startup shell', () => {
     expect(releaseCheck).toContain('Get-AuthenticodeSignature');
     expect(releaseCheck).toContain('artifact.updater-signature');
     expect(releaseCheck).toContain('LUMI_RELEASE_TAURI_CONFIG');
-    const windowsWorkflow = fs.readFileSync(path.join(process.cwd(), '.github/workflows/build-windows.yml'), 'utf8');
-    expect(windowsWorkflow).toContain('createUpdaterArtifacts');
-    expect(windowsWorkflow).toContain('npx tauri build --config $env:LUMI_RELEASE_TAURI_CONFIG');
-    expect(windowsWorkflow).not.toContain("Set-Content -LiteralPath $configPath");
-    expect(windowsWorkflow).toContain("always() && !cancelled() && hashFiles('src-tauri/target/release/bundle/nsis/*.exe') != ''");
-    expect(windowsWorkflow).toContain("name: lumi-os-windows-${{ inputs.channel || 'internal' }}-${{ github.sha }}");
-    expect(windowsWorkflow).toContain("LUMI_COLD_START_BASELINE_MS: ${{ inputs.channel == 'public' && vars.LUMI_COLD_START_BASELINE_MS || '' }}");
-    expect(windowsWorkflow).toContain("$env:LUMI_RELEASE_CHANNEL -eq 'public'");
-    expect(windowsWorkflow).toContain('npm run stress:lifecycle');
-    expect(windowsWorkflow).not.toContain('Upload unverified internal installer');
-    expect(windowsWorkflow).not.toContain('lumi-os-windows-internal-unverified');
-    const reliabilityWorkflow = fs.readFileSync(path.join(process.cwd(), '.github/workflows/reliability-windows.yml'), 'utf8');
-    expect(reliabilityWorkflow).toContain('--duration-hours 24');
-    expect(reliabilityWorkflow).toContain('LUMI_TTS_RELIABILITY_FIXTURE_DIR');
-    expect(reliabilityWorkflow).toContain('New-Item -ItemType Junction');
+    const publicCi = fs.readFileSync(path.join(process.cwd(), '.github/workflows/ci.yml'), 'utf8');
+    const releaseGuide = fs.readFileSync(path.join(process.cwd(), 'COMMERCIAL_RELEASE.md'), 'utf8');
+    expect(publicCi).toContain('Run complete Vitest suite');
+    expect(publicCi).toContain('Build desktop and mobile frontends');
+    expect(releaseGuide).toContain('Source availability and signed binary distribution are separate release decisions.');
+    expect(releaseGuide).toContain('npm run release:check -- --strict-publish');
+    expect(fs.existsSync(path.join(process.cwd(), '.github/workflows/build-windows.yml'))).toBe(false);
+    expect(fs.existsSync(path.join(process.cwd(), '.github/workflows/reliability-windows.yml'))).toBe(false);
   });
 
   it('packages Sharp native dependencies for the build host instead of Windows-only binaries', () => {

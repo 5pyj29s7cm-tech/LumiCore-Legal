@@ -9,6 +9,7 @@ import {
   matchCurrentIndustryWorkflow,
 } from '../server/regions/packs/cn/industry_capability_profile';
 import { buildLumiExecutionPipeline } from '../server/cognition/execution_pipeline';
+import { buildLumiExecutionDecision } from '../server/cognition/execution_decision';
 import { formatClientSelfPrompt } from '../server/client/self_model';
 import { registerAllTools } from '../server/tools/definitions';
 import { ToolRegistry } from '../server/tools/registry';
@@ -16,6 +17,7 @@ import { readDB, writeDB } from '../db_layer';
 import { getIndustryWorkflowTask } from '../server/industry/workflow_service';
 import { getOrCreateActiveConversation } from '../server/conversation/manager';
 import { ensureBackgroundConversationActionTask } from '../server/conversation/action_ledger';
+import { restrictToolPolicyForExecutionBoundary } from '../server/tools/remote_policy';
 
 beforeAll(async () => {
   const { initDatabase } = await import('../db_layer');
@@ -62,6 +64,17 @@ function createRegistry(): ToolRegistry {
   return registry;
 }
 
+function trustedLocalContext(userId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    userId,
+    authenticated: true,
+    authRole: 'user',
+    localExecution: true,
+    executionBoundary: 'trusted_local' as const,
+    ...overrides,
+  };
+}
+
 describe('industry capability profile and channel routing', () => {
   it('keeps a multi-workspace ledger replay read-only', () => {
     const query = '律师版文字验收：请只根据已经存在的行业任务账本和最终回执，分别列出“案件工作台、文书生成、合同审查、法条与类案、财产线索、交付核验、标书制作”的最近任务状态、关键结果、交付物和确认边界；不要重新执行工作流。';
@@ -96,7 +109,7 @@ describe('industry capability profile and channel routing', () => {
     expect(formatClientSelfPrompt('industry_profile_self_user')).toContain('Industry Variant Capability Profile');
   });
 
-  it('routes every explicit industry command identically across chat, voice, task and remote-style chat', () => {
+  it('keeps Chat model-owned, gives non-Chat workflows a registered narrow policy, and restricts remote execution', () => {
     const registry = createRegistry();
     for (const scenario of SCENARIOS[PRODUCT_VARIANT.productLine]) {
       expect(matchCurrentIndustryWorkflow(scenario.command)?.entry.entryId).toBe(scenario.entryId);
@@ -105,7 +118,6 @@ describe('industry capability profile and channel routing', () => {
         ['chat', 'chat'],
         ['voice', 'voice'],
         ['task', 'task'],
-        ['chat', 'feishu_bot'],
       ] as const;
       for (const [channel, source] of builds) {
         const pipeline = buildLumiExecutionPipeline({
@@ -128,11 +140,64 @@ describe('industry capability profile and channel routing', () => {
         ]));
         expect(pipeline.execution.promptOverlay).toContain(`entryId=${scenario.entryId}`);
         expect(pipeline.capabilityPlan.taskLedgerRequired).toBe(false);
+        if (channel === 'chat') {
+          expect(pipeline.turnIntent.flow.modelToolAccess).toBe('manifest');
+          expect(pipeline.execution.toolRoute?.hardAllowlist).not.toBe(true);
+        } else {
+          // Isolated non-Chat workflows may add their one or two registered
+          // adapter contracts above the 32-tool voice routing budget.
+          expect(pipeline.execution.toolPolicy.allowedTools.length).toBeLessThanOrEqual(channel === 'voice' ? 36 : 64);
+          expect(pipeline.execution.toolPolicy.allowedTools.every(name => Boolean(registry.get(name)))).toBe(true);
+        }
       }
+
+      const chat = buildLumiExecutionPipeline({
+        dispatch: {
+          userId: 'industry_remote_projection_user', text: scenario.command, channel: 'chat', source: 'chat',
+          operationMode: 'chat', targetIsLumi: true,
+        },
+        registry,
+      });
+      const remotePolicy = restrictToolPolicyForExecutionBoundary(
+        chat.execution.toolPolicy,
+        'remote_restricted',
+      );
+      expect(remotePolicy.allowedTools.every(name => name === 'web_search')).toBe(true);
+      expect(remotePolicy.allowedTools).not.toContain('industry_workflow_start');
+      expect(remotePolicy.allowedTools).not.toContain('industry_workflow_complete');
     }
   });
 
-  it('routes a natural legal case-progress request identically across every channel', () => {
+  it('fails closed when a non-Chat workflow references an unknown contract', () => {
+    const registry = createRegistry();
+    const scenario = SCENARIOS[PRODUCT_VARIANT.productLine][0];
+    const pipeline = buildLumiExecutionPipeline({
+      dispatch: {
+        userId: 'industry_unknown_contract_user',
+        text: scenario.command,
+        channel: 'voice',
+        source: 'voice',
+        operationMode: 'chat',
+        targetIsLumi: true,
+      },
+      registry,
+      source: 'voice',
+    });
+    const decision = buildLumiExecutionDecision({
+      flow: {
+        ...pipeline.turnIntent.flow,
+        industryWorkflowEntryId: 'unknown-contract',
+      },
+      text: scenario.command,
+      toolDeclarations: registry.getToolDeclarations(),
+      toolRegistry: registry,
+    });
+    expect(decision.toolPolicy.allowedTools).toEqual([]);
+    expect(decision.toolPolicy.forbiddenTools).toContain('*');
+    expect(decision.maxIterations).toBe(0);
+  });
+
+  it('keeps a local legal deliverable available while its external-commit fence remains intact', () => {
     if (PRODUCT_VARIANT.productLine !== 'legal') return;
     const registry = createRegistry();
     const request = '请基于当前矩衡律师版验收案，先读取案件档案，生成一份可复核的案件推进清单，列出已知事实、证据缺口、下一步和需要律师确认的事项；不要发送、提交或对外发布。';
@@ -140,7 +205,6 @@ describe('industry capability profile and channel routing', () => {
       ['chat', 'chat'],
       ['voice', 'voice'],
       ['task', 'task'],
-      ['chat', 'feishu_bot'],
     ] as const) {
       const pipeline = buildLumiExecutionPipeline({
         dispatch: {
@@ -162,10 +226,11 @@ describe('industry capability profile and channel routing', () => {
         'legal_case_workflow_status',
         'industry_workflow_complete',
       ]));
+      expect(pipeline.execution.toolPolicy.allowedTools).not.toContain('wechat_send_message');
     }
   });
 
-  it('keeps capability questions, status follow-ups and corrections tool-free', () => {
+  it('keeps capability questions, status follow-ups and corrections out of the workflow lane', () => {
     const registry = createRegistry();
     for (const scenario of SCENARIOS[PRODUCT_VARIANT.productLine]) {
       for (const text of [scenario.question, scenario.status, `你搞错了，我只是问${scenario.question}`]) {
@@ -181,7 +246,13 @@ describe('industry capability profile and channel routing', () => {
           registry,
         });
         expect(pipeline.turnIntent.flow.industryWorkflowEntryId || '').toBe('');
-        expect(pipeline.execution.toolPolicy.allowedTools || []).not.toContain('industry_workflow_start');
+        expect(pipeline.turnIntent.flow.modelToolAccess).toBe('manifest');
+        expect(pipeline.execution.promptOverlay).not.toContain('## Industry Workflow Route');
+        const remotePolicy = restrictToolPolicyForExecutionBoundary(
+          pipeline.execution.toolPolicy,
+          'remote_restricted',
+        );
+        expect(remotePolicy.allowedTools).not.toContain('industry_workflow_start');
       }
     }
   });
@@ -205,8 +276,7 @@ describe('industry capability profile and channel routing', () => {
     const registry = createRegistry();
     const scenario = SCENARIOS[PRODUCT_VARIANT.productLine][0];
     const secretRequest = `${scenario.command} PRIVATE_INDUSTRY_VALUE_7781`;
-    const context = {
-      userId: 'industry_idempotent_user',
+    const context = trustedLocalContext('industry_idempotent_user', {
       domain: 'personal',
       orgId: '',
       source: 'chat',
@@ -214,7 +284,7 @@ describe('industry capability profile and channel routing', () => {
       routedTaskText: secretRequest,
       requestId: 'industry-stable-request-7781',
       idempotencyKey: 'industry-stable-request-7781',
-    } as any;
+    }) as any;
     const first = JSON.parse(await registry.execute('industry_workflow_start', { entryId: scenario.entryId }, context));
     const second = JSON.parse(await registry.execute('industry_workflow_start', { entryId: scenario.entryId }, context));
     expect(first.status).toBe('created');
@@ -255,8 +325,7 @@ describe('industry capability profile and channel routing', () => {
       context: { organizationWork: { routeId: 'org_route_verified' } },
     });
     writeDB(db);
-    const started = JSON.parse(await registry.execute('industry_workflow_start', { entryId: scenario.entryId }, {
-      userId,
+    const started = JSON.parse(await registry.execute('industry_workflow_start', { entryId: scenario.entryId }, trustedLocalContext(userId, {
       domain: 'work',
       orgId,
       source: 'feishu_bot',
@@ -265,7 +334,7 @@ describe('industry capability profile and channel routing', () => {
       requestId: `industry-org-request-${PRODUCT_VARIANT.productLine}`,
       idempotencyKey: `industry-org-request-${PRODUCT_VARIANT.productLine}`,
       actionIntent: scenario.command,
-    } as any));
+    }) as any));
     expect(started.conversationTaskId).toBe(conversationTaskId);
     const actionTasks = readDB().conversationActionTasks.filter((task: any) => task.userId === userId);
     expect(actionTasks).toHaveLength(1);
@@ -281,8 +350,7 @@ describe('industry capability profile and channel routing', () => {
   it('refuses completion without a verified domain-tool receipt from the same loop', async () => {
     const registry = createRegistry();
     const scenario = SCENARIOS[PRODUCT_VARIANT.productLine][0];
-    const context = {
-      userId: 'industry_receipt_gate_user',
+    const context = trustedLocalContext('industry_receipt_gate_user', {
       domain: 'personal',
       orgId: '',
       source: 'voice',
@@ -291,7 +359,7 @@ describe('industry capability profile and channel routing', () => {
       requestId: 'industry-receipt-gate',
       idempotencyKey: 'industry-receipt-gate',
       getCurrentToolRecords: () => [],
-    } as any;
+    }) as any;
     const started = JSON.parse(await registry.execute('industry_workflow_start', { entryId: scenario.entryId }, context));
     await expect(registry.execute('industry_workflow_complete', { taskId: started.task.id }, context))
       .rejects.toThrow(/No verified domain-tool receipt/);
@@ -302,12 +370,11 @@ describe('industry capability profile and channel routing', () => {
     const scenario = SCENARIOS[PRODUCT_VARIANT.productLine][0];
     const profile = getCurrentIndustryCapabilityProfile()!;
     const entry = profile.entries.find(candidate => candidate.entryId === scenario.entryId)!;
-    const context: any = {
-      userId: `industry_verified_loop_${PRODUCT_VARIANT.productLine}`,
+    const context: any = trustedLocalContext(`industry_verified_loop_${PRODUCT_VARIANT.productLine}`, {
       domain: 'personal', orgId: '', source: 'voice', actionIntent: scenario.command,
       routedTaskText: scenario.command, requestId: `industry-verified-loop-${PRODUCT_VARIANT.productLine}`,
       idempotencyKey: `industry-verified-loop-${PRODUCT_VARIANT.productLine}`,
-    };
+    });
     const started = JSON.parse(await registry.execute('industry_workflow_start', { entryId: scenario.entryId }, context));
     context.getCurrentToolRecords = () => [{
       id: 'verified-domain-receipt', name: 'industry_domain_result_probe', arguments: {},

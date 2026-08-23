@@ -166,7 +166,7 @@ export function getAdapterRegistry(options: AdapterRegistryOptions = {}): Adapte
       surfaces: ['mode switcher', 'voice', 'chat', 'meeting'],
       requiresConfirmation: false,
       diagnostics: state?.mode ? [`Current mode: ${state.mode}`] : [],
-      notes: 'Chat is pure conversation. Assistant is user-present high-permission work. Autonomous has the same practical permissions plus continuous/background work. Switching between Chat, Assistant, and Autonomous does not need tool permission popups; Meeting capture remains explicit.',
+      notes: 'Chat is conversation-first; an explicit foreground action can borrow the Assistant manifest for that turn without persistently changing the visible mode. Assistant is user-present high-permission work. Autonomous has the same practical permissions plus continuous/background work. Switching between Chat, Assistant, and Autonomous does not need tool permission popups; Meeting capture remains explicit.',
     },
     {
       id: 'client.self_intro_demo',
@@ -204,7 +204,7 @@ export function getAdapterRegistry(options: AdapterRegistryOptions = {}): Adapte
       label: 'Design Operations',
       category: 'client',
       status: !hasState ? 'requires_setup' : staleState ? 'attention' : 'ready',
-      actions: ['desktop_list_files', 'read_file', 'read_pdf', 'ocr_image_file', 'floorplan_extract_geometry', 'create_ppt', 'create_pdf', 'cad_generate_dxf', 'cad_prepare_autocad_operations', 'mcp_cad-drafting_autocad_playback_file', 'work_product_verify', 'wechat_send_file'],
+      actions: ['desktop_list_files', 'desktop_write_text_file', 'read_file', 'read_pdf', 'ocr_image_file', 'floorplan_extract_geometry', 'create_ppt', 'create_pdf', 'cad_generate_dxf', 'cad_prepare_autocad_operations', 'mcp_cad-drafting_autocad_playback_file', 'work_product_verify', 'wechat_send_file'],
       surfaces: ['Lumi desktop', 'work takeover task record', 'WPS or editor', 'client-facing PPT/PDF proposal files', 'desktop CAD apps', 'CAD DXF draft', 'AutoCAD MCP/COM stroke-by-stroke playback', 'Revit/BIM application results', 'personal WeChat or WeCom'],
       requiresConfirmation: false,
       setup: hasState ? [] : ['Open Lumi desktop client and provide the measured source drawings or project files required by the design task.'],
@@ -433,7 +433,7 @@ export function getAdapterRegistry(options: AdapterRegistryOptions = {}): Adapte
         `autoProcess=${gate.autoProcessEnabled}`,
         `maxConsecutiveTasks=${gate.maxConsecutiveTasks}`,
       ],
-      notes: 'The desktop has three permission modes: Chat is pure conversation, Assistant is user-present high-permission execution without ordinary tool prompts, and Autonomy has the same practical permissions plus continuous 24h/background operation. Launch-at-login and close-to-background only make Lumi resident when the client/server are alive; workflows then run according to autonomy policy, token budgets, enabled workflow limits, and high-consequence hard boundaries.',
+      notes: 'The desktop has three permission modes: Chat is conversation-first and may borrow Assistant foreground capabilities for an explicit action in the current turn, Assistant is user-present high-permission execution without ordinary tool prompts, and Autonomy has the same practical permissions plus continuous 24h/background operation. Launch-at-login and close-to-background only make Lumi resident when the client/server are alive; workflows then run according to autonomy policy, token budgets, enabled workflow limits, and high-consequence hard boundaries.',
     },
     {
       id: 'automation.work_takeover_tasks',

@@ -9,9 +9,52 @@ import {
   isRecoveredCurrentAppEditingContinuation,
   needsNaturalConversationActionStatusAnswer,
   needsRecentActionContinuationContext,
+  prepareConversationActionTaskState,
 } from '../server/cognition/action_continuation';
 
 describe('recent action continuation', () => {
+  it('never treats an explicit persistent-task creation as status for an older task', () => {
+    const text = '\u8bf7\u521b\u5efa\u4e00\u4e2a\u53ef\u8de8\u91cd\u542f\u7ee7\u7eed\u7684\u6301\u4e45\u4efb\u52a1\u3002\u6807\u9898\u201c\u9752\u7a79\u5ba2\u6237\u8ddf\u8fdb\u95ed\u73af\u201d\u3002\u5b8c\u6210\u540e\u544a\u8bc9\u6211\u4efb\u52a1\u7f16\u53f7\u3001\u72b6\u6001\u548c\u4e0b\u4e00\u6b65\u3002';
+    expect(classifyConversationActionFollowupIntent(text, {
+      version: 2,
+      taskId: 'old-task',
+      status: 'completed',
+      goal: '\u6253\u5f00\u8bb0\u4e8b\u672c',
+      latestInstruction: '\u6253\u5f00\u8bb0\u4e8b\u672c',
+      appTarget: '\u8bb0\u4e8b\u672c',
+      sourcePaths: [],
+      latestBlocker: '',
+      unfinished: false,
+      evidenceTools: ['desktop_open'],
+      assistantState: '',
+      toolSummaries: [],
+      receipts: [],
+      revision: 1,
+      updatedAt: new Date().toISOString(),
+    })).toBe('none');
+    expect(needsRecentActionContinuationContext(text)).toBe(false);
+
+    const conditionalCreate = '请创建一个持久任务，标题“新任务”；如果没完成就继续执行。';
+    expect(classifyConversationActionFollowupIntent(conditionalCreate, {
+      version: 2,
+      taskId: 'old-task',
+      status: 'blocked',
+      goal: '打开记事本',
+      latestInstruction: '打开记事本',
+      appTarget: '记事本',
+      sourcePaths: [],
+      latestBlocker: 'relay timeout',
+      unfinished: true,
+      evidenceTools: ['desktop_open'],
+      assistantState: '',
+      toolSummaries: [],
+      receipts: [],
+      revision: 1,
+      updatedAt: new Date().toISOString(),
+    })).toBe('none');
+    expect(needsRecentActionContinuationContext(conditionalCreate)).toBe(false);
+  });
+
   it('recognizes terse and referential continuations without capturing complete new tasks', () => {
     expect(needsRecentActionContinuationContext('执行绘图')).toBe(true);
     expect(needsRecentActionContinuationContext('按照里面的要求继续')).toBe(true);
@@ -85,6 +128,93 @@ describe('recent action continuation', () => {
     expect(classifyConversationActionFollowupIntent('怎么回事？', unfinished)).toBe('status');
     expect(classifyConversationActionFollowupIntent('怎么回事？', completed)).toBe('none');
     expect(buildRecentActionContinuationBridge('怎么回事？', [], unfinished)).toContain('- followupIntent: status');
+  });
+
+  it('executes a mixed status check and affirmative resume clause for an unfinished durable task', () => {
+    const unfinished = buildConversationActionContinuationState({
+      userText: '打开记事本并写入验收内容。',
+      assistantText: '写入步骤尚未完成。',
+      toolCalls: [{
+        name: 'desktop_open',
+        arguments: { target: '记事本' },
+        error: 'desktop relay timed out',
+      }],
+    });
+    expect(unfinished?.unfinished).toBe(true);
+
+    const mixedExecutionTurns = [
+      '这个任务完成了吗？没完成就继续执行。',
+      '检查任务状态；如果还没完成，就重试。',
+      'Is this task complete? If not, continue executing it.',
+      'Check the task status; if unfinished, retry it.',
+    ];
+    for (const text of mixedExecutionTurns) {
+      expect(classifyRecentActionFollowupIntent(text), text).toBe('execute');
+      expect(classifyConversationActionFollowupIntent(text, unfinished), text).toBe('execute');
+      expect(buildRecentActionContinuationBridge(text, [], unfinished), text)
+        .toContain('- followupIntent: execute');
+    }
+
+    for (const text of [
+      '这个任务完成了吗？',
+      '这个任务完成了吗？继续执行了吗？',
+      'Is it done?',
+      'Is it done? Continue executing?',
+    ]) {
+      expect(classifyConversationActionFollowupIntent(text, unfinished), text).toBe('status');
+      expect(buildRecentActionContinuationBridge(text, [], unfinished), text)
+        .toContain('- followupIntent: status');
+    }
+  });
+
+  it('preserves the unfinished task pointer across status, then resumes it for a conditional action', () => {
+    const unfinished = buildConversationActionContinuationState({
+      userText: '打开记事本并写入验收内容。',
+      assistantText: '桌面中继超时，写入尚未完成。',
+      toolCalls: [{
+        name: 'desktop_open',
+        arguments: { target: '记事本' },
+        error: 'desktop relay timed out',
+      }],
+      updatedAt: '2026-08-21T00:00:00.000Z',
+    });
+    expect(unfinished?.unfinished).toBe(true);
+
+    const policy = {
+      allowedTools: ['desktop_open', 'desktop_ui_type'],
+      requireConfirmation: [],
+      forbiddenTools: [],
+      maxIterations: 8,
+    };
+    const status = prepareConversationActionTaskState(unfinished, {
+      userText: '完成了吗？',
+      requestId: 'status-request',
+      toolPolicy: policy,
+      now: '2026-08-21T00:01:00.000Z',
+    });
+
+    expect(status.kind).toBe('status');
+    expect(status.state?.taskId).toBe(unfinished?.taskId);
+    expect(status.state?.goal).toBe(unfinished?.goal);
+    expect(status.state?.latestInstruction).toBe(unfinished?.latestInstruction);
+    expect(status.state?.revision).toBe(unfinished?.revision);
+    expect(status.state?.status).toBe(unfinished?.status);
+
+    const instruction = '完成了吗？没完成就继续执行。';
+    const resumed = prepareConversationActionTaskState(status.state, {
+      userText: instruction,
+      requestId: 'resume-request',
+      toolPolicy: policy,
+      now: '2026-08-21T00:02:00.000Z',
+    });
+
+    expect(resumed.kind).toBe('resume');
+    expect(resumed.state?.taskId).toBe(unfinished?.taskId);
+    expect(resumed.state?.goal).toBe(unfinished?.goal);
+    expect(resumed.state?.latestInstruction).toBe(instruction);
+    expect(resumed.state?.revision).toBe((unfinished?.revision || 0) + 1);
+    expect(resumed.state?.status).toBe('planning');
+    expect(resumed.state?.unfinished).toBe(true);
   });
 
   it('keeps the executed source path instead of bulk desktop-list samples', () => {

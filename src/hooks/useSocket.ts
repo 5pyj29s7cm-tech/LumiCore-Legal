@@ -6,6 +6,7 @@ import {
   beginDesktopAutomationActivity,
   endDesktopAutomationActivity,
 } from '@/services/desktopAutomationActivity';
+import { desktopCommandRelayOutput } from '@/lib/desktopCommandReceipt';
 
 const isTauri = isTauriRuntime();
 let registeredSocket: Socket | null = null;
@@ -173,6 +174,57 @@ async function handleDesktopExec(socket: Socket, data: {
         output = JSON.stringify(info, null, 2);
         break;
       }
+      case 'desktop_write_text_file': {
+        const targetPath = String(args.path || '').trim();
+        const content = String(args.content ?? '');
+        const encoding = String(args.encoding || 'utf-8').trim().toLowerCase();
+        const overwritePolicy = String(args.overwritePolicy || 'fail_if_exists').trim().toLowerCase();
+        if (!targetPath) {
+          socket.emit(`tool:desktop_result:${correlationId}`, { error: 'No text file path provided' });
+          return;
+        }
+        const result: {
+          success: boolean;
+          status: string;
+          path: string;
+          bytesWritten: number;
+          encoding: string;
+          overwritePolicy: string;
+          overwritten: boolean;
+          readBackMatched: boolean;
+          error?: string | null;
+        } = await invoke('write_text_file', {
+          path: targetPath,
+          content,
+          encoding,
+          overwritePolicy,
+        });
+        if (!result.success) {
+          throw new Error(result.error || `Failed to write text file: ${targetPath}`);
+        }
+        output = JSON.stringify(result);
+        break;
+      }
+      case 'desktop_read_text_file': {
+        const targetPath = String(args.path || '').trim();
+        if (!targetPath) {
+          socket.emit(`tool:desktop_result:${correlationId}`, { error: 'No text file path provided' });
+          return;
+        }
+        const result: {
+          success: boolean;
+          path: string;
+          content: string;
+          bytesRead: number;
+          encoding: string;
+          error?: string | null;
+        } = await invoke('read_text_file', { path: targetPath });
+        if (!result.success) {
+          throw new Error(result.error || `Failed to read text file: ${targetPath}`);
+        }
+        output = JSON.stringify(result);
+        break;
+      }
       case 'desktop_open': {
         const target: string = args.target || '';
         const application: string = args.application || args.browser || '';
@@ -212,7 +264,7 @@ async function handleDesktopExec(socket: Socket, data: {
         if (!result.success) {
           throw new Error(result.output || `Command failed: ${cmd}`);
         }
-        output = result.output;
+        output = desktopCommandRelayOutput(result, correlationId);
         break;
       }
       case 'desktop_active_window': {
@@ -440,12 +492,22 @@ async function dispatchClientAction(args: Record<string, any>): Promise<string> 
   });
 }
 
+/**
+ * Register the desktop device and native tool relay as part of shell startup,
+ * not only when a page component happens to mount. This is idempotent for the
+ * shared Socket.IO instance and is also reused by React consumers.
+ */
+export function initializeSharedSocketRuntime(): Socket {
+  const socket = socketService.connect();
+  registerSharedSocketHandlers(socket);
+  return socket;
+}
+
 export function useSocket() {
   const [socket, setSocket] = useState<Socket | null>(null);
 
   useEffect(() => {
-    const s = socketService.connect();
-    registerSharedSocketHandlers(s);
+    const s = initializeSharedSocketRuntime();
     setSocket(s);
   }, []);
 

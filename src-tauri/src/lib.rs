@@ -2,13 +2,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::collections::HashSet;
-use std::io::Read;
+use std::io::{Read, Write};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -16,6 +17,19 @@ use tauri::{
 };
 #[cfg(not(test))]
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+mod local_bootstrap;
+mod window_activation;
+use local_bootstrap::bootstrap_local_identity;
+use window_activation::{execute_window_activation_steps, WindowActivationOps};
+
+const WINDOW_TOGGLE_SHORTCUT: &str = "Alt+Space";
+const COMMAND_CENTER_SHORTCUT: &str = "Ctrl+Shift+Enter";
+const COMMAND_CENTER_EVENT: &str = "lumi:open-command-center";
+const WINDOW_ACTIVATION_DIAGNOSTIC_EVENT: &str = "lumi:window-activation-diagnostic";
+const MAX_WINDOW_ACTIVATION_DIAGNOSTICS: usize = 50;
+static WINDOW_ACTIVATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 struct SpawnConfig {
     exe: PathBuf,
@@ -56,6 +70,30 @@ struct ResidentState {
     close_to_background: bool,
     started_in_background: bool,
     force_quit: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WindowActivationStepDiagnostic {
+    pub stage: String,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WindowActivationDiagnostic {
+    pub attempt_id: u64,
+    pub attempted_at_ms: u64,
+    pub source: String,
+    pub window_label: String,
+    pub ok: bool,
+    pub failure_stage: Option<String>,
+    pub error: Option<String>,
+    pub steps: Vec<WindowActivationStepDiagnostic>,
+}
+
+#[derive(Default)]
+struct WindowActivationDiagnosticsState {
+    recent: Vec<WindowActivationDiagnostic>,
 }
 
 #[derive(Default)]
@@ -261,6 +299,31 @@ pub struct NativePathInfo {
     pub modified_ms: Option<u64>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTextFileWriteResult {
+    pub success: bool,
+    pub status: String,
+    pub path: String,
+    pub bytes_written: u64,
+    pub encoding: String,
+    pub overwrite_policy: String,
+    pub overwritten: bool,
+    pub read_back_matched: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTextFileReadResult {
+    pub success: bool,
+    pub path: String,
+    pub content: String,
+    pub bytes_read: u64,
+    pub encoding: String,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeAppEntry {
     pub app_id: String,
@@ -271,6 +334,7 @@ pub struct NativeAppEntry {
     pub score: i32,
 }
 
+#[cfg(target_os = "windows")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppLaunchHistoryEntry {
     app_id: String,
@@ -442,6 +506,7 @@ fn detect_gpu() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "windows")]
 fn detect_gpu_usage() -> Option<f32> {
     #[cfg(target_os = "windows")]
     {
@@ -573,6 +638,191 @@ fn path_info(target: String) -> NativePathInfo {
         modified_ms: metadata
             .as_ref()
             .and_then(|m| system_time_to_ms(m.modified())),
+    }
+}
+
+#[tauri::command]
+fn write_text_file(
+    path: String,
+    content: String,
+    encoding: Option<String>,
+    overwrite_policy: Option<String>,
+) -> NativeTextFileWriteResult {
+    const MAX_TEXT_FILE_BYTES: usize = 500 * 1024;
+
+    let target = resolve_user_path(&path);
+    let resolved_path = target.to_string_lossy().to_string();
+    let normalized_encoding = encoding
+        .unwrap_or_else(|| "utf-8".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    let normalized_policy = overwrite_policy
+        .unwrap_or_else(|| "fail_if_exists".to_string())
+        .trim()
+        .to_ascii_lowercase();
+
+    let failure = |message: String| NativeTextFileWriteResult {
+        success: false,
+        status: "failed".to_string(),
+        path: resolved_path.clone(),
+        bytes_written: 0,
+        encoding: normalized_encoding.clone(),
+        overwrite_policy: normalized_policy.clone(),
+        overwritten: false,
+        read_back_matched: false,
+        error: Some(message),
+    };
+
+    if path.trim().is_empty() {
+        return failure("A non-empty text file path is required.".to_string());
+    }
+    if target.file_name().is_none() {
+        return failure("The target must be an exact file path, not a root directory.".to_string());
+    }
+    if target.is_dir() {
+        return failure("The target is a directory, not a text file.".to_string());
+    }
+
+    let bytes = match normalized_encoding.as_str() {
+        "utf-8" | "utf8" => content.into_bytes(),
+        "utf-8-bom" | "utf8-bom" => {
+            let mut value = Vec::with_capacity(content.len() + 3);
+            value.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+            value.extend_from_slice(content.as_bytes());
+            value
+        }
+        _ => {
+            return failure(
+                "Unsupported encoding. Use utf-8 or utf-8-bom for portable text files.".to_string(),
+            );
+        }
+    };
+    if bytes.len() > MAX_TEXT_FILE_BYTES {
+        return failure(format!(
+            "Text content is too large ({} bytes). Maximum is {} bytes.",
+            bytes.len(),
+            MAX_TEXT_FILE_BYTES
+        ));
+    }
+
+    let replace_existing = match normalized_policy.as_str() {
+        "fail_if_exists" => false,
+        "replace" => true,
+        _ => {
+            return failure(
+                "Unsupported overwrite policy. Use fail_if_exists or replace.".to_string(),
+            );
+        }
+    };
+    let existed_before = target.exists();
+    let Some(parent) = target.parent() else {
+        return failure("The target has no parent directory.".to_string());
+    };
+    if !parent.is_dir() {
+        return failure(format!(
+            "Parent directory does not exist: {}",
+            parent.to_string_lossy()
+        ));
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if replace_existing {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut file = match options.open(&target) {
+        Ok(value) => value,
+        Err(error) => return failure(error.to_string()),
+    };
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        return failure(error.to_string());
+    }
+    drop(file);
+
+    let read_back_matched = std::fs::read(&target)
+        .map(|written| written == bytes)
+        .unwrap_or(false);
+    NativeTextFileWriteResult {
+        success: read_back_matched,
+        status: if read_back_matched {
+            "verified"
+        } else {
+            "unverified"
+        }
+        .to_string(),
+        path: resolved_path,
+        bytes_written: bytes.len() as u64,
+        encoding: if normalized_encoding == "utf8" {
+            "utf-8".to_string()
+        } else if normalized_encoding == "utf8-bom" {
+            "utf-8-bom".to_string()
+        } else {
+            normalized_encoding
+        },
+        overwrite_policy: normalized_policy,
+        overwritten: existed_before && replace_existing,
+        read_back_matched,
+        error: if read_back_matched {
+            None
+        } else {
+            Some("The native read-back did not match the requested bytes.".to_string())
+        },
+    }
+}
+
+#[tauri::command]
+fn read_text_file(path: String) -> NativeTextFileReadResult {
+    const MAX_TEXT_FILE_BYTES: u64 = 100 * 1024;
+
+    let target = resolve_user_path(&path);
+    let resolved_path = target.to_string_lossy().to_string();
+    let failure = |message: String| NativeTextFileReadResult {
+        success: false,
+        path: resolved_path.clone(),
+        content: String::new(),
+        bytes_read: 0,
+        encoding: "utf-8".to_string(),
+        error: Some(message),
+    };
+    if path.trim().is_empty() {
+        return failure("A non-empty text file path is required.".to_string());
+    }
+    let metadata = match std::fs::metadata(&target) {
+        Ok(value) => value,
+        Err(error) => return failure(error.to_string()),
+    };
+    if !metadata.is_file() {
+        return failure("The target is not a file.".to_string());
+    }
+    if metadata.len() > MAX_TEXT_FILE_BYTES {
+        return failure(format!(
+            "Text file is too large ({} bytes). Maximum is {} bytes.",
+            metadata.len(),
+            MAX_TEXT_FILE_BYTES
+        ));
+    }
+    let bytes = match std::fs::read(&target) {
+        Ok(value) => value,
+        Err(error) => return failure(error.to_string()),
+    };
+    let (text_bytes, encoding) = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        (&bytes[3..], "utf-8-bom")
+    } else {
+        (bytes.as_slice(), "utf-8")
+    };
+    let content = match std::str::from_utf8(text_bytes) {
+        Ok(value) => value.to_string(),
+        Err(_) => return failure("The native file is not valid UTF-8 text.".to_string()),
+    };
+    NativeTextFileReadResult {
+        success: true,
+        path: resolved_path,
+        content,
+        bytes_read: bytes.len() as u64,
+        encoding: encoding.to_string(),
+        error: None,
     }
 }
 
@@ -841,16 +1091,16 @@ fn run_command(
         }
     };
 
-    let mut cmd = if cfg!(target_os = "windows") {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
         let mut cmd = Command::new("cmd");
-        #[cfg(target_os = "windows")]
-        {
-            cmd.args(["/D", "/S", "/C"]);
-            cmd.raw_arg(&command);
-            cmd.creation_flags(0x08000000u32);
-        }
+        cmd.args(["/D", "/S", "/C"]);
+        cmd.raw_arg(&command);
+        cmd.creation_flags(0x08000000u32);
         cmd
-    } else {
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", &command]);
         cmd
@@ -2214,6 +2464,22 @@ fn list_windows_native_apps(query: Option<&str>, limit: usize) -> Vec<NativeAppE
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+struct RecentlyFocusedWindowsApp {
+    hwnd: isize,
+    pid: u32,
+    title: String,
+    recorded_at: Instant,
+}
+
+#[cfg(target_os = "windows")]
+fn recently_focused_windows_app() -> &'static Mutex<Option<RecentlyFocusedWindowsApp>> {
+    use std::sync::OnceLock;
+    static RECENT: OnceLock<Mutex<Option<RecentlyFocusedWindowsApp>>> = OnceLock::new();
+    RECENT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(target_os = "windows")]
 fn focus_running_windows_app(def: &WindowsAppDefinition) -> Option<CommandResult> {
     let executable_names: Vec<String> = def
         .executable_names
@@ -2299,7 +2565,23 @@ fn focus_running_windows_app(def: &WindowsAppDefinition) -> Option<CommandResult
         if state.hwnd != 0 {
             const SW_RESTORE: i32 = 9;
             ShowWindow(state.hwnd, SW_RESTORE);
-            SetForegroundWindow(state.hwnd);
+            if SetForegroundWindow(state.hwnd) == 0 {
+                return Some(CommandResult {
+                    success: false,
+                    output: format!(
+                        "Found running app {} (pid {}, window \"{}\") but Windows refused to focus it",
+                        def.label, state.pid, state.title
+                    ),
+                });
+            }
+            if let Ok(mut recent) = recently_focused_windows_app().lock() {
+                *recent = Some(RecentlyFocusedWindowsApp {
+                    hwnd: state.hwnd,
+                    pid: state.pid,
+                    title: state.title.clone(),
+                    recorded_at: Instant::now(),
+                });
+            }
             return Some(CommandResult {
                 success: true,
                 output: format!(
@@ -2525,13 +2807,17 @@ async fn list_native_apps(query: Option<String>, limit: Option<usize>) -> Vec<Na
 
 #[tauri::command]
 fn open_item(
-    mut target: String,
+    target: String,
     application: Option<String>,
     window: tauri::WebviewWindow,
 ) -> CommandResult {
     // Open file, folder, app, or URL with the OS default handler
     let _ = window.set_always_on_top(false);
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let mut target = target;
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     if let Some(application) = application
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -2546,6 +2832,9 @@ fn open_item(
             return result;
         }
     }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let _ = application;
 
     #[cfg(target_os = "windows")]
     if let Some(result) = try_launch_windows_app_alias(&target) {
@@ -3233,8 +3522,18 @@ fn hide_to_background(window: tauri::WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
-    show_main_window_impl(&app)
+fn show_main_window(app: tauri::AppHandle) -> Result<WindowActivationDiagnostic, String> {
+    let diagnostic = show_main_window_impl(&app, "ipc_command");
+    if diagnostic.ok {
+        Ok(diagnostic)
+    } else {
+        Err(serde_json::to_string(&diagnostic).unwrap_or_else(|error| {
+            format!(
+                r#"{{"ok":false,"failure_stage":"serialize_diagnostic","error":"{}"}}"#,
+                error
+            )
+        }))
+    }
 }
 
 #[tauri::command]
@@ -3416,32 +3715,165 @@ fn set_autostart_entry(_enabled: bool) -> Result<(), String> {
     Err("Launch at login is currently implemented for Windows builds.".to_string())
 }
 
-fn show_main_window_impl(app: &tauri::AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window not found".to_string())?;
-    let wallpaper_enabled = app
-        .state::<Mutex<WallpaperState>>()
+struct TauriWindowActivationOps<'a> {
+    window: &'a tauri::WebviewWindow,
+}
+
+impl WindowActivationOps for TauriWindowActivationOps<'_> {
+    fn show(&self) -> Result<(), String> {
+        self.window.show().map_err(|error| error.to_string())
+    }
+
+    fn unminimize(&self) -> Result<(), String> {
+        self.window.unminimize().map_err(|error| error.to_string())
+    }
+
+    fn focus_window(&self) -> Result<(), String> {
+        self.window.set_focus().map_err(|error| error.to_string())
+    }
+
+    fn focus_webview(&self) -> Result<(), String> {
+        let webview: &tauri::Webview<_> = self.window.as_ref();
+        webview.set_focus().map_err(|error| error.to_string())
+    }
+
+    fn is_visible(&self) -> Result<bool, String> {
+        self.window.is_visible().map_err(|error| error.to_string())
+    }
+
+    fn is_focused(&self) -> Result<bool, String> {
+        self.window.is_focused().map_err(|error| error.to_string())
+    }
+}
+
+fn window_activation_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn execute_window_activation<O: WindowActivationOps>(
+    source: &str,
+    window_label: &str,
+    restore_result: Result<(), String>,
+    operations: &O,
+) -> WindowActivationDiagnostic {
+    let steps = execute_window_activation_steps(restore_result, operations)
+        .into_iter()
+        .map(|step| WindowActivationStepDiagnostic {
+            stage: step.stage.to_string(),
+            ok: step.error.is_none(),
+            error: step.error,
+        })
+        .collect::<Vec<_>>();
+    let first_failure = steps.iter().find(|step| !step.ok);
+    WindowActivationDiagnostic {
+        attempt_id: WINDOW_ACTIVATION_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        attempted_at_ms: window_activation_timestamp_ms(),
+        source: source.to_string(),
+        window_label: window_label.to_string(),
+        ok: first_failure.is_none(),
+        failure_stage: first_failure.map(|step| step.stage.clone()),
+        error: first_failure.and_then(|step| step.error.clone()),
+        steps,
+    }
+}
+
+fn missing_main_window_diagnostic(source: &str) -> WindowActivationDiagnostic {
+    WindowActivationDiagnostic {
+        attempt_id: WINDOW_ACTIVATION_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        attempted_at_ms: window_activation_timestamp_ms(),
+        source: source.to_string(),
+        window_label: "main".to_string(),
+        ok: false,
+        failure_stage: Some("locate_window".to_string()),
+        error: Some("main window not found".to_string()),
+        steps: vec![WindowActivationStepDiagnostic {
+            stage: "locate_window".to_string(),
+            ok: false,
+            error: Some("main window not found".to_string()),
+        }],
+    }
+}
+
+fn publish_window_activation_diagnostic(
+    app: &tauri::AppHandle,
+    diagnostic: &WindowActivationDiagnostic,
+) {
+    let state = app.state::<Mutex<WindowActivationDiagnosticsState>>();
+    match state.lock() {
+        Ok(mut diagnostics) => {
+            diagnostics.recent.push(diagnostic.clone());
+            let overflow = diagnostics
+                .recent
+                .len()
+                .saturating_sub(MAX_WINDOW_ACTIVATION_DIAGNOSTICS);
+            if overflow > 0 {
+                diagnostics.recent.drain(0..overflow);
+            }
+        }
+        Err(error) => eprintln!(
+            "[LumiOS][window_activation] diagnostic_store_failed: {}",
+            error
+        ),
+    }
+
+    let serialized = serde_json::to_string(diagnostic)
+        .unwrap_or_else(|error| format!(r#"{{"ok":false,"serialization_error":"{}"}}"#, error));
+    if diagnostic.ok {
+        println!("[LumiOS][window_activation] {}", serialized);
+    } else {
+        eprintln!("[LumiOS][window_activation] {}", serialized);
+    }
+    if let Err(error) = app.emit(WINDOW_ACTIVATION_DIAGNOSTIC_EVENT, diagnostic.clone()) {
+        eprintln!(
+            "[LumiOS][window_activation] diagnostic_emit_failed: {}",
+            error
+        );
+    }
+}
+
+fn show_main_window_impl(app: &tauri::AppHandle, source: &str) -> WindowActivationDiagnostic {
+    let Some(window) = app.get_webview_window("main") else {
+        let diagnostic = missing_main_window_diagnostic(source);
+        publish_window_activation_diagnostic(app, &diagnostic);
+        return diagnostic;
+    };
+    let wallpaper_state = app.state::<Mutex<WallpaperState>>();
+    let wallpaper_enabled = wallpaper_state
         .lock()
         .map(|state| state.enabled)
-        .unwrap_or(false);
-    let restore_result = if wallpaper_enabled {
-        let state = app.state::<Mutex<WallpaperState>>();
-        let result = apply_wallpaper_mode(false, state.inner(), &window);
-        if result.is_ok() {
-            let _ = window.emit(
-                "lumi:wallpaper-mode-changed",
-                WallpaperMode { enabled: false },
-            );
+        .map_err(|error| format!("read wallpaper state: {error}"));
+    let restore_result = match wallpaper_enabled {
+        Ok(true) => {
+            let result = apply_wallpaper_mode(false, wallpaper_state.inner(), &window);
+            if result.is_ok() {
+                let _ = window.emit(
+                    "lumi:wallpaper-mode-changed",
+                    WallpaperMode { enabled: false },
+                );
+            }
+            result.map(|_| ())
         }
-        result.map(|_| ())
-    } else {
-        Ok(())
+        Ok(false) => Ok(()),
+        Err(error) => Err(error),
     };
-    window.show().map_err(|e| e.to_string())?;
-    let _ = window.unminimize();
-    window.set_focus().map_err(|e| e.to_string())?;
-    restore_result
+    let operations = TauriWindowActivationOps { window: &window };
+    let diagnostic = execute_window_activation(source, "main", restore_result, &operations);
+    publish_window_activation_diagnostic(app, &diagnostic);
+    diagnostic
+}
+
+#[tauri::command]
+fn get_window_activation_diagnostics(
+    state: tauri::State<'_, Mutex<WindowActivationDiagnosticsState>>,
+) -> Result<Vec<WindowActivationDiagnostic>, String> {
+    state
+        .lock()
+        .map(|diagnostics| diagnostics.recent.clone())
+        .map_err(|error| error.to_string())
 }
 
 fn hide_main_window_impl(app: &tauri::AppHandle) -> Result<(), String> {
@@ -3470,10 +3902,10 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
-                let _ = show_main_window_impl(app);
+                show_main_window_impl(app, "tray_menu_show");
             }
             "exit_wallpaper" => {
-                let _ = show_main_window_impl(app);
+                show_main_window_impl(app, "tray_exit_wallpaper");
             }
             "hide" => {
                 let _ = hide_main_window_impl(app);
@@ -3494,7 +3926,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 ..
             } = event
             {
-                let _ = show_main_window_impl(tray.app_handle());
+                show_main_window_impl(tray.app_handle(), "tray_left_click");
             }
         });
 
@@ -3633,15 +4065,36 @@ pub struct CaptureResult {
 
 #[tauri::command]
 fn get_active_window_info() -> ActiveWindowInfo {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let mut window_id = String::new();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let window_id = String::new();
     let mut title = String::new();
     let mut process_name = String::new();
+    #[cfg(target_os = "windows")]
     let mut executable_path = String::new();
+    #[cfg(not(target_os = "windows"))]
+    let executable_path = String::new();
+    #[cfg(target_os = "windows")]
     let mut publisher = String::new();
+    #[cfg(not(target_os = "windows"))]
+    let publisher = String::new();
+    #[cfg(target_os = "windows")]
     let mut product_name = String::new();
+    #[cfg(not(target_os = "windows"))]
+    let product_name = String::new();
+    #[cfg(target_os = "windows")]
     let mut product_version = String::new();
+    #[cfg(not(target_os = "windows"))]
+    let product_version = String::new();
+    #[cfg(target_os = "windows")]
     let mut window_class = String::new();
+    #[cfg(not(target_os = "windows"))]
+    let window_class = String::new();
+    #[cfg(target_os = "windows")]
     let mut signature_status = String::new();
+    #[cfg(not(target_os = "windows"))]
+    let signature_status = String::new();
     #[allow(unused_mut)]
     let mut pid: u32 = 0;
     #[allow(unused_mut)]
@@ -3664,13 +4117,37 @@ fn get_active_window_info() -> ActiveWindowInfo {
         }
         extern "system" {
             fn GetForegroundWindow() -> isize;
+            fn IsWindow(hwnd: isize) -> i32;
+            fn IsWindowVisible(hwnd: isize) -> i32;
             fn GetWindowTextW(hwnd: isize, lpString: *mut u16, nMaxCount: i32) -> i32;
             fn GetWindowThreadProcessId(hwnd: isize, lpdwProcessId: *mut u32) -> u32;
             fn GetWindowRect(hwnd: isize, lpRect: *mut Rect) -> i32;
             fn GetClassNameW(hwnd: isize, lpClassName: *mut u16, nMaxCount: i32) -> i32;
         }
         unsafe {
-            let hwnd = GetForegroundWindow();
+            let mut hwnd = GetForegroundWindow();
+            // Remote-control overlays and a few UWP focus transitions can leave
+            // Windows without a foreground HWND even though SetForegroundWindow
+            // just succeeded. In that narrow case, retain the exact visible
+            // HWND/PID/title that the native app resolver focused. The fallback
+            // expires quickly and is never used when Windows reports another
+            // foreground window, so ordinary target-mismatch checks stay strict.
+            if hwnd == 0 {
+                if let Ok(mut recent) = recently_focused_windows_app().lock() {
+                    let valid = recent.as_ref().is_some_and(|focused| {
+                        focused.recorded_at.elapsed() <= Duration::from_secs(5)
+                            && IsWindow(focused.hwnd) != 0
+                            && IsWindowVisible(focused.hwnd) != 0
+                    });
+                    if valid {
+                        if let Some(focused) = recent.as_ref() {
+                            hwnd = focused.hwnd;
+                        }
+                    } else {
+                        *recent = None;
+                    }
+                }
+            }
             if hwnd != 0 {
                 window_id = hwnd.to_string();
                 let mut buf: [u16; 512] = [0; 512];
@@ -3682,6 +4159,15 @@ fn get_active_window_info() -> ActiveWindowInfo {
                     window_class = String::from_utf16_lossy(&class_buf[..class_len as usize]);
                 }
                 GetWindowThreadProcessId(hwnd, &mut pid);
+                if let Ok(recent) = recently_focused_windows_app().lock() {
+                    if let Some(focused) = recent.as_ref() {
+                        if hwnd == focused.hwnd && (pid != focused.pid || title != focused.title) {
+                            window_id.clear();
+                            title.clear();
+                            pid = 0;
+                        }
+                    }
+                }
                 let mut rect = Rect {
                     left: 0,
                     top: 0,
@@ -4536,6 +5022,7 @@ Write-Output "OK|$x|$y|$w|$h""#,
 }
 
 /// Simple base64 encoder — avoids pulling in a crate for one function.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn base64_encode(bytes: &[u8]) -> String {
     const CHARS: &[char] = &[
         'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
@@ -4850,7 +5337,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // A second launch is another native recovery path for a
             // click-through wallpaper window.
-            let _ = show_main_window_impl(app);
+            show_main_window_impl(app, "single_instance");
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -4887,20 +5374,24 @@ pub fn run() {
         }))
         .manage(Mutex::new(DesktopWidgetState::default()))
         .manage(Mutex::new(CompactWindowState::default()))
+        .manage(Mutex::new(WindowActivationDiagnosticsState::default()))
         .on_page_load(move |webview, payload| {
             if !started_in_background
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
             {
-                let _ = webview.window().show();
+                show_main_window_impl(webview.app_handle(), "page_load");
             }
         })
         .invoke_handler(tauri::generate_handler![
+            bootstrap_local_identity,
             get_system_info,
             get_desktop_capability_status,
             get_live_stats,
             list_home_files,
             list_directory,
             path_info,
+            write_text_file,
+            read_text_file,
             list_native_apps,
             create_directory,
             rename_item,
@@ -4923,6 +5414,7 @@ pub fn run() {
             close_window,
             hide_to_background,
             show_main_window,
+            get_window_activation_diagnostics,
             quit_app,
             set_close_to_background,
             get_autostart_enabled,
@@ -5126,24 +5618,44 @@ pub fn run() {
                 });
             }
 
-            // Register Alt+Space global shortcut (hide/show window)
-            use tauri_plugin_global_shortcut::GlobalShortcutExt;
+            // Register the native window and command-center shortcuts. The
+            // browser key handler remains a fallback when the webview is
+            // already focused; this path also works while focus is elsewhere.
             let window = app.get_webview_window("main").unwrap();
             let reg = app.global_shortcut();
-            let _ = reg.on_shortcut("Alt+Space", move |app, _shortcut, _event| {
-                let wallpaper_enabled = app
-                    .state::<Mutex<WallpaperState>>()
-                    .lock()
-                    .map(|state| state.enabled)
-                    .unwrap_or(false);
-                if wallpaper_enabled {
-                    let _ = show_main_window_impl(app);
-                } else if window.is_visible().unwrap_or(true) {
-                    let _ = window.hide();
-                } else {
-                    let _ = show_main_window_impl(app);
-                }
-            });
+            if let Err(error) =
+                reg.on_shortcut(WINDOW_TOGGLE_SHORTCUT, move |app, _shortcut, _event| {
+                    let wallpaper_enabled = app
+                        .state::<Mutex<WallpaperState>>()
+                        .lock()
+                        .map(|state| state.enabled)
+                        .unwrap_or(false);
+                    if wallpaper_enabled {
+                        show_main_window_impl(app, "global_toggle_wallpaper");
+                    } else if window.is_visible().unwrap_or(true) {
+                        let _ = window.hide();
+                    } else {
+                        show_main_window_impl(app, "global_toggle_hidden");
+                    }
+                })
+            {
+                eprintln!(
+                    "[LumiOS] Failed to register {WINDOW_TOGGLE_SHORTCUT} global shortcut: {error}"
+                );
+            }
+            if let Err(error) =
+                reg.on_shortcut(COMMAND_CENTER_SHORTCUT, move |app, _shortcut, event| {
+                    if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        return;
+                    }
+                    show_main_window_impl(app, "command_center_shortcut");
+                    let _ = app.emit(COMMAND_CENTER_EVENT, ());
+                })
+            {
+                eprintln!(
+                    "[LumiOS] Failed to register {COMMAND_CENTER_SHORTCUT} global shortcut: {error}"
+                );
+            }
 
             Ok(())
         })
@@ -5171,9 +5683,12 @@ pub fn run() {
             tauri::RunEvent::Reopen { .. } => {
                 // Clicking the Dock icon must always recover a click-through
                 // wallpaper window and restore its previous bounds.
-                let _ = show_main_window_impl(app);
+                show_main_window_impl(app, "macos_reopen");
             }
             tauri::RunEvent::Exit => {
+                if let Err(error) = app.global_shortcut().unregister_all() {
+                    eprintln!("[LumiOS] Failed to unregister global shortcuts: {error}");
+                }
                 let state = app.state::<Mutex<BackendProcesses>>();
                 let mut procs = state.lock().unwrap();
                 if let Some(child) = procs.node.as_mut() {

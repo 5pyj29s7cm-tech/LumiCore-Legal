@@ -18,6 +18,7 @@ import {
   recordPendingConfirmation,
 } from '../server/tools/pending_confirmation';
 import { ToolRegistry } from '../server/tools/registry';
+import { restrictToolPolicyForExecutionBoundary } from '../server/tools/remote_policy';
 
 interface VoiceReplayScenario {
   command: string;
@@ -107,7 +108,15 @@ describe('industry edition pure voice replay', () => {
       expect(voice.turnIntent.flow.clientActionOnlyTurn).toBe(true);
       expect(voice.turnIntent.flow.industryWorkflowEntryId || '').toBe('');
       expect(new Set(voice.execution.toolPolicy.allowedTools)).toEqual(new Set(['client_get_state', 'client_action']));
-      expect(new Set(chat.execution.toolPolicy.allowedTools)).toEqual(new Set(voice.execution.toolPolicy.allowedTools));
+      expect(chat.turnIntent.flow.clientActionOnlyTurn).toBe(true);
+      expect(chat.turnIntent.flow.modelToolAccess).toBe('manifest');
+      expect(chat.execution.toolPolicy.allowedTools).toEqual(expect.arrayContaining(['client_get_state', 'client_action']));
+      expect(chat.execution.toolRoute?.hardAllowlist).not.toBe(true);
+      const remotePolicy = restrictToolPolicyForExecutionBoundary(
+        chat.execution.toolPolicy,
+        'remote_restricted',
+      );
+      expect(remotePolicy.allowedTools).not.toContain('client_action');
       expect(voice.execution.toolPolicy.allowedTools).not.toContain('desktop_open');
       expect(voice.execution.toolPolicy.allowedTools).not.toContain('industry_workflow_start');
 

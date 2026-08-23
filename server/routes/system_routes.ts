@@ -10,7 +10,8 @@ import { scheduler } from "../scheduler";
 import { classifyCloudError, getCloudHealth, recordFailure, resetCircuit } from "../cloud/core";
 import { loadKeys, saveKeys, getKey, getAllKeyNames, isPersistableKeyName } from "../config/keys";
 import { parseDoubaoSpeechCredentials } from "../config/doubao_speech";
-import { requireAuth, requireLocalRequest, resolveDomain } from "../middleware/auth";
+import { optionalAuth, requireAdmin, requireAuth, requireLocalRequest, resolveDomain } from "../middleware/auth";
+import { isLoopbackAddress } from "../config/local_identity";
 import { getLatencyStats } from "../monitor/latency_store";
 import { getVoiceLatencyStats } from "../monitor/voice_latency_store";
 import { mcpManager, getMCPConfig } from "../mcp";
@@ -37,6 +38,10 @@ import {
 } from "../llm/retrieval_model_preferences";
 import { getUserPreferredLLM, upsertUserPreferredLLM } from "../llm/user_preferences";
 import { listModelRoutingReceipts } from "../llm/model_routing_receipts";
+import {
+  assessProviderAvailability,
+  saveProviderProbe,
+} from "../llm/provider_health";
 import { getVoicePreference, setVoicePreference, type VoicePreference } from "../config/voice_preference";
 import { getActiveSTTProvider, getActiveStreamingSTTProvider } from "../stt/adapter";
 import { getActiveProvider as getActiveTTSProvider } from "../tts/adapter";
@@ -69,6 +74,10 @@ import {
 import { getDesktopControlRuntimeSnapshot } from "../desktop/control_lease";
 import { listRegisteredProviders } from '../extensions/registry';
 import { buildStructuredRuntimeStatus } from '../monitor/runtime_status';
+import {
+  buildAcceptanceEvidenceSnapshot,
+  buildPublicAcceptanceSummary,
+} from '../cognition/acceptance_evidence';
 
 export { testLLMProviderConnection, testVisionProviderConnection } from "../llm/model_configuration";
 
@@ -78,43 +87,6 @@ let systemStatsCache: { at: number; value: any } | null = null;
 let systemStatsInFlight: Promise<any> | null = null;
 const serverStartedAt = new Date().toISOString();
 
-interface ProviderProbeRecord {
-  provider: string;
-  model: string;
-  ok: boolean;
-  testedAt: string;
-  latencyMs?: number;
-  error?: string;
-  errorCategory?: string;
-}
-
-function providerProbeKey(provider: string): string {
-  return `provider_probe_${provider}`;
-}
-
-function readProviderProbe(provider: string): ProviderProbeRecord | null {
-  try {
-    const db = readDB();
-    const setting = (db.settings || []).find((item: any) => item.key === providerProbeKey(provider));
-    return setting?.value ? JSON.parse(setting.value) : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveProviderProbe(probe: ProviderProbeRecord): void {
-  try {
-    const db = readDB();
-    if (!db.settings) db.settings = [];
-    const key = providerProbeKey(probe.provider);
-    const value = JSON.stringify(probe);
-    const setting = db.settings.find((item: any) => item.key === key);
-    if (setting) setting.value = value;
-    else db.settings.push({ key, value });
-    writeDB(db);
-  } catch {}
-}
-
 const runtimeBuildMetadata = loadRuntimeBuildMetadata();
 
 function sanitizedProviderError(error: unknown): string {
@@ -122,6 +94,56 @@ function sanitizedProviderError(error: unknown): string {
     .replace(/(?:sk|key)-[A-Za-z0-9_-]{8,}/gi, '[redacted]')
     .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
     .slice(0, 400);
+}
+
+const PROTECTED_ENDPOINT_KEY_RE = /(?:_BASE_URL|_MCP_URL|_WEBHOOK_URL)$/;
+const USER_SCOPED_SETTING_KEYS = new Set(['tool_overrides']);
+
+function scopedUserSettingKey(userId: string, key: string): string {
+  return `user_setting:${String(userId || '').trim()}:${key}`;
+}
+
+function normalizeUserSetting(key: string, value: unknown): unknown {
+  if (key !== 'tool_overrides' || !value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Unsupported or invalid user setting.');
+  }
+  const normalized: Record<string, { enabled: boolean; securityLevel?: 'safe' | 'confirm' }> = {};
+  for (const [toolName, raw] of Object.entries(value as Record<string, any>).slice(0, 500)) {
+    const name = String(toolName || '').trim().slice(0, 180);
+    if (!name || !raw || typeof raw !== 'object' || Array.isArray(raw) || typeof raw.enabled !== 'boolean') continue;
+    const securityLevel = raw.securityLevel === 'safe' || raw.securityLevel === 'confirm'
+      ? raw.securityLevel
+      : undefined;
+    normalized[name] = { enabled: raw.enabled, ...(securityLevel ? { securityLevel } : {}) };
+  }
+  return normalized;
+}
+
+function validateProtectedEndpointSetting(name: string, value: string): string | null {
+  if (!PROTECTED_ENDPOINT_KEY_RE.test(name) || !value) return null;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return `${name} must be a valid absolute HTTP(S) URL.`;
+  }
+  if (parsed.username || parsed.password || parsed.hash) {
+    return `${name} must not contain embedded credentials or a URL fragment.`;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return `${name} must use HTTPS, or HTTP for a loopback service.`;
+  }
+
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const loopback = hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname === '::1'
+    || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+  if (parsed.protocol === 'http:' && !loopback) {
+    return `${name} must use HTTPS unless it targets a loopback service.`;
+  }
+  return null;
 }
 
 export function getRuntimeVersionInfo() {
@@ -264,7 +286,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     res.json(getRuntimeVersionInfo());
   });
 
-  router.get("/runtime/logs", requireAuth, (req, res) => {
+  router.get("/runtime/logs", requireAuth, requireAdmin, requireLocalRequest, (req, res) => {
     const maxLines = Math.min(Math.max(Number(req.query.lines) || 240, 40), 600);
     const sources = collectRuntimeLogSources().map(source => ({
       id: source.id,
@@ -282,15 +304,36 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   });
 
   // Health Check
-  router.get("/health", (req, res) => {
+  router.get("/health", optionalAuth, (req, res) => {
     try {
+      const persistence = getDatabasePersistenceStatus();
+      const detailed = /^(?:1|true|yes)$/i.test(String(req.query.details || ''));
+      if (!detailed) {
+        return res.json({
+          status: persistence.degraded ? 'degraded' : 'ok',
+          timestamp: new Date().toISOString(),
+          runtime: {
+            name: runtimeBuildMetadata.name,
+            version: runtimeBuildMetadata.version,
+            buildId: runtimeBuildMetadata.buildId,
+          },
+          database: {
+            dirty: isDbDirty(),
+            persistence: { degraded: persistence.degraded },
+          },
+        });
+      }
+      if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+      if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      if (!isLoopbackAddress(req.socket?.remoteAddress)) {
+        return res.status(403).json({ error: 'Detailed health is available only from the local Lumi desktop client.' });
+      }
       const db = readDB();
       const memory = process.memoryUsage();
       const toolMetrics = getToolRuntimeMetrics();
       const capabilityMetrics = getCapabilityRuntimeMetrics();
       const ollama = getLocalModelConfig('ollama');
       const lmstudio = getLocalModelConfig('lmstudio');
-      const persistence = getDatabasePersistenceStatus();
       const backgroundTasks = Array.isArray(db.backgroundDelegationTasks) ? db.backgroundDelegationTasks : [];
       const autonomousTasks = Array.isArray(db.autonomousTasks) ? db.autonomousTasks : [];
       const externalAiSessions = Array.isArray(db.externalAiSessions) ? db.externalAiSessions : [];
@@ -300,6 +343,14 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       const externalAiHistoryMessages = Array.isArray(db.externalAiHistoryMessages) ? db.externalAiHistoryMessages : [];
       const extensionRevisions = Array.isArray(db.extensionRevisions) ? db.extensionRevisions : [];
       const extensionReceipts = Array.isArray(db.extensionActivationReceipts) ? db.extensionActivationReceipts : [];
+      const mcpHealth = mcpManager.getServerHealth();
+      const acceptance = buildAcceptanceEvidenceSnapshot({
+        db,
+        manifest: toolRegistry.getCapabilityManifest(),
+        toolMetrics: toolMetrics.tools,
+        capabilityMetrics,
+        mcpHealth,
+      });
       const countTaskStatuses = (tasks: any[]) => tasks.reduce((counts: Record<string, number>, task: any) => {
         const status = String(task?.status || 'unknown');
         counts[status] = (counts[status] || 0) + 1;
@@ -337,6 +388,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
         tools: toolMetrics,
         capabilities: {
           ...capabilityMetrics,
+          acceptance: buildPublicAcceptanceSummary(acceptance),
           rollout: {
             stage: getCapabilityRolloutStage(),
             rollbackExternalDisabled: /^(?:1|true|yes|on)$/i.test(
@@ -374,7 +426,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
           databaseRead: true,
           registeredTools: toolRegistry.list().length,
           extensionProviders: listRegisteredProviders().map(({ userId: _userId, ...provider }) => provider),
-          mcp: mcpManager.getServerHealth(),
+          mcp: mcpHealth,
           localModels: {
             ollama: {
               reachable: ollama.serviceReachable === true,
@@ -412,7 +464,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   });
 
   // Cloud provider health — circuit breaker + fallback status
-  router.get("/cloud/health", (_req, res) => {
+  router.get("/cloud/health", requireAuth, (_req, res) => {
     try { res.json(getCloudHealth()); } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -424,18 +476,33 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     try {
       const scope = resolveDomain(req.user!);
       const toolMetrics = getToolRuntimeMetrics();
-      res.json(buildStructuredRuntimeStatus(readDB(), {
+      const db = readDB();
+      const capabilityMetrics = getCapabilityRuntimeMetrics();
+      const runtimeStatus = buildStructuredRuntimeStatus(db, {
         userId: req.user!.uid,
         domain: scope.domain,
         orgId: scope.orgId,
         runtime: {
           toolMetrics: toolMetrics.totals,
-          capabilityMetrics: getCapabilityRuntimeMetrics(),
+          capabilityMetrics,
           voiceLatency: getVoiceLatencyStats(),
           supervisor: getUnifiedRuntimeSupervisorStatus(),
           readOnlyContextCache: readOnlyContextCache.metrics(),
         },
-      }));
+      });
+      const acceptance = buildAcceptanceEvidenceSnapshot({
+        db,
+        manifest: toolRegistry.getCapabilityManifest(),
+        toolMetrics: toolMetrics.tools,
+        capabilityMetrics,
+        mcpHealth: mcpManager.getServerHealth(),
+        scope: {
+          userId: req.user!.uid,
+          domain: scope.domain,
+          orgId: scope.orgId,
+        },
+      });
+      res.json({ ...runtimeStatus, acceptance });
     } catch (error: any) {
       logger.error('Structured runtime status failed', error);
       res.status(500).json({ error: error.message });
@@ -445,7 +512,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   // Explicit functional probe for local OpenAI-compatible runtimes. This is
   // separate from the cheap cached /health response so monitoring can choose
   // when to incur a network probe.
-  router.get("/llm/local/health", requireLocalRequest, async (_req, res) => {
+  router.get("/llm/local/health", requireAuth, requireAdmin, requireLocalRequest, async (_req, res) => {
     const current = {
       ollama: getLocalModelConfig('ollama'),
       lmstudio: getLocalModelConfig('lmstudio'),
@@ -465,7 +532,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     });
   });
 
-  router.get("/voice/active-provider", requireAuth, (_req, res) => {
+  router.get("/voice/active-provider", requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
     const pref = getVoicePreference();
     res.json({
       pref,
@@ -477,7 +544,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     });
   });
 
-  router.post("/voice/doubao/probe", requireAuth, requireLocalRequest, async (_req, res) => {
+  router.post("/voice/doubao/probe", requireAuth, requireAdmin, requireLocalRequest, async (_req, res) => {
     const ttsDetails = getConfiguredDoubaoTtsDetails();
     if (!ttsDetails.credentialMode || !ttsDetails.voiceId) {
       return res.status(400).json({
@@ -523,7 +590,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     return res.status(result.ok ? 200 : 502).json(result);
   });
 
-  router.post("/voice/provider", requireAuth, requireLocalRequest, (req, res) => {
+  router.post("/voice/provider", requireAuth, requireAdmin, requireLocalRequest, (req, res) => {
     const { stt, tts } = req.body || {};
     const allowedStt = new Set<VoicePreference['stt']>(['auto', 'local-whisper', 'qwen', 'ark', 'whisper']);
     const allowedTts = new Set<VoicePreference['tts']>(['auto', 'local-cosyvoice', 'gptsovits', 'cosyvoice', 'ark']);
@@ -551,7 +618,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   });
 
   // Tool list for security config
-  router.get("/tools", (_req, res) => {
+  router.get("/tools", requireAuth, (_req, res) => {
     const tools = toolRegistry.list().map(t => ({
       name: t.name,
       description: t.description.slice(0, 80),
@@ -561,11 +628,11 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     res.json(tools);
   });
 
-  router.get("/scheduler/tasks", requireAuth, (_req, res) => {
+  router.get("/scheduler/tasks", requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
     res.json({ tasks: scheduler.listTasks() });
   });
 
-  router.post("/scheduler/tasks/:id/toggle", requireAuth, (req, res) => {
+  router.post("/scheduler/tasks/:id/toggle", requireAuth, requireAdmin, requireLocalRequest, (req, res) => {
     const { id } = req.params;
     const result = scheduler.toggleTask(id);
     if (!result.found) {
@@ -591,7 +658,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
       const filtered = allUsage.filter((u: any) =>
-        (u.userId === decoded.uid || u.userId === 'anonymous') &&
+        u.userId === decoded.uid &&
         u.timestamp >= cutoff &&
         (!providerFilter || u.provider === providerFilter)
       );
@@ -631,7 +698,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   });
 
   // Provider status
-  router.get("/llm/providers", (_req, res) => {
+  router.get("/llm/providers", requireAuth, (_req, res) => {
     try {
       const stored = loadKeys();
       const envOrStore = (envKey: string, storeKey: string = envKey) =>
@@ -639,24 +706,29 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       const ollamaConfig = getLocalModelConfig('ollama');
       const lmstudioConfig = getLocalModelConfig('lmstudio');
       const extensionProviders = listRegisteredProviders().map(({ userId: _userId, ...provider }) => provider);
-      const status = (provider: string, configured: boolean, model: string) => ({
-        available: configured,
-        configured,
+      const status = (
+        provider: string,
+        configured: boolean,
+        model: string,
+        runtimeHealthy = false,
+      ) => ({
+        ...assessProviderAvailability({ provider, configured, model, runtimeHealthy }),
         model,
-        lastProbe: readProviderProbe(provider),
       });
-      const dynamicProviders = Object.fromEntries(extensionProviders.map(provider => [String(provider.id), {
-        available: provider.configured === true,
-        configured: provider.configured === true,
-        model: String(provider.defaultModel || ''),
-        local: provider.local === true,
-        extension: true,
-        version: provider.version,
-        models: provider.models,
-        compatibility: provider.compatibility,
-        manifestDigest: provider.manifestDigest,
-        signerFingerprint: provider.signerFingerprint,
-      }]));
+      const dynamicProviders = Object.fromEntries(extensionProviders.map(provider => {
+        const providerId = String(provider.id);
+        const model = String(provider.defaultModel || '');
+        return [providerId, {
+          ...status(providerId, provider.configured === true, model),
+          local: provider.local === true,
+          extension: true,
+          version: provider.version,
+          models: provider.models,
+          compatibility: provider.compatibility,
+          manifestDigest: provider.manifestDigest,
+          signerFingerprint: provider.signerFingerprint,
+        }];
+      }));
       res.json({
         providers: {
           deepseek: status('deepseek', envOrStore('DEEPSEEK_API_KEY'), process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash'),
@@ -669,8 +741,8 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
           kimi: status('kimi', envOrStore('KIMI_API_KEY'), process.env.KIMI_MODEL || 'moonshot-v1-8k'),
           glm: status('glm', envOrStore('GLM_API_KEY'), process.env.GLM_MODEL || 'glm-5.1'),
           relay: status('relay', envOrStore('RELAY_API_KEY') && envOrStore('RELAY_BASE_URL'), process.env.RELAY_MODEL || 'openai-compatible'),
-          ollama: status('ollama', ollamaConfig.detected, ollamaConfig.models[0] || 'local'),
-          lmstudio: status('lmstudio', lmstudioConfig.detected, lmstudioConfig.models[0] || 'local'),
+          ollama: status('ollama', ollamaConfig.detected, ollamaConfig.models[0] || 'local', ollamaConfig.detected),
+          lmstudio: status('lmstudio', lmstudioConfig.detected, lmstudioConfig.models[0] || 'local', lmstudioConfig.detected),
           ...dynamicProviders,
         },
       });
@@ -680,7 +752,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   });
 
   // LLM connection test
-  router.post("/llm/test", requireLocalRequest, async (req, res) => {
+  router.post("/llm/test", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
     const { provider, model } = req.body || {};
     const providerId = String(provider || '');
     const modelId = typeof model === 'string' ? model : undefined;
@@ -714,7 +786,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.post("/llm/route/test", requireLocalRequest, async (req, res) => {
+  router.post("/llm/route/test", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
     const uid = getUserIdFromRequest(req, jwtSecret);
     try {
       res.json(await testLumiModelConfiguration(uid, 'reasoning', llm));
@@ -725,7 +797,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.post("/vision/test", requireLocalRequest, async (req, res) => {
+  router.post("/vision/test", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
     const provider = String(req.body?.provider || '');
     const model = String(req.body?.model || '');
     try {
@@ -737,7 +809,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.post("/retrieval-model/test", requireLocalRequest, async (req, res) => {
+  router.post("/retrieval-model/test", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
     const uid = getUserIdFromRequest(req, jwtSecret);
     try {
       const startedAt = Date.now();
@@ -786,7 +858,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   // API Keys — read/write user-configured keys
   // LLM model preferences — read/write per user
-  router.put("/preferences/llm", (req, res) => {
+  router.put("/preferences/llm", requireAuth, (req, res) => {
     try {
       const uid = getUserIdFromRequest(req, jwtSecret);
       const updated = upsertUserPreferredLLM(uid, req.body || {});
@@ -796,7 +868,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.get("/preferences/llm", (req, res) => {
+  router.get("/preferences/llm", requireAuth, (req, res) => {
     try {
       const uid = getUserIdFromRequest(req, jwtSecret);
       res.json({
@@ -810,7 +882,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.get("/preferences/llm/routing-receipts", (req, res) => {
+  router.get("/preferences/llm/routing-receipts", requireAuth, (req, res) => {
     try {
       const uid = getUserIdFromRequest(req, jwtSecret);
       const requestedLimit = Number.parseInt(String(req.query.limit || '100'), 10);
@@ -827,7 +899,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.put("/preferences/vision", (req, res) => {
+  router.put("/preferences/vision", requireAuth, (req, res) => {
     try {
       if (!isVisionProvider(req.body?.provider)) {
         return res.status(400).json({ error: 'Invalid vision provider' });
@@ -840,7 +912,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.get("/preferences/vision", (req, res) => {
+  router.get("/preferences/vision", requireAuth, (req, res) => {
     try {
       const uid = getUserIdFromRequest(req, jwtSecret);
       return res.json(getUserPreferredVision(uid));
@@ -849,7 +921,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.put("/preferences/generation", (req, res) => {
+  router.put("/preferences/generation", requireAuth, (req, res) => {
     try {
       const imageProvider = req.body?.image?.provider;
       const videoProvider = req.body?.video?.provider;
@@ -864,7 +936,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.get("/preferences/generation", (req, res) => {
+  router.get("/preferences/generation", requireAuth, (req, res) => {
     try {
       const uid = getUserIdFromRequest(req, jwtSecret);
       res.json(getUserPreferredGenerationModels(uid));
@@ -873,7 +945,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.put("/preferences/world", (req, res) => {
+  router.put("/preferences/world", requireAuth, (req, res) => {
     try {
       if (!isWorldModelProvider(req.body?.provider)) {
         return res.status(400).json({ error: 'Invalid world model provider' });
@@ -886,7 +958,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.get("/preferences/world", (req, res) => {
+  router.get("/preferences/world", requireAuth, (req, res) => {
     try {
       const uid = getUserIdFromRequest(req, jwtSecret);
       res.json({ ...getUserWorldModelPrefs(uid), resolved: getUserPreferredWorldModel(uid) });
@@ -895,7 +967,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.put("/preferences/retrieval-model", (req, res) => {
+  router.put("/preferences/retrieval-model", requireAuth, (req, res) => {
     try {
       const uid = getUserIdFromRequest(req, jwtSecret);
       res.json(upsertUserRetrievalModelPreferences(uid, req.body));
@@ -904,7 +976,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.get("/preferences/retrieval-model", (req, res) => {
+  router.get("/preferences/retrieval-model", requireAuth, (req, res) => {
     try {
       const uid = getUserIdFromRequest(req, jwtSecret);
       res.json(getUserRetrievalModelPreferences(uid));
@@ -913,7 +985,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.get("/settings/keys", (_req, res) => {
+  router.get("/settings/keys", requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
     try {
       const stored = loadKeys();
       const masked: Record<string, boolean> = {};
@@ -929,7 +1001,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
   });
 
-  router.post("/settings/keys", (req, res) => {
+  router.post("/settings/keys", requireAuth, requireAdmin, requireLocalRequest, (req, res) => {
     try {
       const { keys } = req.body || {};
       if (!keys || typeof keys !== 'object' || Array.isArray(keys)) {
@@ -947,6 +1019,10 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
           return res.status(400).json({
             error: 'DOUBAO_SPEECH_KEY only accepts a new-console API Key value. Legacy AppID:AccessToken is not supported.',
           });
+        }
+        const endpointError = validateProtectedEndpointSetting(k, v.trim());
+        if (endpointError) {
+          return res.status(400).json({ error: endpointError });
         }
         if (v.trim().length > 0) {
           toSave[k] = v.trim();
@@ -980,16 +1056,18 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   router.post("/settings", requireAuth, (req, res) => {
     try {
       const { key, value } = req.body || {};
-      if (!key || typeof key !== 'string' || value === undefined) {
+      if (!key || typeof key !== 'string' || value === undefined || !USER_SCOPED_SETTING_KEYS.has(key)) {
         return res.status(400).json({ error: 'key and value required' });
       }
+      const normalized = normalizeUserSetting(key, value);
+      const persistedKey = scopedUserSettingKey(req.user!.uid, key);
       const db = readDB();
       if (!db.settings) db.settings = [];
-      const idx = db.settings.findIndex((s: any) => s.key === key);
+      const idx = db.settings.findIndex((s: any) => s.key === persistedKey);
       if (idx >= 0) {
-        db.settings[idx].value = JSON.stringify(value);
+        db.settings[idx].value = JSON.stringify(normalized);
       } else {
-        db.settings.push({ key, value: JSON.stringify(value) });
+        db.settings.push({ key: persistedKey, value: JSON.stringify(normalized) });
       }
       writeDB(db);
       res.json({ success: true });
@@ -1000,8 +1078,12 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   router.get("/settings/:key", requireAuth, (req, res) => {
     try {
+      if (!USER_SCOPED_SETTING_KEYS.has(req.params.key)) {
+        return res.status(404).json({ error: 'Unknown user setting' });
+      }
       const db = readDB();
-      const row = (db.settings || []).find((s: any) => s.key === req.params.key);
+      const persistedKey = scopedUserSettingKey(req.user!.uid, req.params.key);
+      const row = (db.settings || []).find((s: any) => s.key === persistedKey);
       res.json(row ? JSON.parse(row.value) : null);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1009,7 +1091,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   });
 
   // System stats — real-time CPU / memory / platform info
-  router.get("/system/stats", async (_req: any, res: any) => {
+  router.get("/system/stats", requireAuth, async (_req: any, res: any) => {
     try {
       res.json(await getSystemStatsSnapshot());
     } catch (err: any) {
@@ -1019,12 +1101,12 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
 
   // Latency stats
-  router.get("/monitor/latency", (_req: any, res: any) => {
+  router.get("/monitor/latency", requireAuth, (_req: any, res: any) => {
     res.json({ ...getLatencyStats(), voice: getVoiceLatencyStats() });
   });
 
   // Ecosystem stats
-  router.get("/ecosystem/stats", (_req: any, res: any) => {
+  router.get("/ecosystem/stats", requireAuth, requireAdmin, requireLocalRequest, (_req: any, res: any) => {
     try {
       const db = readDB();
       const mcpCfg = getMCPConfig();
@@ -1071,12 +1153,12 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   // ── Ollama local model config ──
   // GET: return saved Ollama URL + detection status
-  router.get("/ollama/config", (_req, res) => {
+  router.get("/ollama/config", requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
     res.json(getLocalModelConfig('ollama'));
   });
 
   // PUT: save Ollama URL and trigger re-detection
-  router.put("/ollama/config", requireLocalRequest, async (req, res) => {
+  router.put("/ollama/config", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
     try {
       const { baseUrl } = req.body || {};
       const result = await refreshLocalModelConfig('ollama', baseUrl, { timeoutMs: 5000 });
@@ -1088,12 +1170,12 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   // ── LM Studio local model config ──
   // GET: return saved LM Studio URL + detection status
-  router.get("/lmstudio/config", (_req, res) => {
+  router.get("/lmstudio/config", requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
     res.json(getLocalModelConfig('lmstudio'));
   });
 
   // PUT: save LM Studio URL and trigger re-detection
-  router.put("/lmstudio/config", requireLocalRequest, async (req, res) => {
+  router.put("/lmstudio/config", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
     try {
       const { baseUrl } = req.body || {};
       const result = await refreshLocalModelConfig('lmstudio', baseUrl, { timeoutMs: 5000 });

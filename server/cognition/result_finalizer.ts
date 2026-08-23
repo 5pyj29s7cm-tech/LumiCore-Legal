@@ -3,14 +3,25 @@ import { guardCompletionClaims } from '../work_product/completion_guard';
 import type { ToolExecutionRecord } from '../tools/types';
 import { decodeToolResult } from '../tools/result_envelope';
 import type { LumiTurnFlow } from './turn_flow';
-import { formatDesktopObservationResult } from './desktop_observation';
+import {
+  formatDesktopObservationResult,
+  requiresActiveWindowObservation,
+} from './desktop_observation';
 import {
   formatClientDiagnosticResult,
   hasSuccessfulSubstantiveClientDiagnosticReceipt,
 } from './client_diagnostic_result';
-import { isCurrentClientDiagnosticRequest, isDiagnosticOrRepairRequest } from './tool_intent';
+import {
+  hasExplicitNoMutationInstruction,
+  isCurrentClientDiagnosticRequest,
+  isDiagnosticOrRepairRequest,
+} from './tool_intent';
 import { CN_CAD_MESSAGES } from '../regions/packs/cn/cad_messages';
-import { CN_VOICE_FAST_PATH_MESSAGES, formatCnToolFailureDetail } from '../regions/packs/cn/voice_fast_path_messages';
+import {
+  CN_VOICE_FAST_PATH_MESSAGES,
+  formatCnClientActionTargetLabel,
+  formatCnToolFailureDetail,
+} from '../regions/packs/cn/voice_fast_path_messages';
 import {
   formatArtifactCreatedAndOpened,
   formatArtifactCreatedOpenFailed,
@@ -24,6 +35,7 @@ import {
 import {
   buildActionContract,
   claimsCurrentAppSaveCompletion,
+  extractExplicitArtifactTextRequirements,
   extractSimpleDesktopOpenTarget,
   extractCurrentAppTarget,
   extractRequestedCurrentAppText,
@@ -34,6 +46,7 @@ import {
   hasCurrentAppUiMutationEvidence,
   hasVerifiedCadGeometryExtractionEvidence,
   hasVisibleAutoCadExecutionEvidence,
+  requiresArtifactPostWriteReadback,
   requiresCadGeometryExtractionOnly,
   requiresCurrentAppUiMutation,
   requiresAuthenticatedWebResult,
@@ -43,7 +56,7 @@ import {
 import { CN_RESULT_GROUNDING_MESSAGES } from '../regions/packs/cn/voice_fast_path_messages';
 import { CN_EXECUTION_EVIDENCE_MESSAGES } from '../regions/packs/cn/execution_evidence_messages';
 import { CN_EXTERNAL_AI_MESSAGES } from '../regions/packs/cn/external_ai_messages';
-import { coalesceToolExecutionRecords } from './task_execution_ledger';
+import { coalesceToolExecutionRecords, toolRecordSucceeded } from './task_execution_ledger';
 import {
   hasContinuousStockWatchIntent,
   hasContinuousStockWatchEvidence,
@@ -99,9 +112,10 @@ function hasRecoveredStatusEvidence(input: LumiResultFinalizerInput): boolean {
 function leakedLegacyToolProtocol(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
   const raw = String(input.responseText || '').trim();
   const hasXmlProtocol = /<(?:function_calls|tool_calls|invoke)\b/i.test(raw);
+  const hasFencedToolProtocol = /```\s*(?:tool|tools|tool_call|tool_calls|function_call|function_calls)\b/i.test(raw);
   // i18n-allow: Chinese internal tool-protocol recognition; not user-visible copy.
   const hasBracketProtocol = /\[(?:[^\]\r\n]{1,48})\]\s*[A-Za-z][A-Za-z0-9_.:-]{1,127}\s*\([^\r\n)]*\)|\[(?:调用|call(?:ing)?|tool)\s+[A-Za-z][A-Za-z0-9_.:-]{1,127}\s*\](?:\s*\{)?/iu.test(raw);
-  if (!hasXmlProtocol && !hasBracketProtocol) return null;
+  if (!hasXmlProtocol && !hasFencedToolProtocol && !hasBracketProtocol) return null;
   const names = Array.from(raw.matchAll(/<invoke\s+name=["']([^"']+)["']/gi), match => match[1]);
   const clientStateRequested = names.includes('client_get_state');
   const chinese = isChineseText(resultTaskText(input));
@@ -223,8 +237,11 @@ function unsupportedToolAvailabilityExcuse(input: LumiResultFinalizerInput): str
     /(?:\u4e0d\u4ee3\u8868|\u5e76\u4e0d\u4ee3\u8868|\u4e0d\u7b49\u4e8e|\u4e0d\u80fd\u8bf4\u660e|\u4e0d\u662f\u8bf4|does\s+not\s+mean|doesn'?t\s+mean)[^\u3002\uff01\uff1f.!?\n]{0,100}[\u3002\uff01\uff1f.!?]?/giu,
     '',
   );
+  // Keep the state word close to the tool noun. A broad wildcard here makes
+  // truthful plans such as “用桌面打开工具启动计算器，不打开替代软件” look as
+  // if they claimed the tool itself was not open.
   // i18n-allow: Unsupported user-switchable tool-state excuse recognition; not user-visible copy.
-  const claimsToolsAreOff = /(?:当前|现在|这轮|我这边|当前会话|这个会话)?[^。！？!?\n]{0,32}(?:工具|tool)[^。！？!?\n]{0,36}(?:没(?:有)?打开|未打开|没开启|未开启|不可用|没有开放|没(?:有)?挂载|未挂载|没带|只有|只(?:挂载|有)|not (?:open|enabled|available|mounted|loaded)|disabled)|(?:当前|现在|这轮|我这边|当前会话|这个会话)?[^。！？!?\n]{0,28}(?:只有|只(?:挂载|有)|没(?:有)?挂载|未挂载|没带)[^。！？!?\n]{0,20}(?:工具|tool)|(?:需要|要不要|可以)(?:我)?[^。！？!?\n]{0,28}(?:切换|切到|进入|开启)[^。！？!?\n]{0,24}(?:工具可用|工具模式|tool mode|tools? enabled)/iu.test(availabilityClaimText);
+  const claimsToolsAreOff = /(?:当前|现在|这轮|我这边|当前会话|这个会话)?[^。！？!?\n]{0,32}(?:工具|tool)(?:\s*(?:本身|列表|集合|状态|权限|能力|链路|路由|is|are)){0,2}[\s:：]*(?:没(?:有)?打开|未打开|没开启|未开启|不可用|没有开放|没(?:有)?挂载|未挂载|没带|只有|只(?:挂载|有)|not (?:open|enabled|available|mounted|loaded)|disabled)|(?:当前|现在|这轮|我这边|当前会话|这个会话)?[^。！？!?\n]{0,28}(?:只有|只(?:挂载|有)|没(?:有)?挂载|未挂载|没带)[^。！？!?\n]{0,20}(?:工具|tool)|(?:需要|要不要|可以)(?:我)?[^。！？!?\n]{0,28}(?:切换|切到|进入|开启)[^。！？!?\n]{0,24}(?:工具可用|工具模式|tool mode|tools? enabled)/iu.test(availabilityClaimText);
   if (!claimsToolsAreOff) return null;
   const actualUnavailableReceipt = (input.toolRecords || []).some(record => (
     String(record.error || '').trim()
@@ -438,9 +455,16 @@ function formatCompactBlockedResponse(input: LumiResultFinalizerInput, reason?: 
             : '\u6211\u4e0d\u4f1a\u628a\u8fd9\u79cd\u672a\u786e\u8ba4\u7684\u7ed3\u679c\u8bf4\u6210\u5df2\u5b8c\u6210\uff1b\u9700\u8981\u7ee7\u7eed\u524d\u53f0\u6267\u884c\u5e76\u9a8c\u8bc1\u7ed3\u679c\u3002',
       ].join('\n');
     }
+    const hasSuccessfulEvidence = (input.toolRecords || []).some(record => (
+      !record.error && String(record.result || '').trim().length > 0
+    ));
     return [
       'This is not complete yet.',
-      failure ? `Blocked at: ${failure}.` : 'Reason: I do not have verifiable completion evidence yet.',
+      failure
+        ? `Blocked at: ${failure}.`
+        : hasSuccessfulEvidence
+          ? 'The requested core action has not actually started: the successful tool evidence does not verify it.'
+          : 'The requested action has not actually started: there is no successful tool evidence for it.',
       'I will not mark that as done until the real action is verified.',
     ].join('\n');
   }
@@ -487,6 +511,57 @@ function formatGroundedSimpleDesktopOpenResult(
     || !hasCoreActionEvidence(contract, input.toolRecords || [], actionText)
   ) {
     return null;
+  }
+
+  // A launch request may explicitly require the real foreground process and
+  // window as its completion proof. Keep that receipt detail instead of
+  // collapsing the answer to the generic "opened" acknowledgement below.
+  // This is intentionally derived from the desktop receipts, never from the
+  // model's prose, so the final response cannot invent verification evidence.
+  if (requiresActiveWindowObservation(actionText)) {
+    const activeRecord = [...(input.toolRecords || [])].reverse().find(record => (
+      /^(?:desktop_active_window|get_active_window_info)$/i.test(String(record.name || ''))
+      && !record.error
+      && String(record.result || '').trim()
+    ));
+    if (activeRecord) {
+      let openResult: Record<string, any> = {};
+      let activeResult: Record<string, any> = {};
+      try { openResult = JSON.parse(String(successfulOpen.result || '{}')); } catch {}
+      try { activeResult = JSON.parse(String(activeRecord.result || '{}')); } catch {}
+      const processName = String(
+        activeResult.process_name
+        || activeResult.processName
+        || activeResult.executable
+        || '',
+      ).trim().replace(/^.*[\\/]/, '');
+      const processId = Number(activeResult.pid || activeResult.processId) || 0;
+      const windowTitle = String(activeResult.title || activeResult.windowTitle || '').trim();
+      const verificationStatus = String(
+        openResult.verification?.status
+        || openResult.status
+        || '',
+      ).trim().toLowerCase();
+      const targetMatched = openResult.targetMatched === true
+        || openResult.verification?.targetMatched === true;
+      const verified = targetMatched
+        && Boolean(processName || windowTitle)
+        && !/^(?:failed|error|blocked|unknown|unverified)$/i.test(verificationStatus);
+      if (isChineseText(actionText)) {
+        return [
+          CN_VOICE_FAST_PATH_MESSAGES.opened(requestedTarget),
+          `实际进程：${processName || '回执未记录'}${processId ? ` (PID ${processId})` : ''}`,
+          `窗口：${windowTitle || '回执未记录'}`,
+          `验证状态：${verified ? '已验证（目标精确匹配）' : '未验证'}`,
+        ].join('\n');
+      }
+      return [
+        `Opened ${requestedTarget}.`,
+        `Actual process: ${processName || 'not recorded'}${processId ? ` (PID ${processId})` : ''}`,
+        `Window: ${windowTitle || 'not recorded'}`,
+        `Verification: ${verified ? 'verified (exact target match)' : 'unverified'}`,
+      ].join('\n');
+    }
   }
   return isChineseText(actionText)
     ? CN_VOICE_FAST_PATH_MESSAGES.opened(requestedTarget)
@@ -688,6 +763,68 @@ function recordHasTerminalSuccess(record: ToolExecutionRecord): boolean {
   return !/(?:^|\b)(?:failed|error|blocked|not found|timed out|permission denied)(?:\b|:)/i.test(raw);
 }
 
+function parseVerifiedClientActionReceipt(record: ToolExecutionRecord): {
+  action: string;
+  mode: string;
+  enabled: boolean;
+  target: string;
+  say: string;
+} | null {
+  if (record.error || record.name !== 'client_action') return null;
+  try {
+    const payload = JSON.parse(String(record.result || '{}'));
+    const status = String(payload?.verification?.status || payload?.status || '').trim().toLowerCase();
+    if (payload?.ok !== true || !['verified', 'not_applicable'].includes(status)) return null;
+    return {
+      action: String(payload?.action || record.arguments?.action || '').trim(),
+      mode: String(payload?.mode || record.arguments?.mode || '').trim(),
+      enabled: Boolean(payload?.enabled ?? record.arguments?.enabled),
+      target: String(
+        payload?.target
+        || payload?.expectation?.target
+        || payload?.relayResult?.target
+        || record.arguments?.target
+        || '',
+      ).trim(),
+      say: String(payload?.say || payload?.verification?.message || '').trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatGroundedClientActionResult(input: LumiResultFinalizerInput): string | null {
+  // The client-action-only route already performed exact target selection and
+  // state-diff verification. A verified native navigation receipt is stronger
+  // evidence than a model sentence that happens to claim the action failed.
+  if (!input.flow?.clientActionOnlyTurn) return null;
+  const receipts = (input.toolRecords || [])
+    .map(parseVerifiedClientActionReceipt)
+    .filter((receipt): receipt is NonNullable<typeof receipt> => Boolean(receipt));
+  const actionable = receipts.filter(receipt => receipt.action !== 'refresh_client_state');
+  const receipt = [...actionable].reverse().find(item => item.action !== 'set_client_mode')
+    || actionable.at(-1)
+    || receipts.at(-1);
+  if (!receipt) return null;
+
+  if (!isChineseText(resultTaskText(input))) {
+    return receipt.say || 'The requested Lumi client action is complete.';
+  }
+  if (receipt.action === 'set_client_mode') {
+    return CN_VOICE_FAST_PATH_MESSAGES.operationModeChanged(receipt.mode || 'assistant');
+  }
+  if (receipt.action === 'set_wallpaper_mode') {
+    return receipt.enabled ? '壁纸模式已开启。' : '壁纸模式已关闭。';
+  }
+  if (receipt.action === 'refresh_client_state') return '客户端状态已刷新。';
+  const label = formatCnClientActionTargetLabel(receipt.action, receipt.target || 'Lumi 界面');
+  if (/^(?:close_|exit_)/.test(receipt.action)) return `${label}已关闭。`;
+  if (/^(?:open_|show_|focus_|enter_)/.test(receipt.action)) {
+    return CN_VOICE_FAST_PATH_MESSAGES.opened(label);
+  }
+  return `已完成${label}操作。`;
+}
+
 function formatGroundedPartialActionResult(
   input: LumiResultFinalizerInput,
 ): LumiResultFinalizerResult | null {
@@ -783,12 +920,29 @@ function sanitizeContradictoryOperationModeText(input: LumiResultFinalizerInput)
 }
 
 function artifactPathFromRecord(record: ToolExecutionRecord): string {
+  const args = record.arguments || {};
+  const direct = String(
+    args.path || args.filePath || args.outputPath || args.targetPath || args.destination || '',
+  ).trim();
+  if (direct) return direct;
   const text = `${String(record.result || '')}\n${JSON.stringify(record.arguments || {})}`;
   const extension = '(?:docx|xlsx|pptx|pdf|md|txt|csv|dxf|dwg)';
   const windows = text.match(new RegExp(`([A-Za-z]:[\\\\/][^\\r\\n"<>|*?]+?\\.${extension})`, 'i'));
   if (windows?.[1]) return windows[1].trim();
   const unix = text.match(new RegExp(`((?:/[^\\s"']+)+\\.${extension})`, 'i'));
   return unix?.[1]?.trim() || '';
+}
+
+function requiresSourceGroundedArtifactContent(actionText: string): boolean {
+  return /(?:\u4ee5|\u6839\u636e|\u57fa\u4e8e|\u53c2\u7167).{0,80}(?:\u771f\u5b9e\u5185\u5bb9|\u6e90\u6587\u4ef6|\u6750\u6599|\u6587\u4ef6\u5185\u5bb9).{0,100}(?:\u6765\u6e90|\u751f\u6210|\u521b\u5efa|\u586b\u5199|\u6574\u7406)|(?:\u771f\u5b9e\u5185\u5bb9|\u6e90\u6587\u4ef6).{0,100}(?:\u552f\u4e00\u6765\u6e90|\u751f\u6210|\u521b\u5efa|\u586b\u5199|\u6574\u7406)/iu.test(actionText);
+}
+
+function findUnresolvedArtifactPlaceholder(artifactText: string): string {
+  const line = String(artifactText || '')
+    .split(/\r?\n/u)
+    .map(value => value.trim())
+    .find(value => /(?:\u6839\u636e|\u57fa\u4e8e|\u53c2\u7167).{0,24}(?:\u586b\u5199|\u8865\u5145|\u751f\u6210|\u66ff\u6362)|\u5f85(?:\u586b\u5199|\u8865\u5145|\u751f\u6210|\u66ff\u6362)|\b(?:TBD|TODO)\b|\{\{[^}]+\}\}/iu.test(value));
+  return line || '';
 }
 
 function formatGroundedArtifactResult(
@@ -798,13 +952,19 @@ function formatGroundedArtifactResult(
   const records = input.toolRecords || [];
   const created = [...records].reverse().find(record => (
     !record.error
-    && /^(?:create_docx|create_xlsx|create_ppt|create_pdf|write_file|cad_generate_dxf)$/i.test(String(record.name || ''))
+    && /^(?:create_docx|create_xlsx|create_ppt|create_pdf|write_file|desktop_write_text_file|cad_generate_dxf)$/i.test(String(record.name || ''))
     && String(record.result || '').trim()
     && artifactPathFromRecord(record)
   ));
   if (!created) return null;
   const path = artifactPathFromRecord(created);
   const actionText = resultTaskText(input);
+  const createdIndex = records.indexOf(created);
+  const readback = records.slice(Math.max(0, createdIndex + 1)).find(record => (
+    /^(?:read_file|read_docx|read_pdf|pdf_to_text|extract_document_text)$/i.test(String(record.name || ''))
+    && artifactPathFromRecord(record).replace(/\//g, '\\').toLowerCase() === path.replace(/\//g, '\\').toLowerCase()
+  ));
+  const readbackRequired = requiresArtifactPostWriteReadback(actionText);
   const asksToOpen = /(?:\u6253\u5f00|\u6253\u5f00\u770b\u770b|\u76f4\u63a5\u6253\u5f00)|\bopen\b/iu.test(actionText);
   const openRecord = [...records].reverse().find(record => /^(?:desktop_open|browser_open_task)$/i.test(String(record.name || '')));
   const verified = records.some(record => (
@@ -839,8 +999,143 @@ function formatGroundedArtifactResult(
       reason: 'Grounded artifact creation and open result from current-turn receipts.',
     };
   }
-  // For an ordinary creation-only task, preserve the model's concise wording;
-  // the generic completion guard already accepts the producing receipt.
+  const artifactVerified = (
+    toolRecordSucceeded(created)
+    && created.terminalVerification?.status === 'verified'
+  );
+  if (artifactVerified) {
+    try {
+      const stats = fs.statSync(path);
+      if (stats.isFile() && stats.size > 0) {
+        const exactText = extractExplicitArtifactTextRequirements(actionText);
+        let artifactText = '';
+        if ((exactText.length || requiresSourceGroundedArtifactContent(actionText)) && /\.(?:txt|md|csv|json|xml|html?|css|svg|dxf|ya?ml|toml|tsx?|jsx?|py|rs)$/iu.test(path)) {
+          artifactText = fs.readFileSync(path, 'utf8');
+          if (requiresSourceGroundedArtifactContent(actionText)) {
+            const unresolvedPlaceholder = findUnresolvedArtifactPlaceholder(artifactText);
+            if (unresolvedPlaceholder) {
+              return {
+                text: zh
+                  ? `\u6587\u4ef6\u5df2\u5199\u5165\uff0c\u4f46\u4ecd\u5305\u542b\u672a\u7528\u6e90\u6587\u4ef6\u771f\u5b9e\u5185\u5bb9\u66ff\u6362\u7684\u5360\u4f4d\u7b26\u201c${unresolvedPlaceholder}\u201d\uff0c\u4e0d\u80fd\u62a5\u544a\u5b8c\u6210\u3002\u4ea7\u7269\u8def\u5f84\uff1a${path}`
+                  : `The file was written, but it still contains an unresolved source placeholder "${unresolvedPlaceholder}". It cannot be reported as complete. Artifact path: ${path}`,
+                blocked: true,
+                reason: 'Source-grounded artifact still contains unresolved placeholders.',
+              };
+            }
+          }
+          const missing = exactText.filter(value => !artifactText.includes(value));
+          if (missing.length) {
+            return {
+              text: zh
+                ? `文件已写入，但尚未满足当前要求：缺少精确文本“${missing[0]}”。我不会把它汇报为已完成。产物路径：${path}`
+                : `The file was written, but it is missing the exact required text "${missing[0]}". I will not mark it complete. Artifact path: ${path}`,
+              blocked: true,
+              reason: `Verified artifact is missing exact required text: ${missing[0]}`,
+              notification: {
+                type: 'work_product_guard',
+                level: 'warning',
+                message: `Verified artifact is missing exact required text: ${missing[0]}`,
+              },
+            };
+          }
+          if (/(?:只写入|仅写入|only\s+write)/iu.test(actionText)) {
+            const expected = exactText.join('\n').replace(/\r\n/g, '\n');
+            if (artifactText.replace(/\r\n/g, '\n') !== expected) {
+              return {
+                text: zh
+                  ? `文件已写入，但全文并非用户指定的逐行内容，不能报告完成。产物路径：${path}`
+                  : `The file was written, but its full text does not exactly match the requested lines. Artifact path: ${path}`,
+                blocked: true,
+                reason: 'Verified artifact contains extra, missing, or reordered text.',
+              };
+            }
+          }
+        }
+        if (readbackRequired && (!readback || readback.error || !String(readback.result || '').trim())) {
+          return {
+            text: zh
+              ? `文件已经写入，但没有取得同一路径的成功回读回执，不能报告完成。产物路径：${path}`
+              : `The file was written, but no successful same-path readback receipt was recorded. Artifact path: ${path}`,
+            blocked: true,
+            reason: 'Requested post-write readback is missing or failed.',
+          };
+        }
+        if (readbackRequired && readback && /\.(?:txt|md|csv|json|xml|html?|css|svg|dxf|ya?ml|toml|tsx?|jsx?|py|rs)$/iu.test(path)) {
+          if (!artifactText) artifactText = fs.readFileSync(path, 'utf8');
+          const receiptText = String(readback.result || '').replace(/\r\n/g, '\n');
+          const actualText = artifactText.replace(/\r\n/g, '\n');
+          if (receiptText !== actualText) {
+            return {
+              text: zh
+                ? `文件已经写入，但回读回执与磁盘全文不一致，不能报告完成。产物路径：${path}`
+                : `The file was written, but the readback receipt differs from the current file. Artifact path: ${path}`,
+              blocked: true,
+              reason: 'Post-write readback differs from the current artifact.',
+            };
+          }
+          if (/(?:\u7f16\u7801|\u603b\u884c\u6570|\u884c\u6570|\u5168\u6587|encoding|line\s*count|full\s*text)/iu.test(actionText)) {
+            const normalizedText = actualText.replace(/\n$/, '');
+            const lineCount = normalizedText ? normalizedText.split('\n').length : 0;
+            return {
+              text: zh
+                ? [
+                    '\u5df2\u5b8c\u6210\u672c\u5730\u6587\u4ef6\u521b\u5efa\u4e0e\u56de\u8bfb\u6838\u9a8c\u3002',
+                    `\u8def\u5f84\uff1a${path}`,
+                    '\u7f16\u7801\uff1aUTF-8',
+                    `\u603b\u884c\u6570\uff1a${lineCount}`,
+                    '\u5168\u6587\uff1a',
+                    normalizedText,
+                  ].join('\n')
+                : [
+                    'Completed the local file and verified it by reading it back.',
+                    `Path: ${path}`,
+                    'Encoding: UTF-8',
+                    `Line count: ${lineCount}`,
+                    'Full text:',
+                    normalizedText,
+                  ].join('\n'),
+              blocked: false,
+              reason: 'Grounded artifact completion with exact same-path post-write readback.',
+            };
+          }
+          if (/(?:编码|总行数|行数|全文|encoding|line\s*count|full\s*text)/iu.test(actionText)) {
+            const normalizedText = actualText.replace(/\n$/, '');
+            const lineCount = normalizedText ? normalizedText.split('\n').length : 0;
+            return {
+              text: zh
+                ? [
+                    '已完成本地文件创建与回读核验。',
+                    `路径：${path}`,
+                    '编码：UTF-8',
+                    `总行数：${lineCount}`,
+                    '全文：',
+                    normalizedText,
+                  ].join('\n')
+                : [
+                    'Completed the local file and verified it by reading it back.',
+                    `Path: ${path}`,
+                    'Encoding: UTF-8',
+                    `Line count: ${lineCount}`,
+                    'Full text:',
+                    normalizedText,
+                  ].join('\n'),
+              blocked: false,
+              reason: 'Grounded artifact completion with exact same-path post-write readback.',
+            };
+          }
+        }
+        return {
+          text: zh
+            ? `已完成并验证本地文件：${path}（${stats.size} 字节）。`
+            : `Completed and verified the local file: ${path} (${stats.size} bytes).`,
+          blocked: false,
+          reason: 'Grounded artifact completion from a verified producer receipt and the current local file.',
+        };
+      }
+    } catch {}
+  }
+  // A declaration without a verified non-empty file remains subject to the
+  // generic completion guard below.
   return null;
 }
 
@@ -1556,6 +1851,244 @@ function correctCurrentTurnContractDrift(
   return grounded;
 }
 
+function sanitizeUnsupportedRestatementAdditions(taskText: string, responseText: string, toolRecords: ToolExecutionRecord[]): string {
+  if (toolRecords.length > 0) return responseText;
+  if (!/(?:只|仅)?(?:复述|重复|完整说出|原样说出)|其他不变|只(?:说|保留|复述)事实/u.test(taskText)) return responseText;
+  const unsupportedClaim = /(?:写|放|记)(?:进|到|在).{0,8}(?:日程|计划|任务)|(?:已经|已|我)?\s*(?:记下|记录|保存)(?:了|好)?|(?:到时|到时候|出发前|之后).{0,16}(?:提醒|通知)|(?:创建|新建|安排).{0,8}(?:任务|提醒|日程)/u;
+  const explicitInTask = unsupportedClaim.test(taskText);
+  if (explicitInTask) return responseText;
+  const clauses = String(responseText || '').match(/[^。！？!?\n]+[。！？!?]?/gu) || [];
+  const retained = clauses.filter(clause => !unsupportedClaim.test(clause)).join('').trim();
+  return retained || responseText;
+}
+
+/**
+ * Receipt formatters validate execution truth; they do not author ordinary
+ * main-chat prose. Keep a non-empty model answer after a grounded successful
+ * check, while retaining formatter text for empty transport output and for
+ * blocked safety/evidence outcomes.
+ */
+function normalizeEvidenceWording(value: string): string {
+  const compact: string[] = [];
+  for (const character of String(value || '').normalize('NFKC')) {
+    const codePoint = character.codePointAt(0) || 0;
+    const asciiAlphaNumeric = (
+      (codePoint >= 48 && codePoint <= 57)
+      || (codePoint >= 65 && codePoint <= 90)
+      || (codePoint >= 97 && codePoint <= 122)
+    );
+    const unicodeWord = (
+      (codePoint >= 0x3400 && codePoint <= 0x9fff)
+      || (codePoint >= 0x3040 && codePoint <= 0x30ff)
+      || (codePoint >= 0xac00 && codePoint <= 0xd7af)
+    );
+    if (asciiAlphaNumeric || unicodeWord) compact.push(character.toLocaleLowerCase());
+  }
+  return compact.join('');
+}
+
+function evidenceBigrams(value: string): Set<string> {
+  const normalized = normalizeEvidenceWording(value);
+  if (!normalized) return new Set();
+  if (normalized.length === 1) return new Set([normalized]);
+  return new Set(Array.from({ length: normalized.length - 1 }, (_, index) => (
+    normalized.slice(index, index + 2)
+  )));
+}
+
+function evidenceIdentifiers(value: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  const flush = () => {
+    if (current.length >= 2) tokens.push(current.slice(0, 128));
+    current = '';
+  };
+  for (const character of String(value || '')) {
+    const codePoint = character.codePointAt(0) || 0;
+    const asciiLetter = (
+      (codePoint >= 65 && codePoint <= 90)
+      || (codePoint >= 97 && codePoint <= 122)
+    );
+    const asciiDigit = codePoint >= 48 && codePoint <= 57;
+    const separator = '_.:/\\=-'.includes(character);
+    if (!current && asciiLetter) {
+      current = character;
+    } else if (current && (asciiLetter || asciiDigit || separator)) {
+      current += character;
+    } else {
+      flush();
+    }
+  }
+  flush();
+
+  const stableTokens = tokens.filter(token => {
+    let hasStructure = false;
+    let hasLetter = false;
+    let allLettersUppercase = true;
+    let previousWasLowercase = false;
+    for (const character of token) {
+      const codePoint = character.codePointAt(0) || 0;
+      const uppercase = codePoint >= 65 && codePoint <= 90;
+      const lowercase = codePoint >= 97 && codePoint <= 122;
+      const digit = codePoint >= 48 && codePoint <= 57;
+      if (uppercase || lowercase) hasLetter = true;
+      if (lowercase) allLettersUppercase = false;
+      if (digit || '_.:/\\=-'.includes(character)) hasStructure = true;
+      if (previousWasLowercase && uppercase) hasStructure = true;
+      previousWasLowercase = lowercase;
+    }
+    return hasStructure || (token.length >= 3 && hasLetter && allLettersUppercase);
+  });
+  return Array.from(new Set(stableTokens.map(token => token.toLocaleLowerCase())));
+}
+
+function modelWordingMatchesGroundedEvidence(
+  input: LumiResultFinalizerInput,
+  modelText: string,
+  groundedText: string,
+): boolean {
+  const normalizedModel = normalizeEvidenceWording(modelText);
+  if (!normalizedModel) return false;
+  const groundedIdentifiers = new Set(evidenceIdentifiers(groundedText));
+  const taskIdentifiers = new Set(evidenceIdentifiers(resultTaskText(input)));
+  const supportedIdentifiers = new Set([...groundedIdentifiers, ...taskIdentifiers]);
+  const missingRequestedIdentifier = Array.from(taskIdentifiers).some(identifier => (
+    groundedIdentifiers.has(identifier)
+    && !normalizedModel.includes(normalizeEvidenceWording(identifier))
+  ));
+  if (missingRequestedIdentifier) return false;
+  const unsupportedIdentifier = evidenceIdentifiers(modelText).some(identifier => (
+    !supportedIdentifiers.has(identifier)
+  ));
+  if (unsupportedIdentifier) return false;
+  const modelBigrams = evidenceBigrams(modelText);
+  const groundedBigrams = evidenceBigrams(groundedText);
+  if (!modelBigrams.size || !groundedBigrams.size) return false;
+  let overlap = 0;
+  for (const token of modelBigrams) {
+    if (groundedBigrams.has(token)) overlap += 1;
+  }
+  return overlap / Math.min(modelBigrams.size, groundedBigrams.size) >= 0.2;
+}
+
+function formatStructuredEvidenceCorrection(
+  input: LumiResultFinalizerInput,
+  grounded: LumiResultFinalizerResult,
+): LumiResultFinalizerResult {
+  const receiptStates = (input.toolRecords || []).map(record => (
+    record.envelope?.status
+    || record.terminalVerification?.status
+    || (record.error ? 'failed' : 'recorded')
+  ));
+  return {
+    ...grounded,
+    reason: [
+      grounded.reason || '',
+      `Structured evidence correction (${receiptStates.join(',') || 'grounder'}).`,
+    ].filter(Boolean).join(' '),
+  };
+}
+
+function preserveModelWordingOnGroundedSuccess(
+  input: LumiResultFinalizerInput,
+  grounded: LumiResultFinalizerResult,
+): LumiResultFinalizerResult {
+  const modelText = String(input.responseText || '').trim();
+  // Grounders reach this helper only after their structured receipt contract
+  // has accepted the current outcome. Compatibility uses a domain-neutral
+  // evidence fingerprint (stable identifiers plus text overlap), never a
+  // tool/phrase-specific reply patch. A failed or conflicting outcome stays on
+  // the structured correction path.
+  if (input.source !== 'chat' || grounded.blocked || !modelText) return grounded;
+  if (
+    claimsCurrentAppSaveCompletion(modelText)
+    && !hasCurrentAppSaveEvidence(input.toolRecords || [], resultTaskText(input))
+  ) {
+    return formatStructuredEvidenceCorrection(input, grounded);
+  }
+  if (!modelWordingMatchesGroundedEvidence(input, modelText, grounded.text)) {
+    return formatStructuredEvidenceCorrection(input, grounded);
+  }
+  return {
+    ...grounded,
+    text: input.responseText,
+  };
+}
+
+function parseActionReceipt(value: unknown): Record<string, any> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, any>;
+  }
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, any>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isWorkTaskLedgerTool(name: unknown): boolean {
+  return /^(?:work_takeover_task_(?:create|get|list|update)|conversation_action_(?:task|receipt).*)$/iu
+    .test(String(name || ''));
+}
+
+function hasVerifiedNonLedgerActionReceipt(records: ToolExecutionRecord[]): boolean {
+  return records.some(record => {
+    if (record.error || isWorkTaskLedgerTool(record.name)) return false;
+    if (record.terminalVerification?.status === 'verified') return true;
+    if (
+      record.envelope?.status === 'verified_success'
+      && record.envelope.verification?.status === 'verified'
+    ) return true;
+    const receipt = parseActionReceipt(record.receipt);
+    const receiptVerification = receipt?.terminalVerification?.status
+      || receipt?.verification?.status;
+    return receiptVerification === 'verified'
+      || receipt?.status === 'verified_success'
+      || receipt?.status === 'verified'
+      || (receipt?.ok === true && receipt?.verified === true);
+  });
+}
+
+function claimsPersistentTaskStepCompletion(responseText: string): boolean {
+  const response = String(responseText || '').trim();
+  if (!response) return false;
+  const explicitlyIncomplete = /(?:\u5c1a\u672a|\u672a|\u6ca1\u6709|\u4e0d\u80fd|\u4e0d\u5e94|\u4e0d\u53ef)[^\u3002\uff01\uff1f.!?\n]{0,20}(?:\u5b8c\u6210|\u6807\u8bb0[^\u3002\uff01\uff1f.!?\n]{0,6}\u5b8c\u6210)|\b(?:not|isn'?t|wasn'?t|cannot|can't)\b[^.!?\n]{0,32}\b(?:complete|completed|done)\b/iu
+    .test(response);
+  if (explicitlyIncomplete) return false;
+  return /(?:\u5df2\u7ecf|\u5df2)[^\u3002\uff01\uff1f.!?\n]{0,18}(?:\u5b8c\u6210|\u505a\u5b8c|\u63a8\u8fdb)|(?:\u5b8c\u6210|\u505a\u5b8c)\u4e86?\u7b2c[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\d]+\u6b65|\b(?:completed|finished|done)\b/iu
+    .test(response);
+}
+
+function unsupportedLedgerOnlyWorkTaskCompletion(
+  input: LumiResultFinalizerInput,
+): LumiResultFinalizerResult | null {
+  const taskText = resultTaskText(input);
+  if (!/\bwt_task_[A-Za-z0-9_-]+\b/u.test(taskText)) return null;
+  if (!/(?:\u7ee7\u7eed|\u7eed\u63a5|\u6062\u590d|\u63a8\u8fdb|\u6267\u884c|\u5904\u7406|\u5b8c\u6210|\u505a\u5b8c)/u.test(taskText)) return null;
+  if (!claimsPersistentTaskStepCompletion(input.responseText)) return null;
+  const records = input.toolRecords || [];
+  if (!records.some(record => isWorkTaskLedgerTool(record.name))) return null;
+  if (hasVerifiedNonLedgerActionReceipt(records)) return null;
+
+  const reason = 'Persistent task completion was claimed from ledger updates without a verified action receipt.';
+  return {
+    text: isChineseText(taskText) || isChineseText(input.responseText)
+      ? CN_EXECUTION_EVIDENCE_MESSAGES.ledgerOnlyTaskCompletion
+      : 'The task ledger proves only a bookkeeping update, not execution. No verified terminal receipt from a real action exists for this turn, so the step cannot be marked complete.',
+    blocked: true,
+    reason,
+    notification: {
+      type: 'work_product_guard',
+      level: 'warning',
+      message: reason,
+    },
+  };
+}
+
 export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResultFinalizerResult {
   input = {
     ...input,
@@ -1571,11 +2104,17 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   if (safeResponseText !== input.responseText) {
     input = { ...input, responseText: safeResponseText };
   }
+  const factualResponseText = sanitizeUnsupportedRestatementAdditions(actionText, input.responseText, input.toolRecords || []);
+  if (factualResponseText !== input.responseText) {
+    input = { ...input, responseText: factualResponseText };
+  }
   // A CAD workflow receipt owns both its execution truth and its user-facing
   // terminal state. Do not let model narration or a later generic guard hide
   // a verified completion or a concrete workflow blocker.
   const earlyGroundedCadRun = formatGroundedCadRunResult(input);
-  if (earlyGroundedCadRun) return earlyGroundedCadRun;
+  if (earlyGroundedCadRun) return preserveModelWordingOnGroundedSuccess(input, earlyGroundedCadRun);
+  const unsupportedWorkTaskCompletion = unsupportedLedgerOnlyWorkTaskCompletion(input);
+  if (unsupportedWorkTaskCompletion) return unsupportedWorkTaskCompletion;
   const modeSafeResponseText = sanitizeContradictoryOperationModeText(input);
   if (modeSafeResponseText !== input.responseText) {
     input = { ...input, responseText: modeSafeResponseText };
@@ -1635,12 +2174,38 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       reason: 'Grounded status follow-up from persisted recent-action receipts.',
     };
   }
-  const guard = guardCompletionClaims({
-    task: actionText,
-    response: input.responseText,
-    toolCalls: input.toolRecords || [],
-    source: input.source,
-  });
+  const groundedClientAction = formatGroundedClientActionResult(input);
+  if (groundedClientAction) {
+    return preserveModelWordingOnGroundedSuccess(input, {
+      text: groundedClientAction,
+      blocked: false,
+      reason: 'Grounded Lumi client action from a verified state-diff receipt.',
+    });
+  }
+  const actionContract = taskActionContract(input);
+  const chatOnlyConversationTurn = Boolean(
+    (input.toolRecords || []).length === 0
+    && input.flow?.allowToolUseForTurn === false
+    && input.flow?.completionEvidenceNeeded !== true
+    && input.flow?.clientActionOnlyTurn !== true
+    && input.flow?.selfRepairTurn !== true
+  );
+  const ordinaryConversation = (
+    chatOnlyConversationTurn
+    || (
+      !actionContract.applies
+      && (input.toolRecords || []).length === 0
+      && hasExplicitNoMutationInstruction(actionText)
+    )
+  );
+  const guard = ordinaryConversation
+    ? { text: input.responseText, blocked: false as const }
+    : guardCompletionClaims({
+        task: actionText,
+        response: input.responseText,
+        toolCalls: input.toolRecords || [],
+        source: input.source,
+      });
   const unsupportedDiagnostic = unsupportedPriorDiagnosticClaim(input);
   if (unsupportedDiagnostic) {
     return {
@@ -1657,7 +2222,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   const diagnosticResult = formatClientDiagnosticResult(input.toolRecords || [], actionText, input.responseText);
   if (diagnosticResult) {
     const diagnosticCompleted = hasSuccessfulSubstantiveClientDiagnosticReceipt(input.toolRecords || []);
-    return {
+    return preserveModelWordingOnGroundedSuccess(input, {
       text: diagnosticResult,
       blocked: !diagnosticCompleted,
       reason: diagnosticCompleted
@@ -1670,7 +2235,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
           message: 'Client diagnostic did not produce a successful substantive receipt.',
         },
       } : {}),
-    };
+    });
   }
   const unsupportedExecution = unsupportedToolExecutionClaim(input);
   if (unsupportedExecution) {
@@ -1698,15 +2263,17 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       },
     };
   }
-  const actionContract = taskActionContract(input);
   // Ordinary conversation has no execution contract. Keep it natural after
   // the protocol/evidence sanity checks above instead of forcing it through a
   // work-product completion guard.
   if (
-    !actionContract.applies
-    && (input.toolRecords || []).length === 0
-    && input.flow?.completionEvidenceNeeded !== true
-    && !guard.blocked
+    ordinaryConversation
+    || (
+      !actionContract.applies
+      && (input.toolRecords || []).length === 0
+      && input.flow?.completionEvidenceNeeded !== true
+      && !guard.blocked
+    )
   ) {
     return { text: input.responseText, blocked: false };
   }
@@ -1717,35 +2284,35 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   const groundedLegalDraft = formatGroundedLegalDraftResult(input);
   if (groundedLegalDraft) return groundedLegalDraft;
   const groundedBlankCadDocument = formatGroundedBlankAutoCadDocumentResult(input);
-  if (groundedBlankCadDocument) return groundedBlankCadDocument;
+  if (groundedBlankCadDocument) return preserveModelWordingOnGroundedSuccess(input, groundedBlankCadDocument);
   const groundedWpsMutation = formatGroundedWpsMutationResult(input);
-  if (groundedWpsMutation) return groundedWpsMutation;
+  if (groundedWpsMutation) return preserveModelWordingOnGroundedSuccess(input, groundedWpsMutation);
   const groundedArtifact = formatGroundedArtifactResult(input);
-  if (groundedArtifact) return groundedArtifact;
+  if (groundedArtifact) return preserveModelWordingOnGroundedSuccess(input, groundedArtifact);
   const groundedCadGeometry = formatGroundedCadGeometryExtractionResult(input);
-  if (groundedCadGeometry) return groundedCadGeometry;
+  if (groundedCadGeometry) return preserveModelWordingOnGroundedSuccess(input, groundedCadGeometry);
   const groundedExternalAiHistory = formatExternalAiHistoryResult(input);
-  if (groundedExternalAiHistory) return groundedExternalAiHistory;
+  if (groundedExternalAiHistory) return preserveModelWordingOnGroundedSuccess(input, groundedExternalAiHistory);
   const groundedExternalAi = formatExternalAiCollaborationResult(input);
-  if (groundedExternalAi) return groundedExternalAi;
+  if (groundedExternalAi) return preserveModelWordingOnGroundedSuccess(input, groundedExternalAi);
   const groundedDesktopAi = formatDesktopAiRoundtableResult(input);
   if (groundedDesktopAi) {
-    return {
+    return preserveModelWordingOnGroundedSuccess(input, {
       text: groundedDesktopAi,
       blocked: false,
       reason: 'Grounded desktop AI collaboration summary from structured tool evidence.',
-    };
+    });
   }
   const groundedSimpleOpen = formatGroundedSimpleDesktopOpenResult(input);
   if (groundedSimpleOpen) {
-    return {
+    return preserveModelWordingOnGroundedSuccess(input, {
       text: groundedSimpleOpen,
       blocked: false,
       reason: 'Grounded exact desktop-open success from the requested target receipt.',
-    };
+    });
   }
   const groundedPartialAction = formatGroundedPartialActionResult(input);
-  if (groundedPartialAction) return groundedPartialAction;
+  if (groundedPartialAction) return preserveModelWordingOnGroundedSuccess(input, groundedPartialAction);
   const groundedDriftCorrection = correctCurrentTurnContractDrift(input, actionContract);
   if (groundedDriftCorrection) {
     return {
@@ -1760,11 +2327,11 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   // overwrite that evidence with a generic incomplete-work guard.
   const groundedDesktopObservation = formatGroundedDesktopEvidence(input);
   if (groundedDesktopObservation) {
-    return {
+    return preserveModelWordingOnGroundedSuccess(input, {
       text: groundedDesktopObservation,
       blocked: false,
       reason: 'Grounded desktop observation from current-turn tool receipts.',
-    };
+    });
   }
   const responseClaimsIncomplete = /(?:\u8fd8|\u5c1a|\u4ecd)?(?:\u6ca1\u6709|\u6ca1|\u672a|\u5e76\u672a|\u4e0d\u7b97|\u4e0d\u80fd\u8bf4)[^\u3002\uFF01\uFF1F.!?\n]{0,18}(?:\u5b8c\u6210|\u53d1\u9001|\u53d1\u51fa|\u6253\u5f00|\u8bfb\u53d6|\u751f\u6210)|\b(?:not|isn'?t|wasn'?t|didn'?t|incomplete|unfinished)\b[^.!?\n]{0,40}\b(?:complete|completed|sent|opened|read|created|generated)\b/iu
     .test(input.responseText || '');
@@ -1775,12 +2342,18 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     && failedToolRecord
     && (actionContract.applies || input.flow?.completionEvidenceNeeded),
   );
+  const hasActionableVisualProviderBlocker = Boolean(
+    failedToolRecord?.error
+    && /access denied.{0,160}account is in good standing|account is in good standing.{0,160}access denied/i.test(failedToolRecord.error),
+  );
   if (reportsToolIterationLimit || reportsFailedExecutionIncomplete) {
     const reason = reportsToolIterationLimit
       ? 'Tool iteration limit reached before a verified final response.'
       : `Execution remained incomplete after ${String(failedToolRecord?.name || 'a tool')} failed.`;
     return {
-      text: input.responseText,
+      text: hasActionableVisualProviderBlocker
+        ? formatCompactBlockedResponse(input, reason)
+        : input.responseText,
       blocked: true,
       reason,
       notification: {
@@ -1970,6 +2543,18 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     };
   }
   if (shouldEnforceCoreActionContract(actionContract, actionText) && claimsActionDone && !legalExternalHandoffOnly && !hasCoreActionEvidence(actionContract, input.toolRecords || [], actionText)) {
+    if (guard.blocked && /content-read\/open\/review/i.test(guard.reason || '')) {
+      return {
+        text: formatCompactBlockedResponse(input, guard.reason),
+        blocked: true,
+        reason: guard.reason,
+        notification: {
+          type: 'work_product_guard',
+          level: 'warning',
+          message: guard.reason || 'Requested content-read/open/review work was not verified.',
+        },
+      };
+    }
     if (guard.blocked && guard.reasonCode === 'successful_irrelevant_evidence') {
       return {
         text: guard.text,

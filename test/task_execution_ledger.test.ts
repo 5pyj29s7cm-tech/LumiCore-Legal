@@ -46,6 +46,28 @@ describe('durable conversation task execution ledger', () => {
     })).toBe(false);
   });
 
+  it('keeps verified WPS document creation successful when the document is intentionally unsaved', () => {
+    expect(toolRecordSucceeded({
+      name: 'wps_create_document_with_text',
+      arguments: { text: 'Lumi WPS' },
+      result: JSON.stringify({
+        ok: true,
+        status: 'verified',
+        automation: 'KWPS.Application',
+        visible: true,
+        documentCreated: true,
+        exactTextMatch: true,
+        saved: false,
+        savePath: '',
+      }),
+      terminalVerification: {
+        status: 'verified',
+        strategy: 'state_diff',
+        reason: 'Exact WPS body readback matched.',
+      },
+    })).toBe(true);
+  });
+
   it('lets a successful retry supersede the same failed step without deleting valid pre/post observations', () => {
     const records = coalesceToolExecutionRecords([
       { name: 'desktop_keyboard_press', arguments: { keys: ['CTRL', 'N'] }, result: '', error: 'snapshot required' },
@@ -106,6 +128,28 @@ describe('durable conversation task execution ledger', () => {
     expect(currentTask.kind).toBe('new');
     expect(currentTask.state?.taskId).not.toBe(oldTask.state?.taskId);
     expect(currentTask.state?.supersededTaskId).toBe(oldTask.state?.taskId);
+  });
+
+  it('keeps an explicit continue workflow on the unfinished task instead of forcing a new id', () => {
+    const policy = { allowedTools: ['industry_output_create'], requireConfirmation: [], forbiddenTools: [], maxIterations: 5 };
+    const started = prepareConversationActionTaskState(null, {
+      userText: '\u8bf7\u751f\u6210\u5e76\u9a8c\u8bc1\u4ea4\u4ed8\u4ef6',
+      requestId: 'workflow-original',
+      toolPolicy: policy,
+      forceTask: true,
+    });
+    const continued = prepareConversationActionTaskState(started.state, {
+      userText: '\u7ee7\u7eed\u521a\u624d\u7684\u4efb\u52a1',
+      requestId: 'workflow-continue',
+      toolPolicy: policy,
+      forceTask: true,
+      forceResume: true,
+      forceNewTask: false,
+    });
+
+    expect(continued.kind).toBe('resume');
+    expect(continued.state?.taskId).toBe(started.state?.taskId);
+    expect(continued.state?.supersededTaskId).toBeUndefined();
   });
 
   it('keeps prior permissions on terse replies and deliberately expands them for a real follow-up', () => {
@@ -188,7 +232,7 @@ describe('durable conversation task execution ledger', () => {
     expect(afterConfirmedOpen?.unfinished).toBe(true);
   });
 
-  it('continues the original task after a confirmed boundary completes only one step', () => {
+  it('always returns a canonical confirmed record to model review instead of declaring the whole goal complete', () => {
     const confirmedOpen = {
       name: 'desktop_open',
       arguments: { target: 'WPS' },
@@ -209,10 +253,14 @@ describe('durable conversation task execution ledger', () => {
     expect(confirmedStepNeedsContinuation(
       'Open WPS',
       [confirmedOpen],
-    )).toBe(false);
+    )).toBe(true);
     expect(confirmedStepNeedsContinuation(
       'Open WPS and create a Word document',
       [{ ...confirmedOpen, result: '', error: 'permission denied' }],
+    )).toBe(true);
+    expect(confirmedStepNeedsContinuation(
+      'Open WPS',
+      [],
     )).toBe(false);
   });
 
@@ -314,6 +362,28 @@ describe('durable conversation task execution ledger', () => {
       complete: false,
       blocker: 'No post-action state was observed.',
     });
+  });
+
+  it('persists text readback metrics without storing another full-text copy', () => {
+    const content = '第一行\n第二行\n第三行';
+    const receipts = recordsToTaskReceipts([{
+      id: 'readback-1',
+      name: 'read_file',
+      arguments: { path: 'C:\\Temp\\result.txt' },
+      result: content,
+      terminalVerification: {
+        status: 'verified',
+        strategy: 'terminal_receipt',
+        reason: 'read returned',
+      },
+    }]);
+    expect(receipts[0].receipt).toMatchObject({
+      kind: 'text_readback_metadata',
+      encoding: 'UTF-8',
+      lineCount: 3,
+      byteLength: Buffer.byteLength(content, 'utf8'),
+    });
+    expect((receipts[0].receipt as any).contentDigest).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it('keeps a verified client action successful when its health payload contains failed zero', () => {

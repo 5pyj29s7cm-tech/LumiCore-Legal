@@ -67,10 +67,15 @@ import { useSocket } from '@/hooks/useSocket';
 import { useAmbientPoller } from '@/hooks/useAmbientPoller';
 import { useVoiceCall, type VoiceTranscriptMeta } from '@/hooks/useVoiceCall';
 import { useApp, type OperationMode } from '@/contexts/AppContext';
+import { describeAgentResponseDelivery } from '@/lib/agentResponseDelivery';
 const LocalAgentSphere = lazy(() => import('./LocalAgentSphere').then(m => ({ default: m.LocalAgentSphere })));
 const NexusGlobe = lazy(() => import('./NexusGlobe/NexusGlobe').then(m => ({ default: m.NexusGlobe })));
 const InkWorldLazy = lazy(() => import('./InkWorld').then(m => ({ default: m.InkWorld })));
-import type { BackgroundWorkflowTask, WorkflowStep } from './workflowTypes';
+import {
+  normalizeTaskCompletionFeedback,
+  type BackgroundWorkflowTask,
+  type WorkflowStep,
+} from './workflowTypes';
 import type { CommandCenterView } from './commandCenterTypes';
 import { useWakeWord } from '../hooks/useWakeWord';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -1726,9 +1731,40 @@ export function DesktopUI({
     setChatOpen(true);
     setActiveTab('command-center');
     window.setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('lumi:focus-command-input'));
+      void (async () => {
+        if (isTauri) {
+          try {
+            const { getCurrentWindow } = await import('@tauri-apps/api/window');
+            const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+            await getCurrentWindow().setFocus();
+            await getCurrentWebview().setFocus();
+          } catch {}
+        }
+        window.dispatchEvent(new CustomEvent('lumi:focus-command-input'));
+      })();
     }, 80);
-  }, [setActiveTab]);
+  }, [isTauri, setActiveTab]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: undefined | (() => void);
+
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) => listen('lumi:open-command-center', () => {
+        if (!disposed) openCommandCenter('office');
+      }))
+      .then(stop => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {});
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [isTauri, openCommandCenter]);
 
   const openProactiveChat = useCallback((detail: ProactiveChatDetail) => {
     setIsNotificationPanelOpen(false);
@@ -3269,7 +3305,7 @@ export function DesktopUI({
         id: workflowStepId('resp', data.requestId),
         type: responseBlocked ? 'error' : 'response',
         text: responseBlocked ? (t.workflowError || 'Processing blocked') : (t.workflowResponseReady || 'Response ready'),
-        detail: (data.reason || (data.finalized === true ? data.text : 'Response was not finalized'))?.slice(0, 100),
+        detail: describeAgentResponseDelivery(data, lang === 'zh'),
         time: Date.now(),
       }]);
       if (terminalResetTimer) clearTimeout(terminalResetTimer);
@@ -3337,6 +3373,7 @@ export function DesktopUI({
         error: raw?.error,
         resultPreview: raw?.resultPreview,
         updatedAt: raw?.updatedAt,
+        completionFeedback: normalizeTaskCompletionFeedback(raw?.completionFeedback || data?.completionFeedback),
       };
     };
 
@@ -3547,6 +3584,11 @@ export function DesktopUI({
         openCommandCenter('office');
         return;
       }
+      if (chatOpen && (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('lumi:new-conversation'));
+        return;
+      }
       if (chatOpen && (e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'v' && !isInputFocused()) {
         e.preventDefault();
         void (async () => {
@@ -3575,6 +3617,12 @@ export function DesktopUI({
       ) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('lumi:submit-command-input'));
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'v') {
+        e.preventDefault();
+        if (callStateRef.current === 'idle') startStandardVoiceCall();
+        else endCall();
         return;
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -3618,7 +3666,7 @@ export function DesktopUI({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [chatOpen, endCall, getVoiceScopeOptions, interrupt, isControlCenterOpen, isSearchOpen, isWallpaperMode, openCommandCenter, selectedVoiceId, startCall, toggleWallpaperMode]);
+  }, [chatOpen, endCall, getVoiceScopeOptions, interrupt, isControlCenterOpen, isSearchOpen, isWallpaperMode, openCommandCenter, selectedVoiceId, startCall, startStandardVoiceCall, toggleWallpaperMode]);
 
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);

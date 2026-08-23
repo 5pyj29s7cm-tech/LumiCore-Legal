@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  describeAgentResponseDelivery,
   isActionSuccessClaim,
   isFinalizedSuccessfulResponse,
   isTerminalAgentStatus,
@@ -26,7 +27,7 @@ describe('frontend agent response finalization gate', () => {
     expect(isActionSuccessClaim('The document describes a completed project.')).toBe(false);
   });
 
-  it('withholds unfinalized action claims from display and speech', () => {
+  it('withholds unfinalized action claims but always delivers terminal receipts', () => {
     const unverified = { text: '\u5df2\u6253\u5f00 WPS\u3002', finalized: false, blocked: false };
     const verified = { ...unverified, finalized: true };
     const blocked = { ...verified, blocked: true };
@@ -35,10 +36,57 @@ describe('frontend agent response finalization gate', () => {
     expect(shouldSpeakAgentResponse(unverified)).toBe(false);
     expect(shouldDisplayAgentResponse(verified)).toBe(true);
     expect(shouldSpeakAgentResponse(verified)).toBe(true);
-    expect(shouldDisplayAgentResponse(blocked)).toBe(false);
+    expect(shouldDisplayAgentResponse(blocked)).toBe(true);
     expect(shouldSpeakAgentResponse(blocked)).toBe(false);
     expect(isFinalizedSuccessfulResponse(verified)).toBe(true);
     expect(isFinalizedSuccessfulResponse(blocked)).toBe(false);
+  });
+
+  it('does not hide a blocker merely because it reports the successful prefix of a partial operation', () => {
+    const partialFailure = {
+      text: '\u6587\u4ef6\u5df2\u7ecf\u5199\u5165\uff0c\u4f46\u6ca1\u6709\u53d6\u5f97\u540c\u4e00\u8def\u5f84\u7684\u6210\u529f\u56de\u8bfb\u56de\u6267\uff0c\u4e0d\u80fd\u62a5\u544a\u5b8c\u6210\u3002',
+      finalized: true,
+      blocked: true,
+      reason: 'Requested post-write readback is missing or failed.',
+    };
+    expect(isActionSuccessClaim(partialFailure.text)).toBe(true);
+    expect(shouldDisplayAgentResponse(partialFailure)).toBe(true);
+    expect(shouldSpeakAgentResponse(partialFailure)).toBe(false);
+  });
+
+  it('keeps confirmation boundaries visible even when transport finalization is absent', () => {
+    expect(shouldDisplayAgentResponse({
+      text: '\u5df2\u51c6\u5907\u5199\u5165\uff0c\u9700\u8981\u4f60\u786e\u8ba4\u540e\u624d\u80fd\u7ee7\u7eed\u3002',
+      finalized: false,
+      status: 'waiting_confirmation',
+    })).toBe(true);
+  });
+
+  it('turns backend reason codes into actionable copy and never renders guard diagnostics', () => {
+    expect(describeAgentResponseDelivery({
+      text: 'No successful current-turn tool execution was recorded for that execution-status claim.',
+      finalized: true,
+      blocked: true,
+      reason: 'execution_recovery_incomplete',
+    }, true)).toContain('\u5df2\u4fdd\u7559');
+    expect(describeAgentResponseDelivery({
+      text: '\u9700\u8981\u786e\u8ba4\u540e\u624d\u80fd\u7ee7\u7eed\u3002',
+      reason: 'waiting_confirmation',
+    }, true)).toContain('\u786e\u8ba4\u540e');
+    expect(describeAgentResponseDelivery({
+      text: 'blocked',
+      reason: 'execution_capability_unavailable',
+    }, false)).toContain('Settings');
+  });
+
+  it('uses retained-state language instead of exposing the missing-tool guard in progress', () => {
+    const blocked = describeTurnCompletionProgress(true, false, true, {
+      finalized: true,
+      blocked: true,
+      reason: 'execution_recovery_incomplete',
+    });
+    expect(blocked.text).toContain('\u4e0a\u4e0b\u6587');
+    expect(blocked.text).not.toContain('\u672a\u68c0\u6d4b\u5230\u5b9e\u9645\u5de5\u5177\u6267\u884c');
   });
 
   it('allows ordinary text and finalized blocker explanations without marking them successful', () => {
@@ -81,11 +129,9 @@ describe('frontend dynamic output path audit', () => {
     const displayGated = [
       'src/components/AgentChatPage.tsx',
       'src/components/ChatPanel.tsx',
-      'src/components/FloatingAgent.tsx',
       'src/components/UnifiedAgent.tsx',
       'src/components/Sanctuary.tsx',
       'src/components/org/CentralLumiChat.tsx',
-      'src/components/ProductDetailPage.tsx',
       'src/components/ProactiveNotifications.tsx',
       'src/hooks/useVoiceCall.ts',
     ];
@@ -105,7 +151,6 @@ describe('frontend dynamic output path audit', () => {
 
   it('does not keep a browser system-voice fallback in chat surfaces', () => {
     for (const relativePath of [
-      'src/components/FloatingAgent.tsx',
       'src/components/UnifiedAgent.tsx',
     ]) {
       const source = read(relativePath);

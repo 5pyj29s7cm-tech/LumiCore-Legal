@@ -11,6 +11,7 @@ import type { CapabilityLane, CapabilityManifestEntry } from '../tools/types';
 import { mcpManager } from '../mcp/client';
 import {
   buildActionContract,
+  extractDesktopLaunchTarget,
   isSimpleDesktopOpenRequest,
   requestsBlankAutoCadDocument,
   requiresExternalAiHistory,
@@ -26,6 +27,11 @@ import {
   ROUTES,
   type RouteDefinition,
 } from '../regions/packs/cn/tool_route_definitions';
+import {
+  isExplicitArtifactCreationText,
+  isExternalCommitConfirmationOnlyRequest,
+} from './normalized_action_intent';
+import { isReadOnlyKnowledgeBaseInspectionRequest } from './knowledge_intent';
 
 type ToolDeclaration = ReturnType<ToolRegistry['getToolDeclarations']>[number];
 
@@ -285,12 +291,22 @@ function isCurrentAuthoringDocumentInspection(text: string): boolean {
 function isDocumentOpenAndReviewRequest(text: string): boolean {
   // i18n-allow: Reviewed multilingual negative open/launch input recognition; not user-visible copy.
   if (/(?:不要|别|禁止|无需).{0,18}(?:打开|启动)|\b(?:do\s+not|don't|never|without)\b.{0,28}\b(?:open|launch)\b/iu.test(text)) return false;
+  // Ignore exact-target exclusion clauses such as "do not substitute a
+  // same-named file". Their incidental "file"/"read" words describe what
+  // must not be used, not a document the user wants reviewed.
+  const candidate = text
+    // i18n-allow: Reviewed Chinese exact-target exclusion recognition; not user-visible copy.
+    .replace(/(?:不能|不要|别|禁止|不可).{0,64}(?:替代|冒充|代替)/gu, ' ')
+    .replace(/\b(?:do\s+not|don't|never)\b.{0,80}\b(?:substitute|replace|use\s+instead)\b/giu, ' ');
   // i18n-allow: Reviewed multilingual open/launch input recognition; not user-visible copy.
-  const wantsOpen = /(?:打开|启动)|\b(?:open|launch)\b/iu.test(text);
+  const wantsOpen = /(?:打开|启动)|\b(?:open|launch)\b/iu.test(candidate);
   // i18n-allow: Reviewed multilingual document-type input recognition; not user-visible copy.
-  const hasDocument = /(?:PDF|DOCX|PPTX?|XLSX?|文件|文档|报告|介绍)|\b(?:pdf|docx?|pptx?|xlsx?|file|document)\b/iu.test(text);
+  const hasDocument = /(?:PDF|DOCX|PPTX?|XLSX?|文件|文档)|\b(?:pdf|docx?|pptx?|xlsx?|file|document)\b/iu.test(candidate)
+    // i18n-allow: Reviewed Chinese report/document input recognition; not user-visible copy.
+    || /(?:打开|启动|阅读|读取).{0,24}(?:报告|介绍)|(?:报告|介绍)(?:文件|文档)/u.test(candidate)
+    || /\b(?:open|launch|read|review).{0,32}\breport\b/iu.test(candidate);
   // i18n-allow: Reviewed multilingual review/read input recognition; not user-visible copy.
-  const wantsReview = /(?:分析|总结|介绍|讲解|读取|阅读|逐页|一页一页|看一下|看看)|\b(?:analy[sz]e|summari[sz]e|review|read|present|walk\s+through)\b/iu.test(text);
+  const wantsReview = /(?:分析|总结|介绍|讲解|读取|阅读|逐页|一页一页|看一下|看看)|\b(?:analy[sz]e|summari[sz]e|review|read|present|walk\s+through)\b/iu.test(candidate);
   return wantsOpen && hasDocument && wantsReview;
 }
 
@@ -691,6 +707,10 @@ export function routeToolsForTurn(
   const reasons: string[] = [];
   const manifestPriorities: string[] = [];
   const actionContract = buildActionContract(text);
+  const explicitArtifactCreation = isExplicitArtifactCreationText(text);
+  const readOnlyKnowledgeInspection = isReadOnlyKnowledgeBaseInspectionRequest(text);
+  const confirmationOnlyExternalCommit = actionContract.kind === 'messaging_send'
+    && isExternalCommitConfirmationOnlyRequest(text);
   const recoveredApplicationContinuation = isRecoveredApplicationContinuation(text);
   const recoveredCurrentAppEdit = isRecoveredCurrentAppEditingContinuation(text);
   const currentAppEdit = recoveredCurrentAppEdit
@@ -711,9 +731,9 @@ export function routeToolsForTurn(
     ? []
     : strictDesktopObservationToolNames(text, actionContract.kind);
   const desktopObservationOnly = desktopObservationToolNames.length > 0;
-  const simpleDesktopOpen =
+  const desktopLaunchRequest =
     actionContract.kind === 'desktop_operation'
-    && isSimpleDesktopOpenRequest(text)
+    && Boolean(extractDesktopLaunchTarget(text))
     && !documentOpenAndReview
     && !isDirectAutocadOperationsPlayback(text);
   const extensionRegistryOnly = actionContract.kind === 'extension_registry';
@@ -727,6 +747,10 @@ export function routeToolsForTurn(
     if (currentAppEdit) continue;
     if (!routeMatches(route, text)) continue;
     if (
+      explicitArtifactCreation
+      && ['messaging', 'client_surface', 'desktop_launch'].includes(route.category)
+    ) continue;
+    if (
       route.category === 'work_takeover'
       && recoveredApplicationContinuation
       && !hasPersistentTaskCenterEvidence(text)
@@ -736,7 +760,7 @@ export function routeToolsForTurn(
       !hasNamedMessagingSurface(text) &&
       !['messaging_read', 'messaging_send'].includes(actionContract.kind)
     ) continue;
-    if (route.category === 'messaging' && hasNegatedMessagingSendIntent(text) && !hasNamedMessagingSurface(text)) continue;
+    if (route.category === 'messaging' && hasNegatedMessagingSendIntent(text) && !hasNamedMessagingSurface(text) && !confirmationOnlyExternalCommit) continue;
     if (route.category === 'messaging' && isDesktopAiCollaboration(text) && !hasNamedMessagingSurface(text)) continue;
     if (
       route.category === 'documents' &&
@@ -774,6 +798,27 @@ export function routeToolsForTurn(
       }
     }
     reasons.push('message reading hard-forbids every messaging capability with external side effects');
+  }
+
+  if (readOnlyKnowledgeInspection && !currentAppEdit) {
+    selected.clear();
+    addIfAvailable(selected, available, 'knowledge_file_stats');
+    addIfAvailable(selected, available, 'knowledge_coverage_report');
+    categories.splice(0, categories.length, 'knowledge');
+    reasons.push('read-only knowledge inventory is isolated from client, system, document, and mutation routes');
+    for (const name of availableNames) {
+      if (!selected.has(name)) forbiddenToolNames.add(name);
+    }
+  }
+
+  if (confirmationOnlyExternalCommit && !currentAppEdit) {
+    selected.clear();
+    addIfAvailable(selected, available, 'wechat_send_message');
+    categories.splice(0, categories.length, 'messaging');
+    reasons.push('confirmation-only external messaging exposes only the exact send adapter, which must stop at the confirmation gate');
+    for (const name of availableNames) {
+      if (!selected.has(name)) forbiddenToolNames.add(name);
+    }
   }
 
   if (currentAppEdit) {
@@ -861,9 +906,15 @@ export function routeToolsForTurn(
     }
   }
 
-  if (simpleDesktopOpen && !currentAppEdit) {
+  if (desktopLaunchRequest && !currentAppEdit) {
     selected.clear();
+    // A compound "open X, then verify the active window" prompt can make the
+    // contract's observation branch prefer only desktop_active_window. Keep
+    // the exact launch actuator as the core step and the active-window read as
+    // its verifier; neither step is optional.
     for (const name of actionContract.preferredTools) addIfAvailable(selected, available, name);
+    if (!selected.has('browser_open_task')) addIfAvailable(selected, available, 'desktop_open');
+    addIfAvailable(selected, available, 'desktop_active_window');
     categories.splice(0, categories.length, 'desktop_launch');
     reasons.splice(
       0,
@@ -1028,9 +1079,11 @@ export function routeToolsForTurn(
     truncated,
     unavailableMcpServers: unique(unavailableMcpServers),
     hardAllowlist: desktopObservationOnly
+      || readOnlyKnowledgeInspection
+      || confirmationOnlyExternalCommit
       || currentAuthoringDocumentInspection
       || documentOpenAndReview
-      || simpleDesktopOpen
+      || desktopLaunchRequest
       || cadGeometryExtractionOnly
       || extensionRegistryOnly
       || selected.has('cad_draw_floorplan_in_autocad')
@@ -1040,9 +1093,13 @@ export function routeToolsForTurn(
       : undefined,
     maxIterations: selected.has('cad_draw_floorplan_in_autocad')
       ? 2
+      : readOnlyKnowledgeInspection
+      ? Math.max(2, selected.size)
+      : confirmationOnlyExternalCommit
+      ? 1
       : currentAuthoringDocumentInspection || documentOpenAndReview
       ? Math.max(3, selected.size)
-      : simpleDesktopOpen
+      : desktopLaunchRequest
       ? Math.max(2, selected.size)
       : desktopObservationOnly
       ? desktopObservationToolNames.length + 1

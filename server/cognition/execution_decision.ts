@@ -30,6 +30,7 @@ import {
   formatIndustryUserGuidancePrompt,
   isIndustryGuidancePreferenceRequest,
 } from '../industry/user_guidance';
+import { buildActionContract } from './action_contract';
 
 type ToolDeclaration = ReturnType<ToolRegistry['getToolDeclarations']>[number];
 
@@ -158,8 +159,126 @@ function fallbackPolicy(
   personalityToolPolicy?: ToolPolicy,
   registry?: ToolRegistry,
 ): ToolPolicy {
-  const opModePolicy = buildOperationModeToolPolicy(flow.effectiveOperationMode, registry);
+  // The visible Chat posture is not a second permission prompt. For an open
+  // model-owned chat turn, expose the ordinary foreground Assistant manifest
+  // without persisting a UI-mode change. Semantic routing still only ranks
+  // candidates, while explicit no-tool/read-only/meeting and sanctuary
+  // boundaries keep modelToolAccess hard-off before this point.
+  const manifestMode = flow.channel === 'chat'
+    && flow.modelToolAccess === 'manifest'
+    && flow.operationMode === 'chat'
+      ? 'assistant'
+      : flow.operationMode;
+  const opModePolicy = buildOperationModeToolPolicy(manifestMode, registry);
+  if (flow.channel === 'chat' && flow.modelToolAccess === 'manifest') {
+    if (!personalityToolPolicy) return opModePolicy;
+    const hardAllowed = new Set(opModePolicy.allowedTools || []);
+    const personalityAllowed = new Set(personalityToolPolicy.allowedTools || []);
+    const hardWildcard = hardAllowed.has('*');
+    const personalityWildcard = personalityAllowed.has('*');
+    const allowedTools = hardWildcard
+      ? [...personalityAllowed]
+      : personalityWildcard
+        ? [...hardAllowed]
+        : [...hardAllowed].filter(name => personalityAllowed.has(name));
+    const forbiddenTools = unique([
+      ...(opModePolicy.forbiddenTools || []),
+      ...(personalityToolPolicy.forbiddenTools || []),
+    ]);
+    const forbidden = new Set(forbiddenTools);
+    const allowed = allowedTools.filter(name => name === '*' || !forbidden.has(name));
+    const hardMax = opModePolicy.maxIterations ?? Number.MAX_SAFE_INTEGER;
+    const personalityMax = personalityToolPolicy.maxIterations ?? Number.MAX_SAFE_INTEGER;
+    return {
+      allowedTools: allowed,
+      forbiddenTools,
+      requireConfirmation: unique([
+        ...(opModePolicy.requireConfirmation || []),
+        ...(personalityToolPolicy.requireConfirmation || []),
+      ]).filter(name => !forbidden.has(name)),
+      securityOverrides: {
+        ...(opModePolicy.securityOverrides || {}),
+        ...(personalityToolPolicy.securityOverrides || {}),
+      },
+      maxIterations: Math.min(hardMax, personalityMax),
+    };
+  }
   return flow.workSurfaceRoute.toolPolicy || opModePolicy || personalityToolPolicy || NO_TOOLS_POLICY;
+}
+
+/**
+ * Voice and task-center execution do not inherit Chat's broad model-owned
+ * manifest. An explicit edition workflow therefore needs its own bounded
+ * policy, derived only from the current registered capability contracts and
+ * the exact workflow contract matched for this turn. Missing or mismatched
+ * contracts fail closed instead of falling back to the complete registry.
+ */
+function buildRegisteredIndustryWorkflowToolPolicy(
+  flow: LumiTurnFlow,
+  registry?: ToolRegistry,
+): ToolPolicy | null {
+  if (flow.channel === 'chat' || !flow.industryWorkflowEntryId) return null;
+  if (!registry) return NO_TOOLS_POLICY;
+  const match = matchCurrentIndustryWorkflow(flow.routeText);
+  if (
+    !match
+    || match.entry.entryId !== flow.industryWorkflowEntryId
+    || match.entry.contract.entryId !== match.entry.entryId
+    || match.entry.contract.productLine !== match.profile.productLine
+  ) return NO_TOOLS_POLICY;
+
+  const assistantPolicy = buildOperationModeToolPolicy('assistant', registry);
+  const assistantManifest = registry.getCapabilityManifest(assistantPolicy);
+  const registeredAssistantTools = new Set(assistantManifest.map(entry => entry.toolName));
+  const routed = routeToolsForTurn(flow.routeText, registry.getToolDeclarations(), {
+    // Reserve room for the four workflow-control contracts while keeping the
+    // complete non-Chat policy inside the channel's declaration budget.
+    maxTools: flow.channel === 'voice' ? 28 : 60,
+    capabilityManifest: assistantManifest,
+  });
+  const requiredWorkflowTools = [
+    'industry_workspace_status',
+    'industry_workspace_bind',
+    'industry_workflow_start',
+    'industry_workflow_complete',
+  ];
+  if (requiredWorkflowTools.some(name => !registeredAssistantTools.has(name))) {
+    return NO_TOOLS_POLICY;
+  }
+  const allowedTools = unique([
+    ...requiredWorkflowTools,
+    ...routed.toolNames,
+  ]).filter(name => registeredAssistantTools.has(name));
+  const allowed = new Set(allowedTools);
+  return {
+    allowedTools,
+    requireConfirmation: (assistantPolicy.requireConfirmation || []).filter(name => allowed.has(name)),
+    forbiddenTools: (assistantPolicy.forbiddenTools || []).filter(name => !allowed.has(name)),
+    securityOverrides: assistantPolicy.securityOverrides
+      ? Object.fromEntries(Object.entries(assistantPolicy.securityOverrides).filter(([name]) => allowed.has(name)))
+      : undefined,
+    maxIterations: flow.channel === 'voice' ? 12 : Math.min(20, assistantPolicy.maxIterations || 20),
+  };
+}
+
+function buildRegisteredIndustryGuidanceToolPolicy(
+  flow: LumiTurnFlow,
+  registry?: ToolRegistry,
+): ToolPolicy | null {
+  if (!flow.industryGuidanceRequest) return null;
+  if (!registry?.get('industry_user_guide')) return NO_TOOLS_POLICY;
+  const allowedTools = [
+    'industry_user_guide',
+    ...(isIndustryGuidancePreferenceRequest(flow.routeText) && registry.get('industry_guidance_preference_set')
+      ? ['industry_guidance_preference_set']
+      : []),
+  ];
+  return {
+    allowedTools,
+    requireConfirmation: [],
+    forbiddenTools: [],
+    maxIterations: 2,
+  };
 }
 
 function shouldRouteTools(flow: LumiTurnFlow, isSanctuary?: boolean): boolean {
@@ -214,6 +333,7 @@ function enhanceToolRouteForFlow(
   const reasons = [...route.reasons];
   const recoveredCurrentAppEdit = isRecoveredCurrentAppEditingContinuation(flow.routeText);
   const recoveredWpsCreateAndType = isRecoveredWpsCreateTask(flow.routeText);
+  const actionContract = buildActionContract(flow.routeText);
   const discoveredEvidenceTools = registry?.findRelevant(flow.routeText, {
     limit: 8,
     evidenceOperations: ['observe', 'test'],
@@ -323,6 +443,7 @@ function enhanceToolRouteForFlow(
       'create_ppt',
       'create_pdf',
       'write_file',
+      'desktop_write_text_file',
     ]);
     categories.push('artifact_work');
     reasons.push('artifact-first turns need production and verification tools');
@@ -335,6 +456,15 @@ function enhanceToolRouteForFlow(
     ? [WPS_CREATE_DOCUMENT_TOOL]
     : industryWorkflowMatch
       ? ['industry_workspace_status', 'industry_workspace_bind', 'industry_workflow_start', 'industry_workflow_complete'].filter(name => available.has(name))
+      : flow.workSurfaceRoute.artifactFirst && actionContract.kind === 'artifact_work'
+        ? [
+            'write_file',
+            'desktop_write_text_file',
+            'work_product_verify',
+            'desktop_path_info',
+            'read_file',
+            'read_files_batch',
+          ].filter(name => available.has(name))
       : [];
   const merged = unique([...priority, ...routeNames, ...Array.from(additions)]);
   if (
@@ -354,31 +484,34 @@ function enhanceToolRouteForFlow(
 }
 
 export function buildLumiExecutionDecision(input: LumiExecutionDecisionInput): LumiExecutionDecision {
+  const modelOwnedMainChat = input.flow.channel === 'chat';
   const recoveredCurrentAppEdit = isRecoveredCurrentAppEditingContinuation(input.flow.routeText || input.text);
   const statusOnlyContinuation =
     /Recovered structured action state:[\s\S]{0,500}- followupIntent:\s*status\b/i.test(input.flow.routeText || input.text);
-  const allowToolUse = input.flow.allowToolUseForTurn && !input.isSanctuary && !statusOnlyContinuation;
-  const selfRepairToolPolicy = input.flow.selfRepairTurn && !statusOnlyContinuation
+  const allowToolUse = (
+    input.flow.allowToolUseForTurn
+    || input.flow.modelToolAccess === 'manifest'
+  ) && !input.isSanctuary && !statusOnlyContinuation;
+  const selfRepairToolPolicy = input.flow.selfRepairTurn && !statusOnlyContinuation && !modelOwnedMainChat
     ? buildSelfRepairToolPolicy(input.flow.routeText || input.text, input.toolRegistry)
     : null;
-  const clientActionToolPolicy = input.flow.clientActionOnlyTurn && !statusOnlyContinuation ? CLIENT_ACTION_TOOL_POLICY : null;
-  const industryGuidanceToolPolicy: ToolPolicy | null = input.flow.industryGuidanceRequest
-    ? {
-        allowedTools: [
-          'industry_user_guide',
-          ...(isIndustryGuidancePreferenceRequest(input.flow.routeText || input.text)
-            ? ['industry_guidance_preference_set']
-            : []),
-        ],
-        requireConfirmation: [],
-        forbiddenTools: [],
-        maxIterations: 2,
-      }
+  const clientActionToolPolicy = input.flow.clientActionOnlyTurn && !statusOnlyContinuation && !modelOwnedMainChat
+    ? CLIENT_ACTION_TOOL_POLICY
     : null;
+  const industryGuidanceToolPolicy = buildRegisteredIndustryGuidanceToolPolicy(
+    input.flow,
+    input.toolRegistry,
+  );
+  const industryWorkflowToolPolicy = buildRegisteredIndustryWorkflowToolPolicy(
+    input.flow,
+    input.toolRegistry,
+  );
   const baseToolPolicy = input.isSanctuary || statusOnlyContinuation
     ? NO_TOOLS_POLICY
     : industryGuidanceToolPolicy
       ? industryGuidanceToolPolicy
+      : industryWorkflowToolPolicy
+        ? industryWorkflowToolPolicy
     : selfRepairToolPolicy
       ? selfRepairToolPolicy
       : clientActionToolPolicy
@@ -405,7 +538,9 @@ export function buildLumiExecutionDecision(input: LumiExecutionDecisionInput): L
     taskMarker
     && (input.flow.routeText || input.text).includes(taskMarker)
     && input.actionTaskState?.policySnapshot
-    && !statusOnlyContinuation,
+    && !statusOnlyContinuation
+    && !clientActionToolPolicy
+    && !selfRepairToolPolicy,
   );
   const uncappedToolPolicy = resumesPinnedTask && toolRoute?.hardAllowlist !== true
     ? applyTaskPolicySnapshot(routedPolicy, input.actionTaskState?.policySnapshot)

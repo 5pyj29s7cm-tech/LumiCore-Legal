@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { normalizeActionIntent } from './normalized_action_intent';
+import {
+  hasMixedStatusExecutionIntent,
+  normalizeActionIntent,
+} from './normalized_action_intent';
 import { matchesCnActionContinuation } from '../regions/packs/cn/action_continuation';
 import {
   CN_TASK_EXECUTION_MESSAGES,
@@ -8,6 +11,7 @@ import {
 import { isGuardGeneratedConversationRecord } from '../conversation/guard_history';
 import { buildActionContract } from './action_contract';
 import type { ToolPolicy } from '../personality/types';
+import { isConfirmationBlockedToolRecord } from '../tools/confirmation_block';
 import {
   coalesceToolExecutionRecords,
   applyTaskPolicySnapshot,
@@ -77,6 +81,38 @@ export interface ConversationActionContinuationUpdate {
   evidenceMessageId?: string;
   requestId?: string;
   toolPolicy?: ToolPolicy;
+}
+
+export type ToolRecordTaskDurability = 'observation_only' | 'durable' | 'unknown';
+
+/**
+ * Durable conversation state follows the capability contract selected by the
+ * model, not the wording or name of a tool. Pure reads remain ordinary turn
+ * evidence; mutations and any persistent/external side effect may own a task
+ * pointer. Legacy records without a capability snapshot stay unknown so a
+ * migration caller can handle them explicitly.
+ */
+export function classifyToolRecordTaskDurability(
+  record: Pick<import('../tools/types').ToolExecutionRecord, 'capability'>,
+): ToolRecordTaskDurability {
+  const capability = record?.capability;
+  if (!capability || !Array.isArray(capability.sideEffects)) return 'unknown';
+  const safeObservationEffects = capability.sideEffects.every(effect => (
+    effect.type === 'none'
+    || effect.type === 'local_read'
+    || effect.type === 'network_read'
+  ));
+  if (
+    (capability.operation === 'observe' || capability.operation === 'test')
+    && safeObservationEffects
+  ) return 'observation_only';
+  if (
+    capability.operation === 'mutate'
+    || capability.operation === 'create'
+    || capability.operation === 'communicate'
+    || !safeObservationEffects
+  ) return 'durable';
+  return 'unknown';
 }
 
 const ENGLISH_SHORT_CONTINUATION_RE =
@@ -327,6 +363,9 @@ const CN_SHORT_EXECUTION_CONTINUATION_RE =
 const ENGLISH_STATUS_FOLLOWUP_RE =
   /^(?:are you (?:doing|running) it|did you do it|is it (?:done|running)|what(?:'s| is) the result|why (?:didn'?t|haven'?t) you|what was my task)[.!?]*$/i;
 
+const MIXED_STATUS_QUESTION_RE =
+  /(?:\u5b8c\u6210|\u505a\u5b8c|\u6267\u884c\u5b8c)(?:\u4e86)?(?:\u5417|\u6ca1|\u4e86\u6ca1).*[\uff1f?].*(?:\u7ee7\u7eed|\u63a5\u7740|\u6062\u590d|\u91cd\u8bd5|\u6267\u884c|\u63a8\u8fdb)(?:\u6267\u884c|\u5904\u7406|\u4efb\u52a1)?(?:\u4e86)?(?:\u5417|\u6ca1|\u6ca1\u6709|\u5462)?[\uff1f?]\s*$|\b(?:is|was|has)\b.{0,28}\b(?:done|complete|completed|finished)\b.*\?\s*(?:(?:are|did|will)\s+you\s+)?(?:continue|continuing|resume|retry|execute|executing|run|running)(?:\s+(?:it|this|that|the\s+task|executing))?\s*\?\s*$/iu;
+
 // A short failure question becomes task status only while a durable task is
 // unfinished. The state check prevents stale completed work from hijacking
 // an unrelated conversational question.
@@ -385,6 +424,9 @@ export function isRecoveredCurrentAppEditingContinuation(text: string): boolean 
 export function classifyRecentActionFollowupIntent(text: string): RecentActionFollowupIntent {
   const clean = compact(text, 500);
   if (!clean) return 'none';
+  if (normalizeActionIntent(clean).rule === 'business-result-followup-before-action') return 'status';
+  if (hasMixedStatusExecutionIntent(clean)) return 'execute';
+  if (MIXED_STATUS_QUESTION_RE.test(clean)) return 'status';
   if (
     STATUS_FOLLOWUP_RE.test(clean)
     || STATUS_RESULT_DEMAND_RE.test(clean)
@@ -573,7 +615,7 @@ export function normalizeConversationActionState(
       .map(path => compact(path, 500))
       .filter(Boolean)
       .slice(0, 8),
-    latestBlocker: status === 'completed'
+    latestBlocker: status === 'completed' || status === 'waiting_confirmation' || status === 'cancelled'
       ? ''
       : compact(receiptCompletion?.blocker || value.latestBlocker, 380),
     unfinished: Boolean(value.unfinished),
@@ -601,8 +643,16 @@ export function classifyConversationActionFollowupIntent(
   state?: ConversationActionContinuationState | null,
 ): RecentActionFollowupIntent {
   const normalizedIntent = normalizeActionIntent(text);
+  if (
+    normalizedIntent.kind === 'correction_explanation'
+    || normalizedIntent.kind === 'work_task'
+  ) return 'none';
   if (normalizedIntent.kind === 'status_query') return 'status';
-  if (normalizedIntent.kind === 'correction_explanation') return 'none';
+  // `statusQuery` deliberately recognizes a narrow, negated business-result
+  // follow-up before mixed execution words. Preserve that read-only decision;
+  // ordinary mixed status + affirmative resume turns are not normalized as a
+  // status query and still take the execute path below.
+  if (hasMixedStatusExecutionIntent(text)) return 'execute';
   const direct = classifyRecentActionFollowupIntent(text);
   if (direct !== 'none') return direct;
   const durableState = normalizeConversationActionState(state);
@@ -665,11 +715,14 @@ export function buildConversationActionContinuationState(
     : goal;
   const completion = taskCompletionFromReceipts(completionGoal, receipts);
   const currentFailure = [...calls].reverse().find(record => !toolCallSucceeded(record));
+  const waitingForConfirmation = calls.some(isConfirmationBlockedToolRecord);
   const hasFailure = completion.records.some(record => !toolCallSucceeded(record));
   const status: ConversationTaskStatus = followupIntent === 'status' && currentFailure
     ? 'blocked'
     : completion.complete
     ? 'completed'
+    : waitingForConfirmation
+      ? 'waiting_confirmation'
     : hasFailure
       ? 'blocked'
       : 'executing';
@@ -692,7 +745,9 @@ export function buildConversationActionContinuationState(
       ...(inheritsPrevious ? previous!.sourcePaths : []),
       ...current.sourcePaths,
     ])).slice(0, 8),
-    latestBlocker: completion.blocker || (currentFailure ? toolCallFailure(currentFailure) : ''),
+    latestBlocker: waitingForConfirmation
+      ? ''
+      : completion.blocker || (currentFailure ? toolCallFailure(currentFailure) : ''),
     unfinished: status !== 'completed',
     evidenceTools: Array.from(new Set([
       ...(inheritsPrevious ? previous!.evidenceTools : []),
@@ -835,6 +890,7 @@ export function needsRecentActionContinuationContext(userText: string): boolean 
   const clean = compact(userText, 500);
   if (!clean || (clean.length > 180 && !isCurrentAppEditingRequest(clean))) return false;
   const normalizedIntent = normalizeActionIntent(clean);
+  if (normalizedIntent.kind === 'work_task') return false;
   if (
     normalizedIntent.kind === 'correction_explanation'
     || normalizedIntent.kind === 'status_query'
@@ -856,6 +912,11 @@ export function resolveRecentActionOpenTarget(
   userText: string,
   persistedState?: ConversationActionContinuationState | null,
 ): string | null {
+  const normalizedIntent = normalizeActionIntent(userText);
+  if (
+    normalizedIntent.kind === 'status_query'
+    || normalizedIntent.kind === 'correction_explanation'
+  ) return null;
   const clean = compact(userText, 120)
     .replace(/[。！？.!?]+$/u, '')
     .trim();
