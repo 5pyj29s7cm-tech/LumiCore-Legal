@@ -1081,7 +1081,6 @@ function LegalCaseWorkspace({
         extractedTextLimit: 8000,
       });
       if (!report.trim()) throw new Error(uiMessage('legal-hub.notice-link-result-is-empty.8480219467'));
-      onAddMaterial('note', uiMessage('legal-hub.notice-link-processing-result.ba3682e3c6'), report, 'tool');
       setNoticeStatus(uiMessage('legal-hub.notice-link-processed-and-archived.ca52301c48'));
     } catch (err: any) {
       setNoticeStatus(err?.message || uiMessage('legal-hub.notice-link-processing-failed.b6c4f793c8'));
@@ -1105,7 +1104,6 @@ function LegalCaseWorkspace({
         evidence: (activeCase.materials || []).slice(0, 8).map(item => `${item.title}（${item.type}）`).join('\n'),
       });
       if (!draft.trim()) throw new Error(uiMessage('legal-hub.engagement-letter-draft-is-empty.4b8b7ac964'));
-      onAddMaterial('pleading', uiMessage('legal-hub.engagement-letter-draft.f24d4df695'), draft, 'tool');
       setDocumentStatus(uiMessage('legal-hub.engagement-letter-draft-generated-and.736bcca40e'));
     } catch (err: any) {
       setDocumentStatus(err?.message || uiMessage('legal-hub.failed-to-draft-engagement-letter.da1f0cf7bb'));
@@ -1127,7 +1125,6 @@ function LegalCaseWorkspace({
         writeFiles: true,
       });
       if (!draft.trim()) throw new Error(uiMessage('legal-hub.reasoning-matrix-is-empty.11a8fdc054'));
-      onAddMaterial('note', uiMessage('legal-hub.legal-reasoning-matrix.6511ae764d'), draft, 'tool');
       setDocumentStatus(uiMessage('legal-hub.reasoning-matrix-generated-and-archived.bab25bd4e7'));
     } catch (err: any) {
       setDocumentStatus(err?.message || uiMessage('legal-hub.reasoning-matrix-generation-failed.2f463a82fa'));
@@ -1164,7 +1161,6 @@ function LegalCaseWorkspace({
         includePdf: false,
       });
       if (!report.trim()) throw new Error(uiMessage('legal-hub.delivery-gate-result-is-empty.f8a71afa2b'));
-      onAddMaterial('note', `${candidate.title} ${uiMessage('legal-hub.delivery-gate-record.410a32f38e')}`, report, 'tool');
       setDocumentStatus(uiMessage('legal-hub.delivery-gate-completed-and-archived.a3ad6b85db'));
     } catch (err: any) {
       setDocumentStatus(err?.message || uiMessage('legal-hub.delivery-gate-failed.733db09c91'));
@@ -1675,7 +1671,6 @@ function LegalResearchWorkspace({ orgId }: { orgId?: string }) {
 function LegalPacketView({
   caseFile,
   orgId,
-  onAddMaterial,
 }: {
   caseFile?: LegalCaseFile | null;
   orgId?: string;
@@ -1724,11 +1719,6 @@ function LegalPacketView({
     }
   };
 
-  const archive = () => {
-    if (!result || !onAddMaterial) return;
-    onAddMaterial('pleading', `${caseFile?.title || caseFile?.caseNumber || uiMessage('legal-hub.case.8a53cf13fb')} 半自动文书包`, result, 'tool');
-  };
-
   return (
     <LegalTwoPaneTool
       icon={<ClipboardList size={22} />}
@@ -1758,8 +1748,6 @@ function LegalPacketView({
       )}
       result={result}
       emptyText={uiMessage('legal-hub.the-packet-will-appear-here.52a02955fa')}
-      archiveLabel={uiMessage('legal-hub.archive-to-case.6dc41a223d')}
-      onArchive={!orgId && result ? archive : undefined}
     />
   );
 }
@@ -1767,7 +1755,6 @@ function LegalPacketView({
 function LegalExternalResearchView({
   caseFile,
   orgId,
-  onAddMaterial,
 }: {
   caseFile?: LegalCaseFile | null;
   orgId?: string;
@@ -1809,11 +1796,6 @@ function LegalExternalResearchView({
     }
   };
 
-  const archive = () => {
-    if (!result || !onAddMaterial) return;
-    onAddMaterial('note', `${caseFile?.title || caseFile?.caseNumber || uiMessage('legal-hub.case.8a53cf13fb')} 外部检索行动单`, result, 'tool');
-  };
-
   return (
     <LegalTwoPaneTool
       icon={<Search size={22} />}
@@ -1835,8 +1817,6 @@ function LegalExternalResearchView({
       )}
       result={result}
       emptyText={uiMessage('legal-hub.external-research-plan-will-appear.701d667eed')}
-      archiveLabel={uiMessage('legal-hub.archive-to-case.6dc41a223d')}
-      onArchive={!orgId && result ? archive : undefined}
     />
   );
 }
@@ -1918,7 +1898,6 @@ function LegalTwoPaneTool({
 function LegalStrategyView({
   caseFile,
   orgId,
-  onAddMaterial,
 }: {
   caseFile?: LegalCaseFile | null;
   orgId?: string;
@@ -1953,12 +1932,6 @@ function LegalStrategyView({
       setLoading(false);
     }
   };
-  const archive = () => {
-    if (!result || !onAddMaterial) return;
-    onAddMaterial('note', `${legalCaseTitle(caseFile)} 诉讼策略分析`, result, 'tool');
-    toast.success(uiMessage('legal-hub.strategy-analysis-archived-to-the.7220b483ae'));
-  };
-
   return (
     <div className="h-full overflow-y-auto p-6 text-white">
       <div className="mx-auto flex max-w-5xl flex-col gap-4">
@@ -1998,14 +1971,6 @@ function LegalStrategyView({
           <div className="min-h-0 rounded-lg border border-white/10 bg-white/[0.04] p-4">
             {result ? (
               <div className="flex h-full min-h-[420px] flex-col gap-3">
-                {!orgId && (
-                  <div className="flex justify-end">
-                    <button onClick={archive} className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/65 transition hover:bg-white/10 hover:text-white">
-                      <FolderOpen size={14} />
-                      {uiMessage('legal-hub.archive-to-case.6dc41a223d')}
-                    </button>
-                  </div>
-                )}
                 <pre className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/20 p-4 text-sm leading-7 text-white/76 custom-scrollbar">
                   {result}
                 </pre>

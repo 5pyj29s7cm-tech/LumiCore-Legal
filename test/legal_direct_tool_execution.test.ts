@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ToolRegistry } from '../server/tools/registry';
-import { executeToolCallOrThrow } from '../server/tools/execution_engine';
+import { executeToolCall, executeToolCallOrThrow } from '../server/tools/execution_engine';
 import { makeApp } from './helpers';
 
 let registerLegalTools: (registry: ToolRegistry) => void;
@@ -69,6 +69,27 @@ describe('direct legal tool execution', () => {
       'legal_case_strategy',
     ]) {
       expect(source).toContain(`'${toolName}'`);
+    }
+  });
+
+  it('returns a verified needs_source receipt instead of claiming an empty asset scan completed', async () => {
+    const registry = new ToolRegistry();
+    registerLegalTools(registry);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('', { status: 404, headers: { 'content-type': 'text/plain' } }),
+    );
+    try {
+      const record = await executeToolCall({
+        registry,
+        name: 'legal_trace_assets',
+        arguments: { name: 'No Source Subject', persistCase: false },
+      });
+      expect(record.error).toBeUndefined();
+      expect(record.terminalVerification?.status).toBe('verified');
+      expect(record.receipt).toMatchObject({ ok: true, status: 'needs_source' });
+      expect(record.result).toContain('needs_source');
+    } finally {
+      fetchMock.mockRestore();
     }
   });
 });

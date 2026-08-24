@@ -1,4 +1,5 @@
 import { startIndustryWorkflow } from './industryWorkflowClient';
+import { mergePersonalLegalCaseRuntimeSnapshot } from './legalCaseStore';
 
 interface LegalIndustrySelection {
   taskId?: string;
@@ -62,7 +63,18 @@ async function ensureLegalIndustryTask(
   return active;
 }
 
-export async function runLegalTool(toolName: string, args: Record<string, any>): Promise<string> {
+export interface LegalToolExecutionResult {
+  text: string;
+  receipt: Record<string, any>;
+  artifacts: string[];
+  caseUpdates: Record<string, any>[];
+  industryWorkflow?: Record<string, any>;
+}
+
+export async function runLegalToolExecution(
+  toolName: string,
+  args: Record<string, any>,
+): Promise<LegalToolExecutionResult> {
   const industryWorkflow = await ensureLegalIndustryTask(toolName, args);
   const res = await fetch(`/api/legal/tool/${encodeURIComponent(toolName)}`, {
     method: 'POST',
@@ -76,10 +88,24 @@ export async function runLegalTool(toolName: string, args: Record<string, any>):
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `${toolName} failed`);
   const text = data.text || data.response || data.reply || data.message || JSON.stringify(data);
+  const caseUpdates = Array.isArray(data.caseUpdates) ? data.caseUpdates : [];
+  caseUpdates.forEach((caseFile: Record<string, any>) => mergePersonalLegalCaseRuntimeSnapshot(caseFile));
   if (args.caseId && typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('lumi:org-legal-cases-changed', {
       detail: { caseId: args.caseId, toolName },
     }));
   }
-  return text;
+  return {
+    text,
+    receipt: data.receipt && typeof data.receipt === 'object' ? data.receipt : {},
+    artifacts: Array.isArray(data.artifacts) ? data.artifacts.map((value: unknown) => String(value)) : [],
+    caseUpdates,
+    industryWorkflow: data.industryWorkflow && typeof data.industryWorkflow === 'object'
+      ? data.industryWorkflow
+      : undefined,
+  };
+}
+
+export async function runLegalTool(toolName: string, args: Record<string, any>): Promise<string> {
+  return (await runLegalToolExecution(toolName, args)).text;
 }

@@ -47,6 +47,20 @@ describe('personal legal case runtime continuity', () => {
     LegalCases.upsertCaseSnapshot(orgId, userId, { ...snapshot, notes: `${snapshot.notes} 待核对诉讼时效。` });
     expect(LegalCases.listCases(orgId, '矩衡律师版验收案', 10, userId)).toHaveLength(1);
 
+    const toolMaterial = LegalCases.addMaterial(orgId, userId, caseId, {
+      type: 'pleading',
+      title: 'Verified tool artifact',
+      content: 'Server-authored legal work product.',
+      localPath: 'D:\\verified\\legal-delivery.docx',
+      source: 'tool',
+    });
+    expect(toolMaterial).not.toBeNull();
+    LegalCases.upsertCaseSnapshot(orgId, userId, snapshot);
+    const afterStaleSync = LegalCases.getCase(orgId, caseId, userId, 'read');
+    expect(afterStaleSync?.materials.filter(material => material.id === toolMaterial?.id)).toHaveLength(1);
+    expect(afterStaleSync?.materials.find(material => material.id === toolMaterial?.id)?.localPath)
+      .toBe('D:\\verified\\legal-delivery.docx');
+
     bindIndustryWorkspaceContext({ userId, domain: 'personal', orgId: '' }, {
       name: snapshot.title,
       attributes: {

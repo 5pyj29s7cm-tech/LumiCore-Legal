@@ -12,6 +12,9 @@ export interface LegalCaseMaterial {
   title: string;
   createdAt: string;
   content?: string;
+  fileName?: string;
+  localPath?: string;
+  createdBy?: string;
   source?: 'manual' | 'meeting' | 'notice' | 'tool' | 'import' | 'feishu';
 }
 
@@ -114,6 +117,9 @@ function normalizeCaseFile(value: any): LegalCaseFile | null {
       title: String(item?.title || chinaLegalCopy().material),
       createdAt: String(item?.createdAt || new Date().toISOString()),
       content: item?.content ? String(item.content) : undefined,
+      fileName: item?.fileName ? String(item.fileName) : undefined,
+      localPath: item?.localPath ? String(item.localPath) : undefined,
+      createdBy: item?.createdBy ? String(item.createdBy) : undefined,
       source: item?.source,
     })) : [],
     assetTraceWorkflow: normalizeAssetTraceWorkflow(value.assetTraceWorkflow) || undefined,
@@ -222,6 +228,28 @@ export function getActiveLegalCase(): LegalCaseFile | null {
   return cases.find(item => item.id === activeId) || cases[0] || null;
 }
 
+export function mergePersonalLegalCaseRuntimeSnapshot(snapshot: unknown): LegalCaseFile | null {
+  if (currentLegalStorageScope().domain !== 'personal') return null;
+  const incoming = normalizeCaseFile(snapshot);
+  if (!incoming) return null;
+  const cases = readLegalCaseFiles();
+  const current = cases.find(item => item.id === incoming.id) || null;
+  if (!current) {
+    writeLegalCaseFiles([incoming, ...cases], incoming.id);
+    return incoming;
+  }
+
+  const runtimeById = new Map(incoming.materials.map(material => [material.id, material]));
+  const mergedMaterials = [
+    ...incoming.materials,
+    ...current.materials.filter(material => !runtimeById.has(material.id)),
+  ];
+  if (JSON.stringify(mergedMaterials) === JSON.stringify(current.materials)) return current;
+  const merged = { ...current, materials: mergedMaterials };
+  writeLegalCaseFiles(cases.map(item => item.id === current.id ? merged : item), current.id);
+  return merged;
+}
+
 export async function syncPersonalLegalCaseToRuntime(caseFile: LegalCaseFile): Promise<void> {
   const response = await fetch('/api/legal/client-case-sync', {
     method: 'POST',
@@ -233,6 +261,8 @@ export async function syncPersonalLegalCaseToRuntime(caseFile: LegalCaseFile): P
     const data = await response.json().catch(() => ({}));
     throw new Error(data.error || 'Failed to synchronize the current legal case.');
   }
+  const data = await response.json().catch(() => ({}));
+  if (data?.case) mergePersonalLegalCaseRuntimeSnapshot(data.case);
 }
 
 export async function deletePersonalLegalCaseFromRuntime(caseId: string): Promise<void> {

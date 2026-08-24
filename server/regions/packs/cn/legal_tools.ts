@@ -2461,6 +2461,21 @@ async function writeDocxFromMarkdown(markdown: string, filePath: string): Promis
   fs.writeFileSync(filePath, buffer);
 }
 
+function isVerifiableDocxArtifact(filePath: string): boolean {
+  try {
+    const buffer = fs.readFileSync(filePath);
+    return buffer.length >= 256
+      && buffer[0] === 0x50
+      && buffer[1] === 0x4b
+      && buffer[2] === 0x03
+      && buffer[3] === 0x04
+      && buffer.includes(Buffer.from('[Content_Types].xml'))
+      && buffer.includes(Buffer.from('word/document.xml'));
+  } catch {
+    return false;
+  }
+}
+
 function tryConvertDocxToPdf(docxPath: string): { ok: boolean; pdfPath?: string; error?: string } {
   const pdfPath = docxPath.replace(/\.docx$/i, '.pdf');
   const script = `
@@ -3028,18 +3043,33 @@ ${templates.slice(0, 3).map(t => `- ${t.title}`).join('\n')}
   ].filter(Boolean).join('\n');
   const archivedReport = `${report}\n\n${sourceSection}`;
   const preflightSection = buildLegalWorkProductPreflightSection(archivedReport, args, orgId);
+  const deliverable = `${archivedReport}\n\n${preflightSection}\n\n## 交付边界\n- 本文件是供律师和投标团队复核的内部投标响应工作底稿，不等于已经上传、发送、提交、签署或投标。\n- 投标人资质、业绩、报价、保证金、签章、密封和最终响应偏差必须由责任人逐项核验。`;
+  const outputDir = resolveWritableOutputDir(
+    textArg(args, 'outputDir'),
+    ensureLegalDeliveryRoot(orgId),
+    projectName,
+    'bid_draft',
+  );
+  const docxPath = path.join(outputDir, `${safeFileSegment(`${projectName}_投标响应工作底稿`, 'bid-response-draft')}.docx`);
+  await writeDocxFromMarkdown(deliverable, docxPath);
+  if (!isVerifiableDocxArtifact(docxPath)) {
+    throw new Error('Bid DOCX generation did not produce a verifiable local artifact.');
+  }
   const caseLine = archiveLegalReportToCase(args, {
     orgId,
     userId,
     caseName,
     title: `${projectName} 投标书工作底稿`,
-    content: `${archivedReport}\n\n${preflightSection}`,
+    content: deliverable,
     type: 'note',
     cause: textArg(args, 'caseType') || '投标/招标文件响应',
+    localPath: docxPath,
   });
-  return `${archivedReport}
+  return `${deliverable}
 
-${preflightSection}
+## 可验证文件输出
+- DOCX 文件：${docxPath}
+- 文件大小：${fs.statSync(docxPath).size} bytes
 
 ## 案件归档与交付边界
 ${caseLine}
@@ -3177,7 +3207,7 @@ ${LEGAL_REASONING_BASELINE}
 
   let report = '';
   try {
-    const text = await runLegalLLM(prompt, context, 2048);
+    const text = await runLegalLLMWithin(prompt, context, 2048, 15_000);
     if (text) report = sanitizeLegalWorkProductOutput(text);
   } catch { /* fall through */ }
 
@@ -3353,6 +3383,14 @@ async function traceAssetsHandler(args: Record<string, any>, context?: any): Pro
     for (const e of enforcements) {
       lines.push(`- [${e.caseNumber}] ${e.court} | 立案: ${e.filingDate} | 执行标的: ${e.executionTarget} | ${e.status}`);
     }
+  }
+
+  const observedSourceCount = (company ? 1 : 0) + enforcements.length;
+  lines.push('\n## 数据可用性');
+  lines.push(`- 数据状态: ${observedSourceCount > 0 ? 'observed' : 'needs_source'}`);
+  lines.push(`- 已取得来源记录: ${observedSourceCount}`);
+  if (observedSourceCount === 0) {
+    lines.push('- 当前步骤未取得可核验的外部企业或执行数据，不能标记为已完成；请配置官方 API，或由律师通过授权浏览器核验后导入来源材料。');
   }
 
   lines.push('\n## 财产线索分析');
@@ -6302,20 +6340,27 @@ export function registerLegalTools(registry: ToolRegistry): void {
         caseType: { type: 'string', description: '事项类型，例如投标/招标文件响应' },
         persistCase: { type: 'boolean', description: '是否归档到案件空间；提供 caseId/caseName 时默认归档，设置 false 可关闭' },
         useModel: { type: 'boolean', description: '是否使用配置的起草模型；false 时生成严格依据已提供要求的确定性工作底稿' },
+        outputDir: { type: 'string', description: '可选输出目录；默认写入 data/legal_delivery/{orgId} 下的独立标书工作底稿目录' },
         orgId: { type: 'string', description: '组织 ID，默认上下文 orgId 或 default' },
         userId: { type: 'string', description: '操作用户 ID，默认上下文 userId 或 system' },
       },
     },
-    handler: withLegalReceipt(generateBidHandler, { status: 'generated', expectCaseMutation: 'when_requested' }),
+    handler: withLegalReceipt(generateBidHandler, {
+      status: 'generated',
+      expectCaseMutation: 'when_requested',
+      requireArtifacts: true,
+    }),
     permission: 'user',
     securityLevel: 'safe',
     capability: legalCapability({
       id: 'legal.bid.generate', operation: 'create', risk: 'medium', successStatuses: ['generated'],
       sideEffects: [
         { type: 'local_state_change', scope: 'optional legal case work-product archive', reversible: true },
+        { type: 'local_write', scope: 'reviewable bid response DOCX artifact', reversible: true },
         { type: 'local_read', scope: 'optional tender files and folders', reversible: true },
         { type: 'network_read', scope: 'configured legal drafting model', reversible: true },
       ],
+      requireArtifacts: true,
     }),
     evidence: legalEvidence('legal.bid.generate', 'create', 'projectName'),
   });
@@ -6399,7 +6444,13 @@ export function registerLegalTools(registry: ToolRegistry): void {
       },
       required: ['name'],
     },
-    handler: withLegalReceipt(traceAssetsHandler, { status: 'observed', expectCaseMutation: 'when_requested' }),
+    handler: withLegalReceipt(traceAssetsHandler, {
+      status: 'observed',
+      expectCaseMutation: 'when_requested',
+      classify: content => /数据状态:\s*needs_source/i.test(content)
+        ? { ok: true, status: 'needs_source' }
+        : { ok: true, status: 'observed' },
+    }),
     permission: 'user',
     securityLevel: 'safe',
   });

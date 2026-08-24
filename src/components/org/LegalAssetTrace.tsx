@@ -37,9 +37,10 @@ import {
   type AssetTraceWorkflow,
   type AssetTraceWorkflowStep,
 } from '../../lib/legalAssetTraceWorkflow';
-import { runLegalTool } from '../../lib/legalToolClient';
+import { runLegalToolExecution } from '../../lib/legalToolClient';
 import { LegalCaseContextBar } from './LegalCaseContextBar';
 import { chinaLegalCopy } from '../../i18n/regions/cn/legal';
+import { uiMessage } from '../../i18n/uiMessages';
 
 interface TraceResult {
   company?: string;
@@ -260,14 +261,27 @@ export function LegalAssetTrace({
     setSelectedStepId(stepId);
     setManualNote(step.note || '');
     try {
-      const output = step.tool === 'local_timeline'
-        ? buildTimelineOutput(running, copy)
-        : step.tool === 'local_action_plan'
-          ? buildWorkflowReport(patchAssetTraceStep(running, step.id, { status: 'completed' }), copy, locale)
-          : await runLegalTool(step.tool || '', buildTraceToolArgs(running, step, copy, caseFile, orgId));
+      let receiptStatus = '';
+      let output = '';
+      if (step.tool === 'local_timeline') {
+        output = buildTimelineOutput(running, copy);
+      } else if (step.tool === 'local_action_plan') {
+        output = buildWorkflowReport(patchAssetTraceStep(running, step.id, { status: 'completed' }), copy, locale);
+      } else {
+        const execution = await runLegalToolExecution(
+          step.tool || '',
+          buildTraceToolArgs(running, step, copy, caseFile, orgId),
+        );
+        output = execution.text;
+        receiptStatus = String(execution.receipt?.status || '').trim().toLowerCase();
+      }
+      const needsSource = receiptStatus === 'needs_source';
       const next = patchAssetTraceStep(running, stepId, {
-        status: step.executionMode === 'assisted' ? 'needs_action' : 'completed',
+        status: needsSource || step.executionMode === 'assisted' ? 'needs_action' : 'completed',
         output,
+        note: needsSource
+          ? uiMessage('legal-asset-trace.verifiable-external-source-required.9b3fa7d6e1', isZh ? 'zh' : 'en')
+          : step.note,
         error: undefined,
       });
       commitWorkflow(next);

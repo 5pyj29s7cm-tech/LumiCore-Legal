@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, AlertTriangle, Check, FileText, HelpCircle, Loader2, Shield, Upload } from 'lucide-react';
 import { toast } from 'sonner';
-import { useApp } from '../../contexts/AppContext';
 import { useT } from '../../lib/useT';
 import type { LegalCaseFile, LegalCaseMaterial } from '../../lib/legalCaseStore';
+import { runLegalTool } from '../../lib/legalToolClient';
 import { LegalCaseContextBar } from './LegalCaseContextBar';
 import { uiMessage } from '../../i18n/uiMessages';
 import {
@@ -16,13 +16,11 @@ type RiskItem = ChinaContractRisk;
 
 export function LegalContractReview({
   caseFile,
-  onAddMaterial,
 }: {
   caseFile?: LegalCaseFile | null;
   onAddMaterial?: (type: LegalCaseMaterial['type'], title: string, content?: string, source?: LegalCaseMaterial['source']) => void;
 }) {
   const t = useT();
-  const { workDomain, orgConnection } = useApp();
   const isZh = t.langCode !== 'en';
   const ui = (zh: string, en: string) => (isZh ? zh : en);
   const defaultContract = useMemo(() => (
@@ -77,37 +75,18 @@ export function LegalContractReview({
     setRisks([]);
     setSelectedRisk(null);
     try {
-      const res = await fetch('/api/legal/contract-review', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contract: contract.slice(0, 10000),
-          domain: workDomain,
-          orgId: workDomain === 'work' && orgConnection?.orgId ? orgConnection.orgId : undefined,
-          caseId: caseFile?.id,
-          caseName: caseFile ? (caseFile.title || caseFile.party || caseFile.caseNumber || undefined) : undefined,
-          caseType: caseFile?.cause || chinaLegalCopy('zh').contractReviewCaseType,
-          court: caseFile?.court,
-          persistCase: Boolean(caseFile),
-        }),
-        credentials: 'include',
+      const text = await runLegalTool('legal_review_contract', {
+        contract: contract.slice(0, 10000),
+        caseId: caseFile?.id,
+        caseName: caseFile ? (caseFile.title || caseFile.party || caseFile.caseNumber || undefined) : undefined,
+        caseType: caseFile?.cause || chinaLegalCopy('zh').contractReviewCaseType,
+        court: caseFile?.court,
+        persistCase: Boolean(caseFile),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || uiMessage('legal-contract-review.contract-review-failed.05af7a7d1f'));
-      const text = data.text || data.response || data.reply || data.message || '';
       const parsedRisks = parseChinaContractRisks(text);
       setResult(text);
       setRisks(parsedRisks);
       setSelectedRisk(parsedRisks[0] || null);
-      if (caseFile?.id && onAddMaterial) {
-        const caseTitle = caseFile.title || caseFile.party || caseFile.caseNumber || uiMessage('legal-case-search.case.8a53cf13fb');
-        onAddMaterial('contract', `${caseTitle} ${uiMessage('legal-contract-review.contract-review.d4cc309459')}`, text, 'tool');
-      }
-      if (caseFile?.id) {
-        window.dispatchEvent(new CustomEvent('lumi:org-legal-cases-changed', {
-          detail: { caseId: caseFile.id, toolName: 'legal_review_contract' },
-        }));
-      }
     } catch (e: any) {
       setResult(`${uiMessage('legal-contract-review.error.1d47687da7')}: ${e.message}`);
     } finally {

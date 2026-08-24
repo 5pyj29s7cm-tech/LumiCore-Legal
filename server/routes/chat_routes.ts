@@ -21,7 +21,11 @@ import {
 } from "../cognition/response_delivery";
 import type { LumiTurnFlow } from "../cognition/turn_flow";
 import type { ToolExecutionRecord } from "../tools/types";
-import { getIndustryWorkflowTask, recordIndustryWorkflowExecution } from "../industry/workflow_service";
+import {
+  blockIndustryWorkflowExecution,
+  getIndustryWorkflowTask,
+  recordIndustryWorkflowExecution,
+} from "../industry/workflow_service";
 import { bindIndustryWorkspaceContext } from '../industry/workspace_context';
 import * as LegalCases from '../org/legal_cases';
 import {
@@ -244,6 +248,25 @@ function isOrganizationViewerLegalRead(
   return args.persistCase === false
     && !String(args.caseId || '').trim()
     && !String(args.caseName || args.title || '').trim();
+}
+
+function legalReceipt(record: ToolExecutionRecord): Record<string, any> {
+  return record.receipt && typeof record.receipt === 'object' && !Array.isArray(record.receipt)
+    ? record.receipt as Record<string, any>
+    : {};
+}
+
+function legalCaseUpdates(
+  record: ToolExecutionRecord,
+  legalOrgId: string,
+  userId: string,
+): LegalCases.OrgLegalCaseFile[] {
+  const changedCaseIds = Array.isArray(legalReceipt(record).changedCaseIds)
+    ? legalReceipt(record).changedCaseIds.map((value: unknown) => String(value || '').trim()).filter(Boolean)
+    : [];
+  return changedCaseIds
+    .map((caseId: string) => LegalCases.getCase(legalOrgId, caseId, userId, 'read'))
+    .filter((caseFile): caseFile is LegalCases.OrgLegalCaseFile => Boolean(caseFile));
 }
 
 export function formatMeetingTranscriptForAnalysis(notes: unknown[]): string {
@@ -587,7 +610,7 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         stage: caseFile.stage,
       },
     });
-    return res.json({ ok: true, status: 'synced', caseId: caseFile.id, activeWorkspace: active });
+    return res.json({ ok: true, status: 'synced', caseId: caseFile.id, case: caseFile, activeWorkspace: active });
   }));
 
   router.delete("/legal/client-case-sync/:caseId", requireAuth, asyncHandler(async (req, res) => {
@@ -678,20 +701,37 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         toolName,
       });
     }
+    const receipt = legalReceipt(record);
+    const receiptStatus = String(receipt.status || '').trim().toLowerCase();
     const workflowRecord = industryWorkflowTask
-      ? recordIndustryWorkflowExecution({
-          userId,
-          domain,
-          orgId,
-          taskId: industryWorkflowTask.id,
-          resultText: record.result,
-          toolRecords: [record],
-          source: 'legal_direct_tool',
-        })
+      ? receiptStatus === 'needs_source'
+        ? blockIndustryWorkflowExecution({
+            userId,
+            domain,
+            orgId,
+            taskId: industryWorkflowTask.id,
+            resultText: record.result,
+            toolRecords: [record],
+            source: 'legal_direct_tool',
+            blockerStatus: 'needs_source',
+            reason: 'The legal workflow needs an authorized, verifiable external source before this step can be completed.',
+          })
+        : recordIndustryWorkflowExecution({
+            userId,
+            domain,
+            orgId,
+            taskId: industryWorkflowTask.id,
+            resultText: record.result,
+            toolRecords: [record],
+            source: 'legal_direct_tool',
+          })
       : null;
     return res.json({
       text: record.result,
       toolName,
+      receipt,
+      artifacts: Array.isArray(receipt.artifacts) ? receipt.artifacts : [],
+      caseUpdates: legalCaseUpdates(record, legalOrgId, userId),
       ...(workflowRecord ? { industryWorkflow: {
         taskId: workflowRecord.task.id,
         status: workflowRecord.task.status,
@@ -730,7 +770,15 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         error: 'Organization viewers may only run contract review without case persistence.',
       });
     }
-    const llmReview = executeToolCallOrThrow({
+    const industryWorkflowTaskId = String(req.body?.industryWorkflowTaskId || '').trim();
+    const industryWorkflowTask = industryWorkflowTaskId
+      ? getIndustryWorkflowTask({ userId, domain, orgId }, industryWorkflowTaskId)
+      : null;
+    if (industryWorkflowTaskId && !industryWorkflowTask) {
+      return res.status(404).json({ error: 'Industry workflow task not found in the current user scope.' });
+    }
+    const industryMetadata = industryWorkflowTask?.metadata?.industryWorkflow || {};
+    const contractReviewRecord = await executeToolCall({
       registry: toolRegistry,
       name: 'legal_review_contract',
       arguments: args,
@@ -740,46 +788,51 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         orgId,
         llmGetters: llm,
         source: 'legal-contract-review',
+        ...(industryWorkflowTask ? {
+          taskId: String(industryMetadata.conversationTaskId || ''),
+          conversationId: String(industryMetadata.conversationId || ''),
+          requestId: String(industryMetadata.requestId || ''),
+        } : {}),
         authenticated: true,
         authRole: req.user!.role,
         orgRole: req.user!.orgRole,
         localExecution: false,
       } as any,
     });
-    llmReview.catch(() => undefined);
-
-    try {
-      const text = await Promise.race([
-        llmReview,
-        new Promise<string>((_, reject) => {
-          setTimeout(() => reject(new Error('合同深度审查超时，已改用本地规则审查')), 15_000);
-        }),
-      ]);
-
-      return res.json({ text, degraded: false });
-    } catch (err: any) {
-      console.warn('[LegalContractReview] Deep review unavailable:', err?.message || err);
-      const fallback = await executeToolCallOrThrow({
-        registry: toolRegistry,
-        name: 'legal_review_contract',
-        arguments: args,
-        context: {
+    if (contractReviewRecord.error || contractReviewRecord.terminalVerification?.status !== 'verified') {
+      return res.status(500).json({
+        error: contractReviewRecord.error
+          || contractReviewRecord.terminalVerification?.reason
+          || 'Contract review did not produce verified evidence.',
+        toolName: 'legal_review_contract',
+      });
+    }
+    const contractReceipt = legalReceipt(contractReviewRecord);
+    const contractWorkflowRecord = industryWorkflowTask
+      ? recordIndustryWorkflowExecution({
           userId,
           domain,
           orgId,
-          source: 'legal-contract-review-fallback',
-          authenticated: true,
-          authRole: req.user!.role,
-          orgRole: req.user!.orgRole,
-          localExecution: false,
-        } as any,
-      });
-      return res.json({
-        text: `${fallback}\n\n*提示：深度 LLM 审查暂未及时完成，已先返回本地规则审查结果。*`,
-        degraded: true,
-        warning: err?.message || 'Contract review fallback used',
-      });
-    }
+          taskId: industryWorkflowTask.id,
+          resultText: contractReviewRecord.result,
+          toolRecords: [contractReviewRecord],
+          source: 'legal_contract_review',
+        })
+      : null;
+    const contractCaseUpdates = legalCaseUpdates(contractReviewRecord, legalOrgId, userId);
+    return res.json({
+      text: contractReviewRecord.result,
+      degraded: false,
+      toolName: 'legal_review_contract',
+      receipt: contractReceipt,
+      artifacts: Array.isArray(contractReceipt.artifacts) ? contractReceipt.artifacts : [],
+      caseUpdates: contractCaseUpdates,
+      ...(contractWorkflowRecord ? { industryWorkflow: {
+        taskId: contractWorkflowRecord.task.id,
+        status: contractWorkflowRecord.task.status,
+        verification: contractWorkflowRecord.verification,
+      } } : {}),
+    });
   }));
 
   router.post("/meeting/analyze", requireAuth, asyncHandler(async (req, res) => {

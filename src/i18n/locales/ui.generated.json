@@ -3755,6 +3755,10 @@
     "en": "Trace",
     "zh": "开始追踪"
   },
+  "legal-asset-trace.verifiable-external-source-required.9b3fa7d6e1": {
+    "en": "A verifiable external source is required. Configure an official API or have counsel verify and import the source through an authorized browser.",
+    "zh": "缺少可核验的外部数据源；请配置官方 API，或由律师在授权浏览器中核验并导入材料。"
+  },
   "legal-bid-workbench.bid-proposal-workbench.354a284512": {
     "en": "Bid Proposal Workbench",
     "zh": "标书生成"
@@ -3790,6 +3794,18 @@
   "legal-bid-workbench.output.8520bb37e3": {
     "en": "Output",
     "zh": "输出"
+  },
+  "legal-bid-workbench.open-docx.6c2f1e4b9a": {
+    "en": "Open DOCX",
+    "zh": "打开 DOCX"
+  },
+  "legal-bid-workbench.open-docx-failed.3f7b19a8c2": {
+    "en": "Unable to open the DOCX artifact",
+    "zh": "打开 DOCX 失败"
+  },
+  "legal-bid-workbench.opened-verified-docx.47da920fb1": {
+    "en": "Opened the verified bid DOCX artifact",
+    "zh": "已打开可验证的 DOCX 标书工作底稿"
   },
   "legal-bid-workbench.parse-tender-requirements-and-generate.b2a47e1579": {
     "en": "Parse tender requirements and generate an editable commercial/technical proposal framework.",

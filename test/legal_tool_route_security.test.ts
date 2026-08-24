@@ -4,6 +4,7 @@ import { makeApp, JWT_SECRET } from './helpers';
 import { mountChatRoutes } from '../server/routes/chat_routes';
 import { toolRegistry } from '../server/tools/registry';
 import { addMember, createOrg } from '../server/org/db';
+import { startIndustryWorkflow } from '../server/industry/workflow_service';
 
 let url: string;
 let cleanup: () => void;
@@ -193,6 +194,39 @@ describe('direct legal tool route security', () => {
         authenticated: true,
         authRole: 'user',
         orgRole: 'viewer',
+      },
+    });
+  });
+
+  it('records contract review against the supplied unified industry workflow task', async () => {
+    const started = startIndustryWorkflow({
+      userId: 'legal-user',
+      domain: 'personal',
+      orgId: '',
+      entryId: 'contract-review',
+      sourceInput: 'Review the scoped contract.',
+      source: 'legal_contract_review_test',
+    });
+    const beforeCalls = observedCalls.length;
+    const response = await fetch(`${url}/api/legal/tool/legal_review_contract`, {
+      method: 'POST',
+      headers: bearer(userToken),
+      body: JSON.stringify({
+        args: { contract: 'scoped contract', persistCase: false },
+        industryWorkflowTaskId: started.task.id,
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.industryWorkflow).toMatchObject({ taskId: started.task.id });
+    expect(body.industryWorkflow.verification).toEqual(expect.objectContaining({ passed: expect.any(Boolean) }));
+    expect(observedCalls).toHaveLength(beforeCalls + 1);
+    expect(observedCalls.at(-1)).toMatchObject({
+      name: 'legal_review_contract',
+      context: {
+        taskId: started.conversationTaskId,
+        requestId: started.requestId,
       },
     });
   });

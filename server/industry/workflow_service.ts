@@ -485,6 +485,59 @@ export function settleIndustryWorkflowConversationTask(
   writeDB(db);
 }
 
+/**
+ * Persist an expected, truthfully observed workflow blocker (for example a
+ * missing authorized data source) without misrepresenting it as a delivered
+ * business result. The tool call itself may be verified even though the
+ * industry outcome still needs user or operator action.
+ */
+export function blockIndustryWorkflowExecution(
+  input: RecordIndustryWorkflowInput & { reason: string; blockerStatus?: string },
+): IndustryWorkflowRecordResult {
+  const existing = getIndustryWorkflowTask(input, input.taskId);
+  if (!existing) throw new Error('Industry workflow task was not found in the active user scope.');
+  const reason = compact(input.reason, 1000) || 'Industry workflow needs additional verified input.';
+  const toolRecords = (input.toolRecords || []).slice(-40);
+  const blockerStatus = compact(input.blockerStatus, 120) || 'blocked';
+  const updated = updateWorkTakeoverTask(input.userId, existing.id, {
+    status: 'blocked',
+    blockedBy: Array.from(new Set([...existing.blockedBy, reason])),
+    result: compact(input.resultText, 5000) || reason,
+    metadata: {
+      workTakeoverToolRuns: toolRunHistory(existing, toolRecords),
+      industryWorkflowLastAttempt: {
+        status: blockerStatus,
+        reason,
+        source: input.source || 'industry_client',
+        at: new Date().toISOString(),
+      },
+    },
+    note: reason,
+  }) || existing;
+  const verification: WorkTakeoverResultVerification = {
+    verificationId: `wt_verify_${Date.now()}_${crypto.randomUUID()}`,
+    checkedAt: new Date().toISOString(),
+    passed: false,
+    status: 'blocked',
+    summary: reason,
+    detectedSurfaces: [],
+    checks: [{
+      id: 'industry_source_ready',
+      label: 'Required industry source is available',
+      passed: false,
+      detail: reason,
+    }],
+    blockers: [reason],
+  };
+  settleIndustryWorkflowConversationTask(updated, verification);
+  return {
+    task: updated,
+    verification,
+    conversationTaskId: conversationTaskIdFor(updated),
+    archivedFilePaths: [],
+  };
+}
+
 export function recordIndustryWorkflowExecution(input: RecordIndustryWorkflowInput): IndustryWorkflowRecordResult {
   const existing = getIndustryWorkflowTask(input, input.taskId);
   if (!existing) throw new Error('Industry workflow task was not found in the active user scope.');

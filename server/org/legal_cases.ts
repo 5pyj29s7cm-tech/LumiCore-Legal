@@ -123,6 +123,38 @@ function normalizeSnapshotMaterial(
   };
 }
 
+function mergeSnapshotMaterials(
+  current: OrgLegalCaseMaterial[],
+  incoming: Partial<OrgLegalCaseMaterial>[],
+  userId: string,
+): OrgLegalCaseMaterial[] {
+  const existingById = new Map((current || []).map(material => [material.id, material]));
+  const seen = new Set<string>();
+  const merged = incoming.map(value => {
+    const normalized = normalizeSnapshotMaterial(value, userId);
+    const existing = existingById.get(normalized.id);
+    seen.add(normalized.id);
+    if (!existing) return normalized;
+    if (existing.source === 'tool') {
+      // Server tools own their generated material and artifact paths. A stale
+      // browser snapshot must never replace that richer persisted receipt.
+      return { ...normalized, ...existing };
+    }
+    return {
+      ...existing,
+      ...normalized,
+      fileName: normalized.fileName || existing.fileName,
+      localPath: normalized.localPath || existing.localPath,
+      createdBy: existing.createdBy || normalized.createdBy,
+      createdAt: existing.createdAt || normalized.createdAt,
+    };
+  });
+  for (const material of current || []) {
+    if (!seen.has(material.id)) merged.push(material);
+  }
+  return merged;
+}
+
 /**
  * Mirrors a client-owned case into the server case ledger without creating a
  * second identity. Chat, voice and direct legal tools can then resolve the
@@ -152,7 +184,7 @@ export function upsertCaseSnapshot(
     ? input.stage as LegalCaseStage
     : current?.stage || 'consultation';
   const materials = Array.isArray(input.materials)
-    ? input.materials.map(material => normalizeSnapshotMaterial(material, userId))
+    ? mergeSnapshotMaterials(current?.materials || [], input.materials, userId)
     : current?.materials || [];
   const caseFile: OrgLegalCaseFile = {
     id: caseId,

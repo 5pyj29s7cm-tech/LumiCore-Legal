@@ -3,7 +3,7 @@ import { Download, FileText, Loader2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { useT } from '../../lib/useT';
 import { getLegalCaseLabel, type LegalCaseFile } from '../../lib/legalCaseStore';
-import { runLegalTool } from '../../lib/legalToolClient';
+import { runLegalToolExecution } from '../../lib/legalToolClient';
 import { LegalCaseContextBar } from './LegalCaseContextBar';
 import { uiMessage } from '../../i18n/uiMessages';
 import { chinaLegalCopy } from '../../i18n/regions/cn/legal';
@@ -39,6 +39,7 @@ export function LegalBidWorkbench({
   const [requirements, setRequirements] = useState('');
   const [projectName, setProjectName] = useState(() => caseFile?.title || caseFile?.cause || '');
   const [result, setResult] = useState('');
+  const [artifactPaths, setArtifactPaths] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -47,6 +48,7 @@ export function LegalBidWorkbench({
     setProjectName(caseFile?.title || caseFile?.cause || '');
     setRequirements('');
     setResult('');
+    setArtifactPaths([]);
   }, [caseFile?.id, caseFile?.title, caseFile?.cause]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -80,13 +82,15 @@ export function LegalBidWorkbench({
     if (!requirements.trim() || loading) return;
     setLoading(true);
     setResult('');
+    setArtifactPaths([]);
     try {
-      const text = await runLegalTool('legal_generate_bid', {
+      const execution = await runLegalToolExecution('legal_generate_bid', {
         ...bidCaseArgs(caseFile, orgId),
         projectName,
         requirements,
       });
-      setResult(text);
+      setResult(execution.text);
+      setArtifactPaths(execution.artifacts);
     } catch (e: any) {
       setResult(`${uiMessage('legal-bid-workbench.error.1d47687da7')}: ${e.message}`);
     } finally {
@@ -94,17 +98,20 @@ export function LegalBidWorkbench({
     }
   };
 
-  const exportBid = () => {
-    if (!result) return;
-    const blob = new Blob([result], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `${projectName || 'bid-proposal'}.md`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    URL.revokeObjectURL(url);
+  const openBidArtifact = async () => {
+    const target = artifactPaths.find(filePath => /\.docx$/i.test(filePath)) || artifactPaths[0];
+    if (!target) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const opened = await invoke<{ success: boolean; output: string }>('open_item', {
+        target,
+        application: null,
+      });
+      if (!opened.success) throw new Error(opened.output || 'Unable to open the bid artifact.');
+      toast.success(uiMessage('legal-bid-workbench.opened-verified-docx.47da920fb1', isZh ? 'zh' : 'en'));
+    } catch (error: any) {
+      toast.error(error?.message || uiMessage('legal-bid-workbench.open-docx-failed.3f7b19a8c2', isZh ? 'zh' : 'en'));
+    }
   };
 
   return (
@@ -172,13 +179,13 @@ export function LegalBidWorkbench({
           <div className="flex min-h-0 flex-col rounded-lg border border-white/10 bg-white/[0.04] p-4">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h3 className="text-sm font-medium text-white">{uiMessage('legal-bid-workbench.output.8520bb37e3')}</h3>
-              {result && (
+              {artifactPaths.length > 0 && (
                 <button
-                  onClick={exportBid}
+                  onClick={() => void openBidArtifact()}
                   className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/65 transition hover:bg-white/10 hover:text-white"
                 >
                   <Download size={14} />
-                  {t.legalBidGenExport || uiMessage('legal-bid-workbench.export.fe47a613e3')}
+                  {uiMessage('legal-bid-workbench.open-docx.6c2f1e4b9a', isZh ? 'zh' : 'en')}
                 </button>
               )}
             </div>
