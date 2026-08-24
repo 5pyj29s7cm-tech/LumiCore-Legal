@@ -2,6 +2,7 @@ import { ToolRegistry } from '../registry';
 import { capabilityContract, capabilityEvidence } from '../capability_contracts';
 import { getCurrentIndustryCapabilityProfile, matchCurrentIndustryWorkflow } from '../../regions/packs/cn/industry_capability_profile';
 import {
+  blockIndustryWorkflowExecution,
   getIndustryWorkflowTask,
   listIndustryWorkflowTasks,
   recordIndustryWorkflowExecution,
@@ -21,6 +22,16 @@ function scope(context?: ToolContext) {
     domain: context?.domain === 'work' ? 'work' as const : 'personal' as const,
     orgId: context?.domain === 'work' ? String(context?.orgId || '') : '',
   };
+}
+
+function recordReceiptStatus(record: { receipt?: unknown; result?: unknown }): string {
+  let payload = record.receipt;
+  if (!payload && typeof record.result === 'string') {
+    try { payload = JSON.parse(record.result); } catch { payload = null; }
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+  const body = payload as Record<string, any>;
+  return String(body.status || body.receipt?.status || '').trim().toLowerCase();
 }
 
 export function registerIndustryWorkflowTools(registry: ToolRegistry): void {
@@ -161,10 +172,38 @@ export function registerIndustryWorkflowTools(registry: ToolRegistry): void {
         'industry_workflow_complete',
         'work_takeover_task_get',
       ]);
-      const evidenceRecords = (context?.getCurrentToolRecords?.() || []).filter(record => (
+      const currentRecords = context?.getCurrentToolRecords?.() || [];
+      const needsSourceRecords = currentRecords.filter(record => (
+        !excluded.has(record.name)
+        && !record.error
+        && recordReceiptStatus(record) === 'needs_source'
+      ));
+      if (needsSourceRecords.length > 0) {
+        const reason = 'The industry workflow still needs an authorized, verifiable source. A needs_source tool receipt cannot complete the task.';
+        const blocked = blockIndustryWorkflowExecution({
+          ...activeScope,
+          taskId,
+          resultText: needsSourceRecords.map(record => String(record.result || '')).join('\n\n').slice(0, 12_000),
+          toolRecords: needsSourceRecords,
+          source: context?.source || 'industry_natural_language',
+          blockerStatus: 'needs_source',
+          reason,
+        });
+        return JSON.stringify({
+          ok: false,
+          status: 'blocked',
+          blockerStatus: 'needs_source',
+          persisted: true,
+          task: blocked.task,
+          verification: blocked.verification,
+          archivedFilePaths: [],
+        }, null, 2);
+      }
+      const evidenceRecords = currentRecords.filter(record => (
         !excluded.has(record.name)
         && !record.error
         && record.terminalVerification?.status === 'verified'
+        && recordReceiptStatus(record) !== 'needs_source'
         && String(record.result || '').trim()
       ));
       if (!evidenceRecords.length) {

@@ -239,9 +239,19 @@ export function mergePersonalLegalCaseRuntimeSnapshot(snapshot: unknown): LegalC
     return incoming;
   }
 
+  const currentById = new Map(current.materials.map(material => [material.id, material]));
   const runtimeById = new Map(incoming.materials.map(material => [material.id, material]));
   const mergedMaterials = [
-    ...incoming.materials,
+    ...incoming.materials.map(material => {
+      const existing = currentById.get(material.id);
+      if (!existing) return material;
+      return {
+        ...existing,
+        ...material,
+        fileName: material.fileName || existing.fileName,
+        localPath: material.localPath || existing.localPath,
+      };
+    }),
     ...current.materials.filter(material => !runtimeById.has(material.id)),
   ];
   if (JSON.stringify(mergedMaterials) === JSON.stringify(current.materials)) return current;

@@ -1,6 +1,7 @@
 export interface IndustryWorkflowTaskRef {
   id: string;
   status: string;
+  metadata?: Record<string, any>;
 }
 
 export interface IndustryWorkflowStartResponse {
@@ -34,6 +35,18 @@ export async function startIndustryWorkflow(input: {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `Unable to start industry workflow (${response.status})`);
   return data as IndustryWorkflowStartResponse;
+}
+
+export async function getIndustryWorkflowTaskRef(taskId: string): Promise<IndustryWorkflowTaskRef | null> {
+  const response = await fetch(`/api/industry/workflows/${encodeURIComponent(taskId)}`, {
+    credentials: 'include',
+  });
+  if (response.status === 404) return null;
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Unable to read industry workflow (${response.status})`);
+  return data?.task && typeof data.task === 'object'
+    ? data.task as IndustryWorkflowTaskRef
+    : null;
 }
 
 export async function verifyIndustryWorkflow(input: {

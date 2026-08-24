@@ -58,15 +58,15 @@ export function installApiBridge(): void {
       if (!needsCredentials) return nativeFetch(input, init);
       const patched: RequestInit = { ...init, credentials: 'include' };
 
-      // WebView2 may not send httpOnly cookies — inject stored auth token as fallback
+      // WebView2 may not send httpOnly cookies. The desktop bridge supplies the
+      // stored account token and its UID-bound native session proof to loopback.
       try {
         const storedToken = localStorage.getItem('lumi_auth_token');
-        if (storedToken) {
-          patched.headers = {
-            ...(patched.headers as Record<string, string> || {}),
-            'Authorization': `Bearer ${storedToken}`,
-          };
-        }
+        const desktopSessionProof = localStorage.getItem('lumi_desktop_session_proof');
+        const headers = new Headers(patched.headers);
+        if (storedToken) headers.set('Authorization', `Bearer ${storedToken}`);
+        if (desktopSessionProof) headers.set('x-lumi-desktop-session', desktopSessionProof);
+        patched.headers = headers;
       } catch {}
 
       // In Tauri production, rewrite /api/* requests to the bundled Node.js backend

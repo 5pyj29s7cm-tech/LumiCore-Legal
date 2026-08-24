@@ -1,11 +1,15 @@
-import { startIndustryWorkflow } from './industryWorkflowClient';
+import { getDesktopSessionProof } from '../services/authService';
+import { getIndustryWorkflowTaskRef, startIndustryWorkflow } from './industryWorkflowClient';
 import { mergePersonalLegalCaseRuntimeSnapshot } from './legalCaseStore';
 
 interface LegalIndustrySelection {
   taskId?: string;
   entryId: string;
+  caseIdentity?: string;
   createdAt: number;
 }
+
+const ACTIVE_INDUSTRY_TASK_STATUSES = new Set(['queued', 'in_progress', 'waiting_confirmation']);
 
 function activeLegalIndustrySelection(): LegalIndustrySelection | null {
   if (typeof window === 'undefined') return null;
@@ -17,6 +21,7 @@ function activeLegalIndustrySelection(): LegalIndustrySelection | null {
     return {
       ...(parsed.taskId ? { taskId: String(parsed.taskId) } : {}),
       entryId: String(parsed.entryId),
+      ...(parsed.caseIdentity ? { caseIdentity: String(parsed.caseIdentity) } : {}),
       createdAt: Number(parsed.createdAt || 0),
     };
   } catch {
@@ -34,14 +39,43 @@ function inferLegalEntryId(toolName: string): string {
   return 'workspace';
 }
 
+function legalCaseIdentity(args: Record<string, any>): string {
+  const caseId = String(args.caseId || '').trim();
+  if (caseId) return `id:${caseId}`;
+  const caseName = String(args.caseName || args.title || '').trim();
+  return caseName ? `name:${caseName.toLocaleLowerCase()}` : 'standalone';
+}
+
+function taskMatchesLegalSelection(
+  task: Awaited<ReturnType<typeof getIndustryWorkflowTaskRef>>,
+  entryId: string,
+  caseIdentity: string,
+): boolean {
+  if (!task || !ACTIVE_INDUSTRY_TASK_STATUSES.has(String(task.status || ''))) return false;
+  const workflow = task.metadata?.industryWorkflow;
+  return String(workflow?.entryId || '') === entryId
+    && String(workflow?.context?.caseIdentity || '') === caseIdentity;
+}
+
 async function ensureLegalIndustryTask(
   toolName: string,
   args: Record<string, any>,
 ): Promise<{ taskId: string; entryId: string }> {
   const selected = activeLegalIndustrySelection();
-  if (selected?.taskId) return { taskId: selected.taskId, entryId: selected.entryId };
+  const inferredEntryId = inferLegalEntryId(toolName);
+  const caseIdentity = legalCaseIdentity(args);
+  const entryId = selected?.entryId === inferredEntryId ? selected.entryId : inferredEntryId;
+  if (
+    selected?.taskId
+    && selected.entryId === entryId
+    && selected.caseIdentity === caseIdentity
+  ) {
+    const task = await getIndustryWorkflowTaskRef(selected.taskId);
+    if (taskMatchesLegalSelection(task, entryId, caseIdentity)) {
+      return { taskId: selected.taskId, entryId };
+    }
+  }
 
-  const entryId = selected?.entryId || inferLegalEntryId(toolName);
   const sourceInput = JSON.stringify({
     toolName,
     caseId: args.caseId || '',
@@ -52,11 +86,12 @@ async function ensureLegalIndustryTask(
     entryId,
     source: 'legal_tool_execution',
     sourceInput,
-    context: { toolName },
+    context: { toolName, caseIdentity },
   });
   const active = {
     taskId: started.task.id,
     entryId,
+    caseIdentity,
     createdAt: Date.now(),
   };
   sessionStorage.setItem('lumi_legal_industry_task', JSON.stringify(active));
@@ -76,9 +111,12 @@ export async function runLegalToolExecution(
   args: Record<string, any>,
 ): Promise<LegalToolExecutionResult> {
   const industryWorkflow = await ensureLegalIndustryTask(toolName, args);
+  const headers = new Headers({ 'Content-Type': 'application/json' });
+  const desktopSessionProof = getDesktopSessionProof();
+  if (desktopSessionProof) headers.set('x-lumi-desktop-session', desktopSessionProof);
   const res = await fetch(`/api/legal/tool/${encodeURIComponent(toolName)}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     credentials: 'include',
     body: JSON.stringify({
       args,

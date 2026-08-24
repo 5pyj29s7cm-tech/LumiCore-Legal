@@ -421,9 +421,58 @@ function uniqueLegalFolder(baseDir: string, caseName: string, suffix: string): s
   return candidate;
 }
 
-function resolveWritableOutputDir(input: string, fallbackRoot: string, caseName: string, suffix: string): string {
+function pathIsWithinRoot(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (
+    relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative)
+  );
+}
+
+function resolveWritableOutputDir(
+  input: string,
+  fallbackRoot: string,
+  caseName: string,
+  suffix: string,
+  options: { restrictToFallbackRoot?: boolean } = {},
+): string {
   if (input) {
     const resolved = path.resolve(expandLocalPath(input));
+    if (options.restrictToFallbackRoot) {
+      const resolvedRoot = path.resolve(fallbackRoot);
+      if (!pathIsWithinRoot(resolvedRoot, resolved)) {
+        throw new Error(`Output directory must stay within the legal delivery root: ${resolvedRoot}`);
+      }
+      fs.mkdirSync(resolvedRoot, { recursive: true });
+      const realRoot = fs.realpathSync(resolvedRoot);
+
+      // Resolve the deepest existing ancestor before creating anything. This
+      // prevents a junction/symlink below the lexical root from redirecting
+      // mkdirSync into an unrelated directory before the containment check.
+      let existingAncestor = resolved;
+      while (!fs.existsSync(existingAncestor)) {
+        const parent = path.dirname(existingAncestor);
+        if (parent === existingAncestor) {
+          throw new Error(`Unable to resolve a safe legal delivery ancestor for: ${resolved}`);
+        }
+        existingAncestor = parent;
+      }
+      const realAncestor = fs.realpathSync(existingAncestor);
+      if (!pathIsWithinRoot(realRoot, realAncestor)) {
+        throw new Error(`Output directory must stay within the legal delivery root: ${realRoot}`);
+      }
+      const realTarget = path.resolve(realAncestor, path.relative(existingAncestor, resolved));
+      if (!pathIsWithinRoot(realRoot, realTarget)) {
+        throw new Error(`Output directory must stay within the legal delivery root: ${realRoot}`);
+      }
+      fs.mkdirSync(realTarget, { recursive: true });
+      const realResolved = fs.realpathSync(realTarget);
+      if (!pathIsWithinRoot(realRoot, realResolved)) {
+        throw new Error(`Output directory must stay within the legal delivery root: ${realRoot}`);
+      }
+      return realResolved;
+    }
     fs.mkdirSync(resolved, { recursive: true });
     return resolved;
   }
@@ -3049,6 +3098,7 @@ ${templates.slice(0, 3).map(t => `- ${t.title}`).join('\n')}
     ensureLegalDeliveryRoot(orgId),
     projectName,
     'bid_draft',
+    { restrictToFallbackRoot: true },
   );
   const docxPath = path.join(outputDir, `${safeFileSegment(`${projectName}_投标响应工作底稿`, 'bid-response-draft')}.docx`);
   await writeDocxFromMarkdown(deliverable, docxPath);

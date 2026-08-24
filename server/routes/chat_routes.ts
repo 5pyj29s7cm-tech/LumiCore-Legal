@@ -136,6 +136,29 @@ function bindIndustryToolRecords(records: ToolExecutionRecord[], input: {
   }));
 }
 
+export function resolveRestDesktopExecutionBoundary(input: {
+  authenticated: boolean;
+  userId: string;
+  remoteAddress?: string | null;
+  proofHeaderPresent: boolean;
+  presentedProof: unknown;
+}): {
+  trustedLocalExecution: boolean;
+  executionBoundary: 'trusted_local' | 'remote_restricted';
+  rejectPresentedProof: boolean;
+} {
+  const trustedLocalExecution = Boolean(
+    input.authenticated
+    && isLoopbackAddress(input.remoteAddress)
+    && verifyDesktopSessionProof(input.presentedProof, input.userId),
+  );
+  return {
+    trustedLocalExecution,
+    executionBoundary: trustedLocalExecution ? 'trusted_local' : 'remote_restricted',
+    rejectPresentedProof: input.proofHeaderPresent && !trustedLocalExecution,
+  };
+}
+
 function dateLikeToIso(value: unknown, fallback = Date.now()): string {
   const date = value ? new Date(value as any) : new Date(fallback);
   return Number.isNaN(date.getTime()) ? new Date(fallback).toISOString() : date.toISOString();
@@ -255,6 +278,19 @@ function isOrganizationViewerLegalRead(
     && !String(args.caseName || args.title || '').trim();
 }
 
+function legalToolRequiresTrustedDesktop(
+  toolName: string,
+  args: Record<string, any>,
+): boolean {
+  const hasCaseIdentity = Boolean(String(args.caseId || args.caseName || args.title || '').trim());
+  if (args.persistCase === true || (args.persistCase !== false && hasCaseIdentity)) return true;
+  if (toolName === 'legal_review_contract' && args.persistCase === false && !hasCaseIdentity) return false;
+  const capability = toolRegistry.getCapabilityManifestEntry(toolName);
+  return Boolean(capability?.sideEffects.some(effect => (
+    effect.type === 'local_write' || effect.type === 'local_state_change'
+  )));
+}
+
 function legalReceipt(record: ToolExecutionRecord): Record<string, any> {
   return record.receipt && typeof record.receipt === 'object' && !Array.isArray(record.receipt)
     ? record.receipt as Record<string, any>
@@ -308,19 +344,20 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
     }
     const userId = req.user?.uid || 'anonymous';
     const presentedDesktopSession = req.headers[DESKTOP_SESSION_HEADER];
-    const desktopSessionPresented = Object.prototype.hasOwnProperty.call(req.headers, DESKTOP_SESSION_HEADER);
-    const trustedLocalExecution = Boolean(
-      req.user
-      && isLoopbackAddress(req.socket?.remoteAddress)
-      && verifyDesktopSessionProof(presentedDesktopSession, userId),
-    );
-    if (desktopSessionPresented && !trustedLocalExecution) {
+    const desktopExecution = resolveRestDesktopExecutionBoundary({
+      authenticated: Boolean(req.user),
+      userId,
+      remoteAddress: req.socket?.remoteAddress,
+      proofHeaderPresent: Object.prototype.hasOwnProperty.call(req.headers, DESKTOP_SESSION_HEADER),
+      presentedProof: presentedDesktopSession,
+    });
+    if (desktopExecution.rejectPresentedProof) {
       return res.status(403).json({
         error: 'Native desktop session proof expired or is invalid',
         code: 'DESKTOP_SESSION_PROOF_REQUIRED',
       });
     }
-    const executionBoundary = trustedLocalExecution ? 'trusted_local' as const : 'remote_restricted' as const;
+    const { trustedLocalExecution, executionBoundary } = desktopExecution;
     const requestScope = req.user ? resolveDomain(req.user) : { domain: 'personal' as const, orgId: '' };
     const domain = requestScope.domain;
     const orgId = requestScope.orgId;
@@ -685,6 +722,27 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
       return res.status(404).json({ error: `Legal tool "${toolName}" is not registered` });
     }
 
+    const presentedDesktopSession = req.headers[DESKTOP_SESSION_HEADER];
+    const desktopExecution = resolveRestDesktopExecutionBoundary({
+      authenticated: true,
+      userId,
+      remoteAddress: req.socket?.remoteAddress,
+      proofHeaderPresent: Object.prototype.hasOwnProperty.call(req.headers, DESKTOP_SESSION_HEADER),
+      presentedProof: presentedDesktopSession,
+    });
+    if (desktopExecution.rejectPresentedProof) {
+      return res.status(403).json({
+        error: 'Native desktop session proof expired or is invalid',
+        code: 'DESKTOP_SESSION_PROOF_REQUIRED',
+      });
+    }
+    if (legalToolRequiresTrustedDesktop(toolName, args) && !desktopExecution.trustedLocalExecution) {
+      return res.status(403).json({
+        error: 'A trusted local desktop session is required for legal file writes or case persistence.',
+        code: 'DESKTOP_SESSION_PROOF_REQUIRED',
+      });
+    }
+
     const industryWorkflowTaskId = String(req.body?.industryWorkflowTaskId || '').trim();
     const industryWorkflowTask = industryWorkflowTaskId
       ? getIndustryWorkflowTask({ userId, domain, orgId }, industryWorkflowTaskId)
@@ -711,7 +769,8 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         authenticated: true,
         authRole: req.user!.role,
         orgRole: req.user!.orgRole,
-        localExecution: false,
+        localExecution: desktopExecution.trustedLocalExecution,
+        ...(desktopExecution.trustedLocalExecution ? { executionBoundary: 'trusted_local' as const } : {}),
       } as any,
     });
     if (record.error || record.terminalVerification?.status !== 'verified') {
@@ -789,6 +848,26 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         error: 'Organization viewers may only run contract review without case persistence.',
       });
     }
+    const presentedDesktopSession = req.headers[DESKTOP_SESSION_HEADER];
+    const desktopExecution = resolveRestDesktopExecutionBoundary({
+      authenticated: true,
+      userId,
+      remoteAddress: req.socket?.remoteAddress,
+      proofHeaderPresent: Object.prototype.hasOwnProperty.call(req.headers, DESKTOP_SESSION_HEADER),
+      presentedProof: presentedDesktopSession,
+    });
+    if (desktopExecution.rejectPresentedProof) {
+      return res.status(403).json({
+        error: 'Native desktop session proof expired or is invalid',
+        code: 'DESKTOP_SESSION_PROOF_REQUIRED',
+      });
+    }
+    if (legalToolRequiresTrustedDesktop('legal_review_contract', args) && !desktopExecution.trustedLocalExecution) {
+      return res.status(403).json({
+        error: 'A trusted local desktop session is required for legal file writes or case persistence.',
+        code: 'DESKTOP_SESSION_PROOF_REQUIRED',
+      });
+    }
     const industryWorkflowTaskId = String(req.body?.industryWorkflowTaskId || '').trim();
     const industryWorkflowTask = industryWorkflowTaskId
       ? getIndustryWorkflowTask({ userId, domain, orgId }, industryWorkflowTaskId)
@@ -815,7 +894,8 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         authenticated: true,
         authRole: req.user!.role,
         orgRole: req.user!.orgRole,
-        localExecution: false,
+        localExecution: desktopExecution.trustedLocalExecution,
+        ...(desktopExecution.trustedLocalExecution ? { executionBoundary: 'trusted_local' as const } : {}),
       } as any,
     });
     if (contractReviewRecord.error || contractReviewRecord.terminalVerification?.status !== 'verified') {

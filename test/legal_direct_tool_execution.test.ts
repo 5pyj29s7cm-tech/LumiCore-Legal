@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ToolRegistry } from '../server/tools/registry';
 import { executeToolCall, executeToolCallOrThrow } from '../server/tools/execution_engine';
+import { registerIndustryWorkflowTools } from '../server/tools/definitions/industry_workflow_tools';
+import { getIndustryWorkflowTask, startIndustryWorkflow } from '../server/industry/workflow_service';
 import { makeApp } from './helpers';
 
 let registerLegalTools: (registry: ToolRegistry) => void;
@@ -88,6 +90,59 @@ describe('direct legal tool execution', () => {
       expect(record.terminalVerification?.status).toBe('verified');
       expect(record.receipt).toMatchObject({ ok: true, status: 'needs_source' });
       expect(record.result).toContain('needs_source');
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it('keeps the industry task blocked when a tool loop tries to complete a needs_source receipt', async () => {
+    const registry = new ToolRegistry();
+    registerLegalTools(registry);
+    registerIndustryWorkflowTools(registry);
+    const userId = `needs-source-loop-${Date.now()}`;
+    const started = startIndustryWorkflow({
+      userId,
+      domain: 'personal',
+      orgId: '',
+      entryId: 'asset-trace',
+      sourceInput: 'Trace assets only from authorized, verifiable sources.',
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('', { status: 404, headers: { 'content-type': 'text/plain' } }),
+    );
+    try {
+      const needsSource = await executeToolCall({
+        registry,
+        name: 'legal_trace_assets',
+        arguments: { name: 'No Source Loop Subject', persistCase: false },
+      });
+      expect(needsSource.receipt).toMatchObject({ status: 'needs_source' });
+
+      const completion = await executeToolCall({
+        registry,
+        name: 'industry_workflow_complete',
+        arguments: { taskId: started.task.id },
+        context: {
+          userId,
+          authenticated: true,
+          domain: 'personal',
+          orgId: '',
+          source: 'legal-needs-source-regression',
+          getCurrentToolRecords: () => [needsSource],
+        } as any,
+      });
+      const payload = JSON.parse(completion.result);
+      expect(payload).toMatchObject({
+        ok: false,
+        status: 'blocked',
+        blockerStatus: 'needs_source',
+        persisted: true,
+        task: { id: started.task.id, status: 'blocked' },
+        verification: { passed: false, status: 'blocked' },
+      });
+      expect(completion.terminalVerification?.status).not.toBe('verified');
+      expect(getIndustryWorkflowTask({ userId, domain: 'personal', orgId: '' }, started.task.id)?.status)
+        .toBe('blocked');
     } finally {
       fetchMock.mockRestore();
     }
