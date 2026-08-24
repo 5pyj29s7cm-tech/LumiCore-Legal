@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { optionalAuth, resolveDomain } from '../middleware/auth';
+import { optionalAuth, requireAuth, resolveDomain } from '../middleware/auth';
 import {
   getIndustryWorkflowTask,
   listCurrentIndustryWorkflowContracts,
@@ -25,17 +25,17 @@ export function mountIndustryWorkflowRoutes(router: Router) {
     res.json({ contracts: listCurrentIndustryWorkflowContracts() });
   });
 
-  router.get('/industry/workflows', optionalAuth, (req, res) => {
+  router.get('/industry/workflows', requireAuth, (req, res) => {
     res.json({ tasks: listIndustryWorkflowTasks(scope(req), Number(req.query?.limit) || 50) });
   });
 
-  router.get('/industry/workflows/:taskId', optionalAuth, (req, res) => {
+  router.get('/industry/workflows/:taskId', requireAuth, (req, res) => {
     const task = getIndustryWorkflowTask(scope(req), String(req.params.taskId || ''));
     if (!task) return res.status(404).json({ error: 'Industry workflow task not found' });
     return res.json({ task });
   });
 
-  router.post('/industry/workflows', optionalAuth, asyncHandler((req, res) => {
+  router.post('/industry/workflows', requireAuth, asyncHandler((req, res) => {
     const entryId = String(req.body?.entryId || '').trim();
     if (!entryId) return res.status(400).json({ error: 'entryId is required' });
     const result = startIndustryWorkflow({
@@ -48,10 +48,14 @@ export function mountIndustryWorkflowRoutes(router: Router) {
     return res.status(201).json(result);
   }));
 
-  router.post('/industry/workflows/:taskId/verify', optionalAuth, asyncHandler((req, res) => {
+  router.post('/industry/workflows/:taskId/verify', requireAuth, asyncHandler((req, res) => {
+    const taskId = String(req.params.taskId || '');
+    if (!getIndustryWorkflowTask(scope(req), taskId)) {
+      return res.status(404).json({ error: 'Industry workflow task not found' });
+    }
     const result = recordIndustryWorkflowExecution({
       ...scope(req),
-      taskId: String(req.params.taskId || ''),
+      taskId,
       resultText: String(req.body?.resultText || ''),
       filePaths: Array.isArray(req.body?.filePaths) ? req.body.filePaths.map(String) : [],
       source: String(req.body?.source || 'industry_client'),
