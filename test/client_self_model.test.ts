@@ -503,9 +503,31 @@ describe('client self tools', () => {
     expect(summary).toMatchObject({ detail: 'summary', inventoryTool: 'client_capability_manifest' });
     expect(summary).not.toHaveProperty('capabilities');
     expect(summary).not.toHaveProperty('interfaceSurfaces');
+    expect(Object.keys(summary.industryCapabilityProfile).sort()).toEqual([
+      'displayName',
+      'entries',
+      'positioning',
+      'productLine',
+      'variantId',
+    ]);
+    expect(summary.industryCapabilityProfile.entries.length).toBeGreaterThan(0);
+    expect(Object.keys(summary.industryCapabilityProfile.entries[0]).sort()).toEqual([
+      'automationLevel',
+      'displayName',
+      'entryId',
+    ]);
+    expect(summary.industryCapabilityProfile.entries[0]).not.toHaveProperty('contract');
+    expect(summary.industryCapabilityProfile.entries[0]).not.toHaveProperty('summary');
+    expect(summary.industryCapabilityProfile.entries[0]).not.toHaveProperty('routingTerms');
     expect(full.detail).toBe('full');
     expect(Array.isArray(full.capabilities)).toBe(true);
     expect(Array.isArray(full.interfaceSurfaces)).toBe(true);
+    expect(full.industryCapabilityProfile).toHaveProperty('schemaVersion', 1);
+    expect(full.industryCapabilityProfile).toHaveProperty('automaticActions');
+    expect(full.industryCapabilityProfile).toHaveProperty('reviewRequiredActions');
+    expect(full.industryCapabilityProfile.entries[0]).toHaveProperty('summary');
+    expect(full.industryCapabilityProfile.entries[0]).toHaveProperty('routingTerms');
+    expect(full.industryCapabilityProfile.entries[0]).toHaveProperty('contract');
     expect(summaryRaw.length).toBeLessThan(fullRaw.length);
   });
 

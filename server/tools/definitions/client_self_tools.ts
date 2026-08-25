@@ -190,7 +190,19 @@ export function registerClientSelfTools(registry: ToolRegistry): void {
       const scopedIdentity = isWork ? { domain: 'work', orgId: context?.orgId } : { domain: 'personal' };
       const common = {
         detail: args?.detail === 'full' ? 'full' : 'summary',
-        industryCapabilityProfile,
+        industryCapabilityProfile: industryCapabilityProfile
+          ? {
+              variantId: industryCapabilityProfile.variantId,
+              displayName: industryCapabilityProfile.displayName,
+              productLine: industryCapabilityProfile.productLine,
+              positioning: industryCapabilityProfile.positioning,
+              entries: industryCapabilityProfile.entries.map(entry => ({
+                entryId: entry.entryId,
+                displayName: entry.displayName,
+                automationLevel: entry.automationLevel,
+              })),
+            }
+          : null,
         state: sanitizeDiagnosticValue(state),
         stateDigest: getClientStateDigest(state),
         health,
@@ -203,6 +215,7 @@ export function registerClientSelfTools(registry: ToolRegistry): void {
         ? {
             ...common,
             architecture,
+            industryCapabilityProfile,
             selfAwareness,
             capabilities: getClientCapabilities(registry.getCapabilityManifest(context?.toolPolicy)),
             interfaceSurfaces: getClientInterfaceSurfaces(),
