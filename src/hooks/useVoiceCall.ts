@@ -48,7 +48,7 @@ interface EndCallOptions {
   refineTranscript?: boolean;
 }
 
-interface VoiceStartPayload {
+export interface VoiceStartPayload {
   voiceId?: string;
   personalityId: string;
   agentId?: string;
@@ -56,6 +56,39 @@ interface VoiceStartPayload {
   domain: 'personal' | 'work';
   orgId?: string;
   sessionId: string;
+}
+
+export interface VoiceSwitchPayload {
+  voiceId: string;
+  sessionId: string;
+}
+
+export interface VoiceSwitchTransition {
+  nextPayload: VoiceStartPayload;
+  event: VoiceSwitchPayload | null;
+}
+
+export function normalizeSelectedVoiceId(value: unknown): string | undefined {
+  const normalized = String(value || '').trim();
+  if (!normalized || normalized.length > 256 || /[\u0000-\u001f\u007f]/.test(normalized)) return undefined;
+  return normalized;
+}
+
+/**
+ * Keep the reconnect payload and live socket update on the same voice revision.
+ * Returning no event for the existing voice prevents duplicate server updates.
+ */
+export function prepareVoiceSwitch(
+  payload: VoiceStartPayload | null,
+  nextVoiceId: unknown,
+): VoiceSwitchTransition | null {
+  const voiceId = normalizeSelectedVoiceId(nextVoiceId);
+  if (!payload || !voiceId) return null;
+  const nextPayload = { ...payload, voiceId };
+  return {
+    nextPayload,
+    event: payload.voiceId === voiceId ? null : { voiceId, sessionId: payload.sessionId },
+  };
 }
 
 interface VoiceAudioResponse {
@@ -139,11 +172,13 @@ export function useVoiceCall({
   const canSendMicAudioRef = useRef(canSendMicAudio);
   const ttsEchoFloorRef = useRef(0);
   const ttsBargeInFramesRef = useRef(0);
+  const ttsBargeInCandidateSentRef = useRef(false);
   const thinkingWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const thinkingWatchdogStartedAt = useRef(0);
   const callStateRef = useRef<CallState>('idle');
   const lastPassiveSilenceKeepAlive = useRef(0);
   const activeStartPayload = useRef<VoiceStartPayload | null>(null);
+  const preferredVoiceIdRef = useRef<string | undefined>(undefined);
   const activeVoiceRequestIdRef = useRef<string | null>(null);
   const activeWorkRequestIdRef = useRef<string | null>(null);
   const socketRef = useRef(socket);
@@ -235,8 +270,10 @@ export function useVoiceCall({
       }
     }
     isTtsPlaying.current = false;
+    ttsStartedAt.current = 0;
     ttsEchoFloorRef.current = 0;
     ttsBargeInFramesRef.current = 0;
+    ttsBargeInCandidateSentRef.current = false;
   }, []);
 
   const disposePlaybackContexts = useCallback(() => {
@@ -381,7 +418,10 @@ export function useVoiceCall({
       const ctx = ensureTtsContext();
       const playbackGeneration = playbackGenerationRef.current;
       isTtsPlaying.current = true;
-      if (ttsStartedAt.current === 0) ttsStartedAt.current = Date.now();
+      if (ttsStartedAt.current === 0) {
+        ttsStartedAt.current = Date.now();
+        ttsBargeInCandidateSentRef.current = false;
+      }
       if (lane !== 'conversation') clearThinkingWatchdog();
       setCallState(prev => (prev === 'thinking' || prev === 'queued') ? 'speaking' : prev);
 
@@ -419,6 +459,10 @@ export function useVoiceCall({
             playAudioChunk(queued.buffer, queued.volumeGain, queued.lane, queued.requestId);
           } else {
             isTtsPlaying.current = false;
+            ttsStartedAt.current = 0;
+            ttsEchoFloorRef.current = 0;
+            ttsBargeInFramesRef.current = 0;
+            ttsBargeInCandidateSentRef.current = false;
             setCallState(prev => prev === 'speaking' ? 'listening' : prev);
           }
         };
@@ -429,17 +473,27 @@ export function useVoiceCall({
           const delayMs = Math.max(0, Math.round((effectiveStart - ctx.currentTime) * 1000));
           setTimeout(() => {
             if (!isCallActive.current || ackGeneration !== playbackGenerationRef.current) return;
-            socket.emit('audio:playback_started', { requestId, lane });
+            socket.emit('audio:playback_started', {
+              requestId,
+              lane,
+              durationMs: Math.max(1, Math.round(decoded.duration * 1_000)),
+            });
           }, delayMs);
         }
       }, (err) => {
         if (playbackGeneration !== playbackGenerationRef.current) return;
         console.error('[VoiceCall] Decode failed:', err);
         isTtsPlaying.current = false;
+        ttsStartedAt.current = 0;
+        ttsEchoFloorRef.current = 0;
+        ttsBargeInFramesRef.current = 0;
+        ttsBargeInCandidateSentRef.current = false;
         if (audioQueue.current.length > 0) {
           const next = audioQueue.current.shift()!;
           const queued: VoiceAudioResponse = next instanceof ArrayBuffer ? { buffer: next } : next;
           playAudioChunk(queued.buffer, queued.volumeGain, queued.lane, queued.requestId);
+        } else {
+          setCallState(prev => prev === 'speaking' ? 'listening' : prev);
         }
       });
     };
@@ -520,6 +574,39 @@ export function useVoiceCall({
       disposePlaybackContexts();
       transcriptionOnlyRef.current = false;
       setCallState('idle');
+    };
+
+    const onAudioVoiceChanged = (data: { voiceId?: string; sessionId?: string }) => {
+      const payload = activeStartPayload.current;
+      const acknowledgedVoiceId = normalizeSelectedVoiceId(data?.voiceId);
+      if (
+        !isCallActive.current
+        || !payload
+        || !acknowledgedVoiceId
+        || data?.sessionId !== payload.sessionId
+        || payload.voiceId !== acknowledgedVoiceId
+      ) return;
+      preferredVoiceIdRef.current = acknowledgedVoiceId;
+    };
+
+    const onAudioVoiceUnavailable = (data: {
+      reason?: string;
+      requestedVoiceId?: string;
+      currentVoiceId?: string | null;
+      sessionId?: string;
+    }) => {
+      const payload = activeStartPayload.current;
+      if (!isCallActive.current || !payload) return;
+      if (data?.sessionId && data.sessionId !== payload.sessionId) return;
+      const requestedVoiceId = normalizeSelectedVoiceId(data?.requestedVoiceId);
+      if (requestedVoiceId && payload.voiceId !== requestedVoiceId) return;
+
+      const currentVoiceId = normalizeSelectedVoiceId(data?.currentVoiceId);
+      activeStartPayload.current = { ...payload, voiceId: currentVoiceId };
+      preferredVoiceIdRef.current = currentVoiceId;
+      setError(data?.reason === 'voice_profile_scope_mismatch'
+        ? 'The selected voice is unavailable in this Lumi workspace.'
+        : 'The selected voice could not be applied to the active call.');
     };
 
     const onAudioInterruptAck = (data?: { workContinues?: boolean; requestId?: string }) => {
@@ -618,6 +705,8 @@ export function useVoiceCall({
     socket.on('audio:transcript', onAudioTranscript);
     socket.on('agent:response', onAgentResponse);
     socket.on('audio:error', onAudioError);
+    socket.on('audio:voice_changed', onAudioVoiceChanged);
+    socket.on('audio:voice_unavailable', onAudioVoiceUnavailable);
     socket.on('audio:interrupt-ack', onAudioInterruptAck);
     socket.on('audio:end-call-request', onAudioEndCallRequest);
     socket.on('audio:sidecar_response', onAudioSidecarResponse);
@@ -631,6 +720,8 @@ export function useVoiceCall({
       socket.off('audio:transcript', onAudioTranscript);
       socket.off('agent:response', onAgentResponse);
       socket.off('audio:error', onAudioError);
+      socket.off('audio:voice_changed', onAudioVoiceChanged);
+      socket.off('audio:voice_unavailable', onAudioVoiceUnavailable);
       socket.off('audio:interrupt-ack', onAudioInterruptAck);
       socket.off('audio:end-call-request', onAudioEndCallRequest);
       socket.off('audio:sidecar_response', onAudioSidecarResponse);
@@ -683,6 +774,8 @@ export function useVoiceCall({
   const startCall = useCallback(async (voiceId?: string, personalityId: string = 'lumi', agentId?: string, options: StartCallOptions = {}) => {
     if (disabled) return;
     if (isCallActive.current || startInFlightRef.current) return;
+    const requestedVoiceId = normalizeSelectedVoiceId(voiceId);
+    if (voiceId !== undefined) preferredVoiceIdRef.current = requestedVoiceId;
     const generation = ++callGenerationRef.current;
     startInFlightRef.current = true;
     try {
@@ -761,20 +854,27 @@ export function useVoiceCall({
             ttsBargeInFramesRef.current = frameRms > adaptiveThreshold
               ? ttsBargeInFramesRef.current + 1
               : 0;
+            if (ttsBargeInFramesRef.current > 0 && !transcriptionOnlyRef.current) {
+              // Feed likely near-end speech to the utterance-scoped voiceprint
+              // verifier. Raw energy alone must never stop playback: speaker
+              // echo and room transients can cross the same threshold. The
+              // server stops TTS only after STT echo filtering and speaker/
+              // semantic admission accept the utterance.
+              window.dispatchEvent(new CustomEvent('lumi:voice-pcm-frame', {
+                detail: { samples: new Float32Array(input), rms: frameRms },
+              }));
+            }
             const strongSpeechFrame = frameRms > Math.max(0.045, adaptiveThreshold * 1.6);
-            if (strongSpeechFrame || ttsBargeInFramesRef.current >= 2) {
-              // Stopping local playback is harmless and must not wait for an
-              // asynchronous voiceprint sample. Audio is already flowing
-              // through the semantic stop lane, so no pre-roll replay is needed.
-              currentSocket.emit('audio:interrupt');
-              stopAllPlayback();
-              ttsStartedAt.current = 0;
-              setCallState('listening');
-              if (!transcriptionOnlyRef.current) {
-                window.dispatchEvent(new CustomEvent('lumi:voice-pcm-frame', {
-                  detail: { samples: new Float32Array(input), rms: frameRms },
-                }));
-              }
+            const sustainedCandidate = ttsBargeInFramesRef.current >= (strongSpeechFrame ? 3 : 5);
+            if (sustainedCandidate && !ttsBargeInCandidateSentRef.current) {
+              ttsBargeInCandidateSentRef.current = true;
+              currentSocket.emit('audio:interrupt-candidate', {
+                source: 'local_energy',
+                rms: Number(frameRms.toFixed(4)),
+                threshold: Number(adaptiveThreshold.toFixed(4)),
+                frames: ttsBargeInFramesRef.current,
+                ttsAgeMs,
+              });
             }
           }
           return;
@@ -813,7 +913,7 @@ export function useVoiceCall({
       isCallActive.current = true;
       callStartTime.current = Date.now();
       const startPayload: VoiceStartPayload = {
-        voiceId,
+        voiceId: preferredVoiceIdRef.current || requestedVoiceId,
         personalityId,
         agentId,
         transcriptionOnly: options.transcriptionOnly === true,
@@ -836,7 +936,21 @@ export function useVoiceCall({
     } finally {
       startInFlightRef.current = false;
     }
-  }, [cleanupCapture, disabled, stopAllPlayback]);
+  }, [cleanupCapture, disabled]);
+
+  const switchVoice = useCallback((voiceId?: string): boolean => {
+    const normalizedVoiceId = normalizeSelectedVoiceId(voiceId);
+    if (!normalizedVoiceId) return false;
+    preferredVoiceIdRef.current = normalizedVoiceId;
+
+    const transition = prepareVoiceSwitch(activeStartPayload.current, normalizedVoiceId);
+    if (!isCallActive.current || !transition) return false;
+    activeStartPayload.current = transition.nextPayload;
+    if (transition.event && socketRef.current?.connected) {
+      socketRef.current.emit('audio:switch-voice', transition.event);
+    }
+    return true;
+  }, []);
 
   useEffect(() => {
     const applyOutputPreference = () => {
@@ -852,14 +966,14 @@ export function useVoiceCall({
 
   const interrupt = useCallback(() => {
     if (callState === 'speaking' || callState === 'thinking') {
-      socket?.emit('audio:interrupt');
+      socket?.emit('audio:interrupt', { source: 'user_control' });
       stopAllPlayback();
     }
   }, [socket, callState, stopAllPlayback]);
 
   useEffect(() => {
     const stopVoiceOutput = () => {
-      if (isCallActive.current) socketRef.current?.emit('audio:interrupt');
+      if (isCallActive.current) socketRef.current?.emit('audio:interrupt', { source: 'user_control' });
       stopAllPlayback();
     };
     window.addEventListener('lumi:stop-voice-output', stopVoiceOutput);
@@ -907,6 +1021,7 @@ export function useVoiceCall({
       ttsStartedAt.current = 0;
       ttsEchoFloorRef.current = 0;
       ttsBargeInFramesRef.current = 0;
+      ttsBargeInCandidateSentRef.current = false;
     }
   }, [callState]);
 
@@ -961,6 +1076,7 @@ export function useVoiceCall({
     connectionQuality,
     startCall,
     startCallRef,
+    switchVoice,
     endCall,
     interrupt,
     toggleMute,

@@ -275,7 +275,7 @@ describe('completion guard generic execution claims', () => {
     expect(result.blocked).toBe(true);
     expect(result.reason).toContain('current-turn tool execution');
     expect(result.text).toContain('\u64cd\u4f5c\u8fd8\u6ca1\u6709\u6210\u529f\u542f\u52a8');
-    expect(result.text).not.toContain('No successful current-turn tool execution');
+    expect(result.text).not.toMatch(/No successful|current-turn|tool execution|execution-status claim|\u6267\u884c\u5668|\u5de5\u5177\u94fe/iu);
   });
 
   it('allows a write-completion claim only with current-turn producer evidence', () => {
@@ -336,6 +336,99 @@ describe('completion guard generic execution claims', () => {
 
     expect(result.blocked).toBe(true);
     expect(result.reason).toContain('\u5199\u5165/\u751f\u6210/\u9a8c\u6536\u8bb0\u5f55');
+  });
+
+  it('does not mistake a saved prior-turn receipt for a saved artifact', () => {
+    const task = '你上一轮是否真的调用过工具？不要再次调用工具，只根据已保存的回执告诉我：工具名、成功还是失败。';
+    const response = '上一轮确实调用过工具。工具名：desktop_active_window；已保存的回执显示执行成功。';
+    const result = guardCompletionClaims({
+      task,
+      response,
+      toolCalls: [{
+        name: 'desktop_poll_activity',
+        arguments: {},
+        result: JSON.stringify({ ok: true, status: 'observed' }),
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'terminal_receipt',
+          reason: 'Desktop observation returned.',
+        },
+      }],
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toBe(response);
+    expect(result.reason || '').not.toContain('生成或保存产物');
+  });
+
+  it.each([
+    '回执已经保存，结果为成功。',
+    '执行记录已保存，状态为成功。',
+    '任务账本已保存，证据状态为成功。',
+    'The receipt was saved and the result was successful.',
+    'The execution log was saved with a successful status result.',
+  ])('does not classify persisted execution metadata as an artifact: %s', (response) => {
+    const result = guardCompletionClaims({
+      task: '核对上一轮执行状态',
+      response,
+      toolCalls: [{
+        name: 'desktop_poll_activity',
+        arguments: {},
+        result: JSON.stringify({ ok: true, status: 'observed' }),
+      }],
+    });
+
+    expect(result.reason || '').not.toContain('生成或保存产物');
+    expect(result.text).not.toContain('生成或保存产物');
+  });
+
+  it('still requires producer evidence for an explicit saved file claim', () => {
+    const result = guardCompletionClaims({
+      task: '保存报告文件',
+      response: '报告文件已保存。',
+      toolCalls: [{
+        name: 'desktop_list_files',
+        arguments: { path: 'D:\\reports' },
+        result: '[{"name":"report.docx"}]',
+      }],
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(result.reason).toContain('写入/生成/验收记录');
+  });
+
+  it('does not let receipt wording hide an explicit saved-file claim', () => {
+    const result = guardCompletionClaims({
+      task: '核对报告文件是否已保存',
+      response: '执行记录显示报告文件已保存。',
+      toolCalls: [{
+        name: 'desktop_list_files',
+        arguments: { path: 'D:\\reports' },
+        result: '[{"name":"report.docx"}]',
+      }],
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(result.reason).toContain('写入/生成/验收记录');
+  });
+
+  it.each([
+    '已经保存成功。',
+    '已保存，路径是 D:\\x.txt。',
+    'report.txt 已保存。',
+  ])('still guards a bare save, path, or filename claim: %s', (response) => {
+    const result = guardCompletionClaims({
+      task: '保存内容',
+      response,
+      toolCalls: [{
+        name: 'desktop_list_files',
+        arguments: { path: 'D:\\' },
+        result: '[{"name":"x.txt"}]',
+      }],
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(result.reason).toContain('写入/生成/验收记录');
   });
 
   it('does not count a confirmation blocker returned as tool text as success', () => {
@@ -446,6 +539,50 @@ describe('completion guard generic execution claims', () => {
     });
     expect(explanation.blocked).toBe(false);
     expect(fact.blocked).toBe(false);
+  });
+
+  it.each([
+    {
+      label: 'discussion',
+      task: '我们先讨论一下任务执行为什么容易丢上下文，不要调用工具。',
+      response: '我现在就开始解释：关键在于路由、回执和上下文恢复没有形成同一条链。',
+    },
+    {
+      label: 'intent',
+      task: '如果以后需要执行任务，你打算怎么处理？',
+      response: '我的意向是先确认目标和边界，再决定是否需要实际操作。',
+    },
+    {
+      label: 'clarification',
+      task: '你说“现在就做”到底是什么意思？',
+      response: '我现在就开始澄清这个说法：它表示承接要求，不代表此刻已经完成了外部操作。',
+    },
+  ])('keeps ordinary $label turns out of the execution guard', ({ task, response }) => {
+    const result = guardCompletionClaims({ task, response, toolCalls: [] });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toBe(response);
+    expect(result.text).not.toMatch(/No successful|current-turn|tool execution|execution-status claim/iu);
+  });
+
+  it.each([
+    {
+      task: '启动桌面上的微信程序。',
+      response: '已经完成。',
+      expected: '桌面操作还不能确认完成',
+    },
+    {
+      task: 'launch WeChat from the desktop',
+      response: 'Completed successfully.',
+      expected: 'desktop action does not yet have a verified completion result',
+    },
+  ])('keeps real unsupported completion claims blocked without exposing guard internals', ({ task, response, expected }) => {
+    const result = guardCompletionClaims({ task, response, toolCalls: [] });
+
+    expect(result.blocked).toBe(true);
+    expect(result.reason).toBeTruthy();
+    expect(result.text.toLowerCase()).toContain(expected.toLowerCase());
+    expect(result.text).not.toMatch(/No successful|current-turn|tool execution|execution-status claim|执行器|工具链|这一轮没有.*工具/iu);
   });
 
   it.each([

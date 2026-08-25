@@ -116,6 +116,27 @@ describe('recent action continuation', () => {
     expect(bridge).toContain('write_file');
   });
 
+  it('binds a restatement request only to the adjacent assistant reply', () => {
+    const text = 'sorry, 你刚刚又卡住了，重新说。';
+    const history = [
+      { role: 'user', message: '继续青穹客户跟进任务。' },
+      { role: 'assistant', message: '旧任务还在等待客户资料。' },
+      { role: 'user', message: '你先重新介绍一下自己。' },
+      { role: 'assistant', message: '我是 Lumi，会陪你聊天，也能在授权后执行任务。' },
+    ];
+
+    expect(classifyRecentActionFollowupIntent(text)).toBe('repeat');
+    expect(classifyConversationActionFollowupIntent(text)).toBe('repeat');
+    expect(needsRecentActionContinuationContext(text)).toBe(true);
+
+    const bridge = buildRecentActionContinuationBridge(text, history);
+    expect(bridge).toContain('- followupIntent: repeat');
+    expect(bridge).toContain('我是 Lumi，会陪你聊天，也能在授权后执行任务。');
+    expect(bridge).not.toContain('旧任务还在等待客户资料');
+    expect(bridge).not.toContain('继续青穹客户跟进任务');
+    expect(bridge).toContain('Do not fall back to an older user task');
+  });
+
   it('treats an ambiguous failure question as status only for an unfinished durable task', () => {
     const unfinished = buildConversationActionContinuationState({
       userText: '读取桌面平面图并画进 AutoCAD。',
@@ -150,6 +171,8 @@ describe('recent action continuation', () => {
       '检查任务状态；如果还没完成，就重试。',
       'Is this task complete? If not, continue executing it.',
       'Check the task status; if unfinished, retry it.',
+      '上一轮是否调用工具？现在请调用另一个工具核实。',
+      'Did the previous turn call a tool? Now use another tool to verify it.',
     ];
     for (const text of mixedExecutionTurns) {
       expect(classifyRecentActionFollowupIntent(text), text).toBe('execute');
@@ -163,6 +186,8 @@ describe('recent action continuation', () => {
       '这个任务完成了吗？继续执行了吗？',
       'Is it done?',
       'Is it done? Continue executing?',
+      '上一轮是否调用工具？不要再次调用工具，只根据回执回答。',
+      'Did the previous turn call a tool? Now use another tool to verify?',
     ]) {
       expect(classifyConversationActionFollowupIntent(text, unfinished), text).toBe('status');
       expect(buildRecentActionContinuationBridge(text, [], unfinished), text)

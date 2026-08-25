@@ -49,6 +49,7 @@ import { shouldExposeAgentWork } from "../cognition/tool_intent";
 import { formatClientSelfPrompt } from "../client/self_model";
 import { buildVisionRoutingOverlay } from "../cognition/vision_routing";
 import { buildLumiExecutionPipeline } from "../cognition/execution_pipeline";
+import { buildModelToolProjection } from "../cognition/capability_selection";
 import { bindCapabilityExecutionPlanTask } from "../cognition/capability_execution_plan";
 import { buildDesktopExecutionStabilityPolicy } from "../cognition/desktop_execution_stability";
 import { createDesktopExecutionTracker, withDesktopExecutionReceipt } from "../desktop/execution_runtime";
@@ -577,6 +578,7 @@ export function registerTaskHandler(
       executionDecision.toolRoute,
       toolSecurityContext.executionBoundary,
     );
+    const modelToolProjection = buildModelToolProjection(executionDecision);
     const actionFollowupIntent = classifyConversationActionFollowupIntent(
       data.text,
       convForHistory.actionContinuationState,
@@ -972,6 +974,7 @@ export function registerTaskHandler(
             actionIntent: confirmedTask,
             routedTaskText: confirmedTask,
             toolPolicy: executionDecision.toolPolicy,
+            modelToolProjection,
             priorToolRecords: [confirmationRecord],
             desktopExecutionTracker,
             isCancelled: () => taskAbortController.signal.aborted,
@@ -1284,7 +1287,7 @@ export function registerTaskHandler(
             }
           }
         },
-        { ...toolSecurityContext, userId: uid, taskId: actionTaskExecution.state?.taskId || requestId, conversationId: convForHistory.id, turnId: requestId, requestId, domain: taskScope.domain, orgId: taskScope.orgId, desktopRelay, requestConfirmation, actionIntent: routedTaskText, routedTaskText, toolPolicy: executionDecision.toolPolicy, desktopExecutionTracker, isCancelled: () => taskLease.signal.aborted, llmGetters, source: 'task', supervisedExternalCommits: true },
+        { ...toolSecurityContext, userId: uid, taskId: actionTaskExecution.state?.taskId || requestId, conversationId: convForHistory.id, turnId: requestId, requestId, domain: taskScope.domain, orgId: taskScope.orgId, desktopRelay, requestConfirmation, actionIntent: routedTaskText, routedTaskText, toolPolicy: executionDecision.toolPolicy, modelToolProjection, desktopExecutionTracker, isCancelled: () => taskLease.signal.aborted, llmGetters, source: 'task', supervisedExternalCommits: true },
         llmGetters.getOllama,
         llmGetters.getLmStudio,
         llmGetters.getArk,
@@ -1399,6 +1402,7 @@ export function registerTaskHandler(
               actionIntent: routedTaskText,
               routedTaskText,
               toolPolicy: executionDecision.toolPolicy,
+              modelToolProjection,
               priorToolRecords,
               desktopExecutionTracker,
               isCancelled: () => taskLease.signal.aborted,

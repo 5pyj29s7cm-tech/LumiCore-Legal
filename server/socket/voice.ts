@@ -26,8 +26,8 @@ import { createResilientStreamingSession, getActiveStreamingSTTProvider } from "
 import { transcribeAudioFile } from "../stt/file_transcription";
 import { computeAdaptiveEndpointSilenceMs } from "../stt/adaptive_endpointing";
 import { getMeetingAudioDir } from "../stt/artifact_paths";
-import { isVoiceProfileAccessible, voiceProfileScope } from '../tts/profile_store';
-import { synthesizeSpeech, getActiveProvider as getTTSProvider, resolveEmotionVoice } from "../tts/adapter";
+import { isVoiceProfileAccessible, listScopedVoiceProfiles, voiceProfileScope } from '../tts/profile_store';
+import { synthesizeSpeech, getActiveProvider as getTTSProvider, listVoices as listTTSVoices, resolveEmotionVoice } from "../tts/adapter";
 import { extractFirstCompleteSpeechSentence } from "../tts/speculative_sentence";
 import { recordLatency } from "../monitor/latency_store";
 import { markVoiceLatencyMilestone, startVoiceLatencyTrace } from "../monitor/voice_latency_store";
@@ -35,6 +35,7 @@ import {
   getOrCreateActiveConversation,
   getOrCreateConversationForTurn,
   addMessage,
+  addMessageIdempotent,
   getMessages,
   getMessagesByTokenBudget,
   extractTopics,
@@ -94,6 +95,7 @@ import { formatOperationModeSwitchResponse } from "../i18n/operation_mode_messag
 import { buildInternalOpenCommand } from "../i18n/naturalness_messages";
 import { buildInteractionModeOverlay } from "../cognition/turn_flow";
 import { buildLumiExecutionPipeline } from "../cognition/execution_pipeline";
+import { buildModelToolProjection } from "../cognition/capability_selection";
 import { shouldRunLegacyDirectExecution } from "../cognition/legacy_route_policy";
 import { bindCapabilityExecutionPlanTask } from "../cognition/capability_execution_plan";
 import { buildForegroundMessagingArguments, executeForegroundMessagingAction } from "../cognition/foreground_messaging_execution";
@@ -125,7 +127,7 @@ import {
 } from "../tools/pending_confirmation";
 import { updatePresence } from "../biometrics/presence";
 import { getVoiceprints } from "../biometrics/store";
-import { formatClientSelfPrompt } from "../client/self_model";
+import { formatCompactClientSelfPrompt } from "../client/self_model";
 import { collectAnticipatoryContext } from "../context/anticipatory_context";
 import {
   createReadOnlyCacheKey,
@@ -200,6 +202,7 @@ interface AudioSession {
   isActive: boolean;
   ttsAbortController: AbortController | null;
   currentVoiceId: string | null;
+  voiceSwitchGeneration: number;
   personalityId: string;
   userId: string;
   agentId: string;
@@ -259,6 +262,8 @@ interface AudioSession {
   silenceTimer: ReturnType<typeof setTimeout> | null;
   /** Tracked TTS decay timers — cleared on stop/disconnect to prevent post-session mutations */
   ttsDecayTimers: ReturnType<typeof setTimeout>[];
+  /** Client-confirmed playback window; synthesis can finish before speakers do. */
+  ttsPlaybackUntil: number;
   /** Barge-in confirmation delay timer — cleared on stop/disconnect */
   bargeinTimer: ReturnType<typeof setTimeout> | null;
   /** Voiceprint verification: true when owner's voice is recognized */
@@ -293,6 +298,95 @@ interface AudioSession {
   lastAcceptedCommandChunkAt: number;
   /** Requests whose remaining speech was stopped while their work kept running. */
   suppressedSpeechRequestIds: Set<string>;
+}
+
+export interface VoiceSwitchRequest {
+  voiceId?: unknown;
+  sessionId?: unknown;
+}
+
+export type VoiceSwitchSession = Pick<
+  AudioSession,
+  'isActive' | 'sessionId' | 'userId' | 'domain' | 'orgId' | 'currentVoiceId'
+>;
+
+export type VoiceSwitchResolution =
+  | {
+      accepted: true;
+      voiceId: string;
+      previousVoiceId: string | null;
+      sessionId: string;
+    }
+  | {
+      accepted: false;
+      reason: 'inactive_session' | 'session_mismatch' | 'invalid_voice_id' | 'voice_profile_scope_mismatch' | 'voice_not_available';
+      requestedVoiceId: string;
+      currentVoiceId: string | null;
+      sessionId: string;
+    };
+
+function normalizeVoiceSwitchId(value: unknown): string {
+  const voiceId = String(value || '').trim();
+  if (!voiceId || voiceId.length > 256 || /[\u0000-\u001f\u007f]/.test(voiceId)) return '';
+  return voiceId;
+}
+
+/** Validate and atomically apply a voice change without restarting microphone/STT. */
+export function applyVoiceSwitchRequest(
+  session: VoiceSwitchSession,
+  data: VoiceSwitchRequest,
+  canAccess: typeof isVoiceProfileAccessible = isVoiceProfileAccessible,
+  isAvailable: (scope: ReturnType<typeof voiceProfileScope>, voiceId: string) => boolean = () => true,
+): VoiceSwitchResolution {
+  const requestedVoiceId = normalizeVoiceSwitchId(data?.voiceId);
+  const requestedSessionId = String(data?.sessionId || '').trim();
+  const rejected = (reason: Exclude<VoiceSwitchResolution, { accepted: true }>['reason']): VoiceSwitchResolution => ({
+    accepted: false,
+    reason,
+    requestedVoiceId,
+    currentVoiceId: session.currentVoiceId,
+    sessionId: session.sessionId,
+  });
+
+  if (!session.isActive) return rejected('inactive_session');
+  if (!requestedSessionId || requestedSessionId !== session.sessionId) return rejected('session_mismatch');
+  if (!requestedVoiceId) return rejected('invalid_voice_id');
+
+  const scope = voiceProfileScope(session.userId, session.domain, session.orgId);
+  if (!canAccess(scope, requestedVoiceId)) return rejected('voice_profile_scope_mismatch');
+  if (!isAvailable(scope, requestedVoiceId)) return rejected('voice_not_available');
+
+  const previousVoiceId = session.currentVoiceId;
+  session.currentVoiceId = requestedVoiceId;
+  return {
+    accepted: true,
+    voiceId: requestedVoiceId,
+    previousVoiceId,
+    sessionId: session.sessionId,
+  };
+}
+
+async function isVoiceSwitchSelectionAvailable(
+  scope: ReturnType<typeof voiceProfileScope>,
+  voiceId: string,
+): Promise<boolean> {
+  if (voiceId === 'default') return true;
+  const provider = getTTSProvider();
+  if (!provider) return false;
+
+  const profile = listScopedVoiceProfiles(scope).find((entry: any) => String(entry?.voiceId || '') === voiceId);
+  if (profile) {
+    return String(profile.provider || 'cosyvoice') === provider
+      && profile.status !== 'training'
+      && profile.status !== 'failed';
+  }
+
+  try {
+    const voices = await listTTSVoices(provider);
+    return voices.some(voice => voice.voiceId === voiceId);
+  } catch {
+    return false;
+  }
 }
 
 interface VoiceInputTiming {
@@ -420,6 +514,7 @@ function cancelActiveVoiceTurn(
   }
   session.bgGeneration++;
   session.isSpeaking = false;
+  session.ttsPlaybackUntil = 0;
   session.isProcessing = false;
   session.isOrchestrating = false;
   if (!preserveInputQueue) session.inputQueue = [];
@@ -481,9 +576,25 @@ export function isVoiceCallEndCommand(text: string): boolean {
   return /^(?:(?:关闭|结束|挂断|退出|停止)(?:语音)?(?:通话|电话|聊天|会话)|(?:语音)?(?:通话|电话|聊天|会话)(?:关闭|结束|挂断|退出)|endcall|hangup|closevoicecall|stopvoicecall)$/u.test(normalized);
 }
 
+/**
+ * Keep the priority transport lane model-free without treating Lumi's own
+ * loudspeaker echo as a user stop. Scope matching isolates simultaneous voice
+ * sessions; the active-TTS flag leaves the same words usable after playback.
+ */
+export function isEchoedImmediateVoiceControl(
+  text: string,
+  ttsActive: boolean,
+  scope = '',
+): boolean {
+  if (!ttsActive) return false;
+  if (!isPureInterruptCommand(text) && !isVoiceCallEndCommand(text)) return false;
+  return isEchoText(text, true, scope);
+}
+
 function interruptVoiceSpeech(session: AudioSession): void {
   session.bgGeneration++;
   session.isSpeaking = false;
+  session.ttsPlaybackUntil = 0;
   if (session.ttsAbortController) {
     session.ttsAbortController.abort();
     session.ttsAbortController = null;
@@ -570,6 +681,7 @@ function getAudioSession(socket: Socket): AudioSession {
       isActive: false,
       ttsAbortController: null,
       currentVoiceId: null,
+      voiceSwitchGeneration: 0,
       personalityId: 'lumi',
       accumulatedText: '',
       isSpeaking: false,
@@ -598,6 +710,7 @@ function getAudioSession(socket: Socket): AudioSession {
       endpointSilenceMs: 850,
       silenceTimer: null,
       ttsDecayTimers: [],
+      ttsPlaybackUntil: 0,
       bargeinTimer: null,
       userId: '',
       agentId: 'lumi',
@@ -1353,7 +1466,7 @@ async function processVoiceInput(
   let voiceUserMessagePersisted = false;
   const persistVoiceUserMessage = (cognitiveIntent = 'voice_received', skipActionContinuation = false) => {
     if (voiceUserMessagePersisted) return;
-    addMessage({
+    addMessageIdempotent({
       userId: session.userId,
       agentId: session.agentId,
       conversationId: conversationTurn.conversation.id,
@@ -1667,6 +1780,7 @@ async function processVoiceInput(
     executionDecision.toolRoute,
     toolSecurityContext.executionBoundary,
   );
+  const modelToolProjection = buildModelToolProjection(executionDecision);
   const actionFollowupIntent = classifyConversationActionFollowupIntent(
     actionIntentText,
     conversationTurn.conversation.actionContinuationState,
@@ -1780,42 +1894,45 @@ async function processVoiceInput(
       source: 'voice',
     });
   }
+  const needsExecutionPrompt = executionDecision.allowToolUse && !remoteRestricted;
   const opModeOverlay = remoteRestricted ? '' : '\n\n' + buildInteractionModeOverlay(turnFlow);
-  const workSurfaceOverlay = workSurfaceRoute.promptOverlay && !remoteRestricted ? '\n\n' + workSurfaceRoute.promptOverlay : '';
-  const visionRoutingOverlay = visionIntent && effectiveOperationMode !== 'meeting' && !remoteRestricted ? '\n\n' + buildVisionRoutingOverlay(session.userId, routedUserText) : '';
+  const workSurfaceOverlay = workSurfaceRoute.promptOverlay && needsExecutionPrompt ? '\n\n' + workSurfaceRoute.promptOverlay : '';
+  const visionRoutingOverlay = visionIntent && effectiveOperationMode !== 'meeting' && needsExecutionPrompt ? '\n\n' + buildVisionRoutingOverlay(session.userId, routedUserText) : '';
   const interactionOverlay = remoteRestricted
     ? baseVoiceOverlay
     : executionDecision.allowToolUse
       ? toolVoiceOverlay
       : baseVoiceOverlay + '\n\n## Interaction Mode\nThis turn is chat-only. Do not call tools, operate the desktop, assemble a team, or claim that you are taking actions. Answer naturally unless the user gives an explicit command.';
 
-  const clientSelfPrompt = remoteRestricted
-    ? ''
-    : '\n\n' + formatClientSelfPrompt(session.userId, voiceScope);
-  const dispatchOverlay = remoteRestricted ? '' : '\n\n' + turnDispatch.promptOverlay;
-  const executionOverlay = '\n\n' + executionBoundaryPromptOverlay(
-    executionDecision.promptOverlay,
-    toolSecurityContext.executionBoundary,
-  );
-  const capabilitySelectionOverlay = remoteRestricted ? '' : '\n\n' + capabilitySelection.promptOverlay;
-  const desktopExecutionOverlay = desktopExecutionPolicy.promptOverlay && !remoteRestricted ? '\n\n' + desktopExecutionPolicy.promptOverlay : '';
+  const clientSelfPrompt = !remoteRestricted && (needsExecutionPrompt || isCapabilityMetaQuestion(actionIntentText))
+    ? '\n\n' + formatCompactClientSelfPrompt(session.userId, voiceScope)
+    : '';
+  const dispatchOverlay = needsExecutionPrompt ? '\n\n' + turnDispatch.promptOverlay : '';
+  const executionOverlay = needsExecutionPrompt || remoteRestricted
+    ? '\n\n' + executionBoundaryPromptOverlay(
+        executionDecision.promptOverlay,
+        toolSecurityContext.executionBoundary,
+      )
+    : '';
+  const capabilitySelectionOverlay = needsExecutionPrompt ? '\n\n' + capabilitySelection.promptOverlay : '';
+  const desktopExecutionOverlay = desktopExecutionPolicy.promptOverlay && needsExecutionPrompt ? '\n\n' + desktopExecutionPolicy.promptOverlay : '';
   const turnFlowOverlay = remoteRestricted ? '' : '\n\n' + turnFlow.promptOverlay;
-  const runtimeCapabilityOverlay = remoteRestricted
-    ? ''
-    : '\n\n' + buildLumiRuntimeCapabilityContext({
+  const runtimeCapabilityOverlay = needsExecutionPrompt
+    ? '\n\n' + buildLumiRuntimeCapabilityContext({
         userId: session.userId,
         text: turnFlow.routeText,
         flow: turnFlow,
         toolRegistry,
         domain: voiceScope.domain,
         orgId: voiceScope.orgId,
-      });
-  const operatingKernelOverlay = remoteRestricted
-    ? ''
-    : '\n\n' + buildLumiOperatingKernelPrompt({
+      })
+    : '';
+  const operatingKernelOverlay = needsExecutionPrompt
+    ? '\n\n' + buildLumiOperatingKernelPrompt({
         channel: 'voice',
         flow: turnFlow,
-      });
+      })
+    : '';
   const proactiveContextOverlay = proactiveContextPrompt ? `\n\n${proactiveContextPrompt}` : '';
   const actionContinuationOverlay = actionContinuationBridge ? `\n\n${actionContinuationBridge}` : '';
   const organizationKnowledgeOverlay = voiceOrganizationKnowledge
@@ -1868,7 +1985,7 @@ async function processVoiceInput(
     } = {},
   ) => {
     if (voiceAssistantMessagePersisted || !String(text || '').trim()) return;
-    addMessage({
+    addMessageIdempotent({
       userId: session.userId,
       agentId: session.agentId,
       conversationId,
@@ -1885,6 +2002,7 @@ async function processVoiceInput(
       orgId: voiceScope.orgId,
       requestId,
       skipActionContinuation: options.skipActionContinuation === true,
+      taskIntent: executionDecision.allowToolUse ? 'task' : 'conversation',
     });
     voiceAssistantMessagePersisted = true;
     scheduleVoiceSummary(conversationId);
@@ -1897,9 +2015,10 @@ async function processVoiceInput(
   };
   const persistSidecarConversation = (conversationId: string) => {
     const history = session.sidecarHistory.splice(0);
-    for (const item of history) {
+    for (const [index, item] of history.entries()) {
       if (!item.persist) continue;
-      addMessage({
+      const sidecarRequestId = `${requestId}:sidecar:${index}`;
+      addMessageIdempotent({
         userId: session.userId,
         agentId: session.agentId,
         conversationId,
@@ -1915,8 +2034,10 @@ async function processVoiceInput(
         timestamp: item.userReceivedAt,
         domain: voiceScope.domain,
         orgId: voiceScope.orgId,
+        requestId: sidecarRequestId,
+        skipActionContinuation: true,
       });
-      addMessage({
+      addMessageIdempotent({
         userId: session.userId,
         agentId: session.agentId,
         conversationId,
@@ -1932,6 +2053,8 @@ async function processVoiceInput(
         timestamp: item.responseAt,
         domain: voiceScope.domain,
         orgId: voiceScope.orgId,
+        requestId: sidecarRequestId,
+        skipActionContinuation: true,
       });
     }
   };
@@ -2094,6 +2217,7 @@ async function processVoiceInput(
       }
     },
     toolPolicy: routedToolPolicy,
+    modelToolProjection,
     desktopExecutionTracker,
   };
   const ttsProvider = getTTSProvider();
@@ -3307,20 +3431,12 @@ async function processVoiceInput(
       llmModel: voiceModel,
       isLLMAvailable: true,
     };
-    const llmClassifier = async (prompt: string, userText: string): Promise<string> => {
-      const classifierModel = voiceModel;
-      const result = await makeLLMCall(
-        [{ role: 'system', content: prompt }, { role: 'user', content: userText }],
-        [],
-        { provider, model: classifierModel, userId: session.userId, domain: voiceScope.domain, orgId: voiceScope.orgId, maxTokens: 60, ...reasoningRoutePolicy },
-        llmGetters.getDeepSeek, llmGetters.getGemini, llmGetters.getOpenAI, llmGetters.getAnthropic, llmGetters.getQwen,
-        llmGetters.getOllama, llmGetters.getLmStudio, llmGetters.getArk, llmGetters.getXiaomi, llmGetters.getKimi, llmGetters.getGlm, llmGetters.getRelay,
-      );
-      recordTokenUsage(session.userId, result.routing?.selectedProvider || provider, result.routing?.selectedModel || classifierModel, result.usage, `voice_cls_${Date.now()}`, 'voice');
-      return result.text || '{"category":"unknown","confidence":0.5,"entities":{}}';
-    };
-
-    const cognition = await processInput(routedUserText, cognitiveCtx, llmClassifier, toolContext);
+    // This classifier is advisory only: it cannot open the tool gate or execute
+    // anything. Calling the same reasoning model here added a serial 7-9 second
+    // round-trip before the model that actually owns the answer. Deterministic
+    // intent remains useful telemetry; the compiled execution pipeline above is
+    // the authoritative router.
+    const cognition = await processInput(routedUserText, cognitiveCtx, undefined, toolContext);
     if (!isCurrentTurn()) return;
 
     if (cognition.directToolExecuted && cognition.responseText) {
@@ -3500,9 +3616,14 @@ async function processVoiceInput(
       // ── Single-phase: stream LLM → TTS with tool iteration, all inline ──
       // Load recent conversation history for context continuity
       // Include both user & assistant messages with correct roles
-      const conv = getOrCreateActiveConversation(session.userId, session.agentId, voiceScope.domain, voiceScope.orgId);
-      const recentMsgs = getMessagesByTokenBudget(conv.id);
+      const recentMsgs = getMessagesByTokenBudget(conversationTurn.conversation.id, 6_000, 6, requestId).filter(message => !(
+        message.role === 'user' && message.externalMessageId === requestId
+      ));
       const voiceHistory: NormalizedMessage[] = normalizeVoiceHistory(recentMsgs);
+      const historyChars = voiceHistory.reduce((total, message) => (
+        total + (typeof message.content === 'string' ? message.content.length : 0)
+      ), 0);
+      logger.info(`[Audio] Prompt budget request=${requestId} systemChars=${voiceSystemPrompt.length} historyMessages=${voiceHistory.length} historyChars=${historyChars}`);
 
       const messages: NormalizedMessage[] = [
         { role: 'system', content: voiceSystemPrompt },
@@ -4107,6 +4228,7 @@ export function registerVoiceHandlers(
       cancelActiveVoiceTurn(session);
     }
     session.isActive = true;
+    session.voiceSwitchGeneration += 1;
     session.accumulatedText = '';
     session.isSpeaking = false;
     session.isProcessing = false;
@@ -4164,8 +4286,13 @@ export function registerVoiceHandlers(
     const voiceScope = voiceProfileScope(session.userId, session.domain, session.orgId);
     if (requestedVoiceId && !isVoiceProfileAccessible(voiceScope, requestedVoiceId)) {
       logger.warn(`[Audio] Refused voice profile from another domain: ${requestedVoiceId}`);
-      socket.emit('audio:voice_unavailable', { reason: 'voice_profile_scope_mismatch' });
       session.currentVoiceId = null;
+      socket.emit('audio:voice_unavailable', {
+        reason: 'voice_profile_scope_mismatch',
+        requestedVoiceId,
+        currentVoiceId: session.currentVoiceId,
+        sessionId: session.sessionId,
+      });
     } else {
       session.currentVoiceId = requestedVoiceId;
     }
@@ -4221,6 +4348,20 @@ export function registerVoiceHandlers(
           }
           if (result.speechFinal) session.lastSpeechEndedAt = Date.now();
           const immediateText = String(result.text || '').trim();
+          if (
+            immediateText
+            && !session.transcriptionOnly
+            && isEchoedImmediateVoiceControl(
+              immediateText,
+              session.isSpeaking || Date.now() < session.ttsPlaybackUntil,
+              voiceEchoScope(session),
+            )
+          ) {
+            logger.info(`[Audio] Ignored echoed priority control (${result.isFinal ? 'final' : 'interim'})`);
+            session.accumulatedText = '';
+            if (result.isFinal) advanceVoiceprintUtterance(socket, session);
+            return;
+          }
           if (
             immediateText
             && !session.transcriptionOnly
@@ -4371,7 +4512,7 @@ export function registerVoiceHandlers(
                   { hasExplicitToolIntent: hasExplicitToolIntent(text) },
                 );
                 const interruptionKind = activeWorkDecision.kind;
-                logger.info(`[Audio] Work-lane interruption=${interruptionKind} (${text.length} chars)`);
+                logger.info(`[Audio] Work-lane interruption=${interruptionKind} source=semantic_transcript request=${session.activeTurnRequestId || 'none'} (${text.length} chars)`);
                 if (interruptionKind === 'cancel_work') {
                   try {
                     const activeConversation = getOrCreateActiveConversation(
@@ -4434,7 +4575,7 @@ export function registerVoiceHandlers(
                 }
                 }
               } else if (session.isSpeaking) {
-                logger.info(`[Audio] Barge-in during speech (${text.length} chars)`);
+                logger.info(`[Audio] Barge-in during speech source=semantic_transcript request=${session.activeTurnRequestId || 'none'} (${text.length} chars)`);
                 cancelActiveVoiceTurn(session, !isPureInterruptCommand(text));
                 socket.emit("audio:status", { status: "interrupted" });
                 socket.emit("audio:interrupt-ack", {});
@@ -4444,7 +4585,7 @@ export function registerVoiceHandlers(
                   return;
                 }
               } else {
-                logger.info(`[Audio] Barge-in during processing (${text.length} chars)`);
+                logger.info(`[Audio] Barge-in during processing source=semantic_transcript request=${session.activeTurnRequestId || 'none'} (${text.length} chars)`);
                 cancelActiveVoiceTurn(session, !isPureInterruptCommand(text));
                 socket.emit("audio:status", { status: "interrupted" });
                 socket.emit("audio:interrupt-ack", {});
@@ -4523,6 +4664,42 @@ export function registerVoiceHandlers(
     }
   });
 
+  socket.on('audio:switch-voice', async (data: VoiceSwitchRequest = {}) => {
+    const session = getAudioSession(socket);
+    const switchGeneration = ++session.voiceSwitchGeneration;
+    const requestedVoiceId = normalizeVoiceSwitchId(data?.voiceId);
+    const scope = voiceProfileScope(session.userId, session.domain, session.orgId);
+    const available = requestedVoiceId
+      ? await isVoiceSwitchSelectionAvailable(scope, requestedVoiceId)
+      : false;
+    if (session.voiceSwitchGeneration !== switchGeneration) {
+      socket.emit('audio:voice_unavailable', {
+        accepted: false,
+        reason: 'voice_switch_superseded',
+        requestedVoiceId,
+        currentVoiceId: session.currentVoiceId,
+        sessionId: session.sessionId,
+      });
+      return;
+    }
+    const resolution = applyVoiceSwitchRequest(
+      session,
+      data,
+      isVoiceProfileAccessible,
+      () => available,
+    );
+    if (!resolution.accepted) {
+      socket.emit('audio:voice_unavailable', resolution);
+      return;
+    }
+
+    socket.emit('audio:voice_changed', {
+      voiceId: resolution.voiceId,
+      previousVoiceId: resolution.previousVoiceId,
+      sessionId: resolution.sessionId,
+    });
+  });
+
   let chunkCount = 0;
   socket.on("audio:chunk", (data: Buffer) => {
     const session = getAudioSession(socket);
@@ -4589,10 +4766,13 @@ export function registerVoiceHandlers(
     logger.info(`[Voiceprint] result epoch=${resultEpoch} source=${data.source || 'unknown'} matched=${data.isOwnerSpeaking} conf=${session.utteranceVoiceprintConfidence.toFixed(2)} quality=${session.utteranceVoiceprintQuality.toFixed(2)} frames=${session.utteranceVoiceprintFrameCount} reason=${data.reason || '-'}`);
   });
 
-  socket.on('audio:playback_started', (data: { requestId?: string; lane?: string }) => {
-    if (data?.lane === 'conversation') return;
+  socket.on('audio:playback_started', (data: { requestId?: string; lane?: string; durationMs?: number }) => {
     const requestId = String(data?.requestId || '').trim();
     if (!requestId.startsWith('voice_')) return;
+    const session = getAudioSession(socket);
+    const durationMs = Math.max(250, Math.min(120_000, Number(data?.durationMs) || 3_000));
+    session.ttsPlaybackUntil = Math.max(session.ttsPlaybackUntil, Date.now() + durationMs + 250);
+    if (data?.lane === 'conversation') return;
     markVoiceLatencyMilestone(requestId, 'firstPlaybackAt');
   });
 
@@ -4615,8 +4795,19 @@ export function registerVoiceHandlers(
     socket.emit('presence:state_change', { isAway: state.isAway, status });
   });
 
-  socket.on("audio:interrupt", () => {
-    logger.info(`[Audio] Interrupt from ${socket.id}`);
+  socket.on('audio:interrupt-candidate', (data?: {
+    source?: string;
+    rms?: number;
+    threshold?: number;
+    frames?: number;
+    ttsAgeMs?: number;
+  }) => {
+    const session = getAudioSession(socket);
+    logger.info(`[Audio] Interrupt candidate source=${String(data?.source || 'unknown')} rms=${Number(data?.rms || 0).toFixed(4)} threshold=${Number(data?.threshold || 0).toFixed(4)} frames=${Math.max(0, Number(data?.frames || 0))} ttsAgeMs=${Math.max(0, Number(data?.ttsAgeMs || 0))} speaking=${session.isSpeaking} processing=${session.isProcessing} request=${session.activeTurnRequestId || 'none'}`);
+  });
+
+  socket.on("audio:interrupt", (data?: { source?: string }) => {
+    logger.info(`[Audio] Interrupt source=${String(data?.source || 'legacy')} socket=${socket.id}`);
     const session = getAudioSession(socket);
     if (session.isBackgroundWork && session.isProcessing && session.pipelineAbortController) {
       const workRequestId = session.activeTurnRequestId;

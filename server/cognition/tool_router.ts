@@ -550,11 +550,22 @@ function priorityToolsForRoute(categories: string[], text: string): string[] {
     );
   }
   if (categories.includes('legal')) {
-    if (/现行有效|法源|法条核验|引用核验|法律版本|司法解释版本|current\s+law|authority\s+source|citation\s+verification/i.test(text)) {
+    // i18n-allow: Chinese legal intent recognition; not user-visible copy.
+    if (/现行有效|法源|权威来源|来源状态|法条核验|引用核验|法律版本|司法解释版本|current\s+law|authority\s+source|citation\s+verification/i.test(text)) {
       priorities.push(
         'legal_authority_source_status',
         'legal_refresh_authoritative_sources',
         'legal_verify_citation',
+        'legal_generate_citation_verification_report',
+        'legal_finalize_delivery_package',
+      );
+    }
+    // i18n-allow: Chinese legal delivery intent recognition; not user-visible copy.
+    if (/交付核验|已归档.{0,24}(?:文书|草稿|材料)|正式交付|archived.{0,24}delivery|delivery\s+verification/i.test(text)) {
+      priorities.push(
+        'legal_verify_archived_delivery',
+        'legal_case_workflow_status',
+        'legal_authority_source_status',
         'legal_generate_citation_verification_report',
         'legal_finalize_delivery_package',
       );
@@ -585,6 +596,8 @@ function priorityToolsForRoute(categories: string[], text: string): string[] {
         'legal_draft_contract',
         'legal_generate_bid',
         'legal_search_tender_projects',
+        'legal_company_database_lookup',
+        'legal_finalize_delivery_package',
       );
     }
     if (/财产线索|被执行人|执行线索|财产保全|诉前保全|股权穿透|实际控制人|关联企业|失信|限制消费|asset|enforcement|equity|shareholder/i.test(text)) {
@@ -610,6 +623,26 @@ function priorityToolsForRoute(categories: string[], text: string): string[] {
         'read_docx',
         'read_pdf',
         'create_docx',
+        'legal_finalize_delivery_package',
+      );
+    }
+    // i18n-allow: Chinese litigation-filing intent recognition; not user-visible copy.
+    if (/原告|起诉状|立案材料|立案手续|plaintiff|filing\s+(?:packet|handoff)/i.test(text)) {
+      priorities.push(
+        'legal_case_workflow_status',
+        'legal_case_reasoning_matrix',
+        'legal_generate_litigation_packet',
+        'legal_prepare_filing_handoff',
+        'legal_finalize_delivery_package',
+      );
+    }
+    // i18n-allow: Chinese external-authority research intent recognition; not user-visible copy.
+    if (/案例库|裁判文书网|法蝉|Alpha|有利案例|外部.{0,12}(?:案例|类案|法源)|external.{0,16}(?:authority|authorities|case)/i.test(text)) {
+      priorities.push(
+        'legal_extract_dispute_focus',
+        'legal_external_research_plan',
+        'legal_search_external_authorities',
+        'legal_prepare_external_browser_workspace',
       );
     }
     priorities.push(

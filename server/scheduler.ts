@@ -21,7 +21,8 @@ import { detectSpatiotemporalPatterns } from './time/spatiotemporal';
 import { cleanupEphemeralAgents } from './agents/orchestrator';
 import { getRecentActivity } from './context/activity_stream';
 import { runDailyScan, isFirstBootComplete } from './autonomy/system_explorer';
-import { getGateConfig } from './autonomy/safety_gate';
+import { getGateConfig, isAutonomousWorkAllowed } from './autonomy/safety_gate';
+import { createRealtimeVoicePrioritySignal } from './autonomy/foreground_activity';
 import { parseStoredOperationMode } from './cognition/operation_modes';
 import { getUserPreferredLLMConfig } from './llm/user_preferences';
 import { refreshAuthoritativeStatuteSources } from './legal/statute_authority_refresh';
@@ -257,6 +258,46 @@ export function buildScheduledProactiveInteractionId(
     }))
     .digest('hex')
     .slice(0, 24)}`;
+}
+
+/**
+ * Scheduler work is user-scoped and must never treat arbitrary actor IDs from
+ * memories/interactions (agent IDs, MCP actors, "unknown", and similar
+ * provenance labels) as Lumi users. Registered users are the authoritative
+ * identity source. The anonymous fallback is retained only for pre-account
+ * local installations that have not created a user record yet.
+ */
+export function resolveScheduledUserIds(db: any): string[] {
+  const registered = new Set<string>();
+  for (const user of Array.isArray(db?.users) ? db.users : []) {
+    const uid = String(user?.uid || '').trim();
+    if (uid) registered.add(uid);
+  }
+  return registered.size > 0 ? [...registered] : ['anonymous'];
+}
+
+/**
+ * Runs one background reflection behind both the autonomy gate and a live
+ * voice interruption signal. The second gate check closes the race between a
+ * scheduler tick being admitted and the model request actually starting.
+ */
+export async function runAgentAutonomousAnalysis(
+  userId: string,
+  analyze: (signal: AbortSignal) => Promise<string>,
+): Promise<string> {
+  if (!isAutonomousWorkAllowed(userId).allowed) return '';
+  const voicePriority = createRealtimeVoicePrioritySignal(userId);
+  try {
+    if (voicePriority.signal.aborted || !isAutonomousWorkAllowed(userId).allowed) return '';
+    try {
+      return await analyze(voicePriority.signal);
+    } catch (error) {
+      if (voicePriority.signal.aborted) return '';
+      throw error;
+    }
+  } finally {
+    voicePriority.dispose();
+  }
 }
 
 type LLMGetters = {
@@ -758,21 +799,9 @@ export function registerScheduledTasks(
     },
   });
 
-  /** Get all unique user IDs from DB (registered users + anonymous fallback) */
+  /** Get scheduler recipients from the authoritative user registry. */
   function getAllUserIds(): string[] {
-    const db = readDB();
-    const ids = new Set<string>();
-    for (const u of db.users || []) {
-      if (u.uid) ids.add(u.uid);
-    }
-    for (const m of db.memories || []) {
-      if (m.userId) ids.add(m.userId);
-    }
-    for (const i of db.interactions || []) {
-      if (i.userId) ids.add(i.userId);
-    }
-    if (ids.size === 0) ids.add('anonymous');
-    return [...ids];
+    return resolveScheduledUserIds(readDB());
   }
 
   function getSystemAdminUserIds(): string[] {
@@ -890,7 +919,7 @@ export function registerScheduledTasks(
         const episodic = getUnconsolidatedEpisodic(userId, 'personal', '');
         if (episodic.length < 10) continue;
         const ctx: ConsolidationContext = {
-          ...getUserPreferredLLMConfig(userId, { domain: 'personal', orgId: '' }),
+          ...getUserPreferredLLMConfig(userId, { domain: 'personal', orgId: '', source: 'scheduler_memory_consolidation' }),
           domain: 'personal',
           orgId: '',
         };
@@ -921,7 +950,7 @@ export function registerScheduledTasks(
       for (const userId of userIds) {
         try {
           const ctx: ConsolidationContext = {
-            ...getUserPreferredLLMConfig(userId, { domain: 'personal', orgId: '' }),
+            ...getUserPreferredLLMConfig(userId, { domain: 'personal', orgId: '', source: 'scheduler_narrative_consolidation' }),
             domain: 'personal',
             orgId: '',
           };
@@ -963,7 +992,7 @@ export function registerScheduledTasks(
       for (const userId of userIds) {
         try {
           const ctx: ConsolidationContext = {
-            ...getUserPreferredLLMConfig(userId, { maxTokens: 900, domain: 'personal', orgId: '' }),
+            ...getUserPreferredLLMConfig(userId, { maxTokens: 900, domain: 'personal', orgId: '', source: 'scheduler_sleep_dream_cycle' }),
             domain: 'personal',
             orgId: '',
           };
@@ -1029,7 +1058,7 @@ Output ONLY the greeting — no preamble, no labels.`;
             const result = await makeLLMCall(
               [{ role: 'user', content: morningPrompt }],
               [],
-              getUserPreferredLLMConfig(userId, { maxTokens: 120 }),
+              getUserPreferredLLMConfig(userId, { maxTokens: 120, source: 'scheduler_daily_summary' }),
               getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
               getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
             );
@@ -1091,7 +1120,7 @@ Output ONLY the reflection — no preamble, no labels.`;
             const result = await makeLLMCall(
               [{ role: 'user', content: eveningPrompt }],
               [],
-              getUserPreferredLLMConfig(userId, { maxTokens: 100 }),
+              getUserPreferredLLMConfig(userId, { maxTokens: 100, source: 'scheduler_evening_wrapup' }),
               getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
               getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
             );
@@ -1192,7 +1221,7 @@ Rules:
           const llmResult = await makeLLMCall(
             [{ role: 'user', content: prompt }],
             [],
-            getUserPreferredLLMConfig(userId, { domain: 'personal', orgId: '' }),
+            getUserPreferredLLMConfig(userId, { domain: 'personal', orgId: '', source: 'scheduler_memory_auto_organize' }),
             getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
               getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
             );
@@ -1342,7 +1371,7 @@ Rules:
           const result = await makeLLMCall(
             [{ role: 'user', content: prompt }],
             [],
-            getUserPreferredLLMConfig(userId, { maxTokens: 400, domain: 'personal', orgId: '' }),
+            getUserPreferredLLMConfig(userId, { maxTokens: 400, domain: 'personal', orgId: '', source: 'scheduler_weekly_review' }),
             getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
               getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
             );
@@ -1411,7 +1440,7 @@ Rules:
           const result = await makeLLMCall(
             [{ role: 'user', content: prompt }],
             [],
-            getUserPreferredLLMConfig(userId, { maxTokens: 600, domain: 'personal', orgId: '' }),
+            getUserPreferredLLMConfig(userId, { maxTokens: 600, domain: 'personal', orgId: '', source: 'scheduler_monthly_review' }),
             getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
               getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
             );
@@ -1479,7 +1508,7 @@ Rules:
           const result = await makeLLMCall(
             [{ role: 'user', content: prompt }],
             [],
-            getUserPreferredLLMConfig(userId, { maxTokens: 800, domain: 'personal', orgId: '' }),
+            getUserPreferredLLMConfig(userId, { maxTokens: 800, domain: 'personal', orgId: '', source: 'scheduler_yearly_review' }),
             getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
               getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
             );
@@ -1654,7 +1683,7 @@ Write in first-person as Lumi, warm and introspective tone. Keep it under 150 Ch
             const narrativeResult = await makeLLMCall(
               [{ role: 'user', content: narrativePrompt }],
               [],
-              getUserPreferredLLMConfig(userId, { maxTokens: 300, domain: 'personal', orgId: '' }),
+              getUserPreferredLLMConfig(userId, { maxTokens: 300, domain: 'personal', orgId: '', source: 'scheduler_growth_journal' }),
               getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
               getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
             );
@@ -1738,6 +1767,7 @@ Write in first-person as Lumi, warm and introspective tone. Keep it under 150 Ch
       for (const agentRecord of autonomousAgents) {
         try {
           const userId = agentRecord.ownerUid || agentRecord.userId || 'anonymous';
+          if (!isAutonomousWorkAllowed(userId).allowed) continue;
           const domain = agentRecord.domain === 'work' && agentRecord.orgId ? 'work' : 'personal';
           const orgId = domain === 'work' ? (agentRecord.orgId || '') : '';
           const personality = personalityRegistry.getForUser(
@@ -1773,14 +1803,19 @@ Write in first-person as Lumi, warm and introspective tone. Keep it under 150 Ch
           runtime.loadState(userId);
 
           const analyze = async (prompt: string): Promise<string> => {
-            const result = await makeLLMCall(
-              [{ role: 'user', content: prompt }],
-              [],
-              getUserPreferredLLMConfig(userId, { maxTokens: 200, domain, orgId }),
-              getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
-              getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
-            );
-            return result.text?.trim() || '';
+            return runAgentAutonomousAnalysis(userId, async signal => {
+              const result = await makeLLMCall(
+                [{ role: 'user', content: prompt }],
+                [],
+                {
+                  ...getUserPreferredLLMConfig(userId, { maxTokens: 200, domain, orgId, source: 'scheduler_agent_autonomous_tick' }),
+                  signal,
+                },
+                getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
+                getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
+              );
+              return result.text?.trim() || '';
+            });
           };
 
           const tickResult = await runtime.autonomousTick(userId, recentMemories, recentInteractions, analyze);
@@ -1876,7 +1911,7 @@ Output ONLY the check-in message — no preamble, no labels.`;
               const result = await makeLLMCall(
                 [{ role: 'user', content: checkInPrompt }],
                 [],
-                getUserPreferredLLMConfig(userId, { maxTokens: 150, domain: 'personal', orgId: '' }),
+                getUserPreferredLLMConfig(userId, { maxTokens: 150, domain: 'personal', orgId: '', source: 'scheduler_proactive_lumi_scan' }),
                 getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
               getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
               );
@@ -1977,7 +2012,7 @@ Output ONLY the prediction message — no preamble, no labels.`;
               const predictionResult = await makeLLMCall(
                 [{ role: 'user', content: predictionPrompt }],
                 [],
-                getUserPreferredLLMConfig(userId, { maxTokens: 100, domain: 'personal', orgId: '' }),
+                getUserPreferredLLMConfig(userId, { maxTokens: 100, domain: 'personal', orgId: '', source: 'scheduler_predictive_assistant' }),
                 getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
               getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
               );

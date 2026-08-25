@@ -2,6 +2,36 @@ import './helpers';
 import { describe, expect, it } from 'vitest';
 
 describe('Lumi turn flow', () => {
+  it('treats the exact prior-turn receipt question as status-only, not saved-artifact work', async () => {
+    const text = '你上一轮是否真的调用过工具？不要再次调用工具，只根据已保存的回执告诉我：工具名、成功还是失败。';
+    const { initDatabase } = await import('../db_layer');
+    const { buildLumiTurnFlow } = await import('../server/cognition/turn_flow');
+    const { normalizeActionIntent } = await import('../server/cognition/normalized_action_intent');
+    const { buildActionContract } = await import('../server/cognition/action_contract');
+    await initDatabase();
+
+    expect(normalizeActionIntent(text)).toMatchObject({
+      kind: 'status_query',
+      target: 'previous_action',
+      sideEffectClass: 'none',
+    });
+    expect(buildActionContract(text)).toMatchObject({ applies: false, kind: 'none' });
+
+    const flow = buildLumiTurnFlow({
+      userId: 'turn_flow_exact_prior_receipt',
+      text,
+      channel: 'chat',
+      source: 'command-center-chat',
+      operationMode: 'assistant',
+      targetIsLumi: true,
+    });
+    expect(flow.allowToolUseForTurn).toBe(false);
+    expect(flow.modelToolAccess).toBe('hard_off');
+    expect(flow.selfRepairTurn).toBe(false);
+    expect(flow.completionEvidenceNeeded).toBe(false);
+    expect(flow.executionGovernance.verificationIntent).toBe('none');
+  });
+
   it.each(['chat', 'voice'] as const)('keeps explicit no-tool continuity tests conversational in %s', async (channel) => {
     const { initDatabase } = await import('../db_layer');
     const { buildLumiTurnFlow } = await import('../server/cognition/turn_flow');
@@ -136,6 +166,7 @@ describe('Lumi turn flow', () => {
   it.each([
     '这个任务完成了吗？没完成就继续执行。',
     'Check the task status; if unfinished, retry it.',
+    '上一轮是否调用工具？现在请调用另一个工具核实。',
   ])('keeps a mixed status and resume turn executable with continuation context: %s', async (text) => {
     const { initDatabase } = await import('../db_layer');
     const { buildLumiTurnFlow } = await import('../server/cognition/turn_flow');
@@ -364,6 +395,87 @@ describe('Lumi turn flow', () => {
     expect(dispatch.flow.workTakeover.shouldResumeTask).toBe(false);
     expect(dispatch.flow.allowToolUseForTurn).toBe(false);
     expect(dispatch.flow.routeText).toBe(text);
+  });
+
+  it('keeps an adjacent-reply restatement ahead of an older active work task', async () => {
+    const { initDatabase } = await import('../db_layer');
+    const { createWorkTakeoverTask } = await import('../server/work_takeover/tasks');
+    const { buildRecentActionContinuationBridge } = await import('../server/cognition/action_continuation');
+    const { buildLumiTurnDispatch } = await import('../server/cognition/turn_dispatch');
+    await initDatabase();
+
+    const userId = 'turn_flow_adjacent_reply_restatement_user';
+    createWorkTakeoverTask({
+      userId,
+      category: 'general_work',
+      title: '青穹客户跟进闭环',
+      nextActions: ['整理客户资料'],
+      source: 'manual',
+      status: 'in_progress',
+      metadata: {
+        workTakeoverExecution: {
+          lastTurn: { status: 'failed' },
+          lastFailure: { tool: 'desktop_ui_click', error: 'stale failure' },
+        },
+      },
+    });
+
+    const text = 'sorry, 你刚刚又卡住了，重新说。';
+    const continuationContext = buildRecentActionContinuationBridge(text, [
+      { role: 'user', message: '继续青穹客户跟进。' },
+      { role: 'assistant', message: '旧任务仍然受阻。' },
+      { role: 'user', message: '你是谁？' },
+      { role: 'assistant', message: '我是 Lumi，是你的常驻智能伙伴。' },
+    ]);
+    const dispatch = buildLumiTurnDispatch({
+      userId,
+      text,
+      continuationContext,
+      channel: 'voice',
+      source: 'voice',
+      operationMode: 'assistant',
+      targetIsLumi: true,
+    });
+
+    expect(dispatch.boundary).toBe('conversation');
+    expect(dispatch.flow.workTakeover.shouldResumeTask).toBe(false);
+    expect(dispatch.flow.selfRepairTurn).toBe(false);
+    expect(dispatch.flow.allowToolUseForTurn).toBe(false);
+    expect(dispatch.flow.modelToolAccess).toBe('hard_off');
+    expect(dispatch.flow.routeText).toContain('followupIntent: repeat');
+    expect(dispatch.flow.routeText).toContain('我是 Lumi，是你的常驻智能伙伴。');
+    expect(dispatch.flow.routeText).not.toContain('工作接管');
+  });
+
+  it('keeps the wallpaper-state speech alias on the client route despite an old task', async () => {
+    const { initDatabase } = await import('../db_layer');
+    const { createWorkTakeoverTask } = await import('../server/work_takeover/tasks');
+    const { buildLumiTurnDispatch } = await import('../server/cognition/turn_dispatch');
+    await initDatabase();
+
+    const userId = 'turn_flow_wallpaper_state_alias_user';
+    createWorkTakeoverTask({
+      userId,
+      category: 'general_work',
+      title: '旧的自主任务',
+      nextActions: ['继续旧任务'],
+      source: 'manual',
+      status: 'in_progress',
+    });
+
+    const dispatch = buildLumiTurnDispatch({
+      userId,
+      text: '打开壁纸状态。',
+      channel: 'voice',
+      source: 'voice',
+      operationMode: 'assistant',
+      targetIsLumi: true,
+    });
+
+    expect(dispatch.boundary).toBe('client_action');
+    expect(dispatch.flow.clientActionOnlyTurn).toBe(true);
+    expect(dispatch.flow.workTakeover.shouldResumeTask).toBe(false);
+    expect(dispatch.flow.routeText).toBe('打开壁纸状态。');
   });
 
   it.each([

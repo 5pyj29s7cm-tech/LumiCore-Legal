@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   hasMixedStatusExecutionIntent,
+  isImmediateAssistantRestatementRequest,
+  isPriorTurnToolReceiptQuestion,
   normalizeActionIntent,
 } from '../server/cognition/normalized_action_intent';
 import {
@@ -16,6 +18,25 @@ import {
 } from '../server/cognition/quick_commands';
 
 describe('normalized desktop intent priority', () => {
+  it.each([
+    '重新说',
+    '再说一遍',
+    '重复一次',
+    'repeat that',
+    'say that again',
+  ])('recognizes an unqualified adjacent-assistant repeat: %s', (text) => {
+    expect(isImmediateAssistantRestatementRequest(text)).toBe(true);
+  });
+
+  it.each([
+    '再说',
+    '重新说一下青穹任务现在的状态',
+    '请重复执行刚才的任务',
+    '重复检查一次壁纸状态',
+  ])('does not steal a qualified task or status request as assistant repeat: %s', (text) => {
+    expect(isImmediateAssistantRestatementRequest(text)).toBe(false);
+  });
+
   it('routes an enumerated persistent-task execution request to the shared planner', () => {
     const text = '\u7ee7\u7eed\u521a\u624d\u7684\u6301\u4e45\u4efb\u52a1\u201c\u4e3b\u7a0b\u5e8f\u6587\u5b57\u957f\u4efb\u52a1-20260818\u201d\uff08\u4efb\u52a1\u7f16\u53f7 wt_task_1787031027377_c8a3v\uff09\uff1a\u5b8c\u6210\u7b2c\u4e00\u6b65\u201c\u8bb0\u5f55\u9a8c\u6536\u9700\u6c42\u201d\u548c\u7b2c\u4e8c\u6b65\u201c\u5728\u804a\u5929\u4e2d\u751f\u6210\u4e94\u9879\u68c0\u67e5\u6e05\u5355\u201d\uff1b\u7b2c\u4e09\u6b65\u4ecd\u4fdd\u6301\u7b49\u5f85\u786e\u8ba4\u3002\u4e0d\u8981\u5199\u6587\u4ef6\uff0c\u4e0d\u8981\u5916\u53d1\u3002';
     const command = buildDeterministicWorkTaskProgressCommand(text);
@@ -330,9 +351,9 @@ describe('normalized desktop intent priority', () => {
   });
 
   it('preserves the named personal-home target in a status-only follow-up', () => {
-    expect(normalizeActionIntent(
-      '刚才“返回 Lumi 个人主页”的任务最终状态是什么？说明执行动作、目标页面和验证状态，不要执行任何新工具。',
-    )).toMatchObject({
+    const text = '刚才“返回 Lumi 个人主页”的任务最终状态是什么？说明执行动作、目标页面和验证状态，不要执行任何新工具。';
+    expect(isPriorTurnToolReceiptQuestion(text)).toBe(false);
+    expect(normalizeActionIntent(text)).toMatchObject({
       kind: 'status_query',
       operation: 'status',
       target: 'home',
@@ -351,6 +372,41 @@ describe('normalized desktop intent priority', () => {
       ok: true,
       verification: { status: 'verified' },
     }))).toBe('已打开聊天界面。');
+  });
+
+  it('treats the spoken wallpaper-state imperative as native wallpaper activation', () => {
+    const intent = normalizeActionIntent('打开壁纸状态。');
+    expect(intent).toMatchObject({
+      kind: 'client_navigation',
+      operation: 'navigate',
+      target: 'wallpaper',
+      clientAction: 'set_wallpaper_mode',
+      clientActionArguments: { enabled: true },
+      sideEffectClass: 'none',
+    });
+    expect(buildDeterministicClientNavigationCommand(intent)?.toolCall).toEqual({
+      name: 'client_action',
+      arguments: { action: 'set_wallpaper_mode', enabled: true },
+    });
+    const closeIntent = normalizeActionIntent('关闭壁纸状态。');
+    expect(buildDeterministicClientNavigationCommand(closeIntent)?.toolCall).toEqual({
+      name: 'client_action',
+      arguments: { action: 'set_wallpaper_mode', enabled: false },
+    });
+    expect(normalizeActionIntent('壁纸状态怎么样？')).toMatchObject({
+      kind: 'status_query',
+      target: 'wallpaper',
+    });
+    expect(normalizeActionIntent('打开壁纸状态了吗？')).toMatchObject({
+      kind: 'status_query',
+      target: 'wallpaper',
+      rule: 'registered-client-surface-status',
+    });
+    expect(normalizeActionIntent('关闭壁纸状态了吗？')).toMatchObject({
+      kind: 'status_query',
+      target: 'wallpaper',
+      rule: 'registered-client-surface-status',
+    });
   });
 
   it.each([
@@ -520,6 +576,8 @@ describe('fresh action versus trailing status wording', () => {
     '\u521a\u624d\u505a\u4e86\u4ec0\u4e48\u2026\u73b0\u5728\u521b\u5efa\u4e00\u4e2a\u65b0\u6587\u4ef6\u3002',
     '\u521a\u624d\u505a\u4e86\u4ec0\u4e48\uff0c\u7136\u540e\u6253\u5f00\u804a\u5929\u754c\u9762\u3002',
     '\u521a\u624d\u505a\u4e86\u4ec0\u4e48\u5e76\u6253\u5f00\u804a\u5929\u754c\u9762\u3002',
+    '上一轮是否调用工具？现在请调用另一个工具核实。',
+    'Did the previous turn call a tool? Now use another tool to verify it.',
   ])('does not let a previous-action receipt question swallow a new instruction: %s', (text) => {
     expect(hasMixedStatusExecutionIntent(text)).toBe(true);
     expect(normalizeActionIntent(text).kind).not.toBe('status_query');
@@ -528,6 +586,7 @@ describe('fresh action versus trailing status wording', () => {
   it.each([
     'What did you just do? Only answer from the receipt; do not execute a new action.',
     '\u521a\u624d\u6253\u5f00\u4e86\u4ec0\u4e48\uff1f\u53ea\u6839\u636e\u4e0a\u4e00\u8f6e\u56de\u6267\u56de\u7b54\uff0c\u4e0d\u8981\u6267\u884c\u65b0\u64cd\u4f5c\u3002',
+    '上一轮是否调用工具？不要再次调用工具，只根据回执回答。',
   ])('keeps an explicitly read-only previous-action query out of execution: %s', (text) => {
     expect(hasMixedStatusExecutionIntent(text)).toBe(false);
     expect(normalizeActionIntent(text)).toMatchObject({
@@ -551,6 +610,8 @@ describe('fresh action versus trailing status wording', () => {
     '刚才做了什么，打开聊天界面了吗？',
     '刚才做了什么，并打开聊天界面了吗？',
     '刚才做了什么，打开过聊天界面吗？',
+    '上一轮是否调用工具？现在调用另一个工具核实了吗？',
+    'Did the previous turn call a tool? Now use another tool to verify?',
   ])('does not upgrade a retrospective Chinese action question into a new navigation: %s', (text) => {
     expect(hasMixedStatusExecutionIntent(text)).toBe(false);
     expect(normalizeActionIntent(text)).toMatchObject({
