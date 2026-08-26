@@ -3,13 +3,34 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { initDatabase, readDB } from '../db_layer';
 import {
   addMessage,
+  addMessageIdempotent,
+  bindConversationActionExecutionTurn,
   getMessages,
   getOrCreateActiveConversation,
   prepareConversationActionExecution,
   recoverOrphanedConversationActionExecutions,
+  settleConversationActionExecutionRequest,
   setConversationActionExecutionStatus,
 } from '../server/conversation/manager';
 import { recordsToTaskReceipts } from '../server/cognition/task_execution_ledger';
+
+function persistActionTurn(input: {
+  conversationId: string;
+  userId: string;
+  userText: string;
+  requestId: string;
+}): string {
+  return addMessageIdempotent({
+    userId: input.userId,
+    agentId: 'lumi',
+    conversationId: input.conversationId,
+    role: 'user',
+    content: input.userText,
+    requestId: input.requestId,
+    deferActionPreparation: true,
+    domain: 'personal',
+  });
+}
 
 describe('conversation action continuation state', () => {
   beforeAll(async () => {
@@ -87,21 +108,31 @@ describe('conversation action continuation state', () => {
   it('keeps a zero-receipt action blocked instead of accepting the assistant claim as completion', () => {
     const userId = `conversation-action-no-evidence-${Date.now()}-${Math.random()}`;
     const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
-    addMessage({
+    const requestId = `request-no-evidence-${Date.now()}`;
+    const userMessageId = addMessage({
       userId,
       agentId: 'lumi',
       conversationId: conversation.id,
       role: 'user',
       content: '在桌面创建文件。',
+      requestId,
       deferActionPreparation: true,
       domain: 'personal',
     });
+    expect(bindConversationActionExecutionTurn({
+      conversationId: conversation.id,
+      userId,
+      userText: '在桌面创建文件。',
+      requestId,
+      userMessageId,
+    })).toMatchObject({ requestId, messageId: userMessageId });
     addMessage({
       userId,
       agentId: 'lumi',
       conversationId: conversation.id,
       role: 'assistant',
       content: '已经创建好了。',
+      requestId,
       taskIntent: 'task',
       domain: 'personal',
     });
@@ -130,8 +161,10 @@ describe('conversation action continuation state', () => {
       deferActionPreparation: true,
       domain: 'personal',
     });
+    // Deferred status sidecars are transcript-only and never take ownership of
+    // the foreground action pointer.
     expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').pendingActionContinuation)
-      .toMatchObject({ requestId });
+      .toBeUndefined();
 
     addMessage({
       userId,
@@ -374,6 +407,12 @@ describe('conversation action continuation state', () => {
       userId,
       userText: '打开 WPS 并新建 Word 文档',
       requestId: 'restart-recovery-request',
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: '打开 WPS 并新建 Word 文档',
+        requestId: 'restart-recovery-request',
+      }),
       toolPolicy: {
         allowedTools: ['desktop_open'],
         requireConfirmation: [],
@@ -614,6 +653,12 @@ describe('conversation action continuation state', () => {
       userId,
       userText: instruction,
       requestId: 'voice-request-1',
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: instruction,
+        requestId: 'voice-request-1',
+      }),
       toolPolicy: {
         allowedTools: ['floorplan_extract_geometry', 'mcp_cad-drafting_autocad_playback_file'],
         requireConfirmation: [],
@@ -629,6 +674,80 @@ describe('conversation action continuation state', () => {
     });
   });
 
+  it('rejects a different persisted turn while another request owns the action pointer', () => {
+    const userId = `conversation-action-busy-${Date.now()}-${Math.random()}`;
+    const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
+    const firstText = 'Open the browser.';
+    const firstRequestId = 'request-busy-first';
+    const first = prepareConversationActionExecution({
+      conversationId: conversation.id,
+      userId,
+      userText: firstText,
+      requestId: firstRequestId,
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: firstText,
+        requestId: firstRequestId,
+      }),
+      toolPolicy: { allowedTools: ['desktop_open'], requireConfirmation: [], forbiddenTools: [], maxIterations: 4 },
+      forceTask: true,
+    });
+    const secondText = 'Open the calculator.';
+    const secondRequestId = 'request-busy-second';
+    const rejected = prepareConversationActionExecution({
+      conversationId: conversation.id,
+      userId,
+      userText: secondText,
+      requestId: secondRequestId,
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: secondText,
+        requestId: secondRequestId,
+      }),
+      toolPolicy: { allowedTools: ['desktop_open'], requireConfirmation: [], forbiddenTools: [], maxIterations: 4 },
+      forceTask: true,
+    });
+
+    expect(rejected).toMatchObject({
+      state: null,
+      kind: 'conversation',
+      bindingFailure: 'busy',
+      diagnosticCode: 'conversation_action_turn_busy',
+    });
+    expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '')).toMatchObject({
+      pendingActionContinuation: { requestId: firstRequestId },
+      actionContinuationState: {
+        taskId: first.state?.taskId,
+        activeRequestId: firstRequestId,
+      },
+    });
+  });
+
+  it('rejects a missing transcript identity without creating action state', () => {
+    const userId = `conversation-action-stale-${Date.now()}-${Math.random()}`;
+    const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
+    const rejected = prepareConversationActionExecution({
+      conversationId: conversation.id,
+      userId,
+      userText: 'Open settings.',
+      requestId: 'request-stale-message',
+      userMessageId: 'msg-does-not-exist',
+      toolPolicy: { allowedTools: ['client_action'], requireConfirmation: [], forbiddenTools: [], maxIterations: 4 },
+      forceTask: true,
+    });
+
+    expect(rejected).toMatchObject({
+      state: null,
+      kind: 'conversation',
+      bindingFailure: 'stale',
+      diagnosticCode: 'conversation_action_turn_not_persisted',
+    });
+    expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
+      .toBeUndefined();
+  });
+
   it('supersedes the previous foreground task without leaving its lease executing', () => {
     const userId = `conversation-action-supersede-${Date.now()}-${Math.random()}`;
     const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
@@ -637,14 +756,31 @@ describe('conversation action continuation state', () => {
       userId,
       userText: '进入壁纸模式。',
       requestId: 'request-wallpaper',
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: '进入壁纸模式。',
+        requestId: 'request-wallpaper',
+      }),
       toolPolicy: { allowedTools: ['client_action'], requireConfirmation: [], forbiddenTools: [], maxIterations: 4 },
       forceTask: true,
     });
+    expect(settleConversationActionExecutionRequest(
+      conversation.id,
+      userId,
+      'request-wallpaper',
+    )).toMatchObject({ status: 'blocked', activeRequestId: undefined });
     const second = prepareConversationActionExecution({
       conversationId: conversation.id,
       userId,
       userText: '打开网易云音乐，放首歌给我听吧。',
       requestId: 'request-music',
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: '打开网易云音乐，放首歌给我听吧。',
+        requestId: 'request-music',
+      }),
       toolPolicy: { allowedTools: ['desktop_open'], requireConfirmation: [], forbiddenTools: [], maxIterations: 4 },
       forceTask: true,
     });
@@ -660,7 +796,6 @@ describe('conversation action continuation state', () => {
       status: 'cancelled',
       activeRequestId: '',
     });
-    expect(oldTask.blocker).toContain(second.state?.taskId);
   });
 
   it('binds a durable task and receipt to the real user message instead of assistant evidence', () => {
@@ -682,6 +817,12 @@ describe('conversation action continuation state', () => {
       userId,
       userText: 'Open the desktop settings panel.',
       requestId,
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: 'Open the desktop settings panel.',
+        requestId,
+      }),
       toolPolicy: { allowedTools: ['client_action'], requireConfirmation: [], forbiddenTools: [], maxIterations: 4 },
       forceTask: true,
     });
@@ -745,6 +886,12 @@ describe('conversation action continuation state', () => {
       userId,
       userText: 'Enter wallpaper mode.',
       requestId,
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: 'Enter wallpaper mode.',
+        requestId,
+      }),
       toolPolicy: { allowedTools: ['client_action'], requireConfirmation: [], forbiddenTools: [], maxIterations: 4 },
       forceTask: true,
     });
@@ -796,7 +943,7 @@ describe('conversation action continuation state', () => {
     const userId = `conversation-action-unprepared-attempts-${Date.now()}-${Math.random()}`;
     const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
     const requestId = `request-unprepared-attempts-${Date.now()}`;
-    addMessage({
+    const userMessageId = addMessage({
       userId,
       agentId: 'lumi',
       conversationId: conversation.id,
@@ -808,6 +955,13 @@ describe('conversation action continuation state', () => {
     });
     expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
       .toBeUndefined();
+    expect(bindConversationActionExecutionTurn({
+      conversationId: conversation.id,
+      userId,
+      userText: 'Enter wallpaper mode.',
+      requestId,
+      userMessageId,
+    })).toMatchObject({ requestId, messageId: userMessageId });
 
     const shared = {
       taskId: 'runtime-provisional-wallpaper-task',
@@ -885,6 +1039,12 @@ describe('conversation action continuation state', () => {
       userId,
       userText: 'Open the browser and sign in.',
       requestId: oldRequestId,
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: 'Open the browser and sign in.',
+        requestId: oldRequestId,
+      }),
       toolPolicy: { allowedTools: ['desktop_open'], requireConfirmation: ['desktop_open'], forbiddenTools: [], maxIterations: 4 },
       forceTask: true,
     });
@@ -961,18 +1121,31 @@ describe('conversation action continuation state', () => {
       userId,
       userText: 'Open the browser.',
       requestId: 'request-old-browser',
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: 'Open the browser.',
+        requestId: 'request-old-browser',
+      }),
       toolPolicy: { allowedTools: ['desktop_open'], requireConfirmation: [], forbiddenTools: [], maxIterations: 4 },
       forceTask: true,
     });
     setConversationActionExecutionStatus(conversation.id, userId, 'blocked', {
       blocker: 'Browser launch failed.', requestId: 'request-old-browser',
     });
+    settleConversationActionExecutionRequest(conversation.id, userId, 'request-old-browser');
 
     const plain = prepareConversationActionExecution({
       conversationId: conversation.id,
       userId,
       userText: 'Which model are you using right now?',
       requestId: 'request-new-model-question',
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: 'Which model are you using right now?',
+        requestId: 'request-new-model-question',
+      }),
       toolPolicy: { allowedTools: [], requireConfirmation: [], forbiddenTools: [], maxIterations: 1 },
     });
 
@@ -1001,9 +1174,16 @@ describe('conversation action continuation state', () => {
       userId,
       userText: '打开 WPS。',
       requestId: 'request-old',
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: '打开 WPS。',
+        requestId: 'request-old',
+      }),
       toolPolicy: { allowedTools: ['desktop_open'], requireConfirmation: [], forbiddenTools: [], maxIterations: 4 },
       forceTask: true,
     });
+    settleConversationActionExecutionRequest(conversation.id, userId, 'request-old');
 
     addMessage({
       userId,
@@ -1020,6 +1200,12 @@ describe('conversation action continuation state', () => {
       userId,
       userText: '进入壁纸模式。',
       requestId: 'request-new',
+      userMessageId: persistActionTurn({
+        conversationId: conversation.id,
+        userId,
+        userText: '进入壁纸模式。',
+        requestId: 'request-new',
+      }),
       toolPolicy: { allowedTools: ['client_action'], requireConfirmation: [], forbiddenTools: [], maxIterations: 4 },
       forceTask: true,
     });

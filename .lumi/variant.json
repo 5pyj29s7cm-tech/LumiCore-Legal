@@ -8,7 +8,8 @@
     "desktopTitle": "Lumi Legal",
     "appIdentifier": "com.lumiai.legal",
     "mobileAppIdentifier": "com.lumiai.legal",
-    "dataDirectoryName": "LumiOS-Legal",
+    "dataDirectoryName": "LumiCore-Legal",
+    "legacyDataDirectoryName": "LumiOS-Legal",
     "updaterChannel": "lumi-legal",
     "defaultSkills": [
       "legal-casework"

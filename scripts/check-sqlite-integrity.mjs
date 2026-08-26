@@ -1,10 +1,9 @@
 import { existsSync } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import sqlite3 from 'sqlite3';
+import { resolveVariantDataRoot } from './lib/product-variant-runtime.mjs';
 
-const configuredRoot = String(process.env.LUMI_DATA_DIR || '').trim();
-const defaultDatabasePath = path.join(configuredRoot || path.join(os.homedir(), 'LumiOS'), 'data', 'lumi.db');
+const defaultDatabasePath = path.join(resolveVariantDataRoot(), 'data', 'lumi.db');
 const databasePath = path.resolve(process.argv[2] || defaultDatabasePath);
 if (!existsSync(databasePath)) {
   console.error(`[sqlite-check] database not found: ${databasePath}`);

@@ -14,7 +14,7 @@ import { formatClientSelfPrompt } from '../server/client/self_model';
 import { registerAllTools } from '../server/tools/definitions';
 import { ToolRegistry } from '../server/tools/registry';
 import { readDB, writeDB } from '../db_layer';
-import { getIndustryWorkflowTask } from '../server/industry/workflow_service';
+import { getIndustryWorkflowTask, listIndustryWorkflowTasks } from '../server/industry/workflow_service';
 import { getOrCreateActiveConversation } from '../server/conversation/manager';
 import { ensureBackgroundConversationActionTask } from '../server/conversation/action_ledger';
 import { restrictToolPolicyForExecutionBoundary } from '../server/tools/remote_policy';
@@ -290,6 +290,9 @@ describe('industry capability profile and channel routing', () => {
     expect(first.status).toBe('created');
     expect(second.status).toBe('reused');
     expect(second.task.id).toBe(first.task.id);
+    expect(listIndustryWorkflowTasks({ userId: context.userId, domain: 'personal', orgId: '' }, 200)
+      .filter(task => task.metadata?.industryWorkflow?.idempotencyKey === `industry-start:${context.idempotencyKey}:${scenario.entryId}`))
+      .toHaveLength(1);
     const definition = registry.get('industry_workflow_start')!;
     expect(definition.parameters.properties).not.toHaveProperty('sourceInput');
     expect(definition.parameters.properties).not.toHaveProperty('context');

@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import sqlite3Package from 'sqlite3';
 import iconv from 'iconv-lite';
+import { resolveVariantDataRoot } from './lib/product-variant-runtime.mjs';
 
 const sqlite3 = sqlite3Package.verbose();
 const apply = process.argv.includes('--apply');
 
 function dataRoot() {
-  return process.env.LUMI_DATA_DIR || path.join(os.homedir(), 'LumiOS');
+  return resolveVariantDataRoot();
 }
 
 function stamp() {

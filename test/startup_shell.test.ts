@@ -123,9 +123,15 @@ describe('desktop startup shell', () => {
     expect(releaseCheck).toContain('LUMI_RELEASE_TAURI_CONFIG');
     const publicCi = fs.readFileSync(path.join(process.cwd(), '.github/workflows/ci.yml'), 'utf8');
     const releaseGuide = fs.readFileSync(path.join(process.cwd(), 'COMMERCIAL_RELEASE.md'), 'utf8');
+    const variantMetadata = JSON.parse(
+      fs.readFileSync(path.join(process.cwd(), '.lumi/variant.json'), 'utf8'),
+    ) as { repository: string };
+    const repositorySlug = new URL(variantMetadata.repository).pathname.replace(/^\//, '').replace(/\.git$/, '');
     expect(publicCi).toContain('Run complete Vitest suite');
     expect(publicCi).toContain('Build desktop and mobile frontends');
-    expect(publicCi.match(/github\.repository == '5pyj29s7cm-tech\/LumiOS'/g)).toHaveLength(2);
+    expect(publicCi.match(new RegExp(`github\\.repository == '${repositorySlug}'`, 'g'))).toHaveLength(2);
+    expect(publicCi).not.toContain('5pyj29s7cm-tech/LumiCore');
+    expect(publicCi).not.toContain('5pyj29s7cm-tech/LumiOS');
     expect(publicCi).not.toContain('github.repository_owner');
     expect(releaseGuide).toContain('Source availability and signed binary distribution are separate release decisions.');
     expect(releaseGuide).toContain('npm run release:check -- --strict-publish');

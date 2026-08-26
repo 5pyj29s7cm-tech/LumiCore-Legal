@@ -85,6 +85,7 @@ export function registerIndustryWorkflowTools(registry: ToolRegistry): void {
       },
       required: ['entryId'],
     },
+    localIdempotencyReplay: 'durable_handler',
     handler: async (args, context) => {
       const activeScope = scope(context);
       const profile = getCurrentIndustryCapabilityProfile();

@@ -6,6 +6,7 @@ export interface ProductVariantRuntime {
   appIdentifier: string;
   mobileAppIdentifier: string;
   dataDirectoryName: string;
+  legacyDataDirectoryName: string;
   updaterChannel: string;
   defaultSkills: string[];
   modules: string[];

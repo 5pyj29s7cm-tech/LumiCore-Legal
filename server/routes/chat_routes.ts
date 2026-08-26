@@ -41,6 +41,11 @@ import {
   DESKTOP_SESSION_HEADER,
   verifyDesktopSessionProof,
 } from "../config/desktop_bootstrap";
+import { redactDiagnosticSecrets } from "../client/diagnostic_sanitizer";
+import {
+  chatPublicErrorCodeForException,
+  sanitizeChatAgentErrorPayload,
+} from "../socket/chat_public_error";
 
 const REST_CHAT_BASE_SYSTEM_INSTRUCTION =
   'You are Lumi, the local core intelligence. Be professional, thoughtful, forward-looking, concise, and useful. Follow the user-facing response-language instruction while keeping internal protocols, tool names, state fields, and execution policy in canonical English.';
@@ -640,7 +645,13 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
       });
     } catch (error: any) {
       console.error("AI Proxy Error:", error);
-      res.status(500).json({ error: error.message });
+      const publicError = sanitizeChatAgentErrorPayload({
+        code: chatPublicErrorCodeForException(error),
+      });
+      res.status(publicError.code === 'CHAT_MODEL_ROUTES_UNAVAILABLE' ? 503 : 500).json({
+        error: publicError.message,
+        code: publicError.code,
+      });
     }
   });
 
@@ -779,9 +790,13 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
       } as any,
     });
     if (record.error || record.terminalVerification?.status !== 'verified') {
+      console.warn(
+        '[LegalDirectTool] Execution failed:',
+        redactDiagnosticSecrets(record.error || record.terminalVerification?.reason || 'unverified receipt').slice(0, 500),
+      );
       return res.status(500).json({
-        error: record.error || record.terminalVerification?.reason || 'Legal tool did not produce verified evidence.',
-        toolName,
+        error: 'Legal tool execution failed',
+        code: 'LEGAL_TOOL_EXECUTION_FAILED',
       });
     }
     const receipt = legalReceipt(record);
@@ -904,11 +919,15 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
       } as any,
     });
     if (contractReviewRecord.error || contractReviewRecord.terminalVerification?.status !== 'verified') {
+      console.warn(
+        '[LegalContractReview] Execution failed:',
+        redactDiagnosticSecrets(
+          contractReviewRecord.error || contractReviewRecord.terminalVerification?.reason || 'unverified receipt',
+        ).slice(0, 500),
+      );
       return res.status(500).json({
-        error: contractReviewRecord.error
-          || contractReviewRecord.terminalVerification?.reason
-          || 'Contract review did not produce verified evidence.',
-        toolName: 'legal_review_contract',
+        error: 'Contract review failed',
+        code: 'LEGAL_CONTRACT_REVIEW_FAILED',
       });
     }
     const contractReceipt = legalReceipt(contractReviewRecord);
