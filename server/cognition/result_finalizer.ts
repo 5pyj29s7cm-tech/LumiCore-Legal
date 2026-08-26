@@ -4,7 +4,7 @@ import type { ToolExecutionRecord } from '../tools/types';
 import { decodeToolResult } from '../tools/result_envelope';
 import type { LumiTurnFlow } from './turn_flow';
 import {
-  formatDesktopObservationResult,
+  evaluateDesktopObservationEvidence,
   requiresActiveWindowObservation,
 } from './desktop_observation';
 import {
@@ -481,7 +481,8 @@ function formatCompactBlockedResponse(input: LumiResultFinalizerInput, reason?: 
 }
 
 function formatGroundedDesktopEvidence(input: LumiResultFinalizerInput): string | null {
-  return formatDesktopObservationResult(input.toolRecords || [], resultTaskText(input));
+  const evidence = evaluateDesktopObservationEvidence(input.toolRecords || [], resultTaskText(input));
+  return evidence.complete ? evidence.text : null;
 }
 
 function parseDesktopOpenResult(record: ToolExecutionRecord): Record<string, any> {
@@ -1318,6 +1319,8 @@ const CAD_GEOMETRY_ZH = {
   receiptState: '\u56de\u6267\u72b6\u6001\uff1a',
   // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
   next: '\u4e0b\u4e00\u6b65\uff1a',
+  // i18n-allow: Reviewed Chinese CAD geometry public failure copy.
+  retry: '\u8bf7\u68c0\u67e5\u6e90\u6587\u4ef6\u540e\u91cd\u8bd5\uff0c\u6216\u6362\u4e00\u4efd\u53ef\u8bfb\u7684\u56fe\u7eb8\u3002',
 } as const;
 
 function formatGroundedCadGeometryExtractionResult(
@@ -1332,23 +1335,17 @@ function formatGroundedCadGeometryExtractionResult(
 
   const zh = isChineseText(actionText);
   if (record.error) {
-    const blocker = String(record.error || '').trim() || 'floorplan_extract_geometry failed.';
+    const publicMessage = zh
+      ? `${CAD_GEOMETRY_ZH.failed}\n${CAD_GEOMETRY_ZH.retry}`
+      : 'Geometry extraction did not succeed; no drawing was executed. Check the source file and retry, or use another readable drawing.';
     return {
-      text: zh
-        ? [
-            CAD_GEOMETRY_ZH.failed,
-            `${CAD_GEOMETRY_ZH.reason}${blocker}`,
-          ].join('\n')
-        : [
-            'Geometry extraction did not succeed; no drawing was executed.',
-            `Reason: ${blocker}`,
-          ].join('\n'),
+      text: publicMessage,
       blocked: true,
-      reason: `Geometry extraction tool failed: ${blocker}`,
+      reason: 'floorplan_geometry_extraction_failed',
       notification: {
         type: 'work_product_guard',
         level: 'warning',
-        message: blocker,
+        message: publicMessage,
       },
     };
   }
@@ -2488,13 +2485,45 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   // task. Do not let an unrelated auxiliary failure (for example a worker
   // attempting write_file after the process list was already returned)
   // overwrite that evidence with a generic incomplete-work guard.
-  const groundedDesktopObservation = formatGroundedDesktopEvidence(input);
-  if (groundedDesktopObservation) {
+  const desktopObservation = evaluateDesktopObservationEvidence(input.toolRecords || [], actionText);
+  if (desktopObservation.complete && desktopObservation.text) {
     return preserveModelWordingOnGroundedSuccess(input, {
-      text: groundedDesktopObservation,
+      text: desktopObservation.text,
       blocked: false,
       reason: 'Grounded desktop observation from current-turn tool receipts.',
     });
+  }
+  // A live desktop question is itself an execution contract. The model can
+  // answer it in factual prose without saying "I checked", so claim-wording
+  // heuristics alone are insufficient: accepting that prose would let a
+  // fabricated title/process/file count bypass the bounded recovery path.
+  // Require one usable current-turn receipt for every deterministic probe.
+  // Partial evidence remains visible, but it must not be promoted to complete;
+  // the stable reason prefix also enters the bounded same-turn recovery path.
+  if (desktopObservation.requested) {
+    const missing = desktopObservation.missingToolNames.join(', ');
+    const irrelevantEvidenceReason = guard.blocked && guard.reasonCode === 'successful_irrelevant_evidence'
+      ? guard.reason
+      : '';
+    const reason = [
+      `Missing desktop evidence for the requested live observation${missing ? `: ${missing}` : ''}.`,
+      irrelevantEvidenceReason,
+    ].filter(Boolean).join(' ');
+    const partialText = desktopObservation.text;
+    const blockedText = partialText
+      || (irrelevantEvidenceReason
+        ? guard.text
+        : formatCompactBlockedResponse(input, reason));
+    return {
+      text: blockedText,
+      blocked: true,
+      reason,
+      notification: {
+        type: 'work_product_guard',
+        level: 'warning',
+        message: reason,
+      },
+    };
   }
   const responseClaimsIncomplete = /(?:\u8fd8|\u5c1a|\u4ecd)?(?:\u6ca1\u6709|\u6ca1|\u672a|\u5e76\u672a|\u4e0d\u7b97|\u4e0d\u80fd\u8bf4)[^\u3002\uFF01\uFF1F.!?\n]{0,18}(?:\u5b8c\u6210|\u53d1\u9001|\u53d1\u51fa|\u6253\u5f00|\u8bfb\u53d6|\u751f\u6210)|\b(?:not|isn'?t|wasn'?t|didn'?t|incomplete|unfinished)\b[^.!?\n]{0,40}\b(?:complete|completed|sent|opened|read|created|generated)\b/iu
     .test(input.responseText || '');

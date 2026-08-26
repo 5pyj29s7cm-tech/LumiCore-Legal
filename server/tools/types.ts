@@ -254,6 +254,8 @@ export interface ToolContext {
   orgId?: string;
   socketId?: string;
   cwd?: string;
+  /** Actual native desktop host platform when it differs from the server. */
+  desktopPlatform?: NodeJS.Platform;
   /** Relay for desktop tools: sends execution request to Tauri frontend and returns result */
   desktopRelay?: (toolName: string, args: Record<string, any>) => Promise<string>;
   /** Explicit personal-device relay used only for approved cross-workspace handoff, such as sending an organization file to the member's own WeChat. */
@@ -492,5 +494,7 @@ export interface ToolExecutionEnvelope<T = unknown> {
   verification: {
     status: 'verified' | 'unverified' | 'failed';
     reason: string;
+    /** Distinguishes a real terminal verifier from legacy success inference. */
+    basis?: 'terminal_verification' | 'compatibility_inference';
   };
 }
