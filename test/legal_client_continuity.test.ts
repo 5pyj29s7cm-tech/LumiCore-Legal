@@ -86,7 +86,7 @@ describe('legal client continuity', () => {
       title: 'Local verified artifact',
       content: 'older local content',
       fileName: 'verified-delivery.docx',
-      localPath: 'D:\\LumiOS\\legal_delivery\\verified-delivery.docx',
+      localPath: 'D:\\LumiCore\\legal_delivery\\verified-delivery.docx',
       source: 'tool',
       createdAt: '2026-08-24T00:00:00.000Z',
     })], 'case-client-continuity');
@@ -104,10 +104,10 @@ describe('legal client continuity', () => {
       id: 'material-shared-id',
       content: 'newer runtime content',
       fileName: 'verified-delivery.docx',
-      localPath: 'D:\\LumiOS\\legal_delivery\\verified-delivery.docx',
+      localPath: 'D:\\LumiCore\\legal_delivery\\verified-delivery.docx',
     });
     expect(readLegalCaseFiles()[0].materials[0].localPath)
-      .toBe('D:\\LumiOS\\legal_delivery\\verified-delivery.docx');
+      .toBe('D:\\LumiCore\\legal_delivery\\verified-delivery.docx');
   });
 
   it('reuses only a matching active entry and case task and sends the native proof', async () => {

@@ -1,8 +1,8 @@
 // Centralized data directory resolver.
 // All persisted files (DB, keys, config, voice samples, KB) live here.
-// Default: ~/LumiCore/data/ — survives code/upgrade overwrites.
-// Existing ~/LumiOS data is moved in place under an exclusive backend lease
-// before SQLite is opened on first LumiCore startup.
+// Default: the product variant's dedicated LumiCore data root.
+// Existing variant-specific LumiOS data is moved in place under an exclusive
+// backend lease before SQLite is opened on first LumiCore startup.
 // Override: set LUMI_DATA_DIR env var.
 
 import fs from 'fs';

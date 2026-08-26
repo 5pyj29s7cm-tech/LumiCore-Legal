@@ -1,10 +1,10 @@
-# LumiCore Commercial Release
+# Lumi Legal Commercial Release
 
-This repository contains the public source track for LumiCore 3.x. Source availability and signed binary distribution are separate release decisions.
+This repository contains the Lumi Legal product track derived from LumiCore 3.x. Source availability and signed binary distribution are separate release decisions.
 
 ## Positioning
 
-- The public repository is the canonical source and community collaboration track.
+- This repository is the canonical source for the Lumi Legal product track.
 - A commit or pull request is not a signed public installer by itself.
 - Official binaries are published only after the platform-specific release gates below pass.
 
@@ -85,18 +85,18 @@ The Windows installer smoke test must prove:
 - The installed bundled skill connects as an MCP server.
 - The silent uninstaller can remove the temporary install.
 
-## LumiCore Rename Upgrade Gate
+## Lumi Legal Rename Upgrade Gate
 
-- Keep the bundle identifier `com.lumiai.os` stable so an upgrade retains the existing WebView profile and macOS privacy grants.
-- On Windows, the LumiCore NSIS pre-install hook never executes an uninstall command read from the registry. If a legacy `Lumi OS` registration exists, installation stops and asks the user to uninstall the old application through Windows Settings before retrying.
-- User data is never deleted by the installer. The backend moves the legacy `~/LumiOS/` root to `~/LumiCore/` under an exclusive data lease on first start.
-- On macOS, launch and verify `LumiCore.app` before manually removing the legacy `Lumi OS.app`; a DMG cannot safely delete another app bundle during drag-install.
+- Keep the bundle identifier `com.lumiai.legal` stable so an upgrade retains the Lumi Legal WebView profile and macOS privacy grants.
+- On Windows, the Lumi Legal NSIS pre-install hook never executes an uninstall command read from the registry. If the conflicting legacy Lumi desktop registration exists, installation stops and asks the user to remove it through Windows Settings before retrying.
+- User data is never deleted by the installer. The backend moves the legacy `~/LumiOS-Legal/` root to `~/LumiCore-Legal/` under an exclusive data lease on first start.
+- On macOS, launch and verify `Lumi Legal.app` before manually removing any legacy legal-client app bundle; a DMG cannot safely delete another app bundle during drag-install.
 
 Manual clean Windows user gate:
 
 1. If Windows still lists the legacy application, uninstall that application through Windows Settings; user data remains outside the application directory.
 2. Install the NSIS setup file.
-3. Launch LumiCore from the installed app shortcut.
+3. Launch Lumi Legal from the installed app shortcut.
 4. Confirm the main window appears without a console window.
 5. Confirm the local backend starts and the UI leaves loading state.
 6. Open Skill Center.
@@ -107,7 +107,7 @@ Manual clean Windows user gate:
 11. Confirm installed bundled skills connect or show clear setup requirements.
 12. Try a no-key skill action.
 13. Try a key-required skill and confirm the setup message is clear.
-14. Quit and relaunch LumiCore.
+14. Quit and relaunch Lumi Legal.
 15. Confirm installed skills and user data persist.
 
 Conversation gate prompts:

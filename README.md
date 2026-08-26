@@ -1,11 +1,11 @@
-# LumiCore
+# Lumi Legal
 
 面向个人与组织的私有化本地智能体系统。
 
 **浙江灵序科技有限公司 · [lumiai.asia](https://lumiai.asia)**
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-orange.svg)](./LICENSE)
-[![LumiCore CI](https://github.com/5pyj29s7cm-tech/LumiCore/actions/workflows/ci.yml/badge.svg)](https://github.com/5pyj29s7cm-tech/LumiCore/actions/workflows/ci.yml)
+[![Lumi Legal CI](https://github.com/5pyj29s7cm-tech/lumi-legal-client/actions/workflows/ci.yml/badge.svg)](https://github.com/5pyj29s7cm-tech/lumi-legal-client/actions/workflows/ci.yml)
 
 > LumiCore 不只是一个聊天助手。
 >
@@ -177,8 +177,8 @@ LumiCore 把行业能力放在技能层，把具体执行放在工具和适配�
 ### 获取源码
 
 ```bash
-git clone https://github.com/5pyj29s7cm-tech/LumiCore.git
-cd LumiCore
+git clone https://github.com/5pyj29s7cm-tech/lumi-legal-client.git
+cd lumi-legal-client
 npm ci
 ```
 
@@ -235,14 +235,14 @@ DOUBAO_SPEECH_KEY=
 
 ## 数据与隐私
 
-默认用户数据目录为 `~/LumiCore/`，与源码仓库分离。升级时会在独占数据租约下将旧版 `~/LumiOS/` 原地迁移，不复制会话或凭据。
+Lumi Legal 的默认用户数据目录为 `~/LumiCore-Legal/`，与源码仓库分离。升级时会在独占数据租约下将旧版 `~/LumiOS-Legal/` 原地迁移，不复制会话或凭据。
 
 | 路径 | 内容 |
 | --- | --- |
-| `~/LumiCore/data/lumi.db` | 会话、记忆、任务、回执与智能体数据 |
-| `~/LumiCore/data/keys.json` | 本地凭证存储 |
-| `~/LumiCore/data/knowledge/` | 知识库文件与索引 |
-| `~/LumiCore/data/voice_samples/` | 用户授权保存的语音样本 |
+| `~/LumiCore-Legal/data/lumi.db` | 会话、记忆、任务、回执与智能体数据 |
+| `~/LumiCore-Legal/data/keys.json` | 本地凭证存储 |
+| `~/LumiCore-Legal/data/knowledge/` | 知识库文件与索引 |
+| `~/LumiCore-Legal/data/voice_samples/` | 用户授权保存的语音样本 |
 | `~/lumi_skills/` | 用户安装的 MCP 技能包 |
 
 提交 Issue 或 Pull Request 时，不要上传 API Key、访问令牌、客户资料、个人数据库、语音样本或可识别真实账号的配置。发现安全问题请先阅读 [安全策略](./SECURITY.md)。
@@ -293,7 +293,7 @@ npm run release:check
 **使命：让人类本身得以延伸。**
 
 - 官网：[lumiai.asia](https://lumiai.asia)
-- GitHub：[5pyj29s7cm-tech/LumiCore](https://github.com/5pyj29s7cm-tech/LumiCore)
+- GitHub：[5pyj29s7cm-tech/lumi-legal-client](https://github.com/5pyj29s7cm-tech/lumi-legal-client)
 - 邮箱：3565286431@qq.com
 
 ## 许可证

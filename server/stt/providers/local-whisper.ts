@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import { PRODUCT_VARIANT } from '../../../shared/product_variant';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_PATH = path.join(__dirname, '..', 'local_whisper.py');
@@ -16,7 +17,15 @@ const SAFE_AUDIO_EXTS = new Set(['.mp3', '.mpeg', '.wav', '.m4a', '.ogg', '.oga'
 const STT_ARTIFACT_ROOT = getSttArtifactRoot();
 const MANAGED_VENV_DIR = path.join(STT_ARTIFACT_ROOT, 'faster-whisper-venv');
 const MANAGED_PYTHON = path.join(MANAGED_VENV_DIR, 'Scripts', 'python.exe');
-const LEGACY_MANAGED_PYTHON = path.join(os.homedir(), 'LumiOS', 'data', 'stt', 'faster-whisper-venv', 'Scripts', 'python.exe');
+const LEGACY_MANAGED_PYTHON = path.join(
+  os.homedir(),
+  PRODUCT_VARIANT.runtime.legacyDataDirectoryName,
+  'data',
+  'stt',
+  'faster-whisper-venv',
+  'Scripts',
+  'python.exe',
+);
 
 let pythonCandidates: string[] | null = null;
 

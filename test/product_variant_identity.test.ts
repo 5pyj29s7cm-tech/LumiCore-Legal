@@ -8,6 +8,7 @@ describe('legal product identity', () => {
   it('keeps installer, runtime, and data identities isolated from main LumiCore', () => {
     const tauri = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
     const dataPath = fs.readFileSync('server/config/data_path.ts', 'utf8');
+    const localWhisper = fs.readFileSync('server/stt/providers/local-whisper.ts', 'utf8');
     const nativeShell = fs.readFileSync('src-tauri/src/lib.rs', 'utf8');
     const nativeBootstrap = fs.readFileSync('src-tauri/src/local_bootstrap.rs', 'utf8');
     expect(PRODUCT_VARIANT.runtime.productName).toBe('Lumi Legal');
@@ -16,6 +17,8 @@ describe('legal product identity', () => {
     expect(tauri).toMatchObject({ productName: 'Lumi Legal', version: '3.1.0', identifier: 'com.lumiai.legal' });
     expect(dataPath).toContain('PRODUCT_VARIANT.runtime.dataDirectoryName');
     expect(dataPath).toContain('PRODUCT_VARIANT.runtime.legacyDataDirectoryName');
+    expect(localWhisper).toContain('PRODUCT_VARIANT.runtime.legacyDataDirectoryName');
+    expect(localWhisper).not.toContain("os.homedir(), 'LumiOS'");
     expect(nativeShell).toContain('.join("LumiCore-Legal")');
     expect(nativeShell).toContain('base.join("LumiOS-Legal")');
     expect(nativeBootstrap).toContain('const PRODUCT_DATA_DIRECTORY: &str = "LumiCore-Legal";');
