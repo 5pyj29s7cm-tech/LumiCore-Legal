@@ -29,8 +29,7 @@ jobs:
         run: npm run lint
       - name: Run complete Vitest suite
         # Several security suites create isolated Git repositories and worktrees.
-        # Bound worker concurrency so shared runners do not turn process pressure
-        # into false 15s/120s timeout failures.
+        # Bound concurrency without serializing the entire 3,700+ test inventory.
         run: npm test -- --maxWorkers=2 --reporter=json --outputFile=vitest-results.json
       - name: Enforce test inventory
         if: always()
