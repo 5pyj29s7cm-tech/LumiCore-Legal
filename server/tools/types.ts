@@ -222,6 +222,25 @@ export interface ToolContext {
   systemExecution?: boolean;
   /** Durable execution correlation shared by task, confirmation and receipt ledgers. */
   taskId?: string;
+  /** Exact durable task revision bound to this immutable request. */
+  taskRevision?: number;
+  /**
+   * Runtime-owned exact call recovered from the durable task ledger for this
+   * immutable request. User payloads and model output must never populate it.
+   * The adapter still intersects it with the exposed manifest and executes it
+   * through the ordinary policy, confirmation, lifecycle and receipt path.
+   */
+  runtimeOwnedDeterministicRecoveryCall?: {
+    source: 'durable_task_capsule';
+    taskId: string;
+    taskRevision: number;
+    requestId: string;
+    name: 'write_file';
+    arguments: {
+      path: string;
+      content: string;
+    };
+  };
   conversationId?: string;
   /** Owning conversation agent/personality for durable delegated work. */
   conversationAgentId?: string;
@@ -412,6 +431,8 @@ export interface NormalizedLLMResponse {
   streamIncomplete?: boolean;
   /** Exact model route used for this call, including explicit fallback evidence. */
   routing?: ModelRoutingTrace;
+  /** Durable id minted only after the exact routing trace is persisted. */
+  routingReceiptId?: string;
 }
 
 export interface ToolExecutionRecord {
@@ -419,6 +440,10 @@ export interface ToolExecutionRecord {
   taskId?: string;
   turnId?: string;
   requestId?: string;
+  /** Exact persisted model call whose output selected this tool invocation. */
+  modelRoutingReceiptId?: string;
+  /** Runtime-owned decision boundary that selected this exact invocation. */
+  executionOrigin?: 'model_selected' | 'confirmed_action_resume' | 'deterministic_route';
   idempotencyKey?: string;
   name: string;
   arguments: Record<string, any>;

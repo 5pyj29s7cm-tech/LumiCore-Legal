@@ -16,6 +16,7 @@ import {
 import {
   buildTransportNeutralConfirmationScope,
   clearAllPendingConfirmationsForTests,
+  consumePendingConfirmationDurably,
   getPendingConfirmation,
   recordPendingConfirmation,
 } from '../server/tools/pending_confirmation';
@@ -167,6 +168,167 @@ describe('accepted action-turn durability fence', () => {
 
     expect(resolution.cleared).toBe(false);
     expect(getPendingConfirmation('bound-confirmation-user', taskScope)?.id).toBe(taskBound.id);
+  });
+
+  it('revokes a rejected pending target and requires a fresh confirmation for its correction', async () => {
+    const oldTarget = 'C:\\Users\\ExampleUser\\LumiCore\\formal-client-e2e-artifacts\\LUMI-E2E-confirmation-correction\\target-0.txt';
+    const newTarget = 'C:\\Users\\ExampleUser\\LumiCore\\formal-client-e2e-artifacts\\LUMI-E2E-confirmation-correction\\target-1.txt';
+    const channelScope = buildTransportNeutralConfirmationScope({
+      domain: 'personal',
+      conversationId: 'corrected-confirmation-conversation',
+    });
+    const taskScope = buildTransportNeutralConfirmationScope({
+      domain: 'personal',
+      conversationId: 'corrected-confirmation-conversation',
+      taskId: 'corrected-confirmation-task',
+    });
+    const oldPending = recordPendingConfirmation(
+      'corrected-confirmation-user',
+      'write_file',
+      { path: oldTarget, content: 'same content' },
+      'chat',
+      taskScope,
+    );
+    const admission = await admitAcceptedUserTurnDurably({
+      persistAcceptedUserTurn: () => 'correction-message',
+      flush: async () => undefined,
+      onPersistenceUnknown: vi.fn(),
+    });
+
+    const resolution = await resolveAcceptedTurnConfirmation({
+      admission: admission!,
+      userId: 'corrected-confirmation-user',
+      userText: `不是 ${oldTarget}，把同一个任务的目标改成 ${newTarget}，内容保持不变；不要沿用或重试旧目标。`,
+      actionState: {
+        version: 2,
+        taskId: 'corrected-confirmation-task',
+        status: 'waiting_confirmation',
+        goal: 'create the confirmed file',
+        appTarget: '',
+        sourcePaths: [],
+        latestBlocker: '',
+        unfinished: true,
+        evidenceTools: ['write_file'],
+        latestInstruction: `create ${oldTarget}`,
+        assistantState: 'waiting for confirmation',
+        toolSummaries: [],
+        updatedAt: new Date().toISOString(),
+      },
+      taskScope,
+      channelScope,
+    });
+
+    expect(resolution).toMatchObject({
+      pending: null,
+      prompt: '',
+      cleared: true,
+      correctionRequiresFreshConfirmation: true,
+    });
+    expect(resolution.revokedCorrectionBasis).toMatchObject({
+      id: oldPending.id,
+      taskId: 'corrected-confirmation-task',
+      toolName: 'write_file',
+      exactArgs: { path: oldTarget, content: 'same content' },
+    });
+    expect(getPendingConfirmation('corrected-confirmation-user', taskScope)).toBeNull();
+    const replacement = recordPendingConfirmation(
+      'corrected-confirmation-user',
+      'write_file',
+      { path: newTarget, content: 'same content' },
+      'chat',
+      taskScope,
+    );
+    expect(replacement.id).not.toBe(oldPending.id);
+    expect(replacement.exactArgs).toMatchObject({ path: newTarget });
+
+    const mixedAdmission = await admitAcceptedUserTurnDurably({
+      persistAcceptedUserTurn: () => 'mixed-correction-message',
+      flush: async () => undefined,
+      onPersistenceUnknown: vi.fn(),
+    });
+    const mixedResolution = await resolveAcceptedTurnConfirmation({
+      admission: mixedAdmission!,
+      userId: 'corrected-confirmation-user',
+      userText: `不是 ${newTarget}，而是创建文件 corrected-final-target.txt，内容不变。`,
+      actionState: {
+        version: 2,
+        taskId: 'corrected-confirmation-task',
+        status: 'waiting_confirmation',
+        goal: 'create the confirmed file',
+        appTarget: '',
+        sourcePaths: [newTarget],
+        latestBlocker: '',
+        unfinished: true,
+        evidenceTools: ['write_file'],
+        latestInstruction: `create ${newTarget}`,
+        assistantState: 'waiting for confirmation',
+        toolSummaries: [],
+        updatedAt: new Date().toISOString(),
+      },
+      taskScope,
+      channelScope,
+    });
+    expect(mixedResolution).toMatchObject({
+      pending: null,
+      cleared: true,
+      correctionRequiresFreshConfirmation: true,
+    });
+    expect(getPendingConfirmation('corrected-confirmation-user', taskScope)).toBeNull();
+  });
+
+  it('recovers the same exact pending action for repeated confirmations and consumes it once', async () => {
+    const channelScope = buildTransportNeutralConfirmationScope({
+      domain: 'personal',
+      conversationId: 'repeat-confirmation-conversation',
+    });
+    const taskScope = buildTransportNeutralConfirmationScope({
+      domain: 'personal',
+      conversationId: 'repeat-confirmation-conversation',
+      taskId: 'repeat-confirmation-task',
+    });
+    const exactArgs = { target: 'WPS', path: 'D:\\deliverables\\final.docx' };
+    const pending = recordPendingConfirmation(
+      'repeat-confirmation-user',
+      'desktop_open',
+      exactArgs,
+      'chat',
+      taskScope,
+    );
+    const admit = async (messageId: string) => admitAcceptedUserTurnDurably({
+      persistAcceptedUserTurn: () => messageId,
+      flush: async () => undefined,
+      onPersistenceUnknown: vi.fn(),
+    });
+    const [firstAdmission, repeatedAdmission] = await Promise.all([
+      admit('confirmation-1'),
+      admit('confirmation-2'),
+    ]);
+
+    const [first, repeated] = await Promise.all([
+      resolveAcceptedTurnConfirmation({
+        admission: firstAdmission!,
+        userId: 'repeat-confirmation-user',
+        userText: '确认',
+        taskScope,
+        channelScope,
+      }),
+      resolveAcceptedTurnConfirmation({
+        admission: repeatedAdmission!,
+        userId: 'repeat-confirmation-user',
+        userText: '确认了',
+        taskScope,
+        channelScope,
+      }),
+    ]);
+
+    expect(first.pending).toMatchObject({ id: pending.id, toolName: 'desktop_open', exactArgs });
+    expect(repeated.pending).toMatchObject({ id: pending.id, toolName: 'desktop_open', exactArgs });
+    expect(await consumePendingConfirmationDurably(
+      'repeat-confirmation-user', pending.id, pending.toolName, exactArgs, taskScope,
+    )).toBe(true);
+    expect(await consumePendingConfirmationDurably(
+      'repeat-confirmation-user', pending.id, pending.toolName, exactArgs, taskScope,
+    )).toBe(false);
   });
 
   it.each([

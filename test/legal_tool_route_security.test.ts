@@ -20,6 +20,20 @@ let orgId = '';
 let viewerToken = '';
 let memberToken = '';
 const registeredStubTools: string[] = [];
+const nativeClientIdentity = {
+  schemaVersion: 1 as const,
+  clientKind: 'tauri' as const,
+  pid: process.pid,
+  startedAtUnixMs: Math.floor((Date.now() - 10_000) / 1_000) * 1_000,
+  executablePath: process.execPath,
+  executableSha256: 'd'.repeat(64),
+  binaryHashUnavailable: false,
+  buildId: 'c'.repeat(40),
+  buildIdSemantics: 'baseline_commit' as const,
+  sourceFingerprint: 'e'.repeat(64),
+  sourceDirty: false,
+  appVersion: '3.1.0',
+};
 const observedCalls: Array<{
   name: string;
   args: Record<string, any>;
@@ -69,7 +83,7 @@ function bearer(token: string): Record<string, string> {
 function desktopBearer(token: string, userId: string): Record<string, string> {
   return {
     ...bearer(token),
-    [DESKTOP_SESSION_HEADER]: issueDesktopSessionProof(userId).proof,
+    [DESKTOP_SESSION_HEADER]: issueDesktopSessionProof(userId, nativeClientIdentity).proof,
   };
 }
 
@@ -205,7 +219,7 @@ describe('direct legal tool route security', () => {
   });
 
   it('fails closed for an empty or UID-mismatched desktop proof', async () => {
-    for (const proof of ['', issueDesktopSessionProof('another-legal-user').proof]) {
+    for (const proof of ['', issueDesktopSessionProof('another-legal-user', nativeClientIdentity).proof]) {
       const callCount = observedCalls.length;
       const response = await fetch(`${url}/api/legal/tool/legal_authority_source_status`, {
         method: 'POST',
@@ -220,7 +234,7 @@ describe('direct legal tool route security', () => {
   });
 
   it('does not trust an otherwise valid proof from a non-loopback address', () => {
-    const proof = issueDesktopSessionProof('legal-user').proof;
+    const proof = issueDesktopSessionProof('legal-user', nativeClientIdentity).proof;
     expect(resolveRestDesktopExecutionBoundary({
       authenticated: true,
       userId: 'legal-user',

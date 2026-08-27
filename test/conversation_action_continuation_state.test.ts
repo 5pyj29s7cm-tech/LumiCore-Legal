@@ -13,6 +13,11 @@ import {
   setConversationActionExecutionStatus,
 } from '../server/conversation/manager';
 import { recordsToTaskReceipts } from '../server/cognition/task_execution_ledger';
+import { getConversationActionStateFromLedger } from '../server/conversation/action_ledger';
+
+function durableActionState(conversationId: string, userId: string) {
+  return getConversationActionStateFromLedger(readDB(), { conversationId, userId });
+}
 
 function persistActionTurn(input: {
   conversationId: string;
@@ -37,7 +42,7 @@ describe('conversation action continuation state', () => {
     await initDatabase();
   });
 
-  it('persists terminal tool evidence across turns and clears it when a concrete new topic supersedes the task', () => {
+  it('keeps terminal evidence in durable history without occupying the live pointer', () => {
     const userId = `conversation-action-state-${Date.now()}-${Math.random()}`;
     const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
 
@@ -70,6 +75,8 @@ describe('conversation action continuation state', () => {
     });
 
     expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
+      .toBeUndefined();
+    expect(durableActionState(conversation.id, userId))
       .toMatchObject({ goal: '打开 WPS。', appTarget: 'WPS', evidenceTools: ['desktop_open'] });
 
     addMessage({
@@ -90,6 +97,8 @@ describe('conversation action continuation state', () => {
     });
 
     expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
+      .toBeUndefined();
+    expect(durableActionState(conversation.id, userId))
       .toMatchObject({ goal: '打开 WPS。', appTarget: 'WPS' });
 
     addMessage({
@@ -103,6 +112,8 @@ describe('conversation action continuation state', () => {
 
     expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
       .toBeUndefined();
+    expect(durableActionState(conversation.id, userId))
+      .toMatchObject({ goal: '打开 WPS。', status: 'completed' });
   });
 
   it('keeps a zero-receipt action blocked instead of accepting the assistant claim as completion', () => {
@@ -295,10 +306,12 @@ describe('conversation action continuation state', () => {
     });
 
     expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
+      .toBeUndefined();
+    expect(durableActionState(conversation.id, userId))
       .toMatchObject({ goal: '打开客户端设置。', evidenceTools: ['client_action'] });
   });
 
-  it('does not let an unrelated proactive message consume an in-flight task pointer', () => {
+  it('does not let an unrelated proactive message consume terminal task history', () => {
     const userId = `conversation-action-proactive-${Date.now()}-${Math.random()}`;
     const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
     addMessage({
@@ -339,6 +352,8 @@ describe('conversation action continuation state', () => {
     });
 
     expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
+      .toBeUndefined();
+    expect(durableActionState(conversation.id, userId))
       .toMatchObject({ goal: '打开 WPS。', appTarget: 'WPS' });
   });
 
@@ -383,6 +398,8 @@ describe('conversation action continuation state', () => {
     });
 
     expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
+      .toBeUndefined();
+    expect(durableActionState(conversation.id, userId))
       .toMatchObject({
         status: 'completed',
         unfinished: false,
@@ -501,6 +518,8 @@ describe('conversation action continuation state', () => {
       completedAt: '2026-07-22T14:00:00.000Z',
     });
     expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
+      .toBeUndefined();
+    expect(durableActionState(conversation.id, userId))
       .toMatchObject({
         taskId,
         status: 'completed',
@@ -674,6 +693,76 @@ describe('conversation action continuation state', () => {
     });
   });
 
+  it('keeps side-channel status transcript writes read-only for the durable task row', () => {
+    const userId = `conversation-status-read-only-${Date.now()}-${Math.random()}`;
+    const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
+    const instruction = 'Create a local report and wait for confirmation.';
+    const taskRequestId = 'status-read-only-task-request';
+    const userMessageId = persistActionTurn({
+      conversationId: conversation.id,
+      userId,
+      userText: instruction,
+      requestId: taskRequestId,
+    });
+    const prepared = prepareConversationActionExecution({
+      conversationId: conversation.id,
+      userId,
+      userText: instruction,
+      requestId: taskRequestId,
+      userMessageId,
+      toolPolicy: {
+        allowedTools: ['write_file'],
+        requireConfirmation: ['write_file'],
+        forbiddenTools: [],
+        maxIterations: 8,
+      },
+    });
+    expect(prepared.state?.taskId).toBeTruthy();
+    setConversationActionExecutionStatus(
+      conversation.id,
+      userId,
+      'waiting_confirmation',
+      { requestId: taskRequestId, assistantState: 'Waiting for confirmation.' },
+    );
+
+    const before = structuredClone(
+      (readDB().conversationActionTasks || []).find((row: any) => row.id === prepared.state?.taskId),
+    );
+    expect(before).toBeDefined();
+
+    const statusRequestId = 'status-read-only-query-request';
+    addMessageIdempotent({
+      userId,
+      agentId: 'lumi',
+      conversationId: conversation.id,
+      role: 'user',
+      content: 'Is this task complete? Report status only.',
+      source: 'chat_task_status',
+      channel: 'chat',
+      cognitiveIntent: 'task_status',
+      requestId: statusRequestId,
+      skipActionContinuation: true,
+      timestamp: '2026-08-28T03:10:00.000Z',
+    });
+    addMessageIdempotent({
+      userId,
+      agentId: 'lumi',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: 'The task is waiting for confirmation.',
+      source: 'chat_task_status',
+      channel: 'chat',
+      cognitiveIntent: 'task_status',
+      requestId: statusRequestId,
+      skipActionContinuation: true,
+      timestamp: '2026-08-28T03:10:01.000Z',
+    });
+
+    const after = (readDB().conversationActionTasks || [])
+      .find((row: any) => row.id === prepared.state?.taskId);
+    expect(after).toEqual(before);
+  });
+
   it('rejects a different persisted turn while another request owns the action pointer', () => {
     const userId = `conversation-action-busy-${Date.now()}-${Math.random()}`;
     const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
@@ -723,6 +812,82 @@ describe('conversation action continuation state', () => {
         activeRequestId: firstRequestId,
       },
     });
+  });
+
+  it('repairs a terminal conversation pointer from the newer unfinished durable task', () => {
+    const userId = `conversation-repair-terminal-pointer-${Date.now()}-${Math.random()}`;
+    const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
+    const terminalTaskId = `task-terminal-pointer-${Date.now()}-${Math.random()}`;
+    const liveTaskId = `task-live-pointer-${Date.now()}-${Math.random()}`;
+    const terminalAt = '2026-08-27T04:00:00.000Z';
+    const liveAt = '2026-08-27T04:01:00.000Z';
+    const terminalState = {
+      version: 2 as const,
+      taskId: terminalTaskId,
+      goal: 'Finish the earlier task.',
+      latestInstruction: 'Finish the earlier task.',
+      status: 'completed' as const,
+      unfinished: false,
+      receipts: [],
+      appTarget: '',
+      sourcePaths: [],
+      latestBlocker: '',
+      evidenceTools: [],
+      assistantState: 'Earlier task completed.',
+      toolSummaries: [],
+      revision: 2,
+      updatedAt: terminalAt,
+    };
+    const liveState = {
+      ...terminalState,
+      taskId: liveTaskId,
+      goal: 'Continue the newer interrupted task.',
+      latestInstruction: 'Continue the newer interrupted task.',
+      status: 'blocked' as const,
+      unfinished: true,
+      latestBlocker: 'The prior executor stopped before verification.',
+      assistantState: '',
+      revision: 1,
+      updatedAt: liveAt,
+    };
+    conversation.actionContinuationState = terminalState;
+
+    const db = readDB();
+    for (const [state, createdAt] of [
+      [terminalState, terminalAt],
+      [liveState, liveAt],
+    ] as const) {
+      db.conversationActionTasks.push({
+        id: state.taskId,
+        conversationId: conversation.id,
+        userId,
+        domain: 'personal',
+        orgId: '',
+        parentTaskId: '',
+        rootUserMessageId: '',
+        intentKind: 'desktop_operation',
+        operation: 'mutate',
+        goal: state.goal,
+        target: '',
+        status: state.status,
+        blocker: state.latestBlocker,
+        activeRequestId: '',
+        completionSource: state.status === 'completed' ? 'tool_receipt' : '',
+        context: JSON.stringify({ actionState: state }),
+        revision: state.revision,
+        createdAt,
+        updatedAt: state.updatedAt,
+        completedAt: state.status === 'completed' ? state.updatedAt : '',
+      });
+    }
+
+    expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
+      .toMatchObject({
+        taskId: liveTaskId,
+        status: 'blocked',
+        unfinished: true,
+        latestBlocker: 'The prior executor stopped before verification.',
+      });
   });
 
   it('rejects a missing transcript identity without creating action state', () => {

@@ -30,9 +30,16 @@ import {
   persistConversationModelExecutionResult,
   getConversationModelExecutionRecovery,
   cancelConversationActionExecution,
+  createDurableForegroundReleaseGate,
   setConversationActionExecutionStatus,
   startConversationActionExecutionHeartbeat,
   updateConversationActionFocus,
+  convergeConversationActionRequestLease,
+  convergeConversationActionRequestLeaseDurably,
+  finalizeForegroundRequestDurably,
+  type ConvergeConversationActionRequestLeaseResult,
+  type FinalizeForegroundRequestResult,
+  type ForegroundRequestDurabilityDependencies,
 } from "../conversation/manager";
 import { processInput, handleLLMFailure, extractSentiment, CognitiveContext, CognitiveResult } from "../cognition";
 import {
@@ -75,8 +82,10 @@ import { persistWorkTakeoverTurnExecution } from "../work_takeover/execution_wri
 import { canAutoApproveAction } from "../tools/action_constitution";
 import {
   buildTransportNeutralConfirmationScope,
+  confirmationArgumentsMatch,
   consumePendingConfirmationDurably,
   formatPendingConfirmationPrompt,
+  pendingConfirmationMatchesExactProposal,
   recordPendingConfirmationDurably,
 } from "../tools/pending_confirmation";
 import { ensurePendingConfirmationPersistenceInitialized } from '../tools/pending_confirmation_repository';
@@ -93,6 +102,7 @@ import {
   formatConversationActionTaskStatus,
   needsNaturalConversationActionStatusAnswer,
 } from "../cognition/action_continuation";
+import { buildDurableTaskDeterministicToolRecoveryCall } from '../cognition/deterministic_tool_recovery';
 import {
   coalesceToolExecutionRecords,
   confirmedStepNeedsContinuation,
@@ -106,7 +116,10 @@ import {
   resolveSocketScope,
   scopedEmotionalStateKey,
 } from "./scope";
-import { CN_TASK_EXECUTION_MESSAGES } from "../regions/packs/cn/voice_fast_path_messages";
+import {
+  CN_TASK_EXECUTION_MESSAGES,
+  CN_VOICE_WORK_MESSAGES,
+} from "../regions/packs/cn/voice_fast_path_messages";
 import { normalizeVoiceHistory as normalizeTaskHistory } from './voice_history';
 import {
   beginChatExecutionDurably,
@@ -124,7 +137,6 @@ import {
 } from "./chat_execution_registry";
 import { commitChatTerminalBoundary } from "./chat_terminal_boundary";
 import {
-  chatPublicErrorCodeForException,
   sanitizeChatAgentErrorPayload,
 } from "./chat_public_error";
 import { classifyActiveTaskMessage } from "../cognition/task_concurrency";
@@ -138,6 +150,50 @@ import {
 } from "../tools/remote_policy";
 
 const taskExecutionQueue = new SerialExecutionQueue();
+
+export interface TaskForegroundRequestIdentity {
+  readonly conversationId: string;
+  readonly userId: string;
+  readonly requestId: string;
+  readonly expectedTaskId?: string;
+}
+
+export interface TaskForegroundRequestReleaseResult {
+  convergence: ConvergeConversationActionRequestLeaseResult;
+  finalization: FinalizeForegroundRequestResult | null;
+  converged: boolean;
+}
+
+/** Converge durable Task ownership before desktop/queue resources leave. */
+export async function convergeTaskForegroundRequestBeforeRelease(input: {
+  readonly identity: TaskForegroundRequestIdentity;
+  readonly aborted: boolean;
+  readonly reason?: string;
+  readonly assistantState?: string;
+}, dependencies: ForegroundRequestDurabilityDependencies = {}): Promise<TaskForegroundRequestReleaseResult> {
+  let convergence = convergeConversationActionRequestLease({
+    ...input.identity,
+    deferLocalOwnerClear: true,
+  });
+  if (convergence.converged) {
+    convergence = await convergeConversationActionRequestLeaseDurably(input.identity, dependencies);
+    return { convergence, finalization: null, converged: true };
+  }
+  const finalization = await finalizeForegroundRequestDurably({
+    ...input.identity,
+    outcome: input.aborted ? 'cancelled' : 'blocked',
+    assistantMessageId: convergence.assistantMessageId || undefined,
+    reason: input.reason || (input.aborted
+      ? 'Task foreground request was aborted before release.'
+      : 'Task foreground executor exited without a fully converged terminal.'),
+    assistantState: input.assistantState,
+  }, dependencies);
+  return {
+    convergence,
+    finalization,
+    converged: finalization.converged,
+  };
+}
 
 function taskExecutionRoom(scope: ChatExecutionScope): string {
   return scope.domain === 'work' && scope.orgId
@@ -270,15 +326,9 @@ export function registerTaskHandler(
       requestId: snapshot.requestId,
     });
     active.cancel();
-    try {
-      const conversation = getOrCreateActiveConversation(
-        uid,
-        '',
-        resolvedScope.domain,
-        resolvedScope.orgId,
-      );
-      cancelConversationActionExecution(conversation.id, uid);
-    } catch {}
+    // The cancellation signal is exact because it targets the serial request
+    // lease. Do not guess an active conversation here: the owning executor
+    // settles its immutable action/task identity before releasing resources.
     try { ack?.({ ok: true, requestId: snapshot.requestId, status: 'cancelling' }); } catch {}
   });
 
@@ -543,7 +593,9 @@ export function registerTaskHandler(
       && !needsNaturalConversationActionStatusAnswer(data.text)
     ) {
       if (!beginChatSidecarExecution(executionScope, requestId)) return;
-      if (!controlTargetRequestId || controlTargetRequestId !== runningTask.requestId) {
+      // Natural-language status turns have no client fence. Bind them to the
+      // server-owned foreground lease; still reject an explicitly stale id.
+      if (controlTargetRequestId && controlTargetRequestId !== runningTask.requestId) {
         try { ack?.({ ok: true, requestId, receivedAt: new Date().toISOString() }); } catch {}
         const staleText = CN_TASK_EXECUTION_MESSAGES.staleControl;
         await commitTaskTerminal({
@@ -602,27 +654,9 @@ export function registerTaskHandler(
     let acknowledged = false;
     if (previous && activeMessageRelation === 'cancel') {
       if (!beginChatSidecarExecution(executionScope, requestId)) return;
-      if (!controlTargetRequestId) {
-        const staleText = CN_TASK_EXECUTION_MESSAGES.staleControl;
-        await commitTaskTerminal({
-          payload: {
-            text: staleText,
-            agentName: 'Lumi',
-            sidecar: true,
-            finalized: true,
-            blocked: false,
-            reason: 'missing_control_target',
-          },
-          persistAssistantMessage: () => {
-            persistEarlyTerminalTranscript(staleText, 'task_control_stale');
-          },
-          errorContext: 'Missing cancellation target terminal',
-        });
-        try { ack?.({ ok: true, requestId, receivedAt: new Date().toISOString() }); } catch {}
-        return;
-      }
+      const cancellationTargetRequestId = controlTargetRequestId || previous.requestId;
       try {
-        await persistChatSidecarCancellationIntent(executionScope, requestId, controlTargetRequestId);
+        await persistChatSidecarCancellationIntent(executionScope, requestId, cancellationTargetRequestId);
       } catch (error: any) {
         await commitTaskTerminal({
           event: 'agent:error',
@@ -652,7 +686,7 @@ export function registerTaskHandler(
         acknowledged = true;
       } catch {}
       emitAgent('agent:status', { status: 'cancelling', sidecar: true });
-      const currentTarget = taskExecutionQueue.getByRequestId(executionKey, controlTargetRequestId);
+      const currentTarget = taskExecutionQueue.getByRequestId(executionKey, cancellationTargetRequestId);
       if (!currentTarget) {
         const staleText = CN_TASK_EXECUTION_MESSAGES.staleControl;
         await commitTaskTerminal({
@@ -672,21 +706,34 @@ export function registerTaskHandler(
         return;
       }
       try {
-        await taskExecutionQueue.cancelRequest(executionKey, controlTargetRequestId);
+        await taskExecutionQueue.cancelRequest(executionKey, cancellationTargetRequestId);
       } catch (error: any) {
+        const settlementTimedOut = error?.code === 'serial_execution_cancellation_timeout';
+        const failureText = settlementTimedOut
+          ? CN_TASK_EXECUTION_MESSAGES.cancellationSettlementTimedOut
+          : sanitizeChatAgentErrorPayload({ code: 'CHAT_CONTROL_CANCEL_FAILED' }).message;
         await commitTaskTerminal({
-          event: 'agent:error',
-          payload: {
+          ...(settlementTimedOut ? {} : { event: 'agent:error' as const }),
+          payload: settlementTimedOut ? {
+            text: failureText,
+            agentName: 'Lumi',
+            sidecar: true,
+            finalized: true,
+            blocked: true,
+            reason: 'cancellation_settlement_timeout',
+          } : {
             code: 'CHAT_CONTROL_CANCEL_FAILED',
             sidecar: true,
           },
           persistAssistantMessage: () => {
             persistEarlyTerminalTranscript(
-              sanitizeChatAgentErrorPayload({ code: 'CHAT_CONTROL_CANCEL_FAILED' }).message,
-              'task_control_failed',
+              failureText,
+              settlementTimedOut ? 'cancellation_settlement_timeout' : 'task_control_failed',
             );
           },
-          errorContext: 'Cancellation settlement failure terminal',
+          errorContext: settlementTimedOut
+            ? 'Cancellation settlement timeout terminal'
+            : 'Cancellation settlement failure terminal',
         });
         return;
       }
@@ -795,6 +842,7 @@ export function registerTaskHandler(
     confirmationScope = confirmationResolution.scope;
     const pendingConfirmation = confirmationResolution.pending;
     const pendingConfirmationPrompt = confirmationResolution.prompt;
+    const correctionRequiresFreshConfirmation = confirmationResolution.correctionRequiresFreshConfirmation;
 
     const taskLease = runAfterAcceptedUserTurnAdmission(taskAdmission, () => {
       if (previous && activeMessageRelation === 'replace') {
@@ -805,12 +853,61 @@ export function registerTaskHandler(
     });
     const taskAbortController = taskLease.controller;
     let releaseDesktopControlLease: (() => void) | null = null;
-    const releaseTask = () => {
+    let taskForegroundRequestIdentity: TaskForegroundRequestIdentity | null = null;
+    const releaseTaskTransportResources = (): void => {
       actionLeaseHeartbeat?.stop();
       releaseDesktopControlLease?.();
       releaseDesktopControlLease = null;
       taskLease.release();
     };
+    const taskReleaseGate = createDurableForegroundReleaseGate({
+      converge: async reason => {
+        if (!taskForegroundRequestIdentity) return true;
+        const releaseResult = await convergeTaskForegroundRequestBeforeRelease({
+          identity: taskForegroundRequestIdentity,
+          aborted: taskAbortController.signal.aborted,
+          reason,
+        });
+        if (!releaseResult.converged) {
+          console.error('[TaskHandler] foreground_request_finalization_incomplete', {
+            code: 'TASK_FOREGROUND_FINALIZATION_INCOMPLETE',
+            identity: taskForegroundRequestIdentity,
+            convergence: {
+              finalStatus: releaseResult.convergence.finalStatus,
+              reason: releaseResult.convergence.reason,
+              evidence: releaseResult.convergence.evidence,
+            },
+            finalization: releaseResult.finalization ? {
+              effectiveOutcome: releaseResult.finalization.effectiveOutcome,
+              taskStatus: releaseResult.finalization.taskStatus,
+              actionTurnStatus: releaseResult.finalization.actionTurnStatus,
+              reason: releaseResult.finalization.reason,
+              evidence: releaseResult.finalization.evidence,
+            } : null,
+          });
+        }
+        return releaseResult.converged;
+      },
+      releaseResources: releaseTaskTransportResources,
+      onFailure: ({ error }) => {
+        if (error instanceof Error && error.message === 'foreground_request_not_durably_converged') return;
+        const convergenceError = error as any;
+        console.error('[TaskHandler] foreground_request_finalization_failed', {
+          code: 'TASK_FOREGROUND_FINALIZATION_FAILED',
+          identity: taskForegroundRequestIdentity,
+          errorName: String(convergenceError?.name || 'Error'),
+          errorMessage: String(convergenceError?.message || 'Unknown convergence error'),
+        });
+      },
+      onRecoveryTakeover: ({ attempts }) => console.error('[TaskHandler] foreground_release_recovery_takeover', {
+        code: 'TASK_FOREGROUND_RELEASE_RECOVERY_TAKEOVER',
+        identity: taskForegroundRequestIdentity,
+        attempts,
+      }),
+    });
+    const releaseTask = (
+      reason = 'Task foreground request reached its release boundary.',
+    ): Promise<boolean> => taskReleaseGate.release(reason);
 
     if (previous) {
       try {
@@ -825,21 +922,27 @@ export function registerTaskHandler(
       });
     }
     if (!await taskLease.waitForTurn()) {
-      const cancelledText = CN_TASK_EXECUTION_MESSAGES.cancelled;
+      const waitTimedOut = taskLease.state === 'timed_out';
+      const cancelledText = waitTimedOut
+        ? CN_TASK_EXECUTION_MESSAGES.queueWaitTimedOut
+        : CN_TASK_EXECUTION_MESSAGES.cancelled;
       await commitTaskTerminal({
         payload: {
           text: cancelledText,
           agentName: 'Lumi',
           finalized: true,
           blocked: true,
-          reason: 'cancelled',
+          reason: waitTimedOut ? 'queue_wait_timeout' : 'cancelled',
         },
         persistAssistantMessage: () => {
-          persistEarlyTerminalTranscript(cancelledText, 'task_cancelled');
+          persistEarlyTerminalTranscript(
+            cancelledText,
+            waitTimedOut ? 'queue_wait_timeout' : 'task_cancelled',
+          );
         },
-        errorContext: 'Queued cancellation terminal',
+        errorContext: waitTimedOut ? 'Queued wait timeout terminal' : 'Queued cancellation terminal',
       });
-      releaseTask();
+      await releaseTask();
       return;
     }
     const replacementUnknownPayload = {
@@ -883,7 +986,7 @@ export function registerTaskHandler(
         'agent:response',
         normalizeAgentPayload('agent:response', replacementUnknownPayload),
       );
-      releaseTask();
+      await releaseTask();
       return;
     }
     if (superseded?.terminalEvent) {
@@ -901,6 +1004,7 @@ export function registerTaskHandler(
         .filter(message => message.id !== taskUserMessageId)
         .slice(-24),
       convForHistory.actionContinuationState,
+      taskUserMessageId,
     );
     const routedTaskText = [data.text, taskActionBridge, pendingConfirmationPrompt].filter(Boolean).join('\n\n');
     const interactionId = crypto.randomUUID();
@@ -1000,8 +1104,16 @@ export function registerTaskHandler(
       requestId,
       userMessageId: taskUserMessageId,
       toolPolicy: executionDecision.toolPolicy,
+      forceTask: executionDecision.allowToolUse,
       forceResume: Boolean(pendingConfirmation || actionFollowupIntent === 'execute'),
     });
+    const runtimeOwnedDeterministicRecoveryCall = 'bindingFailure' in actionTaskExecution
+      ? null
+      : buildDurableTaskDeterministicToolRecoveryCall(
+          actionTaskExecution.state,
+          requestId,
+          confirmationResolution.revokedCorrectionBasis,
+        );
     if ('bindingFailure' in actionTaskExecution) {
       const staleText = actionTaskExecution.bindingFailure === 'busy'
         ? CN_TASK_EXECUTION_MESSAGES.actionTurnBusy
@@ -1043,9 +1155,16 @@ export function registerTaskHandler(
         },
         errorContext: 'Action turn binding terminal',
       });
-      releaseTask();
+      await releaseTask();
       return;
     }
+    taskForegroundRequestIdentity = Object.freeze({
+      conversationId: convForHistory.id,
+      userId: uid,
+      requestId,
+      expectedTaskId: actionTaskExecution.state?.taskId,
+    });
+    try {
     actionLeaseHeartbeat = startConversationActionExecutionHeartbeat({
       conversationId: convForHistory.id,
       userId: uid,
@@ -1223,7 +1342,7 @@ export function registerTaskHandler(
     const messages: NormalizedMessage[] = [
       { role: 'system', content: effectiveSystemPrompt },
       ...taskHistory,
-      { role: 'user', content: routedTaskText },
+      { role: 'user', content: routedTaskText, sourceMessageId: taskUserMessageId },
     ];
     const desktopRelay = createDesktopRelay({
       io,
@@ -1231,7 +1350,8 @@ export function registerTaskHandler(
       domain: taskScope.domain,
       orgId: taskScope.orgId,
       source: 'task',
-      taskId: requestId,
+      taskId: actionTaskExecution.state?.taskId,
+      requestId,
       requestSocket: socket,
       cancelOnRequestSocketDisconnect: false,
       signal: taskAbortController.signal,
@@ -1297,6 +1417,7 @@ export function registerTaskHandler(
     };
     let pendingConfirmationCreatedThisTurn: Awaited<ReturnType<typeof recordPendingConfirmationDurably>> | null = null;
     const requestConfirmation = async (toolName: string, args: Record<string, any>): Promise<boolean> => {
+      if (pendingConfirmationCreatedThisTurn) return false;
       if (
         pendingConfirmation
         && await consumePendingConfirmationDurably(
@@ -1310,7 +1431,22 @@ export function registerTaskHandler(
         console.log(`[TaskHandler] Consumed one-time confirmation for "${toolName}".`);
         return true;
       }
-      if (canAutoApproveAction(toolName, args, { actionIntent: routedTaskText })) return true;
+      if (
+        !correctionRequiresFreshConfirmation
+        && canAutoApproveAction(toolName, args, { actionIntent: routedTaskText })
+      ) return true;
+      const exactWriteCorrection = correctionRequiresFreshConfirmation
+        && confirmationResolution.revokedCorrectionBasis?.toolName === 'write_file';
+      if (
+        exactWriteCorrection
+        && (
+          !runtimeOwnedDeterministicRecoveryCall
+          || toolName !== runtimeOwnedDeterministicRecoveryCall.name
+          || !confirmationArgumentsMatch(args, runtimeOwnedDeterministicRecoveryCall.arguments)
+        )
+      ) {
+        throw new Error('Corrected write confirmation did not match the runtime-owned exact proposal');
+      }
       const pending = await recordPendingConfirmationDurably(uid, toolName, args, 'task', {
         domain: taskScope.domain,
         orgId: taskScope.orgId,
@@ -1319,6 +1455,17 @@ export function registerTaskHandler(
         originRequestId: requestId,
         actionIntent: routedTaskText,
       });
+      if (
+        correctionRequiresFreshConfirmation
+        && !pendingConfirmationMatchesExactProposal(
+          pending,
+          toolName,
+          args,
+          { taskId: actionTaskExecution.state?.taskId, originRequestId: requestId },
+        )
+      ) {
+        throw new Error('Corrected action confirmation was not bound to the current task request');
+      }
       pendingConfirmationCreatedThisTurn = pending;
       setConversationActionExecutionStatus(convForHistory.id, uid, 'waiting_confirmation', {
         assistantState: formatPendingConfirmationPrompt(pending),
@@ -1355,7 +1502,6 @@ export function registerTaskHandler(
         },
         errorContext: 'Conversation task status terminal',
       });
-      releaseTask();
       return;
     }
 
@@ -1379,7 +1525,7 @@ export function registerTaskHandler(
         context: {
           ...toolSecurityContext,
           userId: uid,
-          taskId: actionTaskExecution.state?.taskId || requestId,
+          taskId: actionTaskExecution.state?.taskId,
           conversationId: convForHistory.id,
           turnId: requestId,
           requestId,
@@ -1426,7 +1572,10 @@ export function registerTaskHandler(
         const continuation = await runWithTools(
           [
             { role: 'system', content: effectiveSystemPrompt },
-            ...buildConfirmedStepContinuationMessages(confirmedTask, confirmationRecord),
+            ...buildConfirmedStepContinuationMessages(confirmedTask, confirmationRecord, {
+              messageId: taskUserMessageId,
+              text: data.text,
+            }),
           ],
           toolRegistry,
           {
@@ -1494,6 +1643,7 @@ export function registerTaskHandler(
         source: 'task_confirmation',
         flow: { ...turnFlow, routeText: confirmedTask },
       });
+      confirmationRecord.executionOrigin = 'confirmed_action_resume';
       const terminalCommitted = await commitTaskTerminal({
         payload: {
           text: finalConfirmation.text,
@@ -1527,7 +1677,6 @@ export function registerTaskHandler(
       if (terminalCommitted && !finalConfirmation.blocked) {
         persistTaskLearning(finalConfirmation.text, { toolRecords: confirmationRecords, logLabel: 'task confirmation' });
       }
-      releaseTask();
       return;
     }
 
@@ -1624,14 +1773,13 @@ export function registerTaskHandler(
             logLabel: 'task direct cognition',
           });
         }
-        releaseTask();
         return;
       }
 
       // ── Orchestrator: decompose complex tasks into sub-tasks for worker agents ──
       let orchestratedText = '';
       const orchestratedToolRecords: ToolExecutionRecord[] = [];
-      if (!pendingConfirmation && (cognition.intent.category === 'command' || cognition.intent.category === 'code' || cognition.intent.category === 'question')) {
+      if (!pendingConfirmation && !runtimeOwnedDeterministicRecoveryCall && (cognition.intent.category === 'command' || cognition.intent.category === 'code' || cognition.intent.category === 'question')) {
         const orchestrationContext = {
           ...toolSecurityContext,
           userId: uid,
@@ -1821,7 +1969,6 @@ export function registerTaskHandler(
             logLabel: 'task orchestrated',
           });
         }
-        releaseTask();
         return;
       }
 
@@ -1848,7 +1995,7 @@ export function registerTaskHandler(
             }
           }
         },
-        { ...toolSecurityContext, userId: uid, taskId: actionTaskExecution.state?.taskId || requestId, conversationId: convForHistory.id, turnId: requestId, requestId, domain: taskScope.domain, orgId: taskScope.orgId, desktopRelay, requestConfirmation, actionIntent: routedTaskText, routedTaskText, toolPolicy: executionDecision.toolPolicy, modelToolProjection, desktopExecutionTracker, isCancelled: () => taskLease.signal.aborted, llmGetters, source: 'task', supervisedExternalCommits: true },
+        { ...toolSecurityContext, userId: uid, taskId: actionTaskExecution.state?.taskId, taskRevision: actionTaskExecution.state?.revision, conversationId: convForHistory.id, turnId: requestId, requestId, domain: taskScope.domain, orgId: taskScope.orgId, desktopRelay, requestConfirmation, actionIntent: routedTaskText, routedTaskText, ...(runtimeOwnedDeterministicRecoveryCall ? { runtimeOwnedDeterministicRecoveryCall } : {}), toolPolicy: executionDecision.toolPolicy, modelToolProjection, desktopExecutionTracker, isCancelled: () => taskLease.signal.aborted, llmGetters, source: 'task', supervisedExternalCommits: true },
         llmGetters.getOllama,
         llmGetters.getLmStudio,
         llmGetters.getArk,
@@ -1866,9 +2013,10 @@ export function registerTaskHandler(
       let finalTaskToolRecords = attachDesktopReceipt(result.toolCalls);
 
       if (taskLease.signal.aborted) {
+        const cancelledText = CN_TASK_EXECUTION_MESSAGES.cancelled;
         const cancelledResponse = finalizeLumiResponse({
           taskText: data.text,
-          responseText: 'Task cancelled.',
+          responseText: cancelledText,
           toolRecords: finalTaskToolRecords,
           source: 'task',
           flow: turnFlow,
@@ -1879,14 +2027,14 @@ export function registerTaskHandler(
             agentName: personality.name,
             source: 'task',
             finalized: true,
-            blocked: true,
+            blocked: false,
             reason: 'cancelled',
           },
           persistTerminalState: () => {
             cancelConversationActionExecution(
               convForHistory.id,
               uid,
-              'Task cancelled.',
+              cancelledText,
               requestId,
             );
             return persistTaskExecutionWriteback(
@@ -1935,6 +2083,7 @@ export function registerTaskHandler(
         finalization: finalTaskResponse,
         allowToolUse: executionDecision.allowToolUse,
         pendingConfirmation: Boolean(pendingConfirmationCreatedThisTurn),
+        requiresFreshConfirmation: correctionRequiresFreshConfirmation,
         aborted: taskLease.signal.aborted,
         isAborted: () => taskLease.signal.aborted,
         isPendingConfirmation: () => Boolean(pendingConfirmationCreatedThisTurn),
@@ -1976,7 +2125,7 @@ export function registerTaskHandler(
             {
               ...toolSecurityContext,
               userId: uid,
-              taskId: actionTaskExecution.state?.taskId || requestId,
+              taskId: actionTaskExecution.state?.taskId,
               conversationId: convForHistory.id,
               turnId: requestId,
               requestId,
@@ -1986,12 +2135,14 @@ export function registerTaskHandler(
               requestConfirmation,
               actionIntent: routedTaskText,
               routedTaskText,
+              ...(runtimeOwnedDeterministicRecoveryCall ? { runtimeOwnedDeterministicRecoveryCall } : {}),
               toolPolicy: executionDecision.toolPolicy,
               modelToolProjection,
               priorToolRecords,
               desktopExecutionTracker,
               isCancelled: () => taskLease.signal.aborted,
               llmGetters,
+              taskRevision: actionTaskExecution.state?.revision,
               source: 'task_guard_recovery',
               supervisedExternalCommits: true,
             },
@@ -2175,7 +2326,7 @@ export function registerTaskHandler(
 
     } catch (err: any) {
       if (taskLease.signal.aborted || err?.name === 'AbortError') {
-        const cancelledText = 'Task cancelled.';
+        const cancelledText = CN_TASK_EXECUTION_MESSAGES.cancelled;
         const cancellationRecords = cognition?.toolRecords
           || (cognition?.toolRecord ? [cognition.toolRecord] : []);
         await commitTaskTerminal({
@@ -2183,7 +2334,7 @@ export function registerTaskHandler(
             text: cancelledText,
             agentName: personality.name,
             finalized: true,
-            blocked: true,
+            blocked: false,
             reason: 'cancelled',
           },
           persistTerminalState: () => {
@@ -2216,27 +2367,34 @@ export function registerTaskHandler(
         cognition?.intent || { category: 'unknown', confidence: 0, entities: {}, needsLLM: true },
         err,
       );
-      const publicError = sanitizeChatAgentErrorPayload({ code: chatPublicErrorCodeForException(err) });
+      const failureText = CN_VOICE_WORK_MESSAGES.processingFailed;
+      const failureReason = 'task_execution_failed';
       const failureRecords = cognition?.toolRecords
         || (cognition?.toolRecord ? [cognition.toolRecord] : []);
       await commitTaskTerminal({
-        event: 'agent:error',
-        payload: { code: publicError.code },
+        payload: {
+          text: failureText,
+          agentName: personality.name,
+          source: 'task',
+          finalized: true,
+          blocked: true,
+          reason: failureReason,
+        },
         persistTerminalState: () => {
           setConversationActionExecutionStatus(convForHistory.id, uid, 'blocked', {
-            blocker: publicError.message,
-            assistantState: publicError.message,
-            requestId: '',
+            blocker: failureText,
+            assistantState: failureText,
+            requestId,
           });
           return persistTaskExecutionWriteback(
-            publicError.message,
+            failureText,
             failureRecords,
             `${interactionId}_failed`,
-            { blocked: true, reason: publicError.reason },
+            { blocked: true, reason: failureReason },
           );
         },
         persistAssistantMessage: () => {
-          addMessageIdempotent({ userId: uid, agentId: '', conversationId: convForHistory.id, role: 'assistant', content: publicError.message, personality: personality.id, mode: 'task', source: 'task', channel: 'task', domain: taskScope.domain, orgId: taskScope.orgId, toolCalls: failureRecords.length ? failureRecords : undefined, cognitiveIntent: 'task_execution_failed', requestId });
+          addMessageIdempotent({ userId: uid, agentId: '', conversationId: convForHistory.id, role: 'assistant', content: failureText, personality: personality.id, mode: 'task', source: 'task', channel: 'task', domain: taskScope.domain, orgId: taskScope.orgId, toolCalls: failureRecords.length ? failureRecords : undefined, cognitiveIntent: 'task_execution_failed', requestId });
         },
         publishAfter: executionWriteback => {
           publishTaskExecutionWriteback(executionWriteback);
@@ -2244,8 +2402,71 @@ export function registerTaskHandler(
         },
         errorContext: 'Failed task terminal',
       });
+    }
+    } catch (lifecycleError: any) {
+      const aborted = taskAbortController.signal.aborted || lifecycleError?.name === 'AbortError';
+      const terminalText = aborted
+        ? CN_TASK_EXECUTION_MESSAGES.cancelled
+        : CN_VOICE_WORK_MESSAGES.processingFailed;
+      console.error('[TaskHandler] post_binding_lifecycle_failed', {
+        code: aborted ? 'TASK_FOREGROUND_ABORTED' : 'TASK_FOREGROUND_EXECUTION_FAILED',
+        identity: taskForegroundRequestIdentity,
+        errorName: String(lifecycleError?.name || 'Error'),
+        errorMessage: String(lifecycleError?.message || 'Unknown Task lifecycle error'),
+      });
+      await commitTaskTerminal({
+        payload: {
+          text: terminalText,
+          agentName: personality.name,
+          source: 'task',
+          finalized: true,
+          blocked: !aborted,
+          reason: aborted ? 'cancelled' : 'task_execution_failed',
+        },
+        persistTerminalState: () => aborted
+          ? cancelConversationActionExecution(
+              convForHistory.id,
+              uid,
+              terminalText,
+              requestId,
+            )
+          : setConversationActionExecutionStatus(convForHistory.id, uid, 'blocked', {
+              blocker: terminalText,
+              assistantState: terminalText,
+              requestId,
+            }),
+        persistAssistantMessage: () => {
+          addMessageIdempotent({
+            userId: uid,
+            agentId: '',
+            conversationId: convForHistory.id,
+            role: 'assistant',
+            content: terminalText,
+            personality: personality.id,
+            mode: 'task',
+            source: 'task',
+            channel: 'task',
+            domain: taskScope.domain,
+            orgId: taskScope.orgId,
+            cognitiveIntent: aborted ? 'task_cancelled' : 'task_execution_failed',
+            llmWasCalled: false,
+            requestId,
+          });
+        },
+        publishAfter: () => {
+          io.to(executionRoom).emit('chat:conversation_updated', {
+            conversationId: convForHistory.id,
+            agentId: '',
+            source: 'task',
+            requestId,
+          });
+        },
+        errorContext: aborted
+          ? 'Post-binding cancellation terminal'
+          : 'Post-binding lifecycle failure terminal',
+      });
     } finally {
-      releaseTask();
+      await releaseTask();
     }
   });
 }

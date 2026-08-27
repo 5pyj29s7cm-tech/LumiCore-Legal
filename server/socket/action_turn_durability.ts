@@ -2,6 +2,8 @@ import {
   classifyConversationActionFollowupIntent,
   type ConversationActionContinuationState,
 } from '../cognition/action_continuation';
+import { resolveActiveTaskMessageRelation } from '../cognition/task_concurrency';
+import { classifyTaskCapsuleTurn } from '../conversation/task_capsule';
 import {
   clearPendingConfirmationDurably,
   formatPendingConfirmationPrompt,
@@ -21,9 +23,16 @@ export interface AcceptedUserTurnAdmission<T> {
 
 export interface AcceptedTurnConfirmationResolution {
   pending: PendingToolConfirmation | null;
+  /**
+   * Runtime-only, integrity-checked exact action that a target correction just
+   * revoked. It may seed a narrowly validated corrected call, but it is never
+   * itself reusable or exposed to the model/client.
+   */
+  revokedCorrectionBasis: PendingToolConfirmation | null;
   scope: PendingConfirmationScope;
   prompt: string;
   cleared: boolean;
+  correctionRequiresFreshConfirmation: boolean;
 }
 
 /**
@@ -76,15 +85,41 @@ export async function resolveAcceptedTurnConfirmation(input: {
   return runAfterAcceptedUserTurnAdmission(input.admission, async () => {
     const explicitConfirmation = isExplicitConfirmationReply(input.userText);
     const cancellation = isConfirmationCancellation(input.userText);
+    const followupIntent = classifyConversationActionFollowupIntent(input.userText, input.actionState);
     const unrelated = !explicitConfirmation
       && !cancellation
-      && classifyConversationActionFollowupIntent(input.userText, input.actionState) === 'none';
+      && followupIntent === 'none';
+    const taskRelation = resolveActiveTaskMessageRelation(input.userText, input.actionState);
+    const taskCapsuleTurn = classifyTaskCapsuleTurn(input.userText, input.actionState);
+    const correctionRequiresFreshConfirmation = Boolean(
+      (
+        (
+          taskRelation.feedback === 'correction'
+          && ['active_task', 'previous_task'].includes(taskRelation.binding)
+        )
+        || taskCapsuleTurn === 'target_correction'
+      )
+      && input.actionState?.status === 'waiting_confirmation'
+      && input.taskScope.taskId,
+    );
     let cleared = false;
+    let revokedCorrectionBasis: PendingToolConfirmation | null = null;
 
     if (cancellation) {
       const clearedTask = await clearPendingConfirmationDurably(input.userId, input.taskScope);
       const clearedTaskless = await clearPendingConfirmationDurably(input.userId, input.channelScope);
       cleared = clearedTask || clearedTaskless;
+    } else if (correctionRequiresFreshConfirmation) {
+      // A correction invalidates the exact action that was awaiting approval.
+      // Revoke it before replanning so a later short "confirm" can never
+      // execute the rejected target. The corrected action must establish its
+      // own one-time confirmation boundary.
+      const existing = await getPendingConfirmationDurably(input.userId, input.taskScope);
+      if (existing) {
+        cleared = await clearPendingConfirmationDurably(input.userId, input.taskScope);
+        if (!cleared) throw new Error('Pending confirmation correction could not be revoked');
+        revokedCorrectionBasis = existing;
+      }
     } else if (unrelated) {
       // A taskless grant is a one-turn offer. A new unrelated instruction
       // revokes it, while exact task-bound grants remain resumable.
@@ -98,9 +133,11 @@ export async function resolveAcceptedTurnConfirmation(input: {
     const scope = pending && !pending.taskId ? input.channelScope : input.taskScope;
     return {
       pending,
+      revokedCorrectionBasis,
       scope,
       prompt: pending ? formatPendingConfirmationPrompt(pending) : '',
       cleared,
+      correctionRequiresFreshConfirmation,
     };
   });
 }

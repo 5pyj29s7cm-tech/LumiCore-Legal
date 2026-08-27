@@ -1,14 +1,21 @@
 import { Router } from "express";
-import { requireAuth, optionalAuth } from "../middleware/auth";
-import { readDB, writeDB } from "../../db_layer";
+import { requireAuth } from "../middleware/auth";
+import { readDB } from "../../db_layer";
 import {
   getUserConversations,
   getMessages,
   closeConversation,
   getActiveConversation,
   startNewConversation,
+  startIsolatedConversation,
   activateConversation,
+  deleteConversationData,
 } from "../conversation/manager";
+import {
+  buildTransportNeutralConfirmationScope,
+  revokePendingConfirmationChannelDurably,
+} from "../tools/pending_confirmation";
+import { ensurePendingConfirmationPersistenceInitialized } from "../tools/pending_confirmation_repository";
 
 type ConversationScope = { domain: 'personal' | 'work'; orgId: string };
 
@@ -67,7 +74,10 @@ export function mountConversationRoutes(router: Router, _jwtSecret: string) {
       return res.status(403).json({ error: 'A connected organization is required for a work conversation' });
     }
     const agentId = String(req.body?.agentId || req.query?.agentId || 'lumi').trim() || 'lumi';
-    const conversation = startNewConversation(req.user!.uid, agentId, scope.domain, scope.orgId);
+    const isolated = req.body?.activation === 'isolated';
+    const conversation = isolated
+      ? startIsolatedConversation(req.user!.uid, agentId, scope.domain, scope.orgId)
+      : startNewConversation(req.user!.uid, agentId, scope.domain, scope.orgId);
     res.status(201).json({ conversation });
   });
 
@@ -167,21 +177,42 @@ export function mountConversationRoutes(router: Router, _jwtSecret: string) {
     res.json({ success: true, conversation: closed });
   });
 
-  router.delete("/conversations/:id", requireAuth, (req, res) => {
-    const db = readDB();
-    if (!db.conversations) return res.status(404).json({ error: "Not found" });
-    const conv = db.conversations.find((c: any) => c.id === req.params.id);
-    if (!conv) return res.status(404).json({ error: "Not found" });
-    // Ownership + domain check
-    if (conv.userId !== req.user!.uid) return res.status(403).json({ error: "Unauthorized" });
+  router.delete("/conversations/:id", requireAuth, async (req, res) => {
     const scope = getConversationScope(req);
-    if (!conversationMatchesScope(conv, scope)) return res.status(403).json({ error: "Unauthorized" });
-    const idx = db.conversations.findIndex((c: any) => c.id === req.params.id);
-    db.conversations.splice(idx, 1);
-    if (db.interactions) {
-      db.interactions = db.interactions.filter((i: any) => i.conversationId !== req.params.id);
+    const db = readDB();
+    const conversation = (db.conversations || []).find((candidate: any) => (
+      candidate.id === req.params.id
+      && candidate.userId === req.user!.uid
+      && conversationMatchesScope(candidate, scope)
+    ));
+    if (!conversation) return res.status(404).json({ error: "Not found" });
+    let pendingConfirmationsCancelled = 0;
+    try {
+      await ensurePendingConfirmationPersistenceInitialized();
+      const channelScope = buildTransportNeutralConfirmationScope({
+        domain: scope.domain,
+        orgId: scope.orgId,
+        conversationId: conversation.id,
+      });
+      pendingConfirmationsCancelled = await revokePendingConfirmationChannelDurably(
+        req.user!.uid,
+        {
+          domain: scope.domain,
+          orgId: scope.orgId,
+          channelId: String(channelScope.channelId || ''),
+        },
+      );
+    } catch (error) {
+      console.error('[Conversations] Failed to revoke pending confirmations before deletion:', error);
+      return res.status(503).json({ error: 'Conversation confirmation cleanup is unavailable' });
     }
-    writeDB(db);
-    res.json({ success: true });
+    const deleted = deleteConversationData(
+      req.params.id,
+      req.user!.uid,
+      scope.domain,
+      scope.orgId,
+    );
+    if (!deleted) return res.status(404).json({ error: "Not found" });
+    res.json({ success: true, deleted, pendingConfirmationsCancelled });
   });
 }

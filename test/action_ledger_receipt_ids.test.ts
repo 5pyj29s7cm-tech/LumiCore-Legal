@@ -4,14 +4,18 @@ import {
   archiveBoundConversationActionReceipts,
   appendConversationActionReceipts,
   conversationActionStateFromTask,
+  finalizeConversationActionTask,
   repairContradictoryConversationActionReceipts,
   repairTerminalConversationActionTaskLeases,
+  settleBackgroundConversationActionTask,
+  syncConversationActionTaskLedger,
   type ConversationActionTaskRow,
 } from '../server/conversation/action_ledger';
 import {
   buildConversationActionContinuationState,
   normalizeConversationActionState,
 } from '../server/cognition/action_continuation';
+import { updateTaskCapsuleV1 } from '../server/conversation/task_capsule';
 
 function task(id: string): ConversationActionTaskRow {
   return {
@@ -35,6 +39,16 @@ function task(id: string): ConversationActionTaskRow {
     createdAt: '2026-08-16T00:00:00.000Z',
     updatedAt: '2026-08-16T00:00:00.000Z',
     completedAt: '',
+  };
+}
+
+function activeTurn(taskId: string, requestId: string) {
+  return {
+    conversationId: 'conversation-1',
+    userId: 'user-1',
+    requestId,
+    taskId,
+    status: 'leased',
   };
 }
 
@@ -83,6 +97,99 @@ describe('conversation action receipt ids', () => {
     };
   }
 
+  it('writes three corrected capsule targets back to one durable task row', () => {
+    const taskId = 'task-corrected-target';
+    const root = 'C:\\formal-e2e';
+    const targets = [
+      `${root}\\target-0.txt`,
+      `${root}\\target-1.txt`,
+      `${root}\\target-2.txt`,
+      `${root}\\target-final.txt`,
+    ];
+    const goal = 'Create a file and wait for confirmation.';
+    const conversation: any = {
+      id: 'conversation-1',
+      userId: 'user-1',
+      domain: 'personal',
+      orgId: '',
+    };
+    const db: any = {
+      conversations: [conversation],
+      interactions: [],
+      conversationActionTasks: [],
+      conversationActionReceipts: [],
+    };
+    let state = normalizeConversationActionState({
+      version: 2,
+      taskId,
+      status: 'waiting_confirmation',
+      receipts: [],
+      revision: 1,
+      goal,
+      latestInstruction: goal,
+      latestInstructionRef: 'message-create',
+      appTarget: targets[0],
+      sourcePaths: [],
+      latestBlocker: '',
+      unfinished: true,
+      evidenceTools: [],
+      assistantState: 'Waiting for confirmation.',
+      toolSummaries: [],
+      updatedAt: '2026-08-27T18:43:44.000Z',
+    })!;
+    conversation.actionContinuationState = state;
+
+    const initial = syncConversationActionTaskLedger(db, {
+      conversation,
+      state,
+      userText: goal,
+      now: state.updatedAt,
+    });
+    expect(initial).toMatchObject({ id: taskId, target: targets[0] });
+
+    for (let index = 1; index < targets.length; index += 1) {
+      const instruction = `Replace ${targets[index - 1]} with ${targets[index]}.`;
+      const eventRef = `message-correction-${index}`;
+      const updatedAt = `2026-08-27T18:44:0${index}.000Z`;
+      const correctedCapsule = updateTaskCapsuleV1(state.taskCapsule!, {
+        instruction,
+        correction: {
+          text: instruction,
+          path: targets[index],
+          rejectCurrentTarget: true,
+          reason: 'The user explicitly replaced the prior target.',
+          observedAt: updatedAt,
+          eventRef,
+        },
+        updatedAt,
+      });
+      state = normalizeConversationActionState({
+        ...state,
+        status: 'waiting_confirmation',
+        revision: state.revision + 1,
+        latestInstruction: instruction,
+        latestInstructionRef: eventRef,
+        // Reproduce hydration of the stale top-level target. The capsule owns
+        // the replacement and must advance the row despite this old fallback.
+        appTarget: targets[0],
+        taskCapsule: correctedCapsule,
+        updatedAt,
+      })!;
+      conversation.actionContinuationState = state;
+
+      const corrected = syncConversationActionTaskLedger(db, {
+        conversation,
+        state,
+        userText: instruction,
+        now: updatedAt,
+      });
+
+      expect(corrected).toBe(initial);
+      expect(corrected?.target).toBe(targets[index]);
+      expect(db.conversationActionTasks).toHaveLength(1);
+    }
+  });
+
   it('allocates a new durable row id when one tool record is associated with another task', () => {
     const db: any = { conversationActionTasks: [], conversationActionReceipts: [] };
     const record = { id: 'tool-call-1', name: 'write_file', arguments: { path: 'result.md' }, result: 'ok' };
@@ -93,6 +200,195 @@ describe('conversation action receipt ids', () => {
     expect(db.conversationActionReceipts).toHaveLength(2);
     expect(new Set(db.conversationActionReceipts.map((item: any) => item.id)).size).toBe(2);
     expect(db.conversationActionReceipts[0].id).toBe('tool-call-1');
+  });
+
+  it('persists the exact model routing receipt that selected a tool call', () => {
+    const db: any = { conversationActionTasks: [], conversationActionReceipts: [] };
+    appendConversationActionReceipts(db, {
+      task: task('task-model-bound'),
+      requestId: 'request-model-bound',
+      records: [{
+        id: 'tool-model-bound',
+        name: 'read_file',
+        arguments: { path: 'result.md' },
+        result: 'verified',
+        modelRoutingReceiptId: 'routing-model-bound',
+        executionOrigin: 'model_selected',
+      }],
+    });
+
+    expect(db.conversationActionReceipts[0]).toMatchObject({
+      requestId: 'request-model-bound',
+      modelRoutingReceiptId: 'routing-model-bound',
+      executionOrigin: 'model_selected',
+    });
+  });
+
+  it('keeps persistence_unknown quarantined across ordinary task sync and finalization', () => {
+    const actionTask = task('task-persistence-unknown');
+    const marker = {
+      status: 'persistence_unknown' as const,
+      requestId: 'request-persistence-unknown',
+      quarantinedAt: '2026-08-16T00:00:01.000Z',
+    };
+    const quarantinedState = normalizeConversationActionState({
+      version: 2,
+      taskId: actionTask.id,
+      goal: actionTask.goal,
+      latestInstruction: actionTask.goal,
+      status: 'blocked',
+      unfinished: true,
+      latestBlocker: 'persistence_unknown: terminal durability failed',
+      sourcePaths: [],
+      evidenceTools: [],
+      assistantState: '',
+      toolSummaries: [],
+      receipts: [],
+      terminalPersistence: marker,
+      revision: 2,
+      updatedAt: marker.quarantinedAt,
+    })!;
+    actionTask.status = 'blocked';
+    actionTask.blocker = quarantinedState.latestBlocker;
+    actionTask.revision = quarantinedState.revision;
+    actionTask.updatedAt = marker.quarantinedAt;
+    actionTask.context = JSON.stringify({
+      terminalPersistence: marker,
+      taskFinalization: {
+        outcome: 'persistence_unknown',
+        requestId: marker.requestId,
+        finalizedAt: marker.quarantinedAt,
+      },
+      actionState: quarantinedState,
+    });
+    const conversation: any = {
+      id: actionTask.conversationId,
+      userId: actionTask.userId,
+      domain: actionTask.domain,
+      orgId: actionTask.orgId,
+      actionContinuationState: quarantinedState,
+    };
+    const db: any = {
+      conversations: [conversation],
+      conversationActionTasks: [actionTask],
+      conversationActionReceipts: [],
+    };
+    const unsafeCompleted = normalizeConversationActionState({
+      ...quarantinedState,
+      status: 'completed',
+      unfinished: false,
+      terminalPersistence: undefined,
+      completionSource: 'tool_receipt',
+      revision: 3,
+      updatedAt: '2026-08-16T00:00:02.000Z',
+    })!;
+    const unsafeEchoedMarkerCompleted = normalizeConversationActionState({
+      ...unsafeCompleted,
+      terminalPersistence: marker,
+    })!;
+
+    syncConversationActionTaskLedger(db, {
+      conversation,
+      state: unsafeEchoedMarkerCompleted,
+      now: unsafeEchoedMarkerCompleted.updatedAt,
+    });
+    expect(actionTask).toMatchObject({ status: 'blocked', completedAt: '' });
+
+    syncConversationActionTaskLedger(db, {
+      conversation,
+      state: unsafeCompleted,
+      now: unsafeCompleted.updatedAt,
+    });
+    const finalized = finalizeConversationActionTask(db, {
+      conversation,
+      state: unsafeCompleted,
+      outcome: 'completed',
+      requestId: marker.requestId,
+      completionSource: 'tool_receipt',
+      now: '2026-08-16T00:00:03.000Z',
+    });
+
+    expect(finalized?.state).toMatchObject({
+      status: 'blocked',
+      unfinished: true,
+      terminalPersistence: marker,
+    });
+    expect(actionTask).toMatchObject({ status: 'blocked', completedAt: '' });
+    expect(JSON.parse(actionTask.context)).toMatchObject({
+      terminalPersistence: marker,
+      taskFinalization: { outcome: 'persistence_unknown', requestId: marker.requestId },
+      actionState: { status: 'blocked', terminalPersistence: marker },
+    });
+    expect(conversation.actionContinuationState).toMatchObject({
+      status: 'blocked',
+      terminalPersistence: marker,
+    });
+  });
+
+  it('settles a background-owned action through the common task finalizer', () => {
+    const actionTask = task('task-background-finalization');
+    actionTask.activeRequestId = 'request-background-finalization';
+    actionTask.context = JSON.stringify({
+      source: 'command_center_plan',
+      actionState: normalizeConversationActionState({
+        version: 2,
+        taskId: actionTask.id,
+        goal: actionTask.goal,
+        latestInstruction: actionTask.goal,
+        status: 'executing',
+        unfinished: true,
+        latestBlocker: '',
+        activeRequestId: actionTask.activeRequestId,
+        sourcePaths: [],
+        evidenceTools: [],
+        assistantState: '',
+        toolSummaries: [],
+        receipts: [],
+        revision: 1,
+        updatedAt: actionTask.updatedAt,
+      }),
+    });
+    const db: any = {
+      conversationActionTasks: [actionTask],
+      conversationActionReceipts: [],
+    };
+
+    settleBackgroundConversationActionTask(db, {
+      taskId: actionTask.id,
+      userId: actionTask.userId,
+      requestId: actionTask.activeRequestId,
+      status: 'completed',
+      now: '2026-08-16T00:00:03.000Z',
+      records: [{
+        id: 'background-finalizer-receipt',
+        taskId: actionTask.id,
+        requestId: actionTask.activeRequestId,
+        name: 'background_orchestration_finalizer',
+        arguments: {},
+        result: JSON.stringify({ status: 'verified', verified: true }),
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'terminal_receipt',
+          reason: 'Background work reached verified completion.',
+        },
+      }],
+    });
+
+    expect(actionTask).toMatchObject({
+      status: 'completed',
+      activeRequestId: '',
+      completionSource: 'tool_receipt',
+      completedAt: '2026-08-16T00:00:03.000Z',
+    });
+    expect(JSON.parse(actionTask.context)).toMatchObject({
+      source: 'command_center_plan',
+      taskFinalization: {
+        outcome: 'completed',
+        requestId: 'request-background-finalization',
+        finalizedAt: '2026-08-16T00:00:03.000Z',
+      },
+      actionState: { status: 'completed', unfinished: false },
+    });
   });
 
   it('does not duplicate one logical receipt when the same task is revisited by another request', () => {
@@ -139,7 +435,11 @@ describe('conversation action receipt ids', () => {
         updatedAt: waitingTask.updatedAt,
       },
     });
-    const db: any = { conversationActionTasks: [waitingTask], conversationActionReceipts: [] };
+    const db: any = {
+      conversationActionTasks: [waitingTask],
+      conversationActionReceipts: [],
+      conversationActionTurns: [activeTurn(waitingTask.id, waitingTask.activeRequestId)],
+    };
 
     archiveBoundConversationActionReceipts(db, {
       conversationId: waitingTask.conversationId,
@@ -358,6 +658,182 @@ describe('conversation action receipt ids', () => {
       status: 'failed',
       unfinished: false,
     });
+  });
+
+  it('archives a late success from R1 without changing the same-task R2 owner or live pointer', () => {
+    const successorRequestId = 'request-successor-r2';
+    const historicalRequestId = 'request-historical-r1';
+    const actionTask = task('task-shared-successor');
+    actionTask.goal = 'remember this task state';
+    actionTask.activeRequestId = successorRequestId;
+    actionTask.context = JSON.stringify({
+      source: 'foreground',
+      actionState: {
+        version: 2,
+        taskId: actionTask.id,
+        status: 'executing',
+        receipts: [],
+        revision: 4,
+        goal: actionTask.goal,
+        latestInstruction: 'continue with the corrected target',
+        unfinished: true,
+        latestBlocker: '',
+        activeRequestId: successorRequestId,
+        sourcePaths: [],
+        evidenceTools: [],
+        assistantState: '',
+        toolSummaries: [],
+        updatedAt: '2026-08-17T00:02:00.000Z',
+      },
+    });
+    const liveState = normalizeConversationActionState(JSON.parse(actionTask.context).actionState)!;
+    const conversation: any = {
+      id: actionTask.conversationId,
+      userId: actionTask.userId,
+      actionContinuationState: liveState,
+      pendingActionContinuation: {
+        userText: 'continue with the corrected target',
+        messageId: 'message-r2',
+        requestId: successorRequestId,
+        updatedAt: '2026-08-17T00:02:00.000Z',
+      },
+    };
+    const db: any = {
+      conversations: [conversation],
+      conversationActionTasks: [actionTask],
+      conversationActionReceipts: [],
+      conversationActionTurns: [
+        { ...activeTurn(actionTask.id, historicalRequestId), status: 'cancelled' },
+        activeTurn(actionTask.id, successorRequestId),
+      ],
+    };
+    const beforeTask = JSON.parse(JSON.stringify(actionTask));
+    const beforeLive = JSON.parse(JSON.stringify(conversation.actionContinuationState));
+    const beforePending = JSON.parse(JSON.stringify(conversation.pendingActionContinuation));
+
+    const result = archiveBoundConversationActionReceipts(db, {
+      conversationId: actionTask.conversationId,
+      userId: actionTask.userId,
+      records: [{
+        id: 'late-r1-success',
+        taskId: actionTask.id,
+        requestId: historicalRequestId,
+        name: 'write_file',
+        arguments: { path: 'obsolete-target.txt' },
+        result: JSON.stringify({ ok: true, status: 'completed' }),
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'artifact',
+          reason: 'historical receipt',
+        },
+      }],
+      now: '2026-08-17T00:03:00.000Z',
+    });
+
+    expect(result).toMatchObject({ archived: 1, taskIds: [actionTask.id] });
+    expect(db.conversationActionReceipts).toHaveLength(1);
+    expect(actionTask).toEqual(beforeTask);
+    expect(conversation.actionContinuationState).toEqual(beforeLive);
+    expect(conversation.pendingActionContinuation).toEqual(beforePending);
+    expect(db.conversationActionTurns[1]).toMatchObject({
+      requestId: successorRequestId,
+      taskId: actionTask.id,
+      status: 'leased',
+    });
+  });
+
+  it.each([
+    { label: 'stale requestless pair', authorityUserId: 'message-old', assistantMode: '' },
+    { label: 'proactive requestless pair', authorityUserId: 'message-current', assistantMode: 'proactive' },
+  ])('keeps a $label audit-only even when its receipt verifies success', ({
+    authorityUserId,
+    assistantMode,
+  }) => {
+    const actionTask = task(`task-requestless-${authorityUserId}-${assistantMode || 'stale'}`);
+    actionTask.context = JSON.stringify({
+      actionState: {
+        version: 2,
+        taskId: actionTask.id,
+        status: 'executing',
+        receipts: [],
+        revision: 1,
+        goal: actionTask.goal,
+        latestInstruction: actionTask.goal,
+        unfinished: true,
+        latestBlocker: '',
+        sourcePaths: [],
+        evidenceTools: [],
+        assistantState: '',
+        toolSummaries: [],
+        updatedAt: actionTask.updatedAt,
+      },
+    });
+    const conversation: any = {
+      id: actionTask.conversationId,
+      userId: actionTask.userId,
+      actionContinuationState: JSON.parse(actionTask.context).actionState,
+      pendingActionContinuation: {
+        userText: 'current requestless work',
+        messageId: 'message-current',
+        updatedAt: actionTask.updatedAt,
+      },
+    };
+    const assistantId = `assistant-${authorityUserId}-${assistantMode || 'stale'}`;
+    const db: any = {
+      conversations: [conversation],
+      interactions: [
+        {
+          id: 'message-current',
+          conversationId: actionTask.conversationId,
+          userId: actionTask.userId,
+          role: 'user',
+        },
+        {
+          id: 'message-old',
+          conversationId: actionTask.conversationId,
+          userId: actionTask.userId,
+          role: 'user',
+        },
+        {
+          id: assistantId,
+          conversationId: actionTask.conversationId,
+          userId: actionTask.userId,
+          role: 'assistant',
+          mode: assistantMode,
+        },
+      ],
+      conversationActionTasks: [actionTask],
+      conversationActionReceipts: [],
+      conversationActionTurns: [],
+    };
+    const beforeTask = JSON.parse(JSON.stringify(actionTask));
+    const beforeLive = JSON.parse(JSON.stringify(conversation.actionContinuationState));
+
+    const result = archiveBoundConversationActionReceipts(db, {
+      conversationId: actionTask.conversationId,
+      userId: actionTask.userId,
+      records: [{
+        id: `receipt-${assistantId}`,
+        taskId: actionTask.id,
+        name: 'write_file',
+        arguments: { path: 'requestless-result.txt' },
+        result: JSON.stringify({ ok: true, status: 'completed' }),
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'artifact',
+          reason: 'requestless success must still prove current pairing',
+        },
+      }],
+      currentPairingAuthority: {
+        userMessageId: authorityUserId,
+        assistantMessageId: assistantId,
+      },
+    });
+
+    expect(result).toMatchObject({ archived: 1, adjudicatedTaskIds: [] });
+    expect(actionTask).toEqual(beforeTask);
+    expect(conversation.actionContinuationState).toEqual(beforeLive);
+    expect(conversation.pendingActionContinuation.messageId).toBe('message-current');
   });
 
   it('repairs historical terminal task leases without changing completion ordering', () => {

@@ -12,6 +12,11 @@ import {
 import type { ExecutionGuardRecoveryFinalization } from '../server/cognition/execution_guard_recovery';
 import type { ToolExecutionRecord } from '../server/tools/types';
 import { sanitizeToolRecordsForPersistence } from '../server/cognition/user_output_protection';
+import {
+  clearAllPendingConfirmationsForTests,
+  formatPendingConfirmationRequest,
+  recordPendingConfirmation,
+} from '../server/tools/pending_confirmation';
 
 function record(patch: Partial<ToolExecutionRecord> = {}): ToolExecutionRecord {
   return {
@@ -364,6 +369,55 @@ describe('execution guard recovery', () => {
     expect(String(tasklist.text).length).toBeLessThan(300);
   });
 
+  it('preserves only the exact safe pending-confirmation envelope with path fields', () => {
+    clearAllPendingConfirmationsForTests();
+    try {
+      const pending = recordPendingConfirmation(
+        'trusted-confirmation-output',
+        'web_login',
+        {
+          path: 'C:\\isolated\\lumi-task-regression\\account.json',
+          username: 'owner',
+          password: 'must-never-leak',
+          clientSecret: 'also-must-never-leak',
+        },
+        'chat',
+        { actionIntent: 'Log in with the isolated account' },
+      );
+      const confirmationRequest = formatPendingConfirmationRequest(pending);
+      expect(confirmationRequest).toContain('C:\\isolated\\lumi-task-regression\\account.json');
+      expect(confirmationRequest).toContain('[redacted]');
+      expect(confirmationRequest).not.toContain('must-never-leak');
+      expect(confirmationRequest).not.toContain('also-must-never-leak');
+
+      const trusted = sanitizeExecutionResponseForDelivery({
+        text: confirmationRequest,
+        finalized: true,
+        blocked: false,
+        reason: 'waiting_confirmation',
+      }, {
+        task: 'Log in with the isolated account',
+        trustedConfirmationRequestText: confirmationRequest,
+      });
+      expect(trusted.text).toBe(confirmationRequest);
+      expect(trusted.text).toContain('lumi-task-regression');
+      expect(trusted.reason).toBe('waiting_confirmation');
+      expect(JSON.stringify(trusted)).not.toContain('must-never-leak');
+      expect(JSON.stringify(trusted)).not.toContain('also-must-never-leak');
+
+      const untrusted = sanitizeExecutionResponseForDelivery({
+        text: confirmationRequest,
+        finalized: true,
+        blocked: false,
+        reason: 'waiting_confirmation',
+      }, { task: 'Log in with the isolated account' });
+      expect(untrusted.text).not.toBe(confirmationRequest);
+      expect(untrusted.text).not.toContain('C:\\isolated\\account.json');
+    } finally {
+      clearAllPendingConfirmationsForTests();
+    }
+  });
+
   it('persists verified receipt facts without storing screenshot or oversized raw payloads', () => {
     const records = sanitizeToolRecordsForPersistence([record({
       name: 'desktop_capture_screen',
@@ -582,7 +636,7 @@ describe('execution guard recovery', () => {
 
   it('preserves a confirmation request created during recovery even if the provider then fails', async () => {
     let waitingForConfirmation = false;
-    const recovered = await recoverBlockedExecutionOnce({
+    const recovered = await recoverBlockedExecutionOnce<ExecutionGuardRecoveryFinalization>({
       task: 'send the message',
       responseText: 'I will send it.',
       finalization: {
@@ -608,6 +662,60 @@ describe('execution guard recovery', () => {
       responseText: 'Please confirm the exact action.',
       finalization: { blocked: false, reason: 'waiting_confirmation' },
     });
+  });
+
+  it('self-recovers a missing fresh correction confirmation even when the model draft looked unblocked', async () => {
+    let waitingForConfirmation = false;
+    let attempts = 0;
+    const recovered = await recoverBlockedExecutionOnce<ExecutionGuardRecoveryFinalization>({
+      task: '最后一次纠正目标，内容不变；等待我的确认。',
+      responseText: '目标已经更新，请确认。',
+      finalization: {
+        text: '目标已经更新，请确认。',
+        blocked: false,
+      },
+      allowToolUse: true,
+      pendingConfirmation: false,
+      requiresFreshConfirmation: true,
+      toolRecords: [],
+      isPendingConfirmation: () => waitingForConfirmation,
+      attempt: async () => {
+        attempts += 1;
+        waitingForConfirmation = true;
+        return { text: '新的精确操作正在等待确认。', toolRecords: [] };
+      },
+      finalize: text => ({
+        text,
+        blocked: false,
+        reason: waitingForConfirmation ? 'waiting_confirmation' : undefined,
+      }),
+    });
+
+    expect(attempts).toBe(1);
+    expect(recovered).toMatchObject({
+      attempted: true,
+      recoveryFailed: false,
+      finalization: { blocked: false, reason: 'waiting_confirmation' },
+    });
+  });
+
+  it('never reports an unrecorded fresh confirmation boundary as unblocked', async () => {
+    const recovered = await recoverBlockedExecutionOnce<ExecutionGuardRecoveryFinalization>({
+      task: '最后一次纠正目标，内容不变；等待我的确认。',
+      responseText: '请确认。',
+      finalization: { text: '请确认。', blocked: false },
+      allowToolUse: true,
+      requiresFreshConfirmation: true,
+      toolRecords: [],
+      isPendingConfirmation: () => false,
+      attempt: async () => ({ text: '请确认。', toolRecords: [] }),
+      finalize: text => ({ text, blocked: false }),
+    });
+
+    expect(recovered.attempted).toBe(true);
+    expect(recovered.recoveryFailed).toBe(true);
+    expect(recovered.finalization.blocked).toBe(true);
+    expect(recovered.finalization.reason).toBe('execution_recovery_incomplete');
   });
 
   it('propagates cancellation instead of turning it into a recovery blocker', async () => {
@@ -640,6 +748,7 @@ describe('execution guard recovery', () => {
     for (const source of [chatSource, taskSource, voiceSource]) {
       expect(source).toContain('await recoverBlockedExecutionOnce({');
       expect(source).toContain('pendingConfirmation: Boolean(pendingConfirmationCreatedThisTurn)');
+      expect(source).toContain('requiresFreshConfirmation: correctionRequiresFreshConfirmation');
       expect(source).toContain('priorToolRecords,');
     }
     expect(chatSource).toContain('...normalTurnMessages');
@@ -650,7 +759,14 @@ describe('execution guard recovery', () => {
     expect(chatSource).not.toContain('const guardRecovery = decideExecutionGuardRecovery');
     expect(taskSource).toContain("source: 'task_guard_recovery'");
     expect(taskSource).toContain('normalizeTaskHistory(recentMsgs)');
+    expect(taskSource).toContain('if (!pendingConfirmation && !runtimeOwnedDeterministicRecoveryCall &&');
+    expect(chatSource).toContain('if (!responseText && !runtimeOwnedDeterministicRecoveryCall && legacyDelegationHint.shouldDelegate)');
     expect(voiceSource).toContain("source: 'voice_guard_recovery'");
     expect(voiceSource).toContain('isAborted: () => !isCurrentTurn()');
+
+    for (const source of [chatSource, taskSource, voiceSource]) {
+      expect(source).toMatch(/correctionRequiresFreshConfirmation\s+&& !pendingConfirmationMatchesExactProposal\(/);
+      expect(source).toContain("throw new Error('Corrected action confirmation was not bound to the current task request')");
+    }
   });
 });

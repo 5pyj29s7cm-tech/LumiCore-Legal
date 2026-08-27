@@ -137,9 +137,27 @@ export function buildTransportNeutralConfirmationScope(input: {
 const pendingById = new Map<string, PendingToolConfirmation>();
 const persistedRevisionById = new Map<string, number>();
 const revocationQuarantineIds = new Set<string>();
+const revokedChannelKeys = new Set<string>();
 let persistenceAdapter: PendingConfirmationPersistenceAdapter | null = null;
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 const SECRET_KEY_RE = /password|passkey|secret|token|api.?key|credential|otp|captcha|verification.?code/i;
+
+export type PendingConfirmationChannelScope = Required<Pick<
+  PendingConfirmationScope,
+  'domain' | 'orgId' | 'channelId'
+>>;
+
+function confirmationChannelKey(
+  userId: string,
+  scope: Pick<PendingConfirmationScope, 'domain' | 'orgId' | 'channelId'>,
+): string {
+  return [
+    String(userId || '').trim(),
+    String(scope.domain || ''),
+    String(scope.orgId || ''),
+    String(scope.channelId || '').trim(),
+  ].join('\0');
+}
 
 function stableValue(value: any): any {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -172,6 +190,38 @@ function confirmationPayloadDigest(args: Record<string, any>): string {
   // selective payload projection allowed two materially different patches to
   // share the same user-visible digest.
   return crypto.createHash('sha256').update(JSON.stringify(stableValue(args || {}))).digest('hex');
+}
+
+/** Compare exact tool arguments without depending on object key order. */
+export function confirmationArgumentsMatch(
+  left: Record<string, any>,
+  right: Record<string, any>,
+): boolean {
+  return argsHash(left || {}) === argsHash(right || {});
+}
+
+/**
+ * Prove that a pending record is the exact proposal created by this immutable
+ * task request, rather than an older same-task confirmation returned by the
+ * one-boundary deduplication rule.
+ */
+export function pendingConfirmationMatchesExactProposal(
+  pending: PendingToolConfirmation | null | undefined,
+  toolName: string,
+  args: Record<string, any>,
+  scope: Pick<PendingConfirmationScope, 'taskId' | 'originRequestId'>,
+): boolean {
+  return Boolean(
+    pending
+    && pending.expiresAt > Date.now()
+    && pending.toolName === String(toolName || '').trim()
+    && pending.taskId === String(scope.taskId || '').trim()
+    && pending.originRequestId === String(scope.originRequestId || '').trim()
+    && pending.argsHash === argsHash(args || {})
+    && confirmationArgumentsMatch(pending.exactArgs, args || {})
+    && pending.target === confirmationTarget(args || {})
+    && pending.payloadDigest === confirmationPayloadDigest(args || {}),
+  );
 }
 
 function sanitizeValue(value: any, depth = 0): any {
@@ -349,6 +399,13 @@ export function recordPendingConfirmation(
   source = 'chat',
   scope: Omit<PendingConfirmationScope, 'source'> = {},
 ): PendingToolConfirmation {
+  if (scope.channelId && revokedChannelKeys.has(confirmationChannelKey(userId, {
+    domain: scope.domain,
+    orgId: scope.orgId,
+    channelId: scope.channelId,
+  }))) {
+    throw new Error('Pending confirmation channel has been revoked');
+  }
   const taskId = String(scope.taskId || '').trim();
   if (taskId) {
     const existing = readFresh(userId, {
@@ -429,6 +486,16 @@ export async function recordPendingConfirmationDurably(
     if (!Number.isSafeInteger(revision) || revision < 1) {
       throw new Error('Pending confirmation persistence returned an invalid revision');
     }
+    if (pending.channelId && revokedChannelKeys.has(confirmationChannelKey(userId, pending))) {
+      await persistenceAdapter.cancel({
+        id: pending.id,
+        userId,
+        revision,
+        expiresAt: pending.expiresAt,
+      });
+      pendingById.delete(pending.id);
+      throw new Error('Pending confirmation channel was revoked during persistence');
+    }
     persistedRevisionById.set(pending.id, revision);
     return pending;
   } catch (error) {
@@ -483,14 +550,11 @@ export async function consumePendingConfirmationDurably(
   return true;
 }
 
-export async function clearPendingConfirmationDurably(
+async function clearPendingCandidatesDurably(
   userId: string,
-  scope?: PendingConfirmationScope,
-): Promise<boolean> {
-  let cleared = false;
-  const candidates = [...pendingById.values()].filter(pending => (
-    pending.userId === userId && matchesScope(pending, scope)
-  ));
+  candidates: PendingToolConfirmation[],
+): Promise<number> {
+  let cleared = 0;
   for (const pending of candidates) {
     const revision = persistedRevisionById.get(pending.id);
     if (persistenceAdapter && revision) {
@@ -515,9 +579,46 @@ export async function clearPendingConfirmationDurably(
       pendingById.delete(pending.id);
       persistedRevisionById.delete(pending.id);
     }
-    cleared = true;
+    cleared += 1;
   }
   return cleared;
+}
+
+export async function clearPendingConfirmationDurably(
+  userId: string,
+  scope?: PendingConfirmationScope,
+): Promise<boolean> {
+  const candidates = [...pendingById.values()].filter(pending => (
+    pending.userId === userId && matchesScope(pending, scope)
+  ));
+  return (await clearPendingCandidatesDurably(userId, candidates)) > 0;
+}
+
+/**
+ * Permanently revoke one exact conversation channel for this process and
+ * cancel every active grant in it, including task-bound grants. The tombstone
+ * closes the deletion race with an already-admitted turn that tries to persist
+ * a new confirmation after its conversation has been deleted.
+ */
+export async function revokePendingConfirmationChannelDurably(
+  userId: string,
+  scope: PendingConfirmationChannelScope,
+): Promise<number> {
+  const channelId = String(scope.channelId || '').trim();
+  if (!channelId) throw new Error('Pending confirmation channel revocation requires channelId');
+  const normalizedScope: PendingConfirmationChannelScope = {
+    domain: String(scope.domain || ''),
+    orgId: String(scope.orgId || ''),
+    channelId,
+  };
+  revokedChannelKeys.add(confirmationChannelKey(userId, normalizedScope));
+  const candidates = [...pendingById.values()].filter(pending => (
+    pending.userId === userId
+    && pending.domain === normalizedScope.domain
+    && pending.orgId === normalizedScope.orgId
+    && pending.channelId === normalizedScope.channelId
+  ));
+  return clearPendingCandidatesDurably(userId, candidates);
 }
 
 export function getPendingConfirmation(
@@ -613,5 +714,6 @@ export function clearAllPendingConfirmationsForTests(): void {
   pendingById.clear();
   persistedRevisionById.clear();
   revocationQuarantineIds.clear();
+  revokedChannelKeys.clear();
   persistenceAdapter = null;
 }

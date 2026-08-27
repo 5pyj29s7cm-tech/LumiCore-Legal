@@ -69,6 +69,52 @@ describe('active task message relation', () => {
     }
   });
 
+  it('keeps all long formal file-target corrections on the same task', () => {
+    const root = 'C:\\Users\\ExampleUser\\LumiCore\\formal-client-e2e-artifacts\\LUMI-E2E-correction-lifecycle';
+    const targets = [0, 1, 2, 3].map(index => `${root}\\target-${index}.txt`);
+    const waitingState: ConversationActionContinuationState = {
+      ...activeState,
+      status: 'waiting_confirmation',
+      latestInstruction: `create ${targets[0]}`,
+      sourcePaths: [targets[0]],
+      activeRequestId: undefined,
+    };
+    const corrections = [
+      `不是 ${targets[0]}，把同一个任务的目标改成 ${targets[1]}，内容保持不变；不要沿用或重试旧目标。`,
+      `再纠正一次：不要 ${targets[1]}，改成 ${targets[2]}，仍是同一个任务且内容不变。`,
+      `最后一次纠正：拒绝 ${targets[2]}，最终目标是 ${targets[3]}，内容不变；等待我的确认。`,
+    ];
+
+    for (const text of corrections) {
+      expect(resolveActiveTaskMessageRelation(text, waitingState)).toMatchObject({
+        feedback: 'correction',
+        taskRelation: 'correct',
+        operation: 'replan',
+        binding: 'active_task',
+        taskId: 'task-1',
+      });
+    }
+  });
+
+  it('projects every turn onto the canonical seven-way task relation', () => {
+    const cases = [
+      ['清理一下', 'continue'],
+      ['不是这份', 'correct'],
+      ['确认了', 'confirm'],
+      ['停止', 'cancel'],
+      ['你在干嘛', 'status'],
+      ['怎么说', 'repeat'],
+      ['你刚才卡住了，重新说一下', 'repeat'],
+      ['打开一份新的会议纪要', 'new'],
+    ] as const;
+
+    for (const [text, taskRelation] of cases) {
+      expect(resolveActiveTaskMessageRelation(text, activeState, {
+        activeRequestId: 'request-7',
+      })).toMatchObject({ taskRelation });
+    }
+  });
+
   it('does not absorb a complete new task into an older active task', () => {
     expect(resolveActiveTaskMessageRelation('打开壁纸状态', activeState, {
       activeRequestId: 'request-7',
@@ -88,6 +134,33 @@ describe('active task message relation', () => {
     expect(resolveActiveTaskMessageRelation('谁让你打开这个窗口的', activeState, {
       activeRequestId: 'request-7',
     })).toMatchObject({ relation: 'queue', binding: 'new_task' });
+  });
+
+  it('binds an exact filename supplied after WPS target rejection to the same task', () => {
+    const wpsState: ConversationActionContinuationState = {
+      ...activeState,
+      taskId: 'task-wps-analysis',
+      status: 'blocked',
+      goal: '请分析当前 WPS 活动窗口里的演示文稿。',
+      latestInstruction: '不是这份文件',
+      appTarget: 'WPS',
+      latestBlocker: '用户已拒绝当前文件候选。',
+      activeRequestId: undefined,
+      revision: 3,
+    };
+
+    expect(resolveActiveTaskMessageRelation(
+      '准确文件名是 WPS-Quarterly-Review-Final.pptx，在桌面。请继续分析。',
+      wpsState,
+    )).toMatchObject({
+      relation: 'continue',
+      taskRelation: 'continue',
+      feedback: 'continue',
+      binding: 'active_task',
+      taskId: 'task-wps-analysis',
+      revision: 3,
+      operation: 'resume',
+    });
   });
 
   it('does not attach a current runtime request to a stale durable pointer', () => {
@@ -161,6 +234,41 @@ describe('active task message relation', () => {
     expect(relation.targetRequestId).toBeUndefined();
   });
 
+  it('binds a repeated confirmation to the terminal previous task without reviving it', () => {
+    const completed = {
+      ...activeState,
+      status: 'completed' as const,
+      unfinished: false,
+      activeRequestId: undefined,
+      revision: 8,
+    };
+    expect(resolveActiveTaskMessageRelation('确认了', completed)).toMatchObject({
+      relation: 'continue',
+      taskRelation: 'confirm',
+      feedback: 'accept',
+      binding: 'previous_task',
+      operation: 'verify',
+      taskId: 'task-1',
+      revision: 8,
+      reason: 'durable_previous_action',
+    });
+    expect(resolveActiveTaskMessageRelation('确认了', completed, {
+      controlTargetRequestId: 'request-7',
+    })).toMatchObject({
+      binding: 'stale',
+      reason: 'control_target_request_mismatch',
+    });
+    expect(resolveActiveTaskMessageRelation('确认了', completed, {
+      controlTargetRequestId: 'request-7',
+      controlTargetTaskId: 'task-1',
+      controlTargetRevision: 8,
+    })).toMatchObject({
+      binding: 'previous_task',
+      taskId: 'task-1',
+      revision: 8,
+    });
+  });
+
   it('accepts an exact task/revision fence when the prior request lease is gone', () => {
     const completed = {
       ...activeState,
@@ -231,6 +339,26 @@ describe('active task message relation', () => {
       binding: 'conversation',
       operation: 'repeat',
     });
+    expect(resolveActiveTaskMessageRelation('怎么说', null)).toMatchObject({
+      relation: 'queue',
+      feedback: 'repeat',
+      binding: 'conversation',
+      operation: 'repeat',
+    });
+  });
+
+  it('keeps a status-shaped ordinary question unbound when there is no current or recent task', () => {
+    for (const text of ['你在干啥', '你在做什么']) {
+      expect(resolveActiveTaskMessageRelation(text, null)).toMatchObject({
+        relation: 'status',
+        taskRelation: 'status',
+        feedback: 'status',
+        binding: 'conversation',
+        operation: 'inspect',
+        reason: 'no_bindable_action',
+      });
+      expect(resolveActiveTaskMessageRelation(text, null).targetRequestId).toBeUndefined();
+    }
   });
 
   it('gives the planner root-level continuity and verification invariants', () => {
@@ -241,6 +369,7 @@ describe('active task message relation', () => {
 
     expect(context).toContain('- followupIntent: execute');
     expect(context).toContain('- feedbackRelation: correction');
+    expect(context).toContain('- taskRelation: correct');
     expect(context).toContain('- taskId: task-1');
     expect(context).toContain('- taskRevision: 7');
     expect(context).toContain('- rootGoal: 读取桌面平面图并在 AutoCAD 里绘制');

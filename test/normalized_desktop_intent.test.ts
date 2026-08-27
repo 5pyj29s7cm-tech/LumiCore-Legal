@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   hasMixedStatusExecutionIntent,
+  isExplicitArtifactCreationText,
   isImmediateAssistantRestatementRequest,
   isPriorTurnToolReceiptQuestion,
   normalizeActionIntent,
@@ -409,6 +410,21 @@ describe('normalized desktop intent priority', () => {
     });
   });
 
+  it('does not turn a negated tool mention in ordinary context recall into a receipt query', () => {
+    const text = '继续保持不调用工具。刚才杯子的代号是什么？只回复代号。';
+    expect(isPriorTurnToolReceiptQuestion(text)).toBe(false);
+    expect(normalizeActionIntent(text)).toMatchObject({
+      kind: 'none',
+      relation: 'new',
+    });
+    expect(isPriorTurnToolReceiptQuestion(
+      'Do not call any tools. What was the cup code from the previous turn?',
+    )).toBe(false);
+    expect(isPriorTurnToolReceiptQuestion(
+      'Was no tool receipt recorded in the previous turn?',
+    )).toBe(true);
+  });
+
   it.each([
     ['你能不能使用桌面工具打开记事本？现在打开它。', '记事本'],
     ['Can you use desktop tools to open Notepad? Open it now.', 'Notepad'],
@@ -706,9 +722,50 @@ describe('fresh action versus trailing status wording', () => {
     });
   });
 
+  it.each([
+    '[LUMI_REGRESSION:S4:LIVE] Write the exact text "stale receipt live-owner sentinel" to C:\\isolated-lumi-test\\stale-live-owner.txt. Call write_file exactly once. Do not report task status. Stop when confirmation is required.',
+    '[LUMI_REGRESSION:S4:LIVE] Start a separate isolated task by creating C:\\isolated-lumi-test\\stale-live-owner.txt. You must call write_file exactly once and stop at the confirmation boundary.',
+    'What is the previous task status? Now create C:\\isolated-lumi-test\\stale-live-owner.txt and write the exact text "new owner".',
+  ])('normalizes a concrete English artifact mutation as a new local-write action: %s', (text) => {
+    expect(isExplicitArtifactCreationText(text)).toBe(true);
+    expect(normalizeActionIntent(text)).toMatchObject({
+      kind: 'desktop_operation',
+      operation: 'create',
+      target: 'C:\\isolated-lumi-test\\stale-live-owner.txt',
+      sideEffectClass: 'local_write',
+      relation: 'new',
+      rule: 'explicit-artifact-create',
+    });
+  });
+
+  it.each([
+    'Did you just create C:\\isolated-lumi-test\\stale-live-owner.txt successfully? Only report the receipt.',
+    'What did you just do after creating C:\\isolated-lumi-test\\stale-live-owner.txt, and what evidence proved it succeeded?',
+  ])('keeps a retrospective artifact receipt question read-only: %s', (text) => {
+    expect(isExplicitArtifactCreationText(text)).toBe(false);
+    expect(normalizeActionIntent(text)).toMatchObject({
+      kind: 'status_query',
+      operation: 'status',
+      sideEffectClass: 'none',
+      relation: 'status',
+    });
+  });
+
+  it.each([
+    'Do not create C:\\isolated-lumi-test\\stale-live-owner.txt. Only report task status.',
+    'Can write_file create C:\\isolated-lumi-test\\stale-live-owner.txt?',
+  ])('does not manufacture a file mutation from a negation or capability question: %s', (text) => {
+    expect(isExplicitArtifactCreationText(text)).toBe(false);
+  });
+
   it('does not turn a new artifact task containing status and client-surface text into a status lookup', () => {
     const text = '请在 C:\\Users\\test-user\\Documents\\Lumi主程序实机验收_20260816.txt 创建文件，内容包含“渠道：指挥中心文字聊天”和“状态：待回读验证”。';
-    expect(normalizeActionIntent(text).kind).toBe('none');
+    expect(normalizeActionIntent(text)).toMatchObject({
+      kind: 'desktop_operation',
+      operation: 'create',
+      sideEffectClass: 'local_write',
+      relation: 'new',
+    });
   });
 
   it('treats quoted old navigation inside a task correction as explanation-only', () => {
