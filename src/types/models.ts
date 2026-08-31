@@ -141,8 +141,8 @@ export interface Setting {
 }
 
 export interface VoicePreference {
-  stt: 'auto' | 'qwen' | 'ark' | 'whisper' | 'local-whisper';
-  tts: 'auto' | 'local-cosyvoice' | 'cosyvoice' | 'ark' | 'gptsovits';
+  stt: 'auto' | 'qwen' | 'ark' | 'whisper' | 'local-whisper' | 'relay';
+  tts: 'auto' | 'local-cosyvoice' | 'cosyvoice' | 'ark' | 'gptsovits' | 'relay';
 }
 
 export interface LLMPreference {

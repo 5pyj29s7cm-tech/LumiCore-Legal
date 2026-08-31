@@ -54,15 +54,58 @@ import {
   SENSOR_PERMISSIONS_CHANGED,
   type SensorPermissionState,
 } from '@/services/sensorPermissionService';
-import { formatUiMessage, uiMessage } from '../i18n/uiMessages';
+import { formatUiMessage, uiMessage, type UiMessageKey } from '../i18n/uiMessages';
 import {
   CHINA_LEGAL_DATA_SOURCES,
   chinaLegalCopy,
   type ChinaLegalDataSourceDefinition,
   type ChinaLegalDataSourceField,
 } from '../i18n/regions/cn/legal';
+import {
+  LUMI_OFFICIAL_BASE_URL,
+  LUMI_OFFICIAL_DEFAULT_MODELS,
+  LUMI_OFFICIAL_DOCS_URL,
+  LUMI_OFFICIAL_PROVIDER_ID as SHARED_LUMI_OFFICIAL_PROVIDER_ID,
+} from '../../shared/model_provider_capabilities';
 
 const VoiceForge = lazy(() => import('./VoiceForge').then(m => ({ default: m.VoiceForge })));
+
+// `relay` is the persisted provider id for Lumi's official gateway.  The
+// endpoint is public configuration; the credential remains server-side.
+const LUMI_OFFICIAL_PROVIDER_ID = SHARED_LUMI_OFFICIAL_PROVIDER_ID;
+const LUMI_OFFICIAL_API_LABEL_KEY = 'settings.lumi-official-api-label.a1b2c3d4e5' as const;
+const LUMI_OFFICIAL_SUPPORTED_KEY = 'settings.lumi-official-capability-supported.b2c3d4e5f6' as const;
+const LUMI_OFFICIAL_UNAVAILABLE_KEY = 'settings.lumi-official-capability-unavailable.c3d4e5f6a7' as const;
+const LUMI_RELAY_BASE_URL_PLACEHOLDER = LUMI_OFFICIAL_BASE_URL;
+
+function readStoredRelayBaseUrl(): string {
+  try {
+    return String(localStorage.getItem('lumi_relay_url') || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function clearLegacyRelaySecret(): void {
+  try { localStorage.removeItem('lumi_relay_key'); } catch { /* storage may be unavailable */ }
+}
+
+function lumiOfficialApiLabel(t?: any): string {
+  return uiMessage(LUMI_OFFICIAL_API_LABEL_KEY, t?.langCode === 'en' ? 'en' : 'zh');
+}
+
+function LumiOfficialCapabilityBadge({ t, supported, capabilityKey }: { t: any; supported: boolean; capabilityKey: UiMessageKey }) {
+  const locale = t?.langCode === 'en' ? 'en' : 'zh';
+  return (
+    <div className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-relaxed ${
+      supported ? 'border-cyan-300/15 bg-cyan-300/[0.06] text-cyan-100/65' : 'border-amber-300/15 bg-amber-300/[0.06] text-amber-100/65'
+    }`}>
+      {supported
+        ? formatUiMessage(LUMI_OFFICIAL_SUPPORTED_KEY, { value0: lumiOfficialApiLabel(t) }, locale)
+        : formatUiMessage(LUMI_OFFICIAL_UNAVAILABLE_KEY, { value0: uiMessage(capabilityKey, locale) }, locale)}
+    </div>
+  );
+}
 
 function buildSidebarGroups(t: any) {
   return [
@@ -264,7 +307,7 @@ export function Settings({
       case 'generation-models':
         return <GenerativeModelsPage t={t} />;
       case 'retrieval-model':
-        return <RetrievalModelSettings />;
+        return <RetrievalModelSettings t={t} />;
       case 'voice-model':
       case 'voice-services':
         return <VoiceServicesPage t={t} />;
@@ -774,9 +817,9 @@ function LLMProviderRow({ icon, label, providerId, models, placeholder, disabled
   const { aiConfig, updateAIConfig } = useApp();
   const isZh = t?.langCode !== 'en';
   const ui = (zh: string, en: string) => (isZh ? zh : en);
-  const [keyValue, setKeyValue] = useState(() => {
-    try { return localStorage.getItem(`lumi_${providerId}_key`) || ''; } catch { return ''; }
-  });
+  // Provider secrets are write-only server credentials. Never hydrate or
+  // persist them in browser storage (including old upgraded installations).
+  const [keyValue, setKeyValue] = useState('');
   const [saved, setSaved] = useState(false);
   const [serverConfigured, setServerConfigured] = useState(false);
   const [showKey, setShowKey] = useState(false);
@@ -792,6 +835,7 @@ function LLMProviderRow({ icon, label, providerId, models, placeholder, disabled
   });
 
   useEffect(() => {
+    try { localStorage.removeItem(`lumi_${providerId}_key`); } catch {}
     getSavedKeyStatus()
       .then(data => setServerConfigured(!!data[serverKey]))
       .catch(() => {});
@@ -799,7 +843,7 @@ function LLMProviderRow({ icon, label, providerId, models, placeholder, disabled
 
   const handleRemoveKey = () => {
     saveServerKeys({ [serverKey]: '' }).then(() => {
-      localStorage.removeItem(`lumi_${providerId}_key`);
+      try { localStorage.removeItem(`lumi_${providerId}_key`); } catch {}
       setServerConfigured(false);
       setKeyValue('');
       setKeyDirty(false);
@@ -814,8 +858,9 @@ function LLMProviderRow({ icon, label, providerId, models, placeholder, disabled
   const handleSaveKey = () => {
     if (!keyValue.trim()) return;
     saveServerKeys({ [serverKey]: keyValue.trim() }).then(() => {
-      localStorage.setItem(`lumi_${providerId}_key`, keyValue.trim());
+      try { localStorage.removeItem(`lumi_${providerId}_key`); } catch {}
       setServerConfigured(true);
+      setKeyValue('');
       setKeyDirty(false);
       setTestState('idle');
       setTestMessage('');
@@ -940,9 +985,8 @@ function VisionProviderRow({ icon, label, providerId, models, placeholder, disab
   const { visionConfig, updateVisionConfig } = useApp();
   const isZh = t?.langCode !== 'en';
   const ui = (zh: string, en: string) => (isZh ? zh : en);
-  const [keyValue, setKeyValue] = useState(() => {
-    try { return localStorage.getItem(`lumi_vision_${providerId}_key`) || ''; } catch { return ''; }
-  });
+  // Vision provider secrets stay in the server credential store only.
+  const [keyValue, setKeyValue] = useState('');
   const [saved, setSaved] = useState(false);
   const [serverConfigured, setServerConfigured] = useState(false);
   const [showKey, setShowKey] = useState(false);
@@ -955,6 +999,7 @@ function VisionProviderRow({ icon, label, providerId, models, placeholder, disab
   const [model, setModel] = useState(() => savedModels[providerId] || models[0]);
 
   useEffect(() => {
+    try { localStorage.removeItem(`lumi_vision_${providerId}_key`); } catch {}
     getSavedKeyStatus()
       .then(data => setServerConfigured(!!data[serverKey]))
       .catch(() => {});
@@ -963,8 +1008,9 @@ function VisionProviderRow({ icon, label, providerId, models, placeholder, disab
   const handleSaveKey = () => {
     if (!keyValue.trim()) return;
     saveServerKeys({ [serverKey]: keyValue.trim() }).then(() => {
-      localStorage.setItem(`lumi_vision_${providerId}_key`, keyValue.trim());
+      try { localStorage.removeItem(`lumi_vision_${providerId}_key`); } catch {}
       setServerConfigured(true);
+      setKeyValue('');
       setKeyDirty(false);
       setTestState('idle');
       setTestMessage('');
@@ -1294,16 +1340,14 @@ function VisionRelayProviderRow({ t }: { t?: any }) {
   const { visionConfig, updateVisionConfig } = useApp();
   const isZh = t?.langCode !== 'en';
   const ui = (zh: string, en: string) => (isZh ? zh : en);
-  const [apiKey, setApiKey] = useState(() => {
-    try { return localStorage.getItem('lumi_relay_key') || ''; } catch { return ''; }
-  });
+  const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(() => {
-    try { return localStorage.getItem('lumi_relay_url') || 'http://127.0.0.1:8000/v1'; } catch { return 'http://127.0.0.1:8000/v1'; }
+    return readStoredRelayBaseUrl() || LUMI_OFFICIAL_BASE_URL;
   });
   const savedModels = (() => {
     try { return JSON.parse(localStorage.getItem('lumi_vision_models') || '{}'); } catch { return {}; }
   })();
-  const [model, setModel] = useState(() => savedModels.relay || 'qwen2.5-vl-7b-instruct');
+  const [model, setModel] = useState(() => savedModels.relay || LUMI_OFFICIAL_DEFAULT_MODELS.vision);
   const [serverConfigured, setServerConfigured] = useState(false);
   const [saved, setSaved] = useState(false);
   const [connectionDirty, setConnectionDirty] = useState(false);
@@ -1311,6 +1355,7 @@ function VisionRelayProviderRow({ t }: { t?: any }) {
   const [testMessage, setTestMessage] = useState('');
 
   useEffect(() => {
+    clearLegacyRelaySecret();
     getSavedKeyStatus()
       .then(data => setServerConfigured(!!data.RELAY_API_KEY && !!data.RELAY_BASE_URL))
       .catch(() => {});
@@ -1329,10 +1374,15 @@ function VisionRelayProviderRow({ t }: { t?: any }) {
   };
 
   const handleSave = () => {
-    if (!apiKey.trim() || !baseUrl.trim()) return;
-    saveServerKeys({ RELAY_API_KEY: apiKey.trim(), RELAY_BASE_URL: baseUrl.trim() }).then(() => {
-      localStorage.setItem('lumi_relay_key', apiKey.trim());
+    const enteredKey = apiKey.trim();
+    if ((!enteredKey && !serverConfigured) || !baseUrl.trim()) return;
+    saveServerKeys({
+      RELAY_BASE_URL: baseUrl.trim(),
+      ...(enteredKey ? { RELAY_API_KEY: enteredKey } : {}),
+    }).then(() => {
+      clearLegacyRelaySecret();
       localStorage.setItem('lumi_relay_url', baseUrl.trim());
+      setApiKey('');
       setServerConfigured(true);
       setConnectionDirty(false);
       setTestState('idle');
@@ -1345,7 +1395,7 @@ function VisionRelayProviderRow({ t }: { t?: any }) {
 
   const handleRemove = () => {
     saveServerKeys({ RELAY_API_KEY: '', RELAY_BASE_URL: '' }).then(() => {
-      localStorage.removeItem('lumi_relay_key');
+      clearLegacyRelaySecret();
       localStorage.removeItem('lumi_relay_url');
       setApiKey('');
       setBaseUrl('');
@@ -1378,7 +1428,7 @@ function VisionRelayProviderRow({ t }: { t?: any }) {
   return (
     <SettingsDisclosure
       icon={<Globe size={18} className="text-cyan-400" />}
-      label="OpenAI-Compatible Vision"
+      label={`${lumiOfficialApiLabel(t)} · Vision`}
       defaultOpen={visionConfig.provider === 'relay'}
       badges={<>
         {serverConfigured && <span className="rounded-full border border-green-500/20 bg-green-500/10 px-2 py-0.5 text-[11px] font-semibold text-green-400">{uiMessage('settings.configured.d7f5ed6e15')}</span>}
@@ -1401,7 +1451,7 @@ function VisionRelayProviderRow({ t }: { t?: any }) {
           value={baseUrl}
           onChange={e => { setBaseUrl(e.target.value); setConnectionDirty(true); setTestState('idle'); setTestMessage(''); }}
           onKeyDown={e => e.key === 'Enter' && handleSave()}
-          placeholder="http://127.0.0.1:8000/v1"
+          placeholder={LUMI_RELAY_BASE_URL_PLACEHOLDER}
           className="h-11 rounded-lg border border-white/10 bg-black/30 px-3 font-mono text-sm text-white outline-none transition-colors focus:border-cyan-400/50"
         />
       </div>
@@ -1415,13 +1465,13 @@ function VisionRelayProviderRow({ t }: { t?: any }) {
           className="h-10 min-w-0 rounded-lg border border-white/10 bg-black/30 px-3 font-mono text-xs text-white outline-none focus:border-cyan-400/50"
         />
         <datalist id="vision-relay-models">
-          {['qwen2.5-vl-7b-instruct', 'minicpm-v-4_5', 'internvl3_5-8b', 'glm-4.1v-9b-thinking'].map(m => <option key={m} value={m} />)}
+          {[LUMI_OFFICIAL_DEFAULT_MODELS.vision, 'huawei_maas/deepseek-r1-250528', 'huawei_maas/qwen3-32b'].map(m => <option key={m} value={m} />)}
         </datalist>
       </div>
       <div className="flex flex-wrap gap-2">
         <Button
           onClick={handleSave}
-          disabled={!apiKey.trim() || !baseUrl.trim()}
+          disabled={(!apiKey.trim() && !serverConfigured) || !baseUrl.trim()}
           className="h-10 rounded-lg bg-cyan-600 px-4 text-xs font-semibold text-white transition-all hover:bg-cyan-500 disabled:opacity-30"
         >
           {t?.save || uiMessage('settings.save.ec8e6d5819')}
@@ -1559,7 +1609,7 @@ function VisionRoleSettings({ t }: { t: any }) {
               <option value="qwen">Qwen-VL (DashScope)</option>
               <option value="ollama">Ollama Local Vision</option>
               <option value="lmstudio">LM Studio Local Vision</option>
-              <option value="relay">OpenAI-Compatible Vision</option>
+              <option value={LUMI_OFFICIAL_PROVIDER_ID}>{lumiOfficialApiLabel(t)} · Vision</option>
             </select>
             <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-white/45" />
           </span>
@@ -1579,6 +1629,7 @@ function VisionRoleSettings({ t }: { t: any }) {
             {visionConfig.provider} / {visionConfig.model}
           </span>
         </div>
+        <LumiOfficialCapabilityBadge t={t} supported={true} capabilityKey="settings.capability-vision-world-actions.b8c9d0e1f2" />
       </div>
     </SettingsSection>
   );
@@ -1638,7 +1689,7 @@ const DEFAULT_GENERATION_PREFERENCES: GenerationPreferences = {
   image: {
     provider: 'auto',
     model: '',
-    models: { openai: 'gpt-image-1', qwen: 'wan2.2-t2i-plus', siliconflow: 'Kwai-Kolors/Kolors' },
+    models: { openai: 'gpt-image-1', qwen: 'wan2.2-t2i-plus', siliconflow: 'Kwai-Kolors/Kolors', relay: LUMI_OFFICIAL_DEFAULT_MODELS.image_generation },
   },
   video: {
     provider: 'qwen',
@@ -1648,6 +1699,7 @@ const DEFAULT_GENERATION_PREFERENCES: GenerationPreferences = {
       minimax: 'MiniMax-Hailuo-2.3',
       siliconflow: 'Wan-AI/Wan2.2-T2V-A14B',
       openai: 'sora-2',
+      relay: LUMI_OFFICIAL_DEFAULT_MODELS.video_generation,
     },
   },
 };
@@ -1660,12 +1712,15 @@ const GENERATION_MODEL_OPTIONS: Record<string, string[]> = {
   minimaxVideo: ['MiniMax-Hailuo-2.3', 'MiniMax-Hailuo-02'],
   siliconflowVideo: ['Wan-AI/Wan2.2-T2V-A14B', 'Wan-AI/Wan2.1-T2V-14B-720P', 'Wan-AI/Wan2.1-T2V-14B-720P-Turbo'],
   openaiVideo: ['sora-2', 'sora-2-pro'],
+  relayImage: [LUMI_OFFICIAL_DEFAULT_MODELS.image_generation],
+  relayVideo: [LUMI_OFFICIAL_DEFAULT_MODELS.video_generation],
 };
 
 const IMAGE_GENERATION_PROVIDERS: Record<string, { label: string; models: string[] }> = {
   openai: { label: 'OpenAI', models: GENERATION_MODEL_OPTIONS.openai },
   qwen: { label: 'Qwen / DashScope', models: GENERATION_MODEL_OPTIONS.qwenImage },
   siliconflow: { label: 'SiliconFlow', models: GENERATION_MODEL_OPTIONS.siliconflowImage },
+  relay: { label: 'Lumi Official API', models: GENERATION_MODEL_OPTIONS.relayImage },
 };
 
 const VIDEO_GENERATION_PROVIDERS: Record<string, { label: string; models: string[] }> = {
@@ -1673,6 +1728,7 @@ const VIDEO_GENERATION_PROVIDERS: Record<string, { label: string; models: string
   minimax: { label: 'MiniMax', models: GENERATION_MODEL_OPTIONS.minimaxVideo },
   siliconflow: { label: 'SiliconFlow', models: GENERATION_MODEL_OPTIONS.siliconflowVideo },
   openai: { label: 'OpenAI', models: GENERATION_MODEL_OPTIONS.openaiVideo },
+  relay: { label: 'Lumi Official API', models: GENERATION_MODEL_OPTIONS.relayVideo },
 };
 
 function GenerationModelInput({
@@ -1809,6 +1865,7 @@ function GenerativeModelsPage({ t }: { t: any }) {
                 <option value="openai">OpenAI</option>
                 <option value="qwen">Qwen / DashScope</option>
                 <option value="siliconflow">SiliconFlow</option>
+                <option value={LUMI_OFFICIAL_PROVIDER_ID}>{lumiOfficialApiLabel(t)}</option>
               </select>
             </div>
             {imageProvider && (
@@ -1849,6 +1906,8 @@ function GenerativeModelsPage({ t }: { t: any }) {
             )}
           </section>
         </div>
+
+        <LumiOfficialCapabilityBadge t={t} supported={true} capabilityKey="settings.capability-image-video-generation.c9d0e1f2a3" />
 
         <div className="mt-5 flex justify-end">
           <Button onClick={save} disabled={saving} className="h-10 rounded-lg bg-celestial-saturn px-4 text-xs font-bold text-black hover:bg-yellow-300 disabled:opacity-40">
@@ -1913,7 +1972,7 @@ const WORLD_MODEL_OPTIONS: Record<string, string[]> = {
   qwen: ['qwen-vl-max'],
   ollama: ['qwen2.5vl:7b', 'minicpm-v:8b', 'llama3.2-vision:11b'],
   lmstudio: ['qwen2.5-vl-7b-instruct', 'minicpm-v-4_5', 'internvl3_5-8b'],
-  relay: ['qwen2.5-vl-7b-instruct', 'glm-4.1v-9b-thinking'],
+  relay: [LUMI_OFFICIAL_DEFAULT_MODELS.vision, 'huawei_maas/deepseek-r1-250528', 'huawei_maas/qwen3-32b'],
 };
 
 function WorldActionModelPage({ t }: { t: any }) {
@@ -2019,7 +2078,7 @@ function WorldActionModelPage({ t }: { t: any }) {
               <option value="qwen">Qwen-VL / DashScope</option>
               <option value="ollama">Ollama Local</option>
               <option value="lmstudio">LM Studio Local</option>
-              <option value="relay">OpenAI-Compatible</option>
+              <option value={LUMI_OFFICIAL_PROVIDER_ID}>{lumiOfficialApiLabel(t)}</option>
             </select>
           </label>
 
@@ -2041,6 +2100,7 @@ function WorldActionModelPage({ t }: { t: any }) {
               {activeProvider || '-'} / {activeModel || '-'}
             </span>
           </div>
+          <LumiOfficialCapabilityBadge t={t} supported={true} capabilityKey="settings.capability-world-actions.d0e1f2a3b4" />
         </div>
 
         <div className="mt-5 flex flex-wrap justify-end gap-2">
@@ -2103,7 +2163,7 @@ const DEFAULT_RETRIEVAL_MODEL_PREFERENCES: RetrievalModelPreferences = {
 };
 
 const EMBEDDING_MODEL_PROVIDERS = ['openai', 'qwen', 'siliconflow', 'ollama', 'lmstudio', 'relay'];
-const RERANK_MODEL_PROVIDERS = ['siliconflow'];
+const RERANK_MODEL_PROVIDERS = ['siliconflow', 'relay'];
 
 const EMBEDDING_MODELS: Record<string, string[]> = {
   openai: ['text-embedding-3-small', 'text-embedding-3-large'],
@@ -2111,14 +2171,15 @@ const EMBEDDING_MODELS: Record<string, string[]> = {
   siliconflow: ['Qwen/Qwen3-Embedding-8B', 'Qwen/Qwen3-Embedding-4B', 'Qwen/Qwen3-Embedding-0.6B'],
   ollama: ['nomic-embed-text', 'mxbai-embed-large'],
   lmstudio: ['text-embedding-nomic-embed-text-v1.5'],
-  relay: ['text-embedding-3-small'],
+  relay: [LUMI_OFFICIAL_DEFAULT_MODELS.embedding],
 };
 
 const RERANK_MODELS: Record<string, string[]> = {
   siliconflow: ['Qwen/Qwen3-Reranker-8B', 'Qwen/Qwen3-Reranker-4B', 'Qwen/Qwen3-Reranker-0.6B'],
+  relay: [LUMI_OFFICIAL_DEFAULT_MODELS.rerank],
 };
 
-function retrievalProviderLabel(provider: string): string {
+function retrievalProviderLabel(provider: string, t?: any): string {
   const labels: Record<string, string> = {
     '': uiMessage('settings.no-fallback.532319d005'),
     openai: 'OpenAI',
@@ -2126,12 +2187,12 @@ function retrievalProviderLabel(provider: string): string {
     siliconflow: 'SiliconFlow',
     ollama: 'Ollama Local',
     lmstudio: 'LM Studio Local',
-    relay: 'OpenAI-Compatible',
+    relay: lumiOfficialApiLabel(t),
   };
   return labels[provider] || provider;
 }
 
-function RetrievalModelSettings() {
+function RetrievalModelSettings({ t }: { t?: any }) {
   const [preferences, setPreferences] = useState<RetrievalModelPreferences>(DEFAULT_RETRIEVAL_MODEL_PREFERENCES);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -2244,7 +2305,7 @@ function RetrievalModelSettings() {
           <label className="grid gap-2 md:grid-cols-[170px_minmax(0,1fr)] md:items-center">
             <span className="text-xs font-bold text-white/55">{uiMessage('settings.primary-model.78ee8a421a')}</span>
             <select value={preferences.embedding.provider} onChange={event => setProvider(event.target.value)} className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white outline-none">
-              {EMBEDDING_MODEL_PROVIDERS.map(provider => <option key={provider} value={provider}>{retrievalProviderLabel(provider)}</option>)}
+              {EMBEDDING_MODEL_PROVIDERS.map(provider => <option key={provider} value={provider}>{retrievalProviderLabel(provider, t)}</option>)}
             </select>
           </label>
           <GenerationModelInput
@@ -2257,8 +2318,8 @@ function RetrievalModelSettings() {
           <label className="grid gap-2 md:grid-cols-[170px_minmax(0,1fr)] md:items-center">
             <span className="text-xs font-bold text-white/55">{uiMessage('settings.fallback-model.562ec1697f')}</span>
             <select value={preferences.embedding.fallbackProvider} onChange={event => setFallbackProvider(event.target.value)} className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white outline-none">
-              <option value="">{retrievalProviderLabel('')}</option>
-              {EMBEDDING_MODEL_PROVIDERS.filter(provider => provider !== preferences.embedding.provider).map(provider => <option key={provider} value={provider}>{retrievalProviderLabel(provider)}</option>)}
+              <option value="">{retrievalProviderLabel('', t)}</option>
+              {EMBEDDING_MODEL_PROVIDERS.filter(provider => provider !== preferences.embedding.provider).map(provider => <option key={provider} value={provider}>{retrievalProviderLabel(provider, t)}</option>)}
             </select>
           </label>
           {preferences.embedding.fallbackProvider && (
@@ -2294,7 +2355,7 @@ function RetrievalModelSettings() {
               <label className="grid gap-2 md:grid-cols-[170px_minmax(0,1fr)] md:items-center">
                 <span className="text-xs font-bold text-white/55">{uiMessage('settings.primary-model.78ee8a421a')}</span>
                 <select value={preferences.rerank.provider} onChange={event => setRerankProvider(event.target.value)} className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white outline-none">
-                  {RERANK_MODEL_PROVIDERS.map(provider => <option key={provider} value={provider}>{retrievalProviderLabel(provider)}</option>)}
+                  {RERANK_MODEL_PROVIDERS.map(provider => <option key={provider} value={provider}>{retrievalProviderLabel(provider, t)}</option>)}
                 </select>
               </label>
               <GenerationModelInput
@@ -2319,6 +2380,7 @@ function RetrievalModelSettings() {
           )}
         </section>
       </div>
+      <LumiOfficialCapabilityBadge t={t} supported={true} capabilityKey="settings.capability-embedding.e1f2a3b4c5" />
       <div className="mt-5 flex flex-wrap justify-end gap-2">
         <Button onClick={test} disabled={saving || testing || !preferences.embedding.model.trim() || (preferences.rerank.enabled && !preferences.rerank.model.trim())} className="h-10 rounded-lg border border-emerald-400/20 bg-emerald-400/10 px-4 text-xs font-bold text-emerald-200 hover:bg-emerald-400/15 disabled:opacity-40">
           {testing ? <Loader2 size={15} className="mr-2 animate-spin" /> : <Zap size={15} className="mr-2" />}
@@ -2595,33 +2657,40 @@ interface ProviderRuntimeStatus {
   } | null;
 }
 
+type ProviderScope = 'official' | 'local' | 'services';
+
 function AIProvidersPage({ t, providerStatus }: { t: any; providerStatus: Record<string, ProviderRuntimeStatus> }) {
-  const [scope, setScope] = useState<'cloud' | 'local'>('cloud');
+  const [scope, setScope] = useState<ProviderScope>('official');
   const extensionProviders = Object.entries(providerStatus).filter(([, status]) => (
-    status.extension === true && (scope === 'local' ? status.local === true : status.local !== true)
+    status.extension === true && (scope === 'local' ? status.local === true : scope === 'services' ? status.local !== true : false)
   ));
+  const tabs: Array<{ id: ProviderScope; label: string }> = [
+    { id: 'official', label: lumiOfficialApiLabel(t) },
+    { id: 'local', label: uiMessage('settings.local-compatible.4fda3a8732') },
+    { id: 'services', label: uiMessage('settings.cloud-providers.134b71a80d') },
+  ];
   return (
     <div className="space-y-6">
       <div className="border-b border-white/10 pb-4">
         <h2 className="text-lg font-semibold text-white">{uiMessage('settings.ai-providers.38c3f21901')}</h2>
-        <div className="mt-4 flex gap-5">
-          {([
-            { id: 'cloud', label: uiMessage('settings.cloud-providers.134b71a80d') },
-            { id: 'local', label: uiMessage('settings.local-compatible.4fda3a8732') },
-          ] as const).map(item => (
+        <div className="mt-4 grid grid-cols-3 gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-1">
+          {tabs.map(item => (
             <button
               key={item.id}
               type="button"
               onClick={() => setScope(item.id)}
-              className={`relative pb-2 text-sm font-medium transition-colors ${scope === item.id ? 'text-white' : 'text-white/45 hover:text-white/70'}`}
+              className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${scope === item.id ? 'bg-celestial-saturn text-black shadow-sm' : 'text-white/45 hover:bg-white/[0.06] hover:text-white/70'}`}
             >
               {item.label}
-              {scope === item.id && <span className="absolute inset-x-0 bottom-0 h-0.5 rounded-full bg-celestial-saturn" />}
             </button>
           ))}
         </div>
       </div>
-      {scope === 'cloud' ? <CloudProviderSettings t={t} providerStatus={providerStatus} /> : <LocalProviderSettings t={t} />}
+      {scope === 'official'
+        ? <OfficialProviderSettings t={t} />
+        : scope === 'local'
+          ? <LocalProviderSettings t={t} />
+          : <CloudProviderSettings t={t} providerStatus={providerStatus} />}
       {extensionProviders.length > 0 && (
         <SettingsSection title="Signed extension Providers" icon={<Shield size={18} className="text-emerald-300" />}>
           <div className="divide-y divide-white/10 border-y border-white/10">
@@ -2652,6 +2721,119 @@ function AIProvidersPage({ t, providerStatus }: { t: any; providerStatus: Record
   );
 }
 
+type OfficialRoleReceipt = {
+  role: string;
+  status: 'applied' | 'skipped' | 'failed';
+  provider?: string;
+  model?: string;
+  reason?: string;
+};
+
+type OfficialRoleApplyResponse = {
+  ok: boolean;
+  code?: string;
+  error?: string;
+  applied: OfficialRoleReceipt[];
+  skipped: OfficialRoleReceipt[];
+  failed: Array<{ role: string; reason: string }>;
+  roles: Record<string, OfficialRoleReceipt>;
+};
+
+async function applyOfficialModelRoles(): Promise<OfficialRoleApplyResponse> {
+  const response = await apiFetch('/api/preferences/official/apply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({}),
+  });
+  const data = await response.json().catch(() => ({}));
+  const normalize = (value: unknown, fallback: OfficialRoleReceipt['status']): OfficialRoleReceipt[] => (
+    Array.isArray(value)
+      ? value.map((item: any) => ({
+        role: String(item?.role || item || ''),
+        status: item?.status === 'failed' || item?.status === 'skipped' || item?.status === 'applied' ? item.status : fallback,
+        ...(item?.provider ? { provider: String(item.provider) } : {}),
+        ...(item?.model ? { model: String(item.model) } : {}),
+        ...(item?.reason ? { reason: String(item.reason) } : {}),
+      })).filter(item => item.role)
+      : []
+  );
+  const applied = normalize(data.applied, 'applied');
+  const skipped = normalize(data.skipped, 'skipped');
+  const roles: Record<string, OfficialRoleReceipt> = {};
+  [...applied, ...skipped].forEach(item => { roles[item.role] = item; });
+  if (data.roles && typeof data.roles === 'object' && !Array.isArray(data.roles)) {
+    for (const [role, item] of Object.entries(data.roles as Record<string, any>)) {
+      if (!item || typeof item !== 'object') continue;
+      roles[role] = {
+        role,
+        status: item.status === 'failed' || item.status === 'skipped' || item.status === 'applied' ? item.status : 'skipped',
+        ...(item.provider ? { provider: String(item.provider) } : {}),
+        ...(item.model ? { model: String(item.model) } : {}),
+        ...(item.reason ? { reason: String(item.reason) } : {}),
+      };
+    }
+  }
+  if (!response.ok && data.code !== 'OFFICIAL_API_NOT_CONFIGURED') {
+    throw new Error(data.error || `Official API adaptation failed (${response.status})`);
+  }
+  return {
+    ok: data.ok === true,
+    code: typeof data.code === 'string' ? data.code : undefined,
+    error: typeof data.error === 'string' ? data.error : undefined,
+    applied,
+    skipped,
+    failed: Array.isArray(data.failed) ? data.failed.map((item: any) => ({ role: String(item?.role || ''), reason: String(item?.reason || '') })) : [],
+    roles,
+  };
+}
+
+function OfficialProviderSettings({ t }: { t: any }) {
+  const [applying, setApplying] = useState(false);
+  const [result, setResult] = useState<OfficialRoleApplyResponse | null>(null);
+  const apply = async () => {
+    if (applying) return;
+    setApplying(true);
+    setResult(null);
+    try {
+      const next = await applyOfficialModelRoles();
+      setResult(next);
+      if (next.applied.length > 0) window.dispatchEvent(new CustomEvent('lumi:model-configuration-changed'));
+      if (next.code === 'OFFICIAL_API_NOT_CONFIGURED') toast.error(uiMessage('settings.lumi-official-capability-unavailable.c3d4e5f6a7'));
+      else if (next.failed.length > 0) toast.error(`Applied ${next.applied.length}; ${next.failed.length} failed`);
+      else if (next.applied.length > 0) toast.success(`Applied ${next.applied.length} Lumi model roles`);
+    } catch (error: any) {
+      setResult({ ok: false, applied: [], skipped: [], failed: [{ role: 'request', reason: error?.message || 'request failed' }], roles: {} });
+      toast.error(error?.message || 'Official API adaptation failed');
+    } finally {
+      setApplying(false);
+    }
+  };
+  return (
+    <SettingsSection title={uiMessage('settings.lumi-official-service.9a4e2d7c10')} icon={<Sparkle size={18} className="text-celestial-saturn" />}>
+      <p className="mb-5 max-w-3xl text-sm leading-relaxed text-white/45">
+        Configure the Lumi-owned endpoint once, then apply it to every model role. <a href={LUMI_OFFICIAL_DOCS_URL} target="_blank" rel="noreferrer" className="text-cyan-300/80 underline">API docs</a>
+      </p>
+      <div className="border-y border-white/10">
+        <RelayProviderRow t={t} label={uiMessage('settings.lumi-official-relay.7d3b1f9c24')} />
+      </div>
+      <div className="mt-5 rounded-xl border border-celestial-saturn/15 bg-celestial-saturn/[0.04] p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs leading-relaxed text-white/55">Apply configured official API settings to reasoning, vision, world actions, generation, retrieval, and speech.</p>
+          <Button type="button" onClick={() => { void apply(); }} disabled={applying} data-testid="apply-official-api" className="h-10 rounded-lg bg-celestial-saturn px-4 text-xs font-bold text-black hover:bg-yellow-300 disabled:opacity-40">
+            {applying ? <Loader2 size={15} className="mr-2 animate-spin" /> : <Zap size={15} className="mr-2" />} Apply Lumi Official API
+          </Button>
+        </div>
+        {result && <div className="mt-3 border-t border-white/10 pt-3 text-[11px] text-white/55" role="status" aria-live="polite">
+          {Object.values(result.roles).map(item => <div key={item.role} className="flex flex-wrap gap-2"><span className={item.status === 'applied' ? 'text-emerald-300' : item.status === 'failed' ? 'text-red-300' : 'text-amber-200'}>{item.status}</span><span>{item.role}</span>{item.model && <span className="font-mono text-white/40">{item.provider}/{item.model}</span>}{item.reason && <span className="text-white/35">{item.reason}</span>}</div>)}
+          {result.error && <p className="mt-1 text-red-300/80">{result.error}</p>}
+        </div>}
+      </div>
+      <LumiOfficialCapabilityBadge t={t} supported={true} capabilityKey="settings.capability-official-supported-roles.a3b4c5d6e7" />
+    </SettingsSection>
+  );
+}
+
 const REASONING_MODEL_OPTIONS: Record<string, string[]> = {
   deepseek: ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'],
   qwen: ['qwen-plus', 'qwen-max', 'qwen-turbo'],
@@ -2662,7 +2844,7 @@ const REASONING_MODEL_OPTIONS: Record<string, string[]> = {
   xiaomi: ['mimo-v2.5-pro', 'mimo-v2.5', 'mimo-v2-pro'],
   kimi: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
   glm: ['glm-5.1', 'glm-5-turbo', 'glm-4.7', 'glm-4-plus'],
-  relay: [],
+  relay: [LUMI_OFFICIAL_DEFAULT_MODELS.reasoning],
   ollama: [],
   lmstudio: [],
   auto: [],
@@ -2773,7 +2955,7 @@ function ReasoningRoleSettings({ t, providerStatus }: { t: any; providerStatus: 
             <option value="xiaomi">Xiaomi MiMo</option>
             <option value="kimi">Kimi / Moonshot</option>
             <option value="glm">GLM / Zhipu AI</option>
-            <option value="relay">{t.apiRelayLabel || 'OpenAI-Compatible'}</option>
+            <option value={LUMI_OFFICIAL_PROVIDER_ID}>{lumiOfficialApiLabel(t)}</option>
             <option value="auto">Automatic (Local First)</option>
             <option value="ollama">Ollama Local</option>
             <option value="lmstudio">LM Studio Local</option>
@@ -3342,20 +3524,19 @@ function ApiKeyField({ icon, label, placeholder, disabled = false, storageKey, s
 }
 
 
-function RelayProviderRow({ t }: { t?: any }) {
+function RelayProviderRow({ t, label }: { t?: any; label?: string }) {
   const isZh = t?.langCode !== 'en';
   const ui = (zh: string, en: string) => (isZh ? zh : en);
-  const [apiKey, setApiKey] = useState(() => {
-    try { return localStorage.getItem('lumi_relay_key') || ''; } catch { return ''; }
-  });
+  const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(() => {
-    try { return localStorage.getItem('lumi_relay_url') || 'https://api.example.com/v1'; } catch { return 'https://api.example.com/v1'; }
+    return readStoredRelayBaseUrl() || LUMI_OFFICIAL_BASE_URL;
   });
   const [serverKeyOk, setServerKeyOk] = useState(false);
   const [serverUrlOk, setServerUrlOk] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
+    clearLegacyRelaySecret();
     getSavedKeyStatus()
       .then(data => {
         setServerKeyOk(!!data['RELAY_API_KEY']);
@@ -3365,10 +3546,15 @@ function RelayProviderRow({ t }: { t?: any }) {
   }, []);
 
   const handleSave = () => {
-    if (!apiKey.trim() || !baseUrl.trim()) return;
-    saveServerKeys({ RELAY_API_KEY: apiKey.trim(), RELAY_BASE_URL: baseUrl.trim() }).then(() => {
-      localStorage.setItem('lumi_relay_key', apiKey.trim());
+    const enteredKey = apiKey.trim();
+    if ((!enteredKey && !serverKeyOk) || !baseUrl.trim()) return;
+    saveServerKeys({
+      RELAY_BASE_URL: baseUrl.trim(),
+      ...(enteredKey ? { RELAY_API_KEY: enteredKey } : {}),
+    }).then(() => {
+      clearLegacyRelaySecret();
       localStorage.setItem('lumi_relay_url', baseUrl.trim());
+      setApiKey('');
       setServerKeyOk(true);
       setServerUrlOk(true);
       setSaved(true);
@@ -3379,7 +3565,7 @@ function RelayProviderRow({ t }: { t?: any }) {
 
   const handleRemove = () => {
     saveServerKeys({ RELAY_API_KEY: '', RELAY_BASE_URL: '' }).then(() => {
-      localStorage.removeItem('lumi_relay_key');
+      clearLegacyRelaySecret();
       localStorage.removeItem('lumi_relay_url');
       setServerKeyOk(false);
       setServerUrlOk(false);
@@ -3394,9 +3580,9 @@ function RelayProviderRow({ t }: { t?: any }) {
   return (
     <SettingsDisclosure
       icon={<Globe size={18} className="text-cyan-400" />}
-      label={t?.apiRelayLabel || 'API Relay'}
+      label={label || t?.apiRelayLabel || 'API Relay'}
       badges={<>
-        {(serverKeyOk || serverUrlOk) && <span className="rounded-full border border-green-500/20 bg-green-500/10 px-2 py-0.5 text-[11px] font-semibold text-green-400">{uiMessage('settings.configured.d7f5ed6e15')}</span>}
+        {serverKeyOk && serverUrlOk && <span className="rounded-full border border-green-500/20 bg-green-500/10 px-2 py-0.5 text-[11px] font-semibold text-green-400">{uiMessage('settings.configured.d7f5ed6e15')}</span>}
         {saved && <CheckCircle size={14} className="text-green-400" />}
       </>}
     >
@@ -3414,14 +3600,14 @@ function RelayProviderRow({ t }: { t?: any }) {
           value={baseUrl}
           onChange={e => setBaseUrl(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && handleSave()}
-          placeholder="https://your-relay.example.com/v1"
+          placeholder={LUMI_RELAY_BASE_URL_PLACEHOLDER}
           className="h-11 w-full rounded-lg border border-white/10 bg-black/30 px-3 font-mono text-sm text-white outline-none transition-colors focus:border-cyan-400/50"
         />
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
         <Button
           onClick={handleSave}
-          disabled={!apiKey.trim() || !baseUrl.trim()}
+          disabled={(!apiKey.trim() && !serverKeyOk) || !baseUrl.trim()}
           className="h-10 rounded-lg bg-cyan-600 px-4 text-xs font-semibold text-white transition-all hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-30"
         >
           {t?.save || uiMessage('settings.save.ec8e6d5819')}

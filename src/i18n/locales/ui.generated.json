@@ -1,4 +1,48 @@
 {
+  "settings.lumi-official-api-label.a1b2c3d4e5": {
+    "en": "Lumi Official API (endpoint required)",
+    "zh": "Lumi 官方 API（需官方端点）"
+  },
+  "settings.lumi-official-capability-supported.b2c3d4e5f6": {
+    "en": "All Lumi model roles are supported after the official endpoint is configured.",
+    "zh": "配置官方端点后，Lumi 支持全部模型角色。"
+  },
+  "settings.lumi-official-capability-unavailable.c3d4e5f6a7": {
+    "en": "This Lumi model role is not available in the current build.",
+    "zh": "当前构建不提供此 Lumi 模型角色。"
+  },
+  "settings.lumi-official-speech-unavailable.d4e5f6a7b8": {
+    "en": "Configure the official audio endpoint before using speech.",
+    "zh": "使用语音前请先配置官方音频端点。"
+  },
+  "settings.lumi-official-service.9a4e2d7c10": {
+    "en": "Lumi Official API",
+    "zh": "Lumi 官方 API"
+  },
+  "settings.lumi-official-relay.7d3b1f9c24": {
+    "en": "Lumi Official API endpoint",
+    "zh": "Lumi 官方 API 端点"
+  },
+  "settings.capability-vision-world-actions.b8c9d0e1f2": {
+    "en": "vision and world actions",
+    "zh": "视觉与世界操作"
+  },
+  "settings.capability-image-video-generation.c9d0e1f2a3": {
+    "en": "image and video generation",
+    "zh": "图像与视频生成"
+  },
+  "settings.capability-world-actions.d0e1f2a3b4": {
+    "en": "world actions",
+    "zh": "世界操作"
+  },
+  "settings.capability-embedding.e1f2a3b4c5": {
+    "en": "embedding and reranking",
+    "zh": "嵌入与重排"
+  },
+  "settings.capability-official-supported-roles.a3b4c5d6e7": {
+    "en": "All official model roles are available after configuration.",
+    "zh": "配置完成后官方模型角色均可用。"
+  },
   "settings.background-face-presence.c07ac0f5cb": {
     "en": "Background face presence",
     "zh": "\u540e\u53f0\u4eba\u8138\u5728\u573a\u8bc6\u522b"
