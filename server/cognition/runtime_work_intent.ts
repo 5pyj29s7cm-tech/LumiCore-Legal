@@ -13,8 +13,8 @@ function compact(value: unknown): string {
 // still unambiguously refer to Lumi's durable work ledger. Keep this
 // recognition narrow to demonstratives/all-task forms so ordinary task prose
 // does not enter the control lane.
-const GENERIC_WORK_SCOPE_RE = /(?:这些|那些|所有|全部|上述|上面)(?:后台)?任务|\b(?:these|those|all)\s+(?:background\s+)?tasks?\b/iu;
-const GENERIC_CANCEL_WORK_RE = /(?:清理|清掉|删掉)|\b(?:clear|remove)\b/iu;
+const GENERIC_WORK_SCOPE_RE = /(?:这些|那些|所有|全部|上述|上面)(?:后台)?任务|\b(?:these|those|all)\s+(?:background\s+)?tasks?\b/iu; // i18n-allow: Multilingual input-recognition literals; not user-visible copy.
+const GENERIC_CANCEL_WORK_RE = /(?:清理|清掉|删掉)|\b(?:clear|remove)\b/iu; // i18n-allow: Multilingual input-recognition literals; not user-visible copy.
 
 const EXPLICIT_WORK_SCOPE_RE = /(?:\u540e\u53f0(?:\u4efb\u52a1|\u5de5\u4f5c)?|\u5f53\u524d(?:\u4efb\u52a1|\u5de5\u4f5c)|\u6b63\u5728(?:\u6267\u884c|\u5904\u7406|\u505a)\u7684(?:\u4efb\u52a1|\u5de5\u4f5c)?|\u4efb\u52a1(?:\u961f\u5217|\u8fdb\u5ea6|\u72b6\u6001)|\u5de5\u4f5c(?:\u8fdb\u5ea6|\u72b6\u6001)|\b(?:background|current|active|running)\s+(?:task|work|job)s?\b|\btask\s+(?:queue|progress|status)\b)/iu;
 const CANCEL_WORK_RE = /(?:\u505c\u6b62|\u53d6\u6d88|\u7ed3\u675f|\u7ec8\u6b62|\u4e0d\u8981\u505a|\u522b\u505a|\u4e0d\u7528\u505a|\u653e\u5f03|\u505c\u4e0b)|\b(?:stop|cancel|abort|end|quit|drop)\b/iu;

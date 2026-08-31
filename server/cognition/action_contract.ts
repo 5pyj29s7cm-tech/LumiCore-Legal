@@ -197,6 +197,7 @@ const APP_OPEN_INTENT_RE =
 // the model retains enough iterations and visible mutation evidence is
 // required before completion.
 const COMPOUND_APP_MUTATION_RE =
+  // i18n-allow: Multilingual input-recognition literals; not user-visible copy.
   /(?:然后|接着|并(?:且)?|再|\b(?:and|then|after(?:wards)?|and\s+then)\b)[^.!?;\n]{0,80}(?:新建|创建|写入|输入|粘贴|写|编辑|修改|保存|\b(?:new|create|write|type|paste|edit|modify|save)\b)/iu;
 
 export type DesktopWindowAction = 'maximize' | 'minimize' | 'restore';

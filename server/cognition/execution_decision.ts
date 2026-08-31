@@ -313,7 +313,7 @@ function primaryUserInstruction(input: string): string {
 
 function isUnboundTerseContinuation(input: LumiExecutionDecisionInput): boolean {
   const text = primaryUserInstruction(input.currentTurnText || input.text);
-  if (!/^(?:继续|接着|重试|再试一次|继续执行|继续刚才的任务|恢复|continue|resume|retry|try again|proceed)\s*[。！？!?．.]?$/iu.test(text)) {
+  if (!/^(?:继续|接着|重试|再试一次|继续执行|继续刚才的任务|恢复|continue|resume|retry|try again|proceed)\s*[。！？!?．.]?$/iu.test(text)) { // i18n-allow: Multilingual input-recognition literals; not user-visible copy.
     return false;
   }
   return input.trustedActionContinuation !== true;
