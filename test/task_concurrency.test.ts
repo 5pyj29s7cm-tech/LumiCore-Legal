@@ -395,7 +395,7 @@ describe('active task message relation', () => {
     expect(context).toContain('- taskId: task-1');
     expect(context).toContain('- taskRevision: 7');
     expect(context).toContain('- rootGoal: 读取桌面平面图并在 AutoCAD 里绘制');
-    expect(context).toContain('worker or sub-step completion as evidence only');
-    expect(context).toContain('root coordinator alone may report terminal completion');
+    expect(context).toContain('an individual step completing as evidence only');
+    expect(context).toContain('LumiCore may report terminal completion only after checking the whole goal');
   });
 });
