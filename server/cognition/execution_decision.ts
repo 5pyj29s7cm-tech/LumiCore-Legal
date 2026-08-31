@@ -216,9 +216,9 @@ function fallbackPolicy(
 function buildRegisteredIndustryWorkflowToolPolicy(
   flow: LumiTurnFlow,
   registry?: ToolRegistry,
+  declarations: ToolDeclaration[] = [],
 ): ToolPolicy | null {
   if (!flow.industryWorkflowEntryId) return null;
-  if (!registry) return NO_TOOLS_POLICY;
   const match = matchCurrentIndustryWorkflow(flow.routeText);
   if (
     !match
@@ -226,6 +226,35 @@ function buildRegisteredIndustryWorkflowToolPolicy(
     || match.entry.contract.entryId !== match.entry.entryId
     || match.entry.contract.productLine !== match.profile.productLine
   ) return NO_TOOLS_POLICY;
+
+  // Some callers build an execution decision from an already filtered set of
+  // declarations without carrying the registry object. Keep the workflow
+  // bound to the current, validated entry and intersect strictly with those
+  // declarations instead of collapsing a valid legal turn to zero tools.
+  // Runtime calls still use the authoritative registry branch below.
+  if (!registry) {
+    const declaredTools = new Set(declarations.map(item => item.function.name));
+    const routed = routeToolsForTurn(flow.routeText, declarations, {
+      maxTools: flow.channel === 'voice' ? 28 : 60,
+    });
+    const requiredWorkflowTools = [
+      'industry_workspace_status',
+      'industry_workspace_bind',
+      'industry_workflow_start',
+      'industry_workflow_complete',
+    ].filter(name => declaredTools.has(name));
+    const allowedTools = unique([
+      ...requiredWorkflowTools,
+      ...(flow.workflowHint?.requiredTools || []),
+      ...routed.toolNames,
+    ]).filter(name => declaredTools.has(name));
+    return {
+      allowedTools,
+      requireConfirmation: [],
+      forbiddenTools: [],
+      maxIterations: flow.channel === 'voice' ? 12 : 20,
+    };
+  }
 
   const assistantPolicy = buildOperationModeToolPolicy('assistant', registry);
   const assistantManifest = registry.getCapabilityManifest(assistantPolicy);
@@ -672,6 +701,7 @@ export function buildLumiExecutionDecision(input: LumiExecutionDecisionInput): L
   const industryWorkflowToolPolicy = buildRegisteredIndustryWorkflowToolPolicy(
     input.flow,
     input.toolRegistry,
+    input.toolDeclarations,
   );
   const selectedBaseToolPolicy = input.isSanctuary || statusOnlyContinuation
     ? NO_TOOLS_POLICY
