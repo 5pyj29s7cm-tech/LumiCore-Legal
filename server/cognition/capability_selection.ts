@@ -91,7 +91,7 @@ export function buildModelCapabilityPolicy(
   const baseAllowedSet = new Set(baseAllowed);
   const baseWildcard = baseAllowedSet.has('*');
   const hardRoute = execution.toolRoute?.hardAllowlist === true ? execution.toolRoute : null;
-  const hardAllowed = hardRoute ? unique(hardRoute.toolNames).filter(name => !forbidden.has(name) && (baseWildcard || baseAllowedSet.has(name))) : null;
+  const hardAllowed = hardRoute && hardRoute.toolNames.length > 0 ? unique(hardRoute.toolNames).filter(name => !forbidden.has(name) && (baseWildcard || baseAllowedSet.has(name))) : null;
   const maxIterations = hardRoute ? Math.max(0, Math.min(base.maxIterations ?? execution.maxIterations, hardRoute.maxIterations ?? execution.maxIterations)) : (base.maxIterations ?? execution.maxIterations);
   return {
     ...base,
