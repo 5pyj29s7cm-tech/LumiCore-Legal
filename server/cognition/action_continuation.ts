@@ -38,6 +38,7 @@ import {
   type TaskCapsuleV1,
 } from '../conversation/task_capsule';
 import { isUnconfirmedRuntimeCandidate } from '../conversation/task_target_anchor';
+import { toolRecordTerminalPayload } from '../tools/receipt_payload';
 
 export interface ActionContinuationHistoryItem {
   role?: string;
@@ -97,6 +98,67 @@ export interface ConversationActionContinuationState extends RecentActionContinu
     status: 'persistence_unknown';
     requestId: string;
     quarantinedAt: string;
+  };
+}
+
+export interface PendingRuntimeCancellationRecheck {
+  taskId: string;
+  taskIds: string[];
+  priorReceiptId: string;
+  priorStatus: 'cancelling';
+}
+
+/**
+ * Return immutable runtime targets from a cancellation that was accepted but
+ * is still settling. This is reconciliation authority only; malformed or
+ * widened target lists fail closed and never become cancel-all requests.
+ */
+export function pendingRuntimeCancellationRecheck(
+  value: ConversationActionContinuationState | null | undefined,
+): PendingRuntimeCancellationRecheck | null {
+  const state = normalizeConversationActionState(value);
+  if (!state?.taskId || !state.unfinished) return null;
+  const hasCancellationContract = [state.goal, state.latestInstruction]
+    .filter(Boolean)
+    .some(candidate => {
+      const contract = buildActionContract(candidate);
+      return contract.kind === 'task_control'
+        && contract.preferredTools.includes('runtime_work_cancel');
+    });
+  if (!hasCancellationContract) return null;
+  const latestCancellation = [...(state.receipts || [])]
+    .reverse()
+    .find(receipt => receipt.name === 'runtime_work_cancel');
+  if (!latestCancellation) return null;
+  const payload = toolRecordTerminalPayload({
+    receipt: latestCancellation.receipt,
+    result: latestCancellation.result,
+  });
+  const result = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload as Record<string, any>
+    : null;
+  if (
+    result?.ok !== true
+    || String(result.status || '').toLowerCase() !== 'cancelling'
+    || Number(result.failedCount || 0) !== 0
+    || latestCancellation.terminalVerification?.status === 'verified'
+  ) return null;
+  const exactIds = (candidate: unknown): string[] | null => {
+    if (!Array.isArray(candidate) || candidate.length === 0 || candidate.length > 64) return null;
+    const ids = candidate.map(item => typeof item === 'string' ? item.trim() : '');
+    if (ids.some(id => !id || id.length > 180)) return null;
+    return Array.from(new Set(ids));
+  };
+  const authorized = exactIds(latestCancellation.arguments?.taskIds);
+  const requested = exactIds(result.requestedTaskIds);
+  if (!authorized || !requested) return null;
+  const authorizedSet = new Set(authorized);
+  if (requested.length !== authorizedSet.size || requested.some(id => !authorizedSet.has(id))) return null;
+  return {
+    taskId: state.taskId,
+    taskIds: requested,
+    priorReceiptId: String(latestCancellation.id || '').slice(0, 180),
+    priorStatus: 'cancelling',
   };
 }
 

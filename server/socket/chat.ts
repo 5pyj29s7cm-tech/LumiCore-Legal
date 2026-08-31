@@ -22,6 +22,7 @@ import {
   buildModelCapabilityPolicy,
   buildModelToolProjection,
 } from "../cognition/capability_selection";
+import { trustedContinuationEvidenceTools } from "../cognition/tool_router";
 import { buildLumiExecutionPipeline } from "../cognition/execution_pipeline";
 import { isCurrentIndustryMultiWorkspaceLedgerStatusRequest } from "../regions/packs/cn/industry_capability_profile";
 import { buildDesktopExecutionStabilityPolicy } from "../cognition/desktop_execution_stability";
@@ -81,6 +82,7 @@ import {
   buildPendingAssistantOfferContextFromTranscript,
   resolvePendingRuntimeCleanupOffer,
 } from '../cognition/pending_assistant_offer';
+import { classifyRuntimeWorkIntent } from '../cognition/runtime_work_intent';
 import { formatRuntimeCleanupReceipt } from '../i18n/runtime_cleanup_messages';
 import {
   admitAcceptedUserTurnDurably,
@@ -123,6 +125,11 @@ import {
   type FinalizeForegroundRequestResult,
   type ForegroundRequestDurabilityDependencies,
 } from "../conversation/manager";
+import {
+  getConversationActionStateByTaskId,
+  getConversationActionStateFromLedger,
+  getLatestConversationActionState,
+} from "../conversation/action_ledger";
 import { findAdjacentVerifiedConfirmedAction } from '../conversation/duplicate_confirmation';
 import { scheduleConversationSummary } from "../conversation/summary_scheduler";
 import {
@@ -141,6 +148,8 @@ import {
   classifyConversationActionFollowupIntent,
   conversationActionRequiresFreshConfirmationReview,
   formatConversationActionTaskStatus,
+  pendingRuntimeCancellationRecheck,
+  RECONFIRMATION_REQUIRED_BLOCKER,
 } from "../cognition/action_continuation";
 import { buildDurableTaskDeterministicToolRecoveryCall } from '../cognition/deterministic_tool_recovery';
 import {
@@ -898,6 +907,10 @@ export function registerChatHandler(
       visibleUserText,
       pendingAssistantOfferContext,
     );
+    const explicitRuntimeWorkStatusRequest = classifyRuntimeWorkIntent(
+      visibleUserText,
+      pendingAssistantOfferContext,
+    ) === 'status';
     let confirmationChannelScope = buildTransportNeutralConfirmationScope({
       domain: resolvedDomain,
       orgId: resolvedOrgId,
@@ -1360,6 +1373,9 @@ export function registerChatHandler(
           ? controlTargetRequestId || undefined
           : undefined,
       );
+      const clearedTaskConfirmation = await clearPendingConfirmationDurably(uid, confirmationScope);
+      const clearedTasklessConfirmation = await clearPendingConfirmationDurably(uid, confirmationChannelScope);
+      pendingConfirmationCleared = clearedTaskConfirmation || clearedTasklessConfirmation;
       const cancelledCurrentTask = cancelled?.taskId === resolvedTaskRelation.taskId
         && cancelled.status === 'cancelled';
       const responseText = cancelledCurrentTask
@@ -1436,9 +1452,35 @@ export function registerChatHandler(
           skipActionContinuation: true,
         });
       }
-      const statusText = activeConversation && resolvedTaskRelation.taskId
-        ? getConversationActionStatus(activeConversation.id, uid, visibleUserText, activeConversation.actionContinuationState)
-        : CN_TASK_EXECUTION_MESSAGES.activeWithoutReceipt;
+      // Resolve status from the durable ledger, not only the in-memory
+      // conversation snapshot. A pending confirmation can be written by the
+      // preceding request after this socket handler captured the conversation;
+      // the ledger still knows the exact task and must surface “等待确认”
+      // instead of generic active-without-receipt text.
+      const durableStatusState = activeConversation
+        ? (resolvedTaskRelation.taskId
+          ? getConversationActionStateByTaskId(readDB(), {
+              conversationId: activeConversation.id,
+              userId: uid,
+              taskId: resolvedTaskRelation.taskId,
+            })
+          : getLatestConversationActionState(readDB(), {
+              conversationId: activeConversation.id,
+              userId: uid,
+            }))
+        : null;
+      const statusTaskId = resolvedTaskRelation.taskId || durableStatusState?.taskId || '';
+      const statusText = activeConversation && statusTaskId
+        ? getConversationActionStatus(
+            activeConversation.id,
+            uid,
+            visibleUserText,
+            durableStatusState || activeConversation.actionContinuationState,
+            statusTaskId,
+          )
+        : durableStatusState
+          ? formatConversationActionTaskStatus(durableStatusState)
+          : CN_TASK_EXECUTION_MESSAGES.activeWithoutReceipt;
       try { ack?.({ ok: true, requestId, receivedAt: new Date().toISOString() }); } catch {}
       await commitDeterministicTerminal({
         payload: {
@@ -1449,7 +1491,7 @@ export function registerChatHandler(
           sidecar: true,
           finalized: true,
           blocked: false,
-          reason: '',
+          reason: 'task_status',
         },
         persistAssistantMessage: activeConversation
           ? () => addMessageIdempotent({ userId: uid, agentId: conversationAgentId, conversationId: activeConversation.id, role: 'assistant', content: statusText, domain: resolvedDomain, orgId: resolvedOrgId, source: eventSource, channel: 'chat', cognitiveIntent: 'task_status', requestId, skipActionContinuation: true })
@@ -1989,20 +2031,28 @@ export function registerChatHandler(
       // Prior-turn receipt questions are deterministic ledger reads. Resolve
       // them before memory embeddings, RAG, personality assembly, or any model
       // client so a slow provider cannot block a local execution-status answer.
-      const acceptedFollowupIntent = resolvedTaskRelation.binding === 'active_task'
-        || resolvedTaskRelation.binding === 'previous_task'
-        ? resolvedTaskRelation.feedback === 'status'
-          ? 'status' as const
-          : ['continue', 'correction', 'accept', 'retry'].includes(resolvedTaskRelation.feedback)
-            ? 'execute' as const
-            : classifyConversationActionFollowupIntent(
-                visibleUserText,
-                conversation.actionContinuationState,
-              )
-        : classifyConversationActionFollowupIntent(
-            visibleUserText,
-            conversation.actionContinuationState,
-          );
+      const runtimeStatusOwnsThisTurn = explicitRuntimeWorkStatusRequest
+        && !(
+          resolvedTaskRelation.feedback === 'status'
+          && ['active_task', 'previous_task'].includes(resolvedTaskRelation.binding)
+          && Boolean(resolvedTaskRelation.taskId)
+        );
+      const acceptedFollowupIntent = runtimeStatusOwnsThisTurn
+        ? 'none' as const
+        : resolvedTaskRelation.binding === 'active_task'
+          || resolvedTaskRelation.binding === 'previous_task'
+          ? resolvedTaskRelation.feedback === 'status'
+            ? 'status' as const
+            : ['continue', 'correction', 'accept', 'retry'].includes(resolvedTaskRelation.feedback)
+              ? 'execute' as const
+              : classifyConversationActionFollowupIntent(
+                  visibleUserText,
+                  conversation.actionContinuationState,
+                )
+          : classifyConversationActionFollowupIntent(
+              visibleUserText,
+              conversation.actionContinuationState,
+            );
       const acceptedNormalizedIntent = normalizeActionIntent(visibleUserText);
       const confirmationNeedsFreshReview = Boolean(
         acceptedFollowupIntent === 'status'
@@ -2011,10 +2061,219 @@ export function registerChatHandler(
           conversation.actionContinuationState,
         ),
       );
+      const asksToRecheckPreviousAction = acceptedFollowupIntent === 'status'
+        && acceptedNormalizedIntent.kind === 'status_query'
+        && acceptedNormalizedIntent.target === 'previous_action';
+      const asksAboutBoundConversationTask = acceptedFollowupIntent === 'status'
+        && ['active_task', 'previous_task'].includes(resolvedTaskRelation.binding)
+        && Boolean(resolvedTaskRelation.taskId)
+        && (
+          acceptedNormalizedIntent.kind === 'none'
+          || (
+            acceptedNormalizedIntent.kind === 'status_query'
+            && ['previous_action', 'recent_task'].includes(acceptedNormalizedIntent.target)
+          )
+        );
+      const asksAboutRecentConversationTask = acceptedFollowupIntent === 'status'
+        && acceptedNormalizedIntent.kind === 'status_query'
+        && acceptedNormalizedIntent.target === 'recent_task';
+      const serverBoundRecheckTaskId = asksToRecheckPreviousAction
+        ? String(resolvedTaskRelation.taskId || '').trim()
+        : '';
+      const mayUseUnboundRecheckFallback = asksToRecheckPreviousAction
+        && !serverBoundRecheckTaskId
+        && resolvedTaskRelation.binding === 'conversation'
+        && !controlTargetRequestId
+        && !controlTargetTaskId
+        && controlTargetRevision === undefined;
+      const previousActionState = asksToRecheckPreviousAction
+        ? serverBoundRecheckTaskId
+          ? getConversationActionStateByTaskId(readDB(), {
+              conversationId: conversation.id,
+              userId: uid,
+              taskId: serverBoundRecheckTaskId,
+            })
+          : mayUseUnboundRecheckFallback
+            ? getConversationActionStateFromLedger(readDB(), {
+                conversationId: conversation.id,
+                userId: uid,
+                query: visibleUserText,
+              })
+            : null
+        : null;
+      const runtimeCancellationRecheck = pendingRuntimeCancellationRecheck(previousActionState);
+      if (runtimeCancellationRecheck) {
+        const recheckPolicy = {
+          allowedTools: ['runtime_work_cancel'],
+          requireConfirmation: [],
+          forbiddenTools: [],
+          maxIterations: 1,
+        };
+        const recheckPreparation = prepareConversationActionExecution({
+          conversationId: conversation.id,
+          userId: uid,
+          userText: visibleUserText,
+          requestId,
+          userMessageId: acceptedUserMessageId,
+          toolPolicy: recheckPolicy,
+          forceResume: true,
+          forceNewTask: false,
+          forceTask: true,
+          preserveExistingTask: true,
+        });
+        if (recheckPreparation.state?.taskId === runtimeCancellationRecheck.taskId) {
+          const recheckState = recheckPreparation.state;
+          foregroundRequestIdentity = Object.freeze({
+            conversationId: conversation.id,
+            userId: uid,
+            requestId,
+            expectedTaskId: runtimeCancellationRecheck.taskId,
+          });
+          resolvedTaskRelation = {
+            ...resolvedTaskRelation,
+            binding: 'active_task',
+            taskId: recheckState.taskId,
+            revision: recheckState.revision,
+            targetRequestId: recheckState.activeRequestId || requestId,
+          };
+          emitAgent('agent:task_relation', {
+            relation: resolvedTaskRelation,
+            phase: 'runtime_cleanup_recheck_prepared',
+          });
+          const recheckRecord = await executeToolCall({
+            registry: toolRegistry,
+            id: `runtime_cleanup_recheck_${requestId}`,
+            name: 'runtime_work_cancel',
+            arguments: { taskIds: [...runtimeCancellationRecheck.taskIds] },
+            executionOrigin: 'deterministic_route',
+            context: {
+              ...toolSecurityContext,
+              userId: uid,
+              taskId: runtimeCancellationRecheck.taskId,
+              conversationId: conversation.id,
+              turnId: requestId,
+              requestId,
+              domain: resolvedDomain,
+              orgId: resolvedOrgId,
+              source: 'chat_runtime_cleanup_recheck',
+              toolPolicy: recheckPolicy,
+              actionIntent: previousActionState?.goal || visibleUserText,
+              routedTaskText: previousActionState?.goal || visibleUserText,
+              // This is an idempotent verification of the exact immutable IDs
+              // accepted in the immediately preceding cancellation receipt,
+              // not fresh mutation authority and never a cancel-all request.
+              userConfirmed: true,
+              isCancelled: () => abortController.signal.aborted,
+            },
+          });
+          const recheckLifecycle = {
+            correlationId: recheckRecord.id || `runtime_cleanup_recheck_${requestId}`,
+            name: recheckRecord.name,
+            arguments: recheckRecord.arguments,
+            args: recheckRecord.arguments,
+            result: recheckRecord.error ? undefined : formatToolResultForUi(recheckRecord.result),
+            error: recheckRecord.error,
+          };
+          emitAgent('agent:tool_call', recheckLifecycle);
+          emitAgent('agent:tool', recheckLifecycle);
+          let recheckReceipt: Record<string, any> = {
+            ok: false,
+            status: 'failed',
+            requestedTaskIds: runtimeCancellationRecheck.taskIds,
+            cancelledTaskIds: [],
+            cancellingTaskIds: [],
+            notCancelledTaskIds: runtimeCancellationRecheck.taskIds,
+            targetResults: runtimeCancellationRecheck.taskIds.map(taskId => ({ taskId, status: 'failed' })),
+          };
+          try {
+            const parsed = JSON.parse(String(recheckRecord.result || '{}'));
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              recheckReceipt = parsed;
+            }
+          } catch {}
+          const recheckSettled = !recheckRecord.error
+            && recheckRecord.terminalVerification?.status === 'verified'
+            && ['idle', 'cancelled'].includes(String(recheckReceipt.status || ''));
+          const recheckPending = !recheckRecord.error
+            && String(recheckReceipt.status || '') === 'cancelling';
+          const recheckReason = recheckSettled
+            ? 'runtime_cleanup_recheck_completed'
+            : recheckPending
+              ? 'runtime_cleanup_recheck_pending'
+              : 'runtime_cleanup_recheck_failed';
+          const recheckText = formatRuntimeCleanupReceipt(visibleUserText, recheckReceipt);
+          const recheckCompletionFeedback = buildForegroundTaskCompletionFeedback({
+            taskId: runtimeCancellationRecheck.taskId,
+            taskLabel: previousActionState?.goal || visibleUserText,
+            toolRecords: [recheckRecord],
+            blocked: !recheckSettled,
+            reason: recheckSettled
+              ? ''
+              : recheckPending
+                ? 'Cancellation is still in progress.'
+                : recheckRecord.error
+                  || recheckRecord.terminalVerification?.reason
+                  || 'The exact runtime cancellation could not be verified.',
+          });
+          await commitDeterministicTerminal({
+            payload: {
+              text: recheckText,
+              agentName: 'Lumi',
+              finalized: true,
+              blocked: !recheckSettled,
+              reason: recheckReason,
+              completionFeedback: recheckCompletionFeedback,
+            },
+            persistAssistantMessage: () => {
+              const summary = summarizeToolRecordForPersistence(recheckRecord);
+              if (summary) {
+                addMessage({
+                  userId: uid,
+                  agentId: conversationAgentId,
+                  conversationId: conversation.id,
+                  role: 'tool',
+                  content: summary,
+                  domain: resolvedDomain,
+                  orgId: resolvedOrgId,
+                });
+              }
+              addMessageIdempotent({
+                userId: uid,
+                agentId: conversationAgentId,
+                conversationId: conversation.id,
+                role: 'assistant',
+                content: recheckText,
+                personality: personalityRegistry.get('lumi')?.id || 'lumi',
+                domain: resolvedDomain,
+                orgId: resolvedOrgId,
+                source: 'chat_runtime_cleanup_recheck',
+                channel: 'chat',
+                toolCalls: [recheckRecord],
+                cognitiveIntent: recheckReason,
+                llmWasCalled: false,
+                requestId,
+                completionFeedback: recheckCompletionFeedback,
+              });
+            },
+            publishAfter: () => emitConversationUpdated({
+              conversationId: conversation.id,
+              agentId: conversationAgentId,
+              source: 'chat_runtime_cleanup_recheck',
+              rolledOver: conversationTurn.rolledOver,
+              previousConversationId: conversationTurn.previousConversationId,
+            }),
+            errorContext: 'Runtime cleanup recheck terminal',
+          });
+          await releaseChatSession();
+          return;
+        }
+      }
       if (
         acceptedFollowupIntent === 'status'
         && (
           confirmationNeedsFreshReview
+          || asksAboutBoundConversationTask
+          || asksAboutRecentConversationTask
           || (
             acceptedNormalizedIntent.kind === 'status_query'
             && acceptedNormalizedIntent.target === 'previous_action'
@@ -2027,14 +2286,16 @@ export function registerChatHandler(
               conversationId: conversation.id,
               userId: uid,
               domain: resolvedDomain,
-              orgId: resolvedOrgId,
-              currentRequestId: requestId,
-            }), visibleUserText)
+            orgId: resolvedOrgId,
+            currentRequestId: requestId,
+            taskId: serverBoundRecheckTaskId || previousActionState?.taskId || '',
+          }), visibleUserText)
           : getConversationActionStatus(
               conversation.id,
               uid,
               visibleUserText,
               conversation.actionContinuationState,
+              resolvedTaskRelation.taskId || '',
             );
         const responseIntent = priorToolReceiptQuestion
           ? 'execution_facts'
@@ -2213,7 +2474,8 @@ export function registerChatHandler(
 
       if (conversationId && confirmationCancellationRequested) {
         const cancelled = cancelConversationActionExecution(conversationId, uid);
-        if (cancelled || pendingConfirmationCleared) {
+        const cancelledCurrentTask = cancelled?.status === 'cancelled';
+        if (cancelledCurrentTask || pendingConfirmationCleared) {
           const responseText = pendingConfirmationCleared
             ? '已取消刚才等待确认的操作；它没有执行，也不会继续发送。'
             : CN_TASK_EXECUTION_MESSAGES.cancelled;
@@ -2222,6 +2484,58 @@ export function registerChatHandler(
             persistAssistantMessage: () => addMessageIdempotent({ userId: uid, agentId: conversationAgentId, conversationId, role: 'assistant', content: responseText, domain: resolvedDomain, orgId: resolvedOrgId, source: eventSource, channel: 'chat', cognitiveIntent: 'task_cancel', requestId, skipActionContinuation: true }),
             publishAfter: () => emitConversationUpdated({ conversationId, agentId: conversationAgentId, source: 'chat', rolledOver: conversationTurn.rolledOver, previousConversationId: conversationTurn.previousConversationId }),
             errorContext: 'Pending confirmation cancellation terminal',
+          });
+          await releaseChatSession();
+          return;
+        }
+        const boundTerminalTask = resolvedTaskRelation.taskId
+          ? getConversationActionStateByTaskId(readDB(), {
+              conversationId,
+              userId: uid,
+              taskId: resolvedTaskRelation.taskId,
+            })
+          : getLatestConversationActionState(readDB(), { conversationId, userId: uid });
+        if (boundTerminalTask && !boundTerminalTask.unfinished) {
+          const english = !/[\u3400-\u9fff]/u.test(visibleUserText);
+          const responseText = english
+            ? boundTerminalTask.status === 'completed'
+              ? `The task "${boundTerminalTask.goal || 'the previous task'}" is already completed. Cancellation cannot undo its recorded result, and I did not execute anything again.`
+              : `The task "${boundTerminalTask.goal || 'the previous task'}" is already ${boundTerminalTask.status || 'terminal'}. There is nothing left to stop, and I did not execute anything again.`
+            : CN_TASK_EXECUTION_MESSAGES.terminalCannotCancel(
+                boundTerminalTask.goal,
+                boundTerminalTask.status || 'terminal',
+              );
+          await commitDeterministicTerminal({
+            payload: {
+              text: responseText,
+              agentName: 'Lumi',
+              finalized: true,
+              blocked: false,
+              reason: 'task_already_terminal',
+            },
+            persistAssistantMessage: () => addMessageIdempotent({
+              userId: uid,
+              agentId: conversationAgentId,
+              conversationId,
+              role: 'assistant',
+              content: responseText,
+              domain: resolvedDomain,
+              orgId: resolvedOrgId,
+              source: eventSource,
+              channel: 'chat',
+              cognitiveIntent: 'task_already_terminal',
+              llmWasCalled: false,
+              requestId,
+              skipActionContinuation: true,
+            }),
+            publishAfter: () => emitConversationUpdated({
+              conversationId,
+              agentId: conversationAgentId,
+              source: 'chat',
+              rolledOver: conversationTurn.rolledOver,
+              previousConversationId: conversationTurn.previousConversationId,
+            }),
+            errorContext: 'Terminal task cancellation no-op',
           });
           await releaseChatSession();
           return;
@@ -2646,6 +2960,7 @@ export function registerChatHandler(
           uid,
           visibleUserText,
           conversation?.actionContinuationState,
+          resolvedTaskRelation.taskId || '',
         )}`);
       }
       const recentFailureExplanation = conversationId && !pendingConfirmation
@@ -2774,11 +3089,29 @@ export function registerChatHandler(
         buildModelCapabilityPolicy(executionDecision),
         toolSecurityContext.executionBoundary,
       );
-      const modelToolProjection = buildModelToolProjection(executionDecision);
-      // The canonical tool-use decision owns durable task creation. Plain
-      // conversation remains taskless, while every tool-capable turn receives
-      // its task identity before any relay or tool receipt can be created.
+      // Keep the executor ceiling and the schema projection on the same
+      // boundary-filtered policy. Otherwise a remote entrance can advertise
+      // a locally authorized tool that the execution engine will later deny.
+      executionDecision.baseToolPolicy = modelCapabilityPolicy;
+      executionDecision.toolPolicy = modelCapabilityPolicy;
+      executionDecision.maxIterations = modelCapabilityPolicy.maxIterations;
       const existingActionState = conversation?.actionContinuationState;
+      const pinnedContinuationTools = trustedContinuationEvidenceTools({
+        actionTaskState: existingActionState,
+        trustedActionContinuation: executionDecision.resumesPinnedTask === true,
+      }, new Set(toolRegistry.getToolDeclarations().map(declaration => declaration.function.name)));
+      const modelToolProjection = buildModelToolProjection(executionDecision, {
+        lane: capabilitySelection.lane,
+        preferredTools: capabilitySelection.preferredTools,
+        pinnedTools: pinnedContinuationTools,
+      });
+      const toolSessionActive = executionPipeline.executionRequested
+        && modelToolProjection.toolNames.length > 0;
+      // The semantic execution plan owns durable task creation. Main Chat may
+      // expose a tool manifest to the model for open-ended reasoning, but that
+      // alone does not make a greeting or ordinary conversation an executable
+      // task. Only turns whose flow requires completion evidence/tool work (or
+      // a pending confirmation) receive a durable task identity before relay.
       const bindsExistingAction = Boolean(
         existingActionState?.taskId
         && ['active_task', 'previous_task'].includes(resolvedTaskRelation.binding)
@@ -4187,9 +4520,20 @@ export function registerChatHandler(
       responseText = finalResponse.text;
       if (finalResponse.blocked) {
         console.warn('[ChatHandler] Completion claim blocked:', finalResponse.reason);
-        if (conversationId && actionTaskExecution.state?.taskId && executionDecision.allowToolUse) {
+        // Keep the live action lease until the terminal assistant persistence
+        // boundary when this turn already has tool evidence.  Finalizing the
+        // task here clears its active request before `addMessageIdempotent`
+        // can bind the evidence, causing verified observations (notably the
+        // WPS active-window anchor) to be archived as stale and dropping the
+        // target from the durable capsule.  A blocked turn with no evidence
+        // still needs the early request finalization below.
+        if (conversationId && actionTaskExecution.state?.taskId && toolSessionActive && allToolRecords.length === 0) {
+          const blocker = correctionRequiresFreshConfirmation
+            && !pendingConfirmationCreatedThisTurn
+            ? RECONFIRMATION_REQUIRED_BLOCKER
+            : finalResponse.reason || 'The current work product did not pass final verification.';
           setConversationActionExecutionStatus(conversationId, uid, 'blocked', {
-            blocker: finalResponse.reason || 'The current work product did not pass final verification.',
+            blocker,
             assistantState: responseText,
             requestId: '',
           });

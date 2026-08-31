@@ -7,6 +7,7 @@ import {
   requiresCurrentAppUiMutation,
 } from './action_contract';
 import type { TaskCapsuleV1 } from '../conversation/task_capsule';
+import { toolRecordTerminalText } from '../tools/receipt_payload';
 
 export type ConversationTaskStatus =
   | 'created'
@@ -300,7 +301,10 @@ function structuredRecordPayload(record: ToolExecutionRecord): unknown {
 export function toolRecordSucceeded(record: ToolExecutionRecord): boolean {
   if (!record?.name || compact(record.error, 600)) return false;
   if (record.terminalVerification?.status === 'failed') return false;
-  const result = compact(record.result, 4000);
+  // Some adapters persist the terminal machine receipt separately and leave
+  // the display-oriented result field empty. The receipt is still authoritative
+  // evidence and must participate in success classification.
+  const result = compact(record.result || toolRecordTerminalText(record), 4000);
   if (!result) return false;
   const structuredPayload = structuredRecordPayload(record);
   if (structuredPayload && !Array.isArray(structuredPayload)) {

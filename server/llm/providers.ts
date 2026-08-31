@@ -199,6 +199,17 @@ function parseLegacyParameterValue(value: string): unknown {
 }
 
 /**
+ * Normalize legacy XML/DSML protocol tags emitted by some
+ * OpenAI-compatible providers before they reach the response finalizer.
+ */
+export function normalizeLegacyToolProtocolText(text: string | null): string {
+  return String(text || '').replace(
+    /<\s*(\/?)\s*[|｜]{1,4}\s*DSML\s*[|｜]{1,4}\s*(tool_calls|function_calls|invoke|parameter)\b([^>]*)>/giu,
+    (_match, closing: string, name: string, suffix: string) => '<' + closing + name + suffix + '>',
+  );
+}
+
+/**
  * Some OpenAI-compatible models occasionally print the older XML function-call
  * protocol in message content instead of returning structured tool_calls. Only
  * convert names that were declared for this exact model request.

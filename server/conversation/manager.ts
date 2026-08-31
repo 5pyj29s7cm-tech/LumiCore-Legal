@@ -152,9 +152,10 @@ export function getConversationActionStatus(
   userId: string,
   query = '',
   fallbackState?: ConversationActionContinuationState | null,
+  taskId = '',
 ): string {
   const db = readDB();
-  return formatConversationActionLedgerStatus(db, { conversationId, userId, query })
+  return formatConversationActionLedgerStatus(db, { conversationId, userId, query, taskId })
     || formatConversationActionTaskStatus(fallbackState);
 }
 

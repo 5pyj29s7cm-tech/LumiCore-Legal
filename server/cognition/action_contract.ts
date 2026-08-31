@@ -192,6 +192,13 @@ const AUTHORING_APP_TARGET_RE =
 const APP_OPEN_INTENT_RE =
   /(?:\u6253\u5f00|\u542f\u52a8|\u8fd0\u884c|\u8fdb\u5165)|\b(?:open|launch|start|run)\b/iu;
 
+// Opening an app and then writing/typing/editing is a compound foreground
+// action, not a launch-only probe. Route it through current-app controls so
+// the model retains enough iterations and visible mutation evidence is
+// required before completion.
+const COMPOUND_APP_MUTATION_RE =
+  /(?:然后|接着|并(?:且)?|再|\b(?:and|then|after(?:wards)?|and\s+then)\b)[^.!?;\n]{0,80}(?:新建|创建|写入|输入|粘贴|写|编辑|修改|保存|\b(?:new|create|write|type|paste|edit|modify|save)\b)/iu;
+
 export type DesktopWindowAction = 'maximize' | 'minimize' | 'restore';
 
 export function requestedDesktopWindowAction(input: string): DesktopWindowAction | null {
@@ -214,9 +221,14 @@ export function requiresCurrentAppUiMutation(input: string): boolean {
     openIntent
     && AUTHORING_APP_TARGET_RE.test(textAfterOpen),
   );
+  const hasCompoundOpenMutation = Boolean(
+    openIntent
+    && textAfterOpen
+    && COMPOUND_APP_MUTATION_RE.test(textAfterOpen),
+  );
   return Boolean(
     primary
-    && (CURRENT_APP_REFERENCE_RE.test(primary) || hasRecoveredTarget || hasNamedAuthoringSequence)
+    && (CURRENT_APP_REFERENCE_RE.test(primary) || hasRecoveredTarget || hasNamedAuthoringSequence || hasCompoundOpenMutation)
     && CURRENT_APP_MUTATION_INTENT_RE.test(primary)
   );
 }
