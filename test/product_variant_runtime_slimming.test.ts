@@ -71,4 +71,22 @@ describe('product variant runtime slimming', () => {
     expect(PRODUCT_VARIANT.runtime.defaultSkills.length).toBeGreaterThan(0);
     expect(PRODUCT_VARIANT.runtime.defaultSkills.length).toBeLessThanOrEqual(3);
   });
+
+  it('keeps retired local-agent persistence and organization template teams migration-only', () => {
+    const database = read('db_layer.ts');
+    const orgHub = read('src/components/org/OrgHub.tsx');
+    const adapters = read('server/adapters/registry.ts');
+    const desktopPlan = read('server/desktop/execution_plan.ts');
+
+    expect(database).toContain('migrateRetiredLocalAgentTables');
+    expect(database).toContain("DROP TABLE IF EXISTS ${table}");
+    expect(database).not.toContain('CREATE TABLE IF NOT EXISTS background_delegation_tasks');
+    expect(database).not.toContain("query<any>('SELECT * FROM background_delegation_tasks')");
+    expect(database).not.toContain("name: 'background_delegation_tasks'");
+    expect(database).not.toContain('CREATE TABLE IF NOT EXISTS agent_templates');
+    expect(orgHub).not.toContain('AgentTemplateWorkspace');
+    expect(adapters).not.toContain('external_ai_collaborate');
+    expect(desktopPlan).not.toContain('external_ai_collaborate');
+    expect(fs.existsSync(path.join(process.cwd(), 'server/org/templates.ts'))).toBe(false);
+  });
 });

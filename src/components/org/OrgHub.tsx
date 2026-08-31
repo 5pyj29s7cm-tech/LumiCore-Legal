@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useMemo, useState } from 'react';
 import {
-  Building2, BookOpen, Package, Users, Settings,
-  ClipboardCheck, ScrollText, MessageSquare,
+  Building2, BookOpen, Users, Settings,
+  ScrollText, MessageSquare,
   Shield, User, Briefcase, Home, GitBranch, Loader2, MessagesSquare,
   FolderOpen, FileText, Search, Crosshair, CheckCircle,
 } from 'lucide-react';
@@ -23,7 +23,6 @@ import { chinaLegalCopy } from '../../i18n/regions/cn/legal';
 import type { LegalView } from './LegalHub';
 
 const AuditLogViewer = lazy(() => import('./AuditLogViewer').then(m => ({ default: m.AuditLogViewer })));
-const AgentTemplateWorkspace = lazy(() => import('./AgentTemplateWorkspace').then(m => ({ default: m.AgentTemplateWorkspace })));
 const BranchDashboard = lazy(() => import('./BranchDashboard').then(m => ({ default: m.BranchDashboard })));
 const CentralLumiChat = lazy(() => import('./CentralLumiChat').then(m => ({ default: m.CentralLumiChat })));
 const KnowledgeBaseBrowser = lazy(() => import('./KnowledgeBaseBrowser').then(m => ({ default: m.KnowledgeBaseBrowser })));
@@ -32,7 +31,6 @@ const LegalHub = lazy(() => import('./LegalHub').then(m => ({ default: m.LegalHu
 const MessagingHub = lazy(() => import('../MessagingHub').then(m => ({ default: m.MessagingHub })));
 const OrgMembers = lazy(() => import('./OrgMembers').then(m => ({ default: m.OrgMembers })));
 const OrganizationSettingsWorkspace = lazy(() => import('./OrganizationSettingsWorkspace').then(m => ({ default: m.OrganizationSettingsWorkspace })));
-const TemplateCreator = lazy(() => import('./TemplateCreator').then(m => ({ default: m.TemplateCreator })));
 
 type SubView = OrganizationWorkspaceView;
 
@@ -81,8 +79,6 @@ export function OrgHub() {
     { id: 'kb', label: t.orgKB, icon: <BookOpen size={16} />, roles: ['owner', 'admin', 'member', 'viewer'], showInNav: false },
     { id: 'chat', label: t.orgChat, icon: <MessageSquare size={16} />, roles: ['owner', 'admin', 'member', 'viewer'], showInNav: false },
     { id: 'messaging', label: t.messaging || uiMessage('org-hub.messaging.ec30100616'), icon: <MessagesSquare size={16} />, roles: ['owner', 'admin', 'member'] },
-    { id: 'templates', label: t.orgTemplates, icon: <Package size={16} />, roles: ['owner', 'admin', 'member', 'viewer'], showInNav: false },
-    { id: 'review', label: uiMessage('org-hub.agent-templates.9cc4c8c9d0'), icon: <ClipboardCheck size={16} />, roles: ['owner', 'admin'], showInNav: false },
     { id: 'members', label: t.orgMembers, icon: <Users size={16} />, roles: ['owner', 'admin'], showInNav: false },
     { id: 'audit', label: t.orgAudit, icon: <ScrollText size={16} />, roles: ['owner', 'admin'] },
     { id: 'settings', label: t.orgSettings, icon: <Settings size={16} />, roles: ['owner', 'admin', 'member', 'viewer'] },
@@ -199,9 +195,6 @@ export function OrgHub() {
       case 'dashboard': return <BranchDashboard />;
       case 'kb': return <KnowledgeBaseBrowser />;
       case 'kb-edit': return <KnowledgeBaseEditor articleId={editingArticleId} onSaved={() => { setEditingArticleId(undefined); setSubView('kb'); }} />;
-      case 'templates': return <AgentTemplateWorkspace />;
-      case 'templates-create': return <TemplateCreator />;
-      case 'review': return <AgentTemplateWorkspace initialTab="review" />;
       case 'chat': return <CentralLumiChat />;
       case 'messaging': return <MessagingHub t={t} />;
       case 'members': return <OrgMembers />;

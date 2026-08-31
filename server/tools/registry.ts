@@ -319,7 +319,6 @@ export function getToolExecutionTimeoutMs(name: string): number {
   if (/^cad_prepare_autocad_operations$/i.test(name)) return 5 * 60_000;
   if (/^(web_login_|url_fetch_logged_in)/i.test(name)) return 5 * 60_000;
   if (name === 'legal_refresh_authoritative_sources') return 3 * 60_000;
-  if (name === 'desktop_ai_roundtable' || name === 'external_ai_collaborate') return 15 * 60_000;
   if (name === 'self_improvement_stage_patch' || name === 'self_improvement_activate') return 60 * 60_000;
   if (/^(wechat_|desktop_ai_|external_ai_)/i.test(name)) return 3 * 60_000;
   if (/^(work_takeover_|capability_gap_autofix|generate_skill|install_skill)/i.test(name)) return 10 * 60_000;

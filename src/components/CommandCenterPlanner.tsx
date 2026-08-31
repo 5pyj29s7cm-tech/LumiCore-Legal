@@ -144,11 +144,19 @@ export function CommandCenterPlanner({
     void refresh();
     const socket = socketService.connect();
     const update = () => void refresh(true);
-    socket.on('agent:background_task_update', update);
+    const events = [
+      'autonomous:task_started',
+      'autonomous:task_paused',
+      'autonomous:task_retry_scheduled',
+      'autonomous:task_completed',
+      'autonomous:task_failed',
+      'autonomous:task_cancelled',
+    ];
+    events.forEach(event => socket.on(event, update));
     const timer = window.setInterval(update, 15_000);
     return () => {
       window.clearInterval(timer);
-      socket.off('agent:background_task_update', update);
+      events.forEach(event => socket.off(event, update));
     };
   }, [refresh, scopeKey]);
 

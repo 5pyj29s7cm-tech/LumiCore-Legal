@@ -26,9 +26,6 @@ describe('organization workspace information architecture', () => {
     const orgHub = source('src/components/org/OrgHub.tsx');
     const legalHub = source('src/components/org/LegalHub.tsx');
     const legalCopy = source('src/i18n/regions/cn/legal.ts');
-    const marketplace = source('src/components/org/TemplateMarketplace.tsx');
-    const creator = source('src/components/org/TemplateCreator.tsx');
-    const reviewQueue = source('src/components/org/TemplateReviewQueue.tsx');
 
     for (const id of [
       'workspace',
@@ -70,23 +67,23 @@ describe('organization workspace information architecture', () => {
     for (const id of ['strategy', 'packet', 'knowledge-sync']) {
       expect(legalHub).toContain(`case '${id}'`);
     }
-    expect(marketplace).toContain('category=legal');
-    expect(creator).toContain("category: 'legal'");
-    expect(reviewQueue).toContain('category=legal');
+    expect(orgHub).not.toContain('AgentTemplateWorkspace');
+    expect(orgHub).not.toContain("case 'templates'");
+    expect(fs.existsSync(path.join(process.cwd(), 'src/components/org/TemplateMarketplace.tsx'))).toBe(false);
+    expect(fs.existsSync(path.join(process.cwd(), 'src/components/org/TemplateCreator.tsx'))).toBe(false);
+    expect(fs.existsSync(path.join(process.cwd(), 'src/components/org/TemplateReviewQueue.tsx'))).toBe(false);
   });
 
-  it('combines template review with the marketplace and hides duplicate dashboard destinations from navigation', () => {
+  it('hides retired agent-template destinations and duplicate dashboard destinations from navigation', () => {
     const orgHub = source('src/components/org/OrgHub.tsx');
-    const templateWorkspace = source('src/components/org/AgentTemplateWorkspace.tsx');
 
-    for (const id of ['kb', 'chat', 'templates', 'members']) {
+    for (const id of ['kb', 'chat', 'members']) {
       expect(orgHub).toContain(`id: '${id}'`);
     }
-    expect(orgHub.match(/showInNav: false/g)?.length).toBeGreaterThanOrEqual(5);
-    expect(orgHub).toContain("case 'templates': return <AgentTemplateWorkspace />");
-    expect(orgHub).toContain('initialTab="review"');
-    expect(templateWorkspace).toContain('<TemplateMarketplace />');
-    expect(templateWorkspace).toContain('<TemplateReviewQueue />');
+    expect(orgHub.match(/showInNav: false/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(orgHub).not.toContain("id: 'templates'");
+    expect(orgHub).not.toContain("id: 'review'");
+    expect(fs.existsSync(path.join(process.cwd(), 'src/components/org/AgentTemplateWorkspace.tsx'))).toBe(false);
   });
 
   it('combines organization settings with branch connection without duplicating the branch navigation item', () => {

@@ -6,9 +6,6 @@ export type OrganizationWorkspaceView =
   | 'kb-edit'
   | 'chat'
   | 'messaging'
-  | 'templates'
-  | 'templates-create'
-  | 'review'
   | 'members'
   | 'audit'
   | 'settings'
@@ -21,9 +18,6 @@ export const ORGANIZATION_WORKSPACE_VIEWS: readonly OrganizationWorkspaceView[] 
   'kb-edit',
   'chat',
   'messaging',
-  'templates',
-  'templates-create',
-  'review',
   'members',
   'audit',
   'settings',
@@ -36,8 +30,6 @@ export const ORGANIZATION_WORKSPACE_PUBLIC_VIEWS: readonly OrganizationWorkspace
   'kb',
   'chat',
   'messaging',
-  'templates',
-  'review',
   'members',
   'audit',
   'settings',
@@ -63,11 +55,6 @@ const VIEW_ALIASES: Record<string, OrganizationWorkspaceView> = {
   'message-access': 'messaging',
   feishu: 'messaging',
   wecom: 'messaging',
-  agents: 'templates',
-  'agent-templates': 'templates',
-  marketplace: 'templates',
-  'template-marketplace': 'templates',
-  'template-review': 'review',
   permissions: 'members',
   'members-and-permissions': 'members',
   logs: 'audit',
@@ -79,7 +66,7 @@ const VIEW_ALIASES: Record<string, OrganizationWorkspaceView> = {
   lawyer: 'legal',
 };
 
-const ADMIN_ONLY_VIEWS = new Set<OrganizationWorkspaceView>(['review', 'members', 'audit']);
+const ADMIN_ONLY_VIEWS = new Set<OrganizationWorkspaceView>(['members', 'audit']);
 const NON_VIEWER_VIEWS = new Set<OrganizationWorkspaceView>(['kb-edit', 'messaging']);
 
 export function normalizeOrganizationWorkspaceView(value: unknown): OrganizationWorkspaceView | null {

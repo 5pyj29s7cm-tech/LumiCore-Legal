@@ -134,14 +134,6 @@ export function emitMemberLeft(orgId: string, userId: string) {
   broadcastToOrg(orgId, 'member:left', { userId, orgId });
 }
 
-export function emitTemplateSubmitted(orgId: string, templateId: string, authorId: string) {
-  broadcastToOrg(orgId, 'template:submitted', { templateId, authorId, orgId });
-}
-
-export function emitTemplateStatusChange(orgId: string, templateId: string, status: string) {
-  broadcastToOrg(orgId, 'template:status', { templateId, status, orgId });
-}
-
 export function emitKbUpdated(orgId: string, articleId: string, action: 'created' | 'updated' | 'deleted') {
   broadcastToOrg(orgId, 'kb:article', { articleId, action, orgId });
 }
