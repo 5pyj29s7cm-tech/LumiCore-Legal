@@ -65,6 +65,15 @@ export interface LumiCapabilitySelection {
   readOnlyPattern?: RankedReadOnlyToolPattern;
 }
 
+export interface ModelToolProjectionHints {
+  /** Server-owned capabilities already evidenced for this unfinished task. */
+  pinnedTools?: readonly string[];
+  /** Ordinary conversation may stay tool-free even in an action-capable mode. */
+  allowUnroutedDiscovery?: boolean;
+  lane?: LumiCapabilityLane;
+  preferredTools?: readonly string[];
+}
+
 /**
  * Build the authorization ceiling exposed to the model. Semantic routing may
  * rank a small preferred set, but it must not silently turn that ranking into
@@ -74,18 +83,24 @@ export interface LumiCapabilitySelection {
 export function buildModelCapabilityPolicy(
   execution: LumiExecutionDecision,
 ): ToolPolicy {
-  const base = execution.baseToolPolicy;
+  const base = execution.resumesPinnedTask ? execution.toolPolicy : execution.baseToolPolicy;
   const forbiddenTools = unique(base.forbiddenTools || []);
   const forbidden = new Set(forbiddenTools);
   const blockAll = forbidden.has('*') || execution.allowToolUse === false;
+  const baseAllowed = (base.allowedTools || []).filter(name => name === '*' || !forbidden.has(name));
+  const baseAllowedSet = new Set(baseAllowed);
+  const baseWildcard = baseAllowedSet.has('*');
+  const hardRoute = execution.toolRoute?.hardAllowlist === true ? execution.toolRoute : null;
+  const hardAllowed = hardRoute ? unique(hardRoute.toolNames).filter(name => !forbidden.has(name) && (baseWildcard || baseAllowedSet.has(name))) : null;
+  const maxIterations = hardRoute ? Math.max(0, Math.min(base.maxIterations ?? execution.maxIterations, hardRoute.maxIterations ?? execution.maxIterations)) : (base.maxIterations ?? execution.maxIterations);
   return {
     ...base,
     allowedTools: blockAll
       ? []
-      : (base.allowedTools || []).filter(name => name === '*' || !forbidden.has(name)),
+      : hardAllowed || baseAllowed,
     forbiddenTools: blockAll ? unique([...forbiddenTools, '*']) : forbiddenTools,
-    requireConfirmation: unique(base.requireConfirmation || []).filter(name => !forbidden.has(name)),
-    maxIterations: blockAll ? 0 : (base.maxIterations ?? execution.maxIterations),
+    requireConfirmation: unique(base.requireConfirmation || []).filter(name => !forbidden.has(name) && (!hardAllowed || hardAllowed.includes(name))),
+    maxIterations: blockAll ? 0 : maxIterations,
   };
 }
 
@@ -99,24 +114,29 @@ export const MODEL_CAPABILITY_DISCOVERY_TOOL = 'client_capability_manifest';
  */
 export function buildModelToolProjection(
   execution: LumiExecutionDecision,
+  hints: ModelToolProjectionHints = {},
 ): NonNullable<ToolContext['modelToolProjection']> {
-  if (!execution.allowToolUse || execution.baseToolPolicy.forbiddenTools?.includes('*')) {
+  const authorization = buildModelCapabilityPolicy(execution);
+  if (!execution.allowToolUse || authorization.forbiddenTools?.includes('*')) {
     return { toolNames: [], maxTools: 0, allowDynamicDiscovery: false };
   }
 
   const route = execution.toolRoute;
   const hardAllowlist = route?.hardAllowlist === true;
   const maxTools = Math.max(1, Math.min(route?.maxTools || 32, 32));
-  const routedNames = route?.toolNames?.length
-    ? route.toolNames
-    : (execution.toolPolicy.allowedTools || []).filter(name => name && name !== '*');
-  const toolNames = unique(routedNames).slice(0, maxTools);
-
-  if (!hardAllowlist && !toolNames.includes(MODEL_CAPABILITY_DISCOVERY_TOOL)) {
-    // Never evict a semantic route winner merely to add discovery. Normal
-    // routed turns reserve this tool in enhanceToolRouteForFlow; a saturated
-    // externally supplied route remains exact instead of losing its tail.
+  const allowed = new Set(authorization.allowedTools || []);
+  const forbidden = new Set(authorization.forbiddenTools || []);
+  const wildcard = allowed.has('*');
+  const isAuthorized = (name: string) => Boolean(name && !forbidden.has('*') && !forbidden.has(name) && (wildcard || allowed.has(name)));
+  const routedNames = unique(route?.toolNames || []).filter(isAuthorized);
+  const pinnedNames = hardAllowlist ? [] : unique(Array.from(hints.pinnedTools || [])).filter(isAuthorized);
+  const semanticNames = hardAllowlist ? [] : unique(Array.from(hints.preferredTools || [])).filter(isAuthorized);
+  let toolNames = unique([...pinnedNames, ...(hardAllowlist ? routedNames : semanticNames), ...(!hardAllowlist ? routedNames : [])]).slice(0, maxTools);
+  const allowUnroutedDiscovery = hints.allowUnroutedDiscovery ?? hints.lane !== 'conversation';
+  const shouldExposeDiscovery = !hardAllowlist && isAuthorized(MODEL_CAPABILITY_DISCOVERY_TOOL) && (Boolean(route?.toolNames?.length) || semanticNames.length > 0 || allowUnroutedDiscovery);
+  if (shouldExposeDiscovery && !toolNames.includes(MODEL_CAPABILITY_DISCOVERY_TOOL)) {
     if (toolNames.length < maxTools) toolNames.push(MODEL_CAPABILITY_DISCOVERY_TOOL);
+    else if (!route?.toolNames?.length) toolNames = [...toolNames.slice(0, Math.max(0, maxTools - 1)), MODEL_CAPABILITY_DISCOVERY_TOOL];
   }
 
   return {

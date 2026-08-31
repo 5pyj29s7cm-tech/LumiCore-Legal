@@ -70,6 +70,8 @@ export interface ToolRouteOptions {
   pendingAssistantOfferContext?: PendingAssistantOfferContext;
   /** Trusted server-owned durable task state for terse continuation turns. */
   actionTaskState?: ConversationActionContinuationState | null;
+  /** True only when the transport bound this turn to that exact durable task. */
+  trustedActionContinuation?: boolean;
 }
 
 function unique(values: string[]): string[] {
@@ -82,6 +84,33 @@ function routeMatches(route: RouteDefinition, text: string): boolean {
 
 function addIfAvailable(out: Set<string>, available: Set<string>, name: string): void {
   if (available.has(name)) out.add(name);
+}
+
+/**
+ * Preserve the smallest server-proven capability envelope for a trusted
+ * continuation. A terse continuation does not contain enough semantic
+ * information to rediscover the original tool family, so only tools that
+ * already produced evidence for the same unfinished task may be re-exposed.
+ */
+export function trustedContinuationEvidenceTools(
+  options: ToolRouteOptions | undefined,
+  available: Set<string>,
+): string[] {
+  const state = options?.actionTaskState;
+  if (!options?.trustedActionContinuation || !state?.unfinished) return [];
+  const snapshot = state.policySnapshot;
+  const allowed = new Set(snapshot?.allowedTools || []);
+  const forbidden = new Set(snapshot?.forbiddenTools || []);
+  const wildcard = allowed.has('*');
+  const names = [
+    ...(state.evidenceTools || []),
+    ...((state.receipts || []).map(receipt => receipt.name)),
+  ];
+  return unique(names)
+    .filter(name => available.has(name))
+    .filter(name => !forbidden.has('*') && !forbidden.has(name))
+    .filter(name => !snapshot || wildcard || allowed.has(name))
+    .slice(-16);
 }
 
 const MANIFEST_LANES_BY_GROUP: Record<string, CapabilityLane[]> = {
@@ -748,6 +777,10 @@ export function routeToolsForTurn(
   const selected = new Set<string>();
   const categories: string[] = [];
   const reasons: string[] = [];
+  const continuationEvidenceTools = trustedContinuationEvidenceTools(options, available);
+  if (continuationEvidenceTools.length) {
+    reasons.push('the exact server-bound task retained tools that already produced receipts for its unfinished step');
+  }
   const manifestPriorities: string[] = [];
   const runtimeWorkIntent = classifyRuntimeWorkIntent(
     text,
@@ -1123,9 +1156,17 @@ export function routeToolsForTurn(
     reasons.push('referential cleanup has no valid adjacent assistant offer; runtime cancellation remains fail-closed');
   }
 
+  // Re-add only server-proven evidence tools after semantic routing.  Any
+  // explicit hard/read-only restriction above still wins through the forbidden
+  // set, so a continuation can never widen a safety boundary.
+  for (const name of continuationEvidenceTools) {
+    if (!forbiddenToolNames.has(name)) selected.add(name);
+  }
+
   const orderedBeforeHealthGate = applyRoutePriority(
     availableNames.filter(name => selected.has(name)),
     unique([
+      ...continuationEvidenceTools,
       ...priorityToolsForRoute(categories, text),
       ...manifestPriorities,
     ]),
