@@ -33,6 +33,10 @@ import {
   LUMI_TECHNICAL_ARCHITECTURE,
   type LumiTechnicalArchitecture,
 } from '../../shared/technical_architecture';
+import {
+  LUMI_OPERATION_MODE_IDS,
+  type LumiClientMode,
+} from '../../shared/operation_modes';
 import { toolRegistry } from '../tools/registry';
 import type { CapabilityLane, CapabilityManifestEntry } from '../tools/types';
 import { selectManifestCapabilities } from '../tools/capability_projection';
@@ -42,7 +46,7 @@ import { CN_SELF_INTRODUCTION_COPY } from '../regions/packs/cn/self_introduction
 import { listRegisteredProviders } from '../extensions/registry';
 import { formatIndustryCapabilityProfilePrompt } from '../regions/packs/cn/industry_capability_profile';
 
-export type ClientMode = 'chat' | 'assistant' | 'autonomous' | 'meeting';
+export type ClientMode = LumiClientMode;
 export type ClientCapabilityKind =
   | 'mode'
   | 'window'
@@ -1632,7 +1636,7 @@ export function getSelfModelSnapshot(
       continuity: 'single_identity_across_surfaces',
     },
     scope: { domain, orgId: domain === 'work' ? String(scope.orgId || '') : '' },
-    modes: ['chat', 'assistant', 'autonomous', 'meeting'].map(id => ({
+    modes: LUMI_OPERATION_MODE_IDS.map(id => ({
       id,
       available: true,
       active: state?.mode === id,
@@ -1967,6 +1971,7 @@ export function formatCompactClientSelfPrompt(
     state
       ? `- UI: mode=${state.mode || 'unknown'}; activeTab=${state.activeTab || 'unknown'}; viewMode=${state.viewMode || 'personal'}; workDomain=${state.workDomain || 'personal'}; settings=${state.settings?.activeSection || 'none'}`
       : '- UI: no live desktop state is currently available.',
+    `- Operation-mode definition: exactly ${LUMI_OPERATION_MODE_IDS.length} persistent permission modes (${LUMI_OPERATION_MODE_IDS.join(', ')}); meeting is a temporary capture surface, not another permission mode.`,
     state
       ? `- Surfaces: wallpaper=${Boolean(state.surfaces?.wallpaperMode)}; widget=${Boolean(state.surfaces?.widgetMode)}; meeting=${Boolean(state.surfaces?.meetingOpen || state.meeting?.active)}; nexus=${Boolean(state.surfaces?.nexusOpen || state.viewMode === 'world')}; focused=${state.windows?.focused || 'none'}`
       : '',
