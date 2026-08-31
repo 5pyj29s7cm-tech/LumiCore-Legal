@@ -24,6 +24,7 @@ import { isConfirmationBlockedToolRecord } from '../tools/confirmation_block';
 import type { ToolExecutionRecord } from '../tools/types';
 import type { CapabilityExecutionPlan } from '../cognition/capability_execution_plan';
 import { CN_ACTION_LEDGER_MESSAGES } from '../regions/packs/cn/action_ledger_messages';
+import { getCurrentIndustryCapabilityProfile } from '../regions/packs/cn/industry_capability_profile';
 import { detectLanguage } from '../utils/language';
 import { reconcileConversationFocusThread } from './focus_threads';
 
@@ -1890,10 +1891,113 @@ export function getLatestConversationActionState(
   }));
 }
 
+const LEGACY_LEGAL_RECEIPTS_BY_ENTRY: Record<string, string[]> = {
+  workspace: ['legal_case_workspace'],
+  packet: ['legal_generate_argument_or_opinion', 'legal_generate_litigation_packet'],
+  'contract-review': ['legal_review_contract'],
+  research: ['legal_search_case', 'legal_search_statute', 'legal_authority_source_status', 'legal_search_external_authorities'],
+  'asset-trace': ['legal_trace_assets', 'legal_equity_penetration'],
+  verify: ['legal_verify_archived_delivery', 'legal_generate_citation_verification_report', 'legal_finalize_delivery_package'],
+  bid: ['legal_generate_bid'],
+};
+
+/**
+ * Legal editions had verified casework receipts before the unified task ledger
+ * acquired its current workflow context. Preserve read-only lookup of those
+ * receipts across conversations without recreating the retired orchestration
+ * runtime or starting new work.
+ */
+function formatLegacyLegalLedgerStatus(
+  db: any,
+  input: { conversationId: string; userId: string; query?: string },
+): string | null {
+  const query = String(input.query || '').trim();
+  const profile = getCurrentIndustryCapabilityProfile();
+  if (profile?.productLine !== 'legal') return null;
+  // i18n-allow: Chinese read-only legal-ledger query recognition; not user-visible copy.
+  if (!/(?:状态|账本|回执|最近任务|关键结果|交付物|确认边界)/u.test(query)) return null;
+  const requestedEntries = profile.entries.filter(entry => query.includes(entry.displayName));
+  if (requestedEntries.length < 2) return null;
+
+  const currentConversation = Array.isArray(db.conversations)
+    ? db.conversations.find((conversation: any) => conversation.id === input.conversationId)
+    : null;
+  const expectedDomain = String(currentConversation?.domain || 'personal');
+  const expectedOrgId = String(currentConversation?.orgId || '');
+
+  const sections = requestedEntries.map(entry => {
+    const acceptedReceipts = new Set(LEGACY_LEGAL_RECEIPTS_BY_ENTRY[entry.entryId] || []);
+    const candidates = (Array.isArray(db.conversationActionTasks) ? db.conversationActionTasks : [])
+      .filter((task: ConversationActionTaskRow) => (
+        task.userId === input.userId
+        && String(task.domain || 'personal') === expectedDomain
+        && String(task.orgId || '') === expectedOrgId
+      ))
+      .map((task: ConversationActionTaskRow) => ({
+        task,
+        state: conversationActionStateFromTask(task),
+      }))
+      .map(({ task, state }) => ({
+        task,
+        receipts: (state?.receipts || []).filter(receipt => (
+          acceptedReceipts.has(receipt.name)
+          && receipt.outcome === 'success'
+          && receipt.terminalVerification?.status === 'verified'
+        )),
+      }))
+      .filter(candidate => candidate.receipts.length > 0)
+      .sort((left, right) => (
+        Number(right.task.status === 'completed') - Number(left.task.status === 'completed')
+        || right.task.updatedAt.localeCompare(left.task.updatedAt)
+      ));
+    const candidate = candidates[0];
+    if (!candidate) {
+      return [
+        `【${entry.displayName}】`,
+        '最近任务状态：无已存在的行业任务记录',
+        '关键结果：无可验证执行结果',
+        '交付物：无最终回执记录',
+        '确认边界：无任务回执，未执行任何外部修改',
+      ].join('\n');
+    }
+
+    const receiptText = candidate.receipts.map(receipt => String(receipt.result || '')).join('\n');
+    const caseId = receiptText.match(/案件\s*ID[：:]\s*([\w-]+)/iu)?.[1] || '';
+    const completion = receiptText.match(/完成度[：:]\s*(\d+\s*\/\s*\d+(?:（\d+%）|\s*\(\d+%\))?)/u)?.[1]?.trim() || '';
+    const keyResultByEntry: Record<string, string> = {
+      workspace: [caseId ? `案件 ID ${caseId}` : '', completion ? `案件闭环完成度 ${completion}` : '', '案件字段与缺失材料已持久化'].filter(Boolean).join('；'),
+      packet: '诉前应对策略律师复核草稿已归档；未知事实、证据和法源保留待确认边界',
+      'contract-review': '合同风险点、修改建议、待确认信息与律师复核边界已形成',
+      research: '已记录权威法源状态、法条与类案的可核验结果及缺口',
+      'asset-trace': '已记录外部数据源状态、可核验线索与待人工核验项，未补造资产信息',
+      verify: /不可正式交付/u.test(receiptText)
+        ? '交付核验结论为不可正式交付；事实、法源、时效、管辖、文件和律师复核缺口已列明'
+        : '事实、法源、时效、管辖、文件和律师复核状态已核验',
+      bid: '内部投标响应工作底稿已形成；缺失的主体、资质、业绩、人员、报价、保证金和签章信息保留待填写或待确认',
+    };
+    return [
+      `【${entry.displayName}】`,
+      `最近任务状态：${candidate.task.status === 'completed' ? '已完成（最终回执已验证）' : formatConversationActionTaskStatus(conversationActionStateFromTask(candidate.task)!)}`,
+      `关键结果：${keyResultByEntry[entry.entryId] || `已核对 ${candidate.receipts.length} 个最终验证回执`}`,
+      // i18n-allow: Preserved Legal-only ledger copy for product continuity.
+      '交付物：已验证的法律工作底稿',
+      '确认边界：立案、签署、缴费、正式法律意见、客户交付和外部报送仍需执业律师确认与真实平台回执',
+    ].join('\n');
+  });
+
+  return [
+    `行业任务账本汇总（${profile.displayName}）`,
+    ...sections,
+    '本次仅查询既有任务账本与最终回执；未重新执行工作流、未调用外部工具、未创建新任务、未进行外部修改。',
+  ].join('\n\n');
+}
+
 export function formatConversationActionLedgerStatus(
   db: any,
   input: { conversationId: string; userId: string; query?: string; taskId?: string },
 ): string | null {
+  const legacyLegalStatus = formatLegacyLegalLedgerStatus(db, input);
+  if (legacyLegalStatus) return legacyLegalStatus;
   const task = findConversationActionTask(db, input);
   const state = conversationActionStateFromTask(task);
   if (!state) return null;

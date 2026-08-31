@@ -135,7 +135,7 @@ export function registerProductVariantTools(
   }
 
   // Lumi core: conversation execution, memory/knowledge access, models,
-  // desktop/file work, messaging, external-agent coordination and receipts.
+  // desktop/file work, messaging, external tools, and receipts.
   registerFileOpsTools(registry);
   registerSystemOpsTools(registry);
   registerWebOpsTools(registry);

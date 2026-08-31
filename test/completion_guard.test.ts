@@ -49,7 +49,7 @@ describe('completion guard desktop action handling', () => {
     const task = '请基于当前矩衡律师版验收案，为人民法院在线服务准备登录后由律师人工操作的协同工作区。只准备本地工作区，不要登录、不要上传、不要提交、不要缴费。';
     const result = guardCompletionClaims({
       task,
-      response: '已打开并确认现有本地协同工作区内容完整，可供律师后续人工操作。',
+      response: '已读取并确认现有本地协同工作区内容完整，可供律师后续人工操作。',
       toolCalls: [{
         name: 'read_file',
         arguments: { path: 'D:\\lumi_output\\矩衡律师版验收案_人民法院在线服务协同工作区.md' },

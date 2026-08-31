@@ -90,9 +90,10 @@ describe('one Lumi with isolated personal and organization workspaces', () => {
       'kb',
       'chat',
       'messaging',
-      'review',
       'members',
       'audit',
+      'settings',
+      'branch',
       'legal',
     ]));
   });

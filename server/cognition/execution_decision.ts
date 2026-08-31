@@ -103,6 +103,10 @@ const SELF_REPAIR_DESKTOP_RE =
   /(?:\u684c\u9762|\u7a97\u53e3|\u753b\u9762|\u9875\u9762|\u754c\u9762|\u767d\u5c4f|\u9ed1\u5c4f|\u5d29\u6e83|\u5361\u4f4f|\u5361\u6b7b|\u6ca1\u53cd\u5e94|\u6253\u4e0d\u5f00|\u542f\u52a8\u5931\u8d25|\b(?:autocad|wps|wechat|weixin|desktop|window|screen|page|ui|blank|crash(?:ed)?|stuck|hang(?:ing)?)\b|white\s+screen|black\s+screen|failed\s+to\s+(?:open|start))/iu;
 const SELF_REPAIR_ADAPTER_RE =
   /(?:\u80fd\u529b|\u9002\u914d\u5668|\u63a5\u5165|\u8fde\u63a5|\u8f6f\u4ef6|\u5e94\u7528|\b(?:mcp|skill|plugin|adapter|capability|integration|connection|autocad|wps|wechat|weixin|cad|bim)\b)/iu;
+const SELF_REPAIR_ADAPTER_RUNTIME_RE =
+  /(?:\u9002\u914d\u5668|\u63a5\u5165|\u8fde\u63a5|\b(?:mcp|adapter|integration|connection)\b)/iu;
+const SELF_REPAIR_SKILL_ONLY_RE =
+  /(?:\u6280\u80fd|\u63d2\u4ef6|\b(?:skill|plugin)\b)/iu;
 const SELF_REPAIR_LEARNING_INSPECTION_RE =
   // i18n-allow: Reviewed Chinese learning-check input recognition; not user-visible copy.
   /(?:跑|做|进行|执行|查|查看|检查).{0,10}(?:一轮)?(?:学习检查|学习状态检查|学习记录检查|能力学习检查)/u;
@@ -122,9 +126,13 @@ export function buildSelfRepairToolPolicy(text: string, registry?: ToolRegistry)
   ];
   const explicitRecovery = SELF_REPAIR_MUTATION_REQUEST_RE.test(requested);
   const explicitSkillRepair = explicitRecovery && SELF_REPAIR_SKILL_RE.test(requested);
+  const explicitAdapterRecovery = explicitRecovery
+    && SELF_REPAIR_ADAPTER_RUNTIME_RE.test(requested)
+    && !SELF_REPAIR_SKILL_ONLY_RE.test(requested);
 
   if (SELF_REPAIR_ADAPTER_RE.test(requested)) {
     allowedTools.push('adapter_registry_list', 'adapter_health_check');
+    if (explicitAdapterRecovery) allowedTools.push('adapter_auto_recover');
   }
   if (SELF_REPAIR_LEARNING_INSPECTION_RE.test(requested)) {
     allowedTools.push('capability_learning_list');

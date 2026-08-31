@@ -242,8 +242,8 @@ export function Docs({ t }: { t: any }) {
               <DocCard
                 icon={<Terminal className="text-celestial-glow" />}
                 title={t.advancedGuides || 'Advanced Guides'}
-                desc={t.advancedGuidesDesc || 'Build complex multi-agent systems and custom knowledge graphs.'}
-                links={[t.orchestrationDoc || 'Orchestration', t.customLLMsDoc || 'Custom LLMs', t.securityRulesDoc || 'Security Rules']}
+                desc={t.advancedGuidesDesc || 'Build reliable LumiCore workflows and custom knowledge graphs.'}
+                links={[t.orchestrationDoc || 'Task execution', t.customLLMsDoc || 'Custom LLMs', t.securityRulesDoc || 'Security Rules']}
               />
               <DocCard
                 icon={<Zap className="text-celestial-saturn" />}

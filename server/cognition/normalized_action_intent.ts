@@ -485,11 +485,27 @@ export function hasMixedStatusExecutionIntent(value: string): boolean {
 }
 
 function statusQuery(text: string): NormalizedActionIntent | null {
+  // Questions about what a case/result still lacks are read-only follow-ups.
+  // A separately phrased affirmative rebuild remains a new action below.
+  // i18n-allow: Reviewed Chinese business-result follow-up recognition; not user-visible copy.
+  if (/(?:这个|该|当前)?(?:案子|案件|任务|结果)?[^。！？!?\n]{0,20}(?:还缺什么|下一步(?:要)?怎么(?:做|办))[？?]?/u.test(text)) {
+    return {
+      kind: 'status_query',
+      operation: 'status',
+      subject: 'lumi',
+      target: 'recent_task',
+      payload: '',
+      sideEffectClass: 'none',
+      relation: 'status',
+      confidence: 0.97,
+      rule: 'business-result-followup-before-action',
+    };
+  }
   // A new work instruction may ask Lumi to report its receipt/status after
   // completion. That trailing reporting clause is part of the requested
   // delivery, not a retrospective query about an older task.
   // i18n-allow: Reviewed Chinese new-work input recognition; not user-visible copy.
-  const affirmativeNewWork = /(?:请|帮我|给我|替我).{0,96}(?:制作|生成|创建|新建|起草|审查|审核|分析|处理|整理|准备)|(?:^|[：:；;。])\s*为[^。！？!?\n]{1,96}(?:制作|生成|创建|起草)/u.test(text);
+  const affirmativeNewWork = /(?:^|[：:；;。]\s*)(?:新建|创建|制作|生成|起草|审查|审核|分析|处理|整理|准备)|(?:请|帮我|给我|替我).{0,96}(?:制作|生成|创建|新建|起草|审查|审核|分析|处理|整理|准备)|(?:^|[：:；;。])\s*为[^。！？!?\n]{1,96}(?:制作|生成|创建|起草)|(?:实机验收|法条与类案)[^。！？!?\n]{0,220}(?:输出|检索|查找|核验)/u.test(text);
   // i18n-allow: Reviewed Chinese post-completion receipt input recognition; not user-visible copy.
   const postCompletionReport = /(?:完成|做完|执行完|生成完)(?:之后|以后|后).{0,48}(?:告诉|报告|汇报).{0,32}(?:任务)?(?:回执|状态|结果|证据)/u.test(text);
   if (affirmativeNewWork && postCompletionReport) return null;

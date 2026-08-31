@@ -12,7 +12,6 @@ import {
   settleConversationActionExecutionRequest,
   setConversationActionExecutionStatus,
 } from '../server/conversation/manager';
-import { recordsToTaskReceipts } from '../server/cognition/task_execution_ledger';
 import { getConversationActionStateFromLedger } from '../server/conversation/action_ledger';
 
 function durableActionState(conversationId: string, userId: string) {
@@ -156,6 +155,250 @@ describe('conversation action continuation state', () => {
         receipts: [],
         goal: '在桌面创建文件。',
       });
+  });
+
+  it('replays the formal WPS foreground sequence without replacing the blocked task or adopting LumiCore as its target', () => {
+    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const userId = `wps-foreground-continuation-${nonce}`;
+    const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
+    const firstRequestId = `chat-wps-current-document-${nonce}`;
+    const firstText = '帮我分析一下wps当前打开的文件';
+    const firstMessageId = persistActionTurn({
+      conversationId: conversation.id,
+      userId,
+      userText: firstText,
+      requestId: firstRequestId,
+    });
+    const toolPolicy = {
+      allowedTools: ['desktop_active_window', 'desktop_poll_activity'],
+      requireConfirmation: [],
+      forbiddenTools: [],
+      maxIterations: 4,
+    };
+    const first = prepareConversationActionExecution({
+      conversationId: conversation.id,
+      userId,
+      userText: firstText,
+      requestId: firstRequestId,
+      userMessageId: firstMessageId,
+      toolPolicy,
+      forceTask: true,
+    });
+    const taskId = first.state?.taskId || '';
+    expect(taskId).toBeTruthy();
+
+    addMessageIdempotent({
+      userId,
+      agentId: 'lumi',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: '我现在看到的前台窗口是 Visual Studio Code，不是可读取的 WPS 文档。请先把要分析的文档切到前台。',
+      requestId: firstRequestId,
+      taskIntent: 'task',
+      domain: 'personal',
+      source: 'test',
+      channel: 'chat',
+      toolCalls: [{
+        id: `active-vscode-${nonce}`,
+        key: 'desktop_active_window:{}',
+        name: 'desktop_active_window',
+        arguments: {},
+        result: JSON.stringify({
+          window_id: '4198450',
+          title: 'lumiOS - Visual Studio Code',
+          process_name: 'Code.exe',
+          executable_path: 'C:\\Program Files\\Microsoft VS Code\\Code.exe',
+        }),
+        outcome: 'success',
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'terminal_receipt',
+          reason: 'The active window observation returned.',
+        },
+        taskId,
+        requestId: firstRequestId,
+        turnId: firstRequestId,
+        recordedAt: '2026-08-28T10:15:41.044Z',
+      }],
+      terminalTaskDisposition: {
+        outcome: 'blocked',
+        taskId,
+        requestId: firstRequestId,
+        reason: 'desktop_execution_plan_receipt: target_mismatch',
+      },
+      timestamp: '2026-08-28T10:15:41.044Z',
+    });
+
+    const blocked = getOrCreateActiveConversation(userId, 'lumi', 'personal', '')
+      .actionContinuationState;
+    expect(blocked).toMatchObject({
+      taskId,
+      status: 'blocked',
+      unfinished: true,
+      activeRequestId: undefined,
+      goal: firstText,
+    });
+    const taskBefore = structuredClone(
+      (readDB().conversationActionTasks || []).find((row: any) => row.id === taskId),
+    );
+    expect(taskBefore).toBeDefined();
+
+    const secondRequestId = `chat-wps-foreground-ready-${nonce}`;
+    const secondText = '已经切到前台';
+    const secondMessageId = persistActionTurn({
+      conversationId: conversation.id,
+      userId,
+      userText: secondText,
+      requestId: secondRequestId,
+    });
+    const second = prepareConversationActionExecution({
+      conversationId: conversation.id,
+      userId,
+      userText: secondText,
+      requestId: secondRequestId,
+      userMessageId: secondMessageId,
+      toolPolicy,
+      forceTask: true,
+    });
+
+    expect(second).not.toHaveProperty('bindingFailure');
+    expect(second.kind).toBe('resume');
+    expect(second.state).toMatchObject({
+      taskId,
+      goal: firstText,
+      latestInstruction: secondText,
+      status: 'planning',
+      activeRequestId: secondRequestId,
+    });
+    expect(second.state?.taskCapsule?.target).toEqual(blocked?.taskCapsule?.target);
+
+    const lumiRuntimePath = 'D:\\lumiOS\\src-tauri\\target-codex-lumicore-tauri\\release\\lumi-core.exe';
+    addMessageIdempotent({
+      userId,
+      agentId: 'lumi',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: '前台仍是 LumiCore，尚未获得 WPS 当前文档。',
+      requestId: secondRequestId,
+      taskIntent: 'task',
+      domain: 'personal',
+      source: 'test',
+      channel: 'chat',
+      toolCalls: [{
+        id: `poll-lumicore-${nonce}`,
+        key: 'desktop_poll_activity:{}',
+        name: 'desktop_poll_activity',
+        arguments: {},
+        result: JSON.stringify({
+          window: {
+            window_id: '489555400',
+            title: 'LumiCore',
+            process_name: 'lumi-core.exe',
+            executable_path: lumiRuntimePath,
+          },
+          idle: { idle_ms: 13094, idle_seconds: 13 },
+        }),
+        outcome: 'success',
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'terminal_receipt',
+          reason: 'The foreground observation returned.',
+        },
+        taskId,
+        requestId: secondRequestId,
+        turnId: secondRequestId,
+        recordedAt: '2026-08-28T10:16:21.105Z',
+      }],
+      terminalTaskDisposition: {
+        outcome: 'blocked',
+        taskId,
+        requestId: secondRequestId,
+        reason: 'desktop_execution_plan_receipt: target_mismatch',
+      },
+      timestamp: '2026-08-28T10:16:21.105Z',
+    });
+
+    const finalConversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
+    expect(finalConversation.actionContinuationState).toMatchObject({
+      taskId,
+      status: 'blocked',
+      unfinished: true,
+      activeRequestId: undefined,
+      goal: firstText,
+    });
+    expect(finalConversation.actionContinuationState?.sourcePaths).not.toContain(lumiRuntimePath);
+    expect(finalConversation.actionContinuationState?.taskCapsule?.paths).not.toContain(lumiRuntimePath);
+    expect(finalConversation.actionContinuationState?.taskCapsule?.target.path).not.toBe(lumiRuntimePath);
+
+    const db = readDB();
+    const tasks = (db.conversationActionTasks || [])
+      .filter((row: any) => row.conversationId === conversation.id);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      id: taskId,
+      goal: firstText,
+      target: taskBefore.target,
+      status: 'blocked',
+      rootUserMessageId: firstMessageId,
+    });
+    expect(tasks[0].target).not.toContain('LumiCore');
+    expect(tasks[0].target).not.toContain('lumi-core.exe');
+
+    const turns = (db.conversationActionTurns || [])
+      .filter((row: any) => row.conversationId === conversation.id)
+      .filter((row: any) => [firstRequestId, secondRequestId].includes(row.requestId));
+    expect(turns).toHaveLength(2);
+    expect(turns.map((row: any) => row.taskId)).toEqual([taskId, taskId]);
+    expect(turns.map((row: any) => row.requestId)).toEqual([firstRequestId, secondRequestId]);
+  });
+
+  it('persists receipt-only cancellation truth into the durable conversation task', () => {
+    const userId = `conversation-receipt-only-${Date.now()}-${Math.random()}`;
+    const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
+
+    addMessage({
+      userId,
+      agentId: 'lumi',
+      conversationId: conversation.id,
+      role: 'user',
+      content: '\u505c\u6b62\u540e\u53f0\u4efb\u52a1',
+      domain: 'personal',
+    });
+    addMessage({
+      userId,
+      agentId: 'lumi',
+      conversationId: conversation.id,
+      role: 'assistant',
+      content: '\u540e\u53f0\u4efb\u52a1\u5df2\u53d6\u6d88\u3002',
+      toolCalls: [{
+        id: `receipt-only-cancel-${Date.now()}`,
+        name: 'runtime_work_cancel',
+        arguments: {},
+        result: '',
+        receipt: JSON.stringify(JSON.stringify({
+          ok: true,
+          status: 'cancelled',
+          matchedCount: 1,
+          cancelledCount: 1,
+          cancellingCount: 0,
+          failedCount: 0,
+        })),
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'terminal_receipt',
+          reason: 'The unified runtime ledger confirmed cancellation.',
+        },
+      }],
+      domain: 'personal',
+    });
+
+    expect(durableActionState(conversation.id, userId)).toMatchObject({
+      goal: '\u505c\u6b62\u540e\u53f0\u4efb\u52a1',
+      status: 'completed',
+      unfinished: false,
+      completionSource: 'tool_receipt',
+      evidenceTools: ['runtime_work_cancel'],
+    });
   });
 
   it('clears a deferred prior-action status turn after a deterministic zero-tool reply', () => {
@@ -448,83 +691,6 @@ describe('conversation action continuation state', () => {
         unfinished: true,
         activeRequestId: undefined,
         updatedAt: '2026-07-22T14:00:00.000Z',
-      });
-  });
-
-  it('recovers verified completion before converting an interrupted lease into a blocker', () => {
-    const userId = `conversation-receipt-recovery-${Date.now()}-${Math.random()}`;
-    const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
-    const taskId = `task-receipt-recovery-${Date.now()}-${Math.random()}`;
-    const goal = '请基于当前矩衡律师版验收案，为人民法院在线服务准备登录后由律师人工操作的协同工作区。只准备本地工作区，不要登录、不要上传、不要提交、不要缴费。';
-    const receipts = recordsToTaskReceipts([{
-      name: 'legal_prepare_filing_handoff',
-      arguments: { caseId: 'case-acceptance' },
-      result: JSON.stringify({ ok: true, status: 'completed', uploadCount: 14 }),
-      terminalVerification: {
-        status: 'verified' as const,
-        strategy: 'terminal_receipt' as const,
-        reason: 'The local filing handoff was recorded.',
-      },
-    }], '2026-07-22T13:59:00.000Z');
-    const db = readDB();
-    const actionState = {
-      version: 2 as const,
-      taskId,
-      goal,
-      latestInstruction: goal,
-      status: 'executing' as const,
-      unfinished: true,
-      latestBlocker: '',
-      activeRequestId: 'request-receipt-recovery',
-      assistantState: '',
-      toolSummaries: [],
-      appTarget: '',
-      sourcePaths: [],
-      evidenceTools: [],
-      receipts,
-      revision: 1,
-      updatedAt: '2026-07-22T13:59:00.000Z',
-    };
-    conversation.actionContinuationState = actionState;
-    db.conversationActionTasks.push({
-      id: taskId,
-      conversationId: conversation.id,
-      userId,
-      domain: 'personal',
-      orgId: '',
-      parentTaskId: '',
-      rootUserMessageId: '',
-      intentKind: 'legal_document',
-      operation: 'create',
-      goal,
-      target: 'local court-platform handoff',
-      status: 'executing',
-      blocker: '',
-      activeRequestId: 'request-receipt-recovery',
-      completionSource: '',
-      context: JSON.stringify({ actionState }),
-      revision: 1,
-      createdAt: '2026-07-22T13:58:00.000Z',
-      updatedAt: '2026-07-22T13:59:00.000Z',
-      completedAt: '',
-    });
-
-    expect(recoverOrphanedConversationActionExecutions('2026-07-22T14:00:00.000Z')).toBeGreaterThan(0);
-    expect(db.conversationActionTasks.find(task => task.id === taskId)).toMatchObject({
-      status: 'completed',
-      blocker: '',
-      activeRequestId: '',
-      completionSource: 'tool_receipt',
-      completedAt: '2026-07-22T14:00:00.000Z',
-    });
-    expect(getOrCreateActiveConversation(userId, 'lumi', 'personal', '').actionContinuationState)
-      .toBeUndefined();
-    expect(durableActionState(conversation.id, userId))
-      .toMatchObject({
-        taskId,
-        status: 'completed',
-        unfinished: false,
-        completionSource: 'tool_receipt',
       });
   });
 

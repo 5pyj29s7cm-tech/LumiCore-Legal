@@ -196,7 +196,6 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       description: req.body?.description,
       skillTags: req.body?.skillTags,
       memberIds: req.body?.memberIds,
-      agentIds: req.body?.agentIds,
       isManager: req.body?.isManager,
     });
     res.status(201).json(position);
@@ -327,7 +326,6 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       targetDepartmentId: req.body?.targetDepartmentId,
       targetPositionId: req.body?.targetPositionId,
       targetMemberId: req.body?.targetMemberId,
-      targetAgentIds: req.body?.targetAgentIds,
       reason: req.body?.reason,
     });
     if (!handoff) {
@@ -649,8 +647,6 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       res.status(500).json({ error: err.message });
     });
   });
-
-  // ── Agent Templates ───────────────────────────────────────────────────
 
   router.get('/org/legal/cases', requireAuth, requireOrgMember, (req: Request, res: Response) => {
     const query = String(req.query.query || '');

@@ -148,6 +148,21 @@ const ARTIFACT_PRODUCTION_SUBJECT_RE =
 const NON_ARTIFACT_PRODUCTION_CLAIM_RE =
   /(?:(?:已经|已|都)?[^。！？!?；;，,\n]{0,12}(?:生成|新建|创建|保存|输出|写入|写好|写完|导出)(?:好|完|成功|完成|了)?(?:的)?\s*(?:回执|记录|账本|证据|状态|结果)|(?:回执|记录|账本|证据|状态|结果)[^。！？!?；;，,\n]{0,12}(?:(?:已经|已|都)?[^。！？!?；;，,\n]{0,8})?(?:生成|新建|创建|保存|输出|写入|写好|写完|导出)(?:好|完|成功|完成|了)?)|\b(?:(?:created|saved|exported|generated|written)\s+(?:the\s+)?(?:receipt|log|ledger|evidence|status|result)s?|(?:receipt|log|ledger|evidence|status|result)s?\s+(?:(?:has|have|had|was|were|is|are)\s+(?:been\s+)?)?(?:created|saved|exported|generated|written))\b/iu;
 
+// A statement that explicitly denies producing an artifact is evidence about
+// a read-only assessment, not a production claim. Keep this clause-local so a
+// separate positive claim in the same response is still guarded.
+// i18n-allow: Multilingual negated artifact-claim recognition; not user-visible copy.
+const NEGATED_ARTIFACT_PRODUCTION_CLAIM_RE =
+  /(?:没有|未|并未|不会|不能证明|无法证明|不是|只完成)[^。！？!?；;，,\n]{0,32}(?:生成|新建|创建|保存|输出|写入|写好|写完|导出)|\b(?:did\s+not|didn't|was\s+not|wasn't|without|cannot\s+prove|could\s+not\s+verify)[^.!?;\n]{0,48}\b(?:create|save|export|generate|write)\w*\b/iu;
+
+// Prospective next steps describe work that remains to be done. They must not
+// be mistaken for a claim that an artifact already exists.
+const PROSPECTIVE_ARTIFACT_PRODUCTION_CLAIM_RE =
+  /^(?:[-*#>]\s*)*(?:\u4e0b\u4e00\u6b65|\u540e\u7eed|\u5efa\u8bae|\u9700\u8981|\u5e94\u5f53|\u5e94\u8be5|\u5f85|\u5c06|\u53ef\u4ee5|\u53ef|next\s+step|later|recommend(?:ed)?|need(?:s)?\s+to|should|will|can)\s*[:\uff1a-]?[\s\S]{0,80}(?:\u751f\u6210|\u65b0\u5efa|\u521b\u5efa|\u4fdd\u5b58|\u8f93\u51fa|\u5199\u5165|\u5bfc\u51fa|create|save|export|generate|write)/iu;
+
+const UNVERIFIED_ARTIFACT_EXISTENCE_CLAIM_RE =
+  /(?:\u4e0d\u80fd\u8bc1\u5b9e|\u65e0\u6cd5\u8bc1\u5b9e)[^\n.!?;\u3002\uff01\uff1f\uff1b]{0,48}(?:\u751f\u6210|\u65b0\u5efa|\u521b\u5efa|\u4fdd\u5b58|\u8f93\u51fa|\u5199\u5165|\u5bfc\u51fa|create|save|export|generate|write)/iu;
+
 /**
  * Persistence words are not inherently file-production claims. In
  * particular, "the receipt was saved" describes execution evidence rather
@@ -163,6 +178,9 @@ function hasArtifactCreationClaim(value: string): boolean {
 
   return clauses.some(clause => {
     if (!FILE_CREATION_CLAIM_RE.test(clause)) return false;
+    if (NEGATED_ARTIFACT_PRODUCTION_CLAIM_RE.test(clause)) return false;
+    if (UNVERIFIED_ARTIFACT_EXISTENCE_CLAIM_RE.test(clause)) return false;
+    if (PROSPECTIVE_ARTIFACT_PRODUCTION_CLAIM_RE.test(clause)) return false;
     const hasArtifactSubject = ARTIFACT_PRODUCTION_SUBJECT_RE.test(clause);
     if (hasArtifactSubject) return true;
     if (NON_ARTIFACT_PRODUCTION_CLAIM_RE.test(clause)) return false;

@@ -398,10 +398,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       const capabilityMetrics = getCapabilityRuntimeMetrics();
       const ollama = getLocalModelConfig('ollama');
       const lmstudio = getLocalModelConfig('lmstudio');
-      const backgroundTasks = Array.isArray(db.backgroundDelegationTasks) ? db.backgroundDelegationTasks : [];
       const autonomousTasks = Array.isArray(db.autonomousTasks) ? db.autonomousTasks : [];
-      const externalAiSessions = Array.isArray(db.externalAiSessions) ? db.externalAiSessions : [];
-      const externalAiDispatches = Array.isArray(db.externalAiDispatches) ? db.externalAiDispatches : [];
       const externalAiHistorySources = Array.isArray(db.externalAiHistorySources) ? db.externalAiHistorySources : [];
       const externalAiHistorySyncJobs = Array.isArray(db.externalAiHistorySyncJobs) ? db.externalAiHistorySyncJobs : [];
       const externalAiHistoryMessages = Array.isArray(db.externalAiHistoryMessages) ? db.externalAiHistoryMessages : [];
@@ -426,7 +423,6 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
         runtime: getRuntimeVersionInfo(),
         database: {
           users: db.users.length,
-          agents: db.agents.length,
           interactions: db.interactions.length,
           dirty: isDbDirty(),
           persistence,
@@ -434,10 +430,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
           actionReceipts: (db.conversationActionReceipts || []).length,
           extensionRevisions: extensionRevisions.length,
           extensionActivationReceipts: extensionReceipts.length,
-          backgroundDelegationTasks: backgroundTasks.length,
           autonomousTasks: autonomousTasks.length,
-          externalAiSessions: externalAiSessions.length,
-          externalAiDispatches: externalAiDispatches.length,
           externalAiHistorySources: externalAiHistorySources.length,
           externalAiHistorySyncJobs: externalAiHistorySyncJobs.length,
           externalAiHistoryMessages: externalAiHistoryMessages.length,
@@ -471,10 +464,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
             lmstudio: getLocalModelQueueSnapshot('lmstudio'),
           },
           durableWork: {
-            backgroundDelegation: countTaskStatuses(backgroundTasks),
             autonomy: countTaskStatuses(autonomousTasks),
-            externalAiSessions: countTaskStatuses(externalAiSessions),
-            externalAiDispatches: countTaskStatuses(externalAiDispatches),
             externalAiHistorySources: countTaskStatuses(externalAiHistorySources),
             externalAiHistorySyncJobs: countTaskStatuses(externalAiHistorySyncJobs),
             extensions: countTaskStatuses(extensionRevisions),
@@ -1300,7 +1290,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       res.json({
         skillCount: allServers.length, enabledSkillCount: enabledServers.length,
         connectedSkillCount: connectedServers.length, toolCount: toolRegistry.list().length,
-        agentCount: (db.agents || []).length, interactionCount: (db.interactions || []).length,
+        interactionCount: (db.interactions || []).length,
         conversationCount: (db.conversations || []).length,
         deviceCount: io ? io.engine.clientsCount : 0,
         ramTotal: Math.round(os.totalmem() / 1024 / 1024 / 1024 * 10) / 10,

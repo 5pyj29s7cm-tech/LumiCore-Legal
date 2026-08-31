@@ -658,6 +658,29 @@ function priorityToolsForRoute(categories: string[], text: string): string[] {
     );
   }
   if (categories.includes('legal')) {
+    // i18n-allow: Legal-domain input recognition terms; not user-visible copy.
+    if (/(?:原告|被告|起诉状|答辩状|质证意见|立案材料|证据目录|诉讼材料)|\b(?:plaintiff|defendant|complaint|defense|pleading|filing)\b/iu.test(instructionText)) {
+      priorities.push(
+        'legal_case_workflow_status',
+        'legal_case_reasoning_matrix',
+        'legal_generate_litigation_packet',
+        'legal_generate_argument_or_opinion',
+        'legal_finalize_delivery_package',
+      );
+      // i18n-allow: Legal-domain input recognition terms; not user-visible copy.
+      if (/(?:原告|起诉状|立案材料|立案)|\b(?:plaintiff|complaint|filing)\b/iu.test(instructionText)) {
+        priorities.push('legal_prepare_filing_handoff');
+      }
+    }
+    // i18n-allow: Legal-source input recognition terms; not user-visible copy.
+    if (/(?:人民法院案例库|裁判文书网|法蝉|\bAlpha\b|有利案例|案例库)|\bexternal\s+authorit(?:y|ies)\b/iu.test(instructionText)) {
+      priorities.push(
+        'legal_extract_dispute_focus',
+        'legal_external_research_plan',
+        'legal_search_external_authorities',
+        'legal_prepare_external_browser_workspace',
+      );
+    }
     if (/现行有效|法源|法条核验|引用核验|法律版本|司法解释版本|current\s+law|authority\s+source|citation\s+verification/i.test(instructionText)) {
       priorities.push(
         'legal_authority_source_status',
@@ -692,6 +715,8 @@ function priorityToolsForRoute(categories: string[], text: string): string[] {
         'legal_review_contract',
         'legal_draft_contract',
         'legal_generate_bid',
+        'legal_company_database_lookup',
+        'legal_finalize_delivery_package',
       );
     }
     if (/财产线索|被执行人|执行线索|财产保全|诉前保全|股权穿透|实际控制人|关联企业|失信|限制消费|asset|enforcement|equity|shareholder/i.test(instructionText)) {
