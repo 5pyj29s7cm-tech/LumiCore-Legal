@@ -855,6 +855,10 @@
     "en": "Review Queue",
     "zh": "模板审核"
   },
+  "agent-chat-page.dictation-text-only.a17d39c4e2": {
+    "en": "Dictation (text only)",
+    "zh": "听写（仅转成文字）"
+  },
   "audit-log-viewer.action.91069d1d41": {
     "en": "Action",
     "zh": "操作"
