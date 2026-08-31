@@ -11,7 +11,8 @@ import { mountInteractionsRoutes } from "../routes/interactions_routes";
 import { mountAuthRoutes } from "../routes/auth";
 import { mountMemoryRoutes } from "../routes/memory_routes";
 import { mountConversationRoutes } from "../routes/conversations";
-import { mountAgentRoutes } from "../routes/agent_routes";
+import { mountCreativeRoutes } from "../routes/creative_routes";
+import { mountMemoryAvatarRoutes } from "../routes/memory_avatar_routes";
 import { mountSkillRoutes } from "../routes/skill_routes";
 import { mountMarketplaceRoutes } from "../routes/marketplace_routes";
 import { mountMiscRoutes } from "../routes/misc_routes";
@@ -65,8 +66,10 @@ export function mountAllRoutes({ apiRouter, jwtSecret, llm, getCookieOptions, io
   // Auth
   mountAuthRoutes(apiRouter, jwtSecret, getCookieOptions);
 
-  // Agents
-  mountAgentRoutes(apiRouter, jwtSecret, llmGetters);
+  // Personal creative tools and single-persona Memory Avatars. These are
+  // independent of the retired local Agent/team runtime.
+  mountCreativeRoutes(apiRouter, jwtSecret, llmGetters);
+  mountMemoryAvatarRoutes(apiRouter, llmGetters);
 
   // Preferences & Interactions
   mountPreferencesRoutes(apiRouter, jwtSecret);

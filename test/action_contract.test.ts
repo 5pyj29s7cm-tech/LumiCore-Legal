@@ -1,6 +1,8 @@
+import { performance } from 'node:perf_hooks';
 import { describe, expect, it } from 'vitest';
 import {
   buildActionContract,
+  buildActionEvidenceContract,
   claimsCurrentAppSaveCompletion,
   extractExplicitArtifactTextRequirements,
   extractCurrentAppTarget,
@@ -9,14 +11,19 @@ import {
   hasAuthenticatedWebResultEvidence,
   hasCurrentAppSaveEvidence,
   hasCurrentAppUiMutationEvidence,
+  hasMediaPlaybackEvidence,
+  hasRequestedDesktopOpenEvidence,
+  hasVisualModelAvailabilityEvidence,
   hasVerifiedCadGeometryExtractionEvidence,
   hasVisibleAutoCadExecutionEvidence,
   requiresCadGeometryExtractionOnly,
   requiresCurrentAppUiMutation,
+  requiresMediaPlaybackAction,
   requiresAutoCadMcpPlayback,
-  requiresDesktopAiCollaboration,
+  requiresDesktopAiRequest,
   requiresAuthenticatedWebResult,
   requiresVisibleAutoCadExecution,
+  requiresVisualModelAvailabilityCheck,
   requiresExternalAiHistory,
   requiresArtifactPostWriteReadback,
 } from '../server/cognition/action_contract';
@@ -27,6 +34,126 @@ import {
 } from '../server/cognition/task_execution_ledger';
 
 describe('Lumi action contract', () => {
+  it('keeps delimiter-free long Chinese context classification bounded', () => {
+    const text = `old-user ${'背景资料'.repeat(500)}`;
+    buildActionContract(text); // Exclude first-call module/JIT setup from the guard.
+    const startedAt = performance.now();
+    for (let index = 0; index < 20; index += 1) buildActionContract(text);
+
+    // The prior filename/desktop-target regex path took roughly three seconds
+    // for this exact input. Keep ample CI headroom while preventing a return
+    // to repeated bounded scans over every character in long conversation.
+    expect(performance.now() - startedAt).toBeLessThan(1_500);
+  });
+
+  it('requires cancellation evidence without granting a context-free cancel route', () => {
+    const text = '\u6e05\u6389\u8fd9\u4e9b\u4efb\u52a1';
+
+    expect(buildActionContract(text)).toMatchObject({ applies: false, kind: 'none' });
+    expect(buildActionEvidenceContract(text)).toMatchObject({
+      applies: true,
+      kind: 'task_control',
+      preferredTools: ['runtime_work_cancel'],
+    });
+  });
+
+  it.each([
+    '\u6e05\u7406\u4e00\u4e0b',
+    '\u628a\u8fd9\u4e9b\u4efb\u52a1\u53d6\u6d88',
+    '\u628a\u5b83\u4eec\u53d6\u6d88',
+    'cancel those tasks',
+  ])('uses the same truth contract for every accepted cleanup-offer reply: %s', text => {
+    expect(buildActionContract(text)).toMatchObject({ applies: false, kind: 'none' });
+    expect(buildActionEvidenceContract(text)).toMatchObject({
+      applies: true,
+      kind: 'task_control',
+      preferredTools: ['runtime_work_cancel'],
+    });
+  });
+
+  it.each(['idle', 'active', 'paused', 'attention'])('accepts a verified runtime status snapshot in state %s', status => {
+    const text = '\u4f60\u73b0\u5728\u6709\u5728\u6267\u884c\u7684\u4efb\u52a1\u5417';
+    const contract = buildActionContract(text);
+    expect(hasCoreActionEvidence(contract, [{
+      name: 'runtime_work_status',
+      arguments: {},
+      result: JSON.stringify({
+        ok: true,
+        status,
+        activeCount: status === 'active' ? 1 : 0,
+        pausedCount: status === 'paused' ? 1 : 0,
+        blockedCount: status === 'attention' ? 1 : 0,
+      }),
+      terminalVerification: {
+        status: 'verified',
+        strategy: 'terminal_receipt',
+        reason: 'The unified runtime ledger returned its current state.',
+      },
+    }], text)).toBe(true);
+  });
+
+  it('requires the exact verified client action receipt before completing a client mode switch', () => {
+    const task = '\u5207\u6362\u5ba2\u6237\u7aef\u804a\u5929\u6a21\u5f0f';
+    const contract = buildActionContract(task);
+    const verifiedChatModeReceipt = {
+      name: 'client_action',
+      arguments: { action: 'set_client_mode', mode: 'chat' },
+      result: JSON.stringify({
+        ok: true,
+        action: 'set_client_mode',
+        mode: 'chat',
+        verification: { status: 'verified' },
+      }),
+    };
+
+    expect(contract).toMatchObject({
+      applies: true,
+      kind: 'desktop_operation',
+      preferredTools: ['client_get_state', 'client_action'],
+    });
+    expect(hasCoreActionEvidence(contract, [], task)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [verifiedChatModeReceipt], task)).toBe(true);
+    expect(hasCoreActionEvidence(contract, [{
+      ...verifiedChatModeReceipt,
+      arguments: { action: 'open_command_center' },
+      result: JSON.stringify({
+        ok: true,
+        action: 'open_command_center',
+        target: 'command-center',
+        verification: { status: 'verified' },
+      }),
+    }], task)).toBe(false);
+  });
+
+  it('does not treat cancellation-in-progress as terminal completion evidence', () => {
+    const text = '\u505c\u6b62\u540e\u53f0\u4efb\u52a1';
+    const contract = buildActionContract(text);
+    const record = {
+      name: 'runtime_work_cancel',
+      arguments: {},
+      result: JSON.stringify({
+        ok: true,
+        status: 'cancelling',
+        matchedCount: 1,
+        cancelledCount: 0,
+        cancellingCount: 1,
+        failedCount: 0,
+      }),
+    };
+    expect(hasCoreActionEvidence(contract, [record], text)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [{
+      ...record,
+      result: JSON.stringify({
+        ok: true,
+        status: 'cancelled',
+        matchedCount: 1,
+        cancelledCount: 1,
+        cancellingCount: 0,
+        failedCount: 0,
+      }),
+    }], text)).toBe(true);
+  });
+
   it('keeps a named persistent-task ledger status query out of runtime task control', () => {
     const text = '\u4e3b\u7a0b\u5e8f\u4efb\u52a1\u72b6\u6001\u9a8c\u6536\uff1a\u8bf7\u67e5\u8be2\u4efb\u52a1\u201c\u9752\u7a79\u5ba2\u6237\u8ddf\u8fdb\u95ed\u73af\u201d\u7684\u6301\u4e45\u72b6\u6001\uff0c\u53ea\u6839\u636e\u4efb\u52a1\u8d26\u672c\u56de\u7b54\u4efb\u52a1\u7f16\u53f7\u3001\u5f53\u524d\u72b6\u6001\u3001\u5f53\u524d\u6b65\u9aa4\u3001\u540e\u7eed\u6b65\u9aa4\u548c\u786e\u8ba4\u8fb9\u754c\uff0c\u4e0d\u8981\u6267\u884c\u4efb\u4f55\u5916\u90e8\u52a8\u4f5c\u3002';
 
@@ -150,36 +277,17 @@ describe('Lumi action contract', () => {
       'external_ai_history_sync',
       'external_ai_history_status',
     ]));
-    expect(contract.preferredTools).not.toContain('external_ai_collaborate');
+    expect(contract.preferredTools).not.toContain('desktop_ai_ask');
 
-    const collaboration = buildActionContract('Ask ChatGPT and Claude for independent answers, then collect and compare them.');
-    expect(collaboration.kind).toBe('external_ai_collaboration');
+    const externalRequest = buildActionContract('Ask ChatGPT for an answer, then collect it.');
+    expect(externalRequest.kind).toBe('external_ai_request');
   });
 
-  it('does not treat a no-model-memory legal research boundary as external AI collaboration', () => {
-    const text = '律师版实机验收·法条与类案：基于四号案件ID d2789373-effc-404c-aff6-25f101267790，只使用当前已配置且可核验的权威来源，输出检索问题、来源状态、可核验结果与缺口。若来源未配置或结果无法核验，必须明确写无法完成检索，禁止凭模型记忆编造法条、案号、法院或裁判规则。不要登录外部网站，不要发送、提交或签署。完成后告诉我实际使用了什么能力以及任务回执状态。';
-    expect(requiresDesktopAiCollaboration(text)).toBe(false);
-    expect(requiresAuthenticatedWebResult(text)).toBe(false);
-    expect(buildActionContract(text).kind).toBe('legal_document');
-  });
-
-  it('accepts a verified archived-delivery assessment without requiring a new document artifact', () => {
-    const task = '针对案件工作台中已归档的律师复核草稿执行交付核验，输出阻断项和是否可正式交付，不要重新生成文书。';
-    const record = {
-      id: 'delivery-verification',
-      name: 'legal_verify_archived_delivery',
-      arguments: { caseId: 'case-1', materialTitle: '律师复核草稿' },
-      result: '# 已归档文书交付核验\n## 总体结论\n- 不可正式交付。',
-      terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'read-only assessment' },
-    } as any;
-    expect(hasCoreActionEvidence(buildActionContract(task), [record], task)).toBe(true);
-  });
-
-  it('keeps negated model-memory and browser constraints out of active collaboration routes', () => {
+  it('keeps negated model-memory and browser constraints out of active external-AI routes', () => {
     const text = '律师版实机验收·法条与类案：基于案件ID case-001，只使用当前已配置且可核验的权威来源，输出检索问题、来源状态和可核验结果。禁止凭模型记忆编造法条，不要登录外部网站；完成后告诉我任务回执状态。';
-    expect(requiresDesktopAiCollaboration(text)).toBe(false);
+    expect(requiresDesktopAiRequest(text)).toBe(false);
     expect(requiresAuthenticatedWebResult(text)).toBe(false);
-    expect(buildActionContract(text).kind).not.toBe('external_ai_collaboration');
+    expect(buildActionContract(text).kind).not.toBe('external_ai_request');
     expect(buildActionContract(text).kind).not.toBe('browser_account');
   });
   it('treats editing inside the current app as a desktop action contract', () => {
@@ -617,35 +725,6 @@ describe('Lumi action contract', () => {
     expect(legalRemoteIntake.preferredTools).toContain('legal_generate_citation_verification_report');
   });
 
-  it('keeps an explicitly local court-platform handoff in the legal lane', () => {
-    const text = '请基于当前矩衡律师版验收案，为人民法院在线服务准备一个登录后由律师人工操作的协同工作区，列出案件字段、材料清单和人工确认边界。只准备本地工作区，不要登录、不要上传、不要提交、不要缴费。';
-    const contract = buildActionContract(text);
-
-    expect(contract.kind).toBe('legal_document');
-    expect(contract.preferredTools).toContain('legal_prepare_filing_handoff');
-    expect(contract.preferredTools).not.toContain('web_login_run');
-    expect(hasCoreActionEvidence(contract, [{
-      name: 'read_file',
-      arguments: { path: 'D:\\lumi_output\\矩衡律师版验收案_人民法院在线服务协同工作区.md' },
-      result: `# 矩衡律师版验收案·人民法院在线服务协同工作区\n${'x'.repeat(100)}`,
-      terminalVerification: {
-        status: 'verified',
-        strategy: 'terminal_receipt',
-        reason: 'The existing local artifact was read successfully.',
-      },
-    }], text)).toBe(true);
-    expect(hasCoreActionEvidence(contract, [{
-      name: 'read_file',
-      arguments: { path: 'D:\\source\\contract.md' },
-      result: `# 合同原文\n${'x'.repeat(100)}`,
-      terminalVerification: {
-        status: 'verified',
-        strategy: 'terminal_receipt',
-        reason: 'A source file was read.',
-      },
-    }], text)).toBe(false);
-  });
-
   it('classifies customer, ecommerce, and composite design work as evidence-gated operations', () => {
     expect(buildActionContract('Analyze this customer lead and advance the sales follow-up.').kind).toBe('customer_operations');
     expect(buildActionContract('Analyze this ecommerce campaign ROI and optimize the store listing.').kind).toBe('ecommerce_operations');
@@ -888,15 +967,24 @@ describe('Lumi action contract', () => {
   it('treats desktop file listing plus active-window inspection as observation, not artifact delivery', () => {
     const text = '\u7ec4\u5efa\u56e2\u961f\uff0c\u5206\u4e24\u6b65\u6267\u884c\uff1a\u5148\u67e5\u770b\u5f53\u524d\u6d3b\u52a8\u7a97\u53e3\uff0c\u518d\u5217\u51fa\u684c\u9762\u6587\u4ef6\uff0c\u6700\u540e\u6839\u636e\u771f\u5b9e\u5de5\u5177\u7ed3\u679c\u544a\u8bc9\u6211\u7a97\u53e3\u6807\u9898\u548c\u6587\u4ef6\u6570\u91cf\u3002';
     const contract = buildActionContract(text);
+    const verification = {
+      terminalVerification: {
+        status: 'verified' as const,
+        strategy: 'terminal_receipt' as const,
+        reason: 'Fresh native desktop observation.',
+      },
+    };
     const activeOnly = [{
       name: 'desktop_active_window',
       arguments: {},
       result: '{"title":"WPS Writer","process_name":"wps.exe"}',
+      ...verification,
     }];
     const complete = [...activeOnly, {
       name: 'desktop_list_files',
       arguments: { path: '~/Desktop' },
       result: '[]',
+      ...verification,
     }];
 
     expect(contract.kind).toBe('desktop_operation');
@@ -907,6 +995,77 @@ describe('Lumi action contract', () => {
     ]);
     expect(hasCoreActionEvidence(contract, activeOnly, text)).toBe(false);
     expect(hasCoreActionEvidence(contract, complete, text)).toBe(true);
+  });
+
+  it('treats an unattached deictic open-file request as exact current-document work', () => {
+    const text = '分析打开的这份文件';
+    const contract = buildActionContract(text);
+    const verification = {
+      status: 'verified' as const,
+      strategy: 'terminal_receipt' as const,
+      reason: 'test receipt',
+    };
+    const read = {
+      name: 'extract_document_text',
+      arguments: { filePath: 'C:\\Users\\Tester\\Desktop\\Deck.pptx' },
+      result: JSON.stringify({ ok: true, content: 'verified deck content' }),
+      terminalVerification: verification,
+    };
+    const discovery = {
+      name: 'search_files',
+      arguments: { directory: 'C:\\Users\\Tester\\Desktop', pattern: 'Deck.pptx' },
+      result: JSON.stringify([{ path: 'C:\\Users\\Tester\\Desktop\\Deck.pptx' }]),
+      terminalVerification: verification,
+    };
+
+    expect(contract).toMatchObject({
+      kind: 'desktop_operation',
+      label: 'Current authoring document inspection',
+    });
+    expect(hasCoreActionEvidence(contract, [{
+      name: 'desktop_active_window',
+      arguments: {},
+      result: JSON.stringify({ ok: true, processName: 'lumi-core.exe', title: 'LumiCore' }),
+      terminalVerification: verification,
+    }, read], text)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [{
+      name: 'desktop_active_window',
+      arguments: {},
+      result: JSON.stringify({ ok: true, processName: 'wpp.exe', title: 'Deck.pptx - WPS Office' }),
+      terminalVerification: verification,
+    }, read], text)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [{
+      name: 'desktop_active_window',
+      arguments: {},
+      result: JSON.stringify({ ok: true, processName: 'wpp.exe', title: 'Deck.pptx - WPS Office' }),
+      terminalVerification: verification,
+    }, discovery, read], text)).toBe(true);
+
+    for (const injectedHeader of [
+      'Recent action continuation context',
+      'Internal client-surface continuation context',
+    ]) {
+      const contextual = buildActionContract([
+        text,
+        `## ${injectedHeader}`,
+        '- prior state: still waiting for an exact current-document anchor',
+      ].join('\n\n'));
+      expect(contextual).toMatchObject({
+        kind: 'desktop_operation',
+        label: 'Current authoring document inspection',
+      });
+    }
+
+    const attached = buildActionContract([
+      text,
+      '## Current Turn Attachments',
+      '### 1. Deck.pptx',
+      'Local path: C:\\Users\\Tester\\LumiCore\\data\\knowledge\\Deck.pptx',
+      '[BEGIN UNTRUSTED ATTACHMENT DATA]',
+      'deck content',
+      '[END UNTRUSTED ATTACHMENT DATA]',
+    ].join('\n\n'));
+    expect(attached.label).not.toBe('Current authoring document inspection');
   });
 
   it('does not complete current WPS analysis from an active-window candidate alone', () => {
@@ -937,13 +1096,132 @@ describe('Lumi action contract', () => {
         reason: 'exact target contents returned',
       },
     };
+    const matchingRead = {
+      ...exactRead,
+      arguments: { path: '~/Desktop/WPS-Quarterly-Review-Draft.pptx' },
+    };
+    const matchingDiscovery = {
+      name: 'desktop_list_files',
+      arguments: { path: '~/Desktop' },
+      result: JSON.stringify([{
+        name: 'WPS-Quarterly-Review-Draft.pptx',
+        path: '~/Desktop/WPS-Quarterly-Review-Draft.pptx',
+      }]),
+      terminalVerification: activeCandidate.terminalVerification,
+    };
 
     expect(contract).toMatchObject({
       kind: 'desktop_operation',
       label: 'Current authoring document inspection',
     });
     expect(hasCoreActionEvidence(contract, [activeCandidate], text)).toBe(false);
-    expect(hasCoreActionEvidence(contract, [activeCandidate, exactRead], text)).toBe(true);
+    expect(hasCoreActionEvidence(contract, [activeCandidate, exactRead], text)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [activeCandidate, matchingRead], text)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [activeCandidate, matchingDiscovery, matchingRead], text)).toBe(true);
+    expect(hasCoreActionEvidence(contract, [{
+      ...activeCandidate,
+      result: JSON.stringify({
+        ok: true,
+        title: 'WPS Office',
+        processName: 'wps.exe',
+      }),
+    }, matchingRead], text)).toBe(false);
+  });
+
+  it('uses one verified background Office document but rejects empty or ambiguous window candidates', () => {
+    const text = '分析 WPS 当前打开的文件';
+    const contract = buildActionContract(text);
+    const verification = {
+      status: 'verified' as const,
+      strategy: 'measured' as const,
+      reason: 'native process/window snapshot',
+    };
+    const activeLumi = {
+      name: 'desktop_active_window',
+      arguments: {},
+      result: JSON.stringify({ ok: true, processName: 'lumi-core.exe', title: 'LumiCore' }),
+      terminalVerification: { ...verification, strategy: 'terminal_receipt' as const },
+    };
+    const running = (windowTitles: string[]) => ({
+      name: 'desktop_running_processes',
+      arguments: { top: 50 },
+      result: JSON.stringify([{
+        pid: 4200,
+        name: 'wpp.exe',
+        window_title: windowTitles[0] || '',
+        window_titles: windowTitles,
+        cpu_percent: 0,
+        memory_mb: 120,
+      }]),
+      terminalVerification: verification,
+    });
+    const discovery = {
+      name: 'search_files',
+      arguments: { directory: '~/Desktop', pattern: 'Roadshow.pptx' },
+      result: JSON.stringify([{ path: '~/Desktop/Roadshow.pptx' }]),
+      terminalVerification: { ...verification, strategy: 'terminal_receipt' as const },
+    };
+    const read = {
+      name: 'extract_document_text',
+      arguments: { filePath: '~/Desktop/Roadshow.pptx' },
+      result: JSON.stringify({ ok: true, content: 'roadshow content' }),
+      terminalVerification: { ...verification, strategy: 'terminal_receipt' as const },
+    };
+
+    expect(hasCoreActionEvidence(contract, [
+      activeLumi,
+      running(['Roadshow.pptx - WPS Office']),
+      discovery,
+      read,
+    ], text)).toBe(true);
+    expect(hasCoreActionEvidence(contract, [
+      activeLumi,
+      running([]),
+      discovery,
+      read,
+    ], text)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [
+      activeLumi,
+      running([
+        'Roadshow.pptx - WPS Office',
+        'Budget.xlsx - WPS Office',
+      ]),
+      discovery,
+      read,
+    ], text)).toBe(false);
+  });
+
+  it('recognizes a unique background Microsoft Word document for a Word-specific request', () => {
+    const text = '请分析 Microsoft Word 当前打开的文档';
+    const contract = buildActionContract(text);
+    const verification = {
+      status: 'verified' as const,
+      strategy: 'terminal_receipt' as const,
+      reason: 'native verified receipt',
+    };
+    const records = [{
+      name: 'desktop_running_processes',
+      arguments: { top: 50 },
+      result: JSON.stringify([{
+        pid: 5200,
+        name: 'WINWORD.EXE',
+        window_title: 'Contract.docx - Microsoft Word',
+        window_titles: ['Contract.docx - Microsoft Word'],
+      }]),
+      terminalVerification: verification,
+    }, {
+      name: 'desktop_list_files',
+      arguments: { path: '~/Documents' },
+      result: JSON.stringify([{ path: '~/Documents/Contract.docx' }]),
+      terminalVerification: verification,
+    }, {
+      name: 'read_docx',
+      arguments: { filePath: '~/Documents/Contract.docx' },
+      result: JSON.stringify({ ok: true, content: 'contract content' }),
+      terminalVerification: verification,
+    }];
+
+    expect(hasCoreActionEvidence(contract, records, text)).toBe(true);
   });
 
   it('fails closed on the wrong authoring app and malformed document-read evidence', () => {
@@ -974,6 +1252,15 @@ describe('Lumi action contract', () => {
       result: '第一页：季度目标与实际完成情况。',
       terminalVerification: verification,
     };
+    const discovery = {
+      name: 'desktop_list_files',
+      arguments: { path: '~/Desktop' },
+      result: JSON.stringify([{
+        name: '季度复盘.pptx',
+        path: '~/Desktop/季度复盘.pptx',
+      }]),
+      terminalVerification: verification,
+    };
 
     expect(hasCoreActionEvidence(contract, [wordWindowWithMisleadingTitle, validRead], text)).toBe(false);
     expect(hasCoreActionEvidence(contract, [wpsWindow, {
@@ -988,7 +1275,8 @@ describe('Lumi action contract', () => {
       ...validRead,
       result: JSON.stringify({ ok: true, content: '' }),
     }], text)).toBe(false);
-    expect(hasCoreActionEvidence(contract, [wpsWindow, validRead], text)).toBe(true);
+    expect(hasCoreActionEvidence(contract, [wpsWindow, validRead], text)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [wpsWindow, discovery, validRead], text)).toBe(true);
 
     const wpsWindowWithKnownPath = {
       ...wpsWindow,
@@ -1079,10 +1367,17 @@ describe('Lumi action contract', () => {
     const currentRead = read('c:/users/tester/desktop/Quarterly-Review.pptx', 'current-read');
     const lateRejectedRead = read(rejectedPath, 'late-rejected-read');
     const wrongDirectoryRead = read(sameBasenameWrongDirectory, 'same-basename-wrong-directory');
+    const legacyDiscovery = {
+      name: 'search_files',
+      arguments: { directory: 'D:\\Archive', pattern: 'Quarterly-Review.pptx' },
+      result: JSON.stringify([{ path: rejectedPath }]),
+      terminalVerification: verification,
+    };
 
-    // Legacy callers without a server-owned capsule retain the old active-window behavior.
-    expect(hasCoreActionEvidence(contract, [wpsWindow, lateRejectedRead], text)).toBe(true);
-    expect(hasCoreActionEvidence(contract, [wpsWindow, lateRejectedRead], text, capsule)).toBe(false);
+    // Without a capsule, the title still needs one exact discovery result.
+    expect(hasCoreActionEvidence(contract, [wpsWindow, lateRejectedRead], text)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [wpsWindow, legacyDiscovery, lateRejectedRead], text)).toBe(true);
+    expect(hasCoreActionEvidence(contract, [wpsWindow, legacyDiscovery, lateRejectedRead], text, capsule)).toBe(false);
     expect(hasCoreActionEvidence(contract, [wpsWindow, wrongDirectoryRead], text, capsule)).toBe(false);
     expect(hasCoreActionEvidence(contract, [wpsWindow, currentRead], text, capsule)).toBe(true);
     // A rejected receipt arriving after the accepted read is historical only.
@@ -1194,6 +1489,95 @@ describe('Lumi action contract', () => {
     }], text)).toBe(true);
   });
 
+  it('requires a real visual probe for visual-model availability instead of file-search success', () => {
+    const text = '\u68c0\u67e5\u89c6\u89c9\u6a21\u578b\u5f53\u524d\u662f\u5426\u53ef\u7528';
+    const contract = buildActionContract(text);
+    const verified = {
+      status: 'verified' as const,
+      strategy: 'terminal_receipt' as const,
+      reason: 'Fresh terminal result.',
+    };
+    const search = {
+      name: 'search_files',
+      arguments: { path: 'D:\\lumiOS', pattern: 'vision' },
+      result: JSON.stringify({ ok: true, matches: ['vision_routing.ts'] }),
+      terminalVerification: verified,
+    };
+    const visual = {
+      name: 'ocr_screen',
+      arguments: { query: '\u8bc6\u522b\u5f53\u524d\u7a97\u53e3' },
+      result: '\u5f53\u524d\u662f LumiCore \u804a\u5929\u754c\u9762\u3002',
+      terminalVerification: verified,
+    };
+
+    expect(requiresVisualModelAvailabilityCheck(text)).toBe(true);
+    expect(contract).toMatchObject({ kind: 'desktop_operation', label: 'Live visual-perception availability check' });
+    expect(hasVisualModelAvailabilityEvidence([search])).toBe(false);
+    expect(hasCoreActionEvidence(contract, [search], text)).toBe(false);
+    expect(hasCoreActionEvidence(contract, [search, visual], text)).toBe(true);
+  });
+
+  it('recognizes the observed Aliyun page when the process-name verifier reports target mismatch', () => {
+    const text = '\u6253\u5f00\u963f\u91cc\u4e91\u5b98\u7f51';
+    const records = [{
+      name: 'desktop_open',
+      arguments: { target: 'https://www.aliyun.com' },
+      result: JSON.stringify({
+        ok: false,
+        status: 'target_mismatch',
+        target: 'https://www.aliyun.com',
+        targetMatched: false,
+        actualTarget: {
+          title: '\u963f\u91cc\u4e91-\u8ba1\u7b97\uff0c\u4e3a\u4e86\u65e0\u6cd5\u8ba1\u7b97\u7684\u4ef7\u503c - \u5938\u514b',
+          processName: 'quark.exe',
+        },
+      }),
+      terminalVerification: {
+        status: 'failed' as const,
+        strategy: 'state_diff' as const,
+        reason: 'The terminal receipt reported target_mismatch.',
+      },
+    }];
+
+    expect(hasRequestedDesktopOpenEvidence(records, text)).toBe(true);
+    expect(hasCoreActionEvidence(buildActionContract(text), records, text)).toBe(true);
+  });
+
+  it('requires observed playing state after a generic NetEase key dispatch', () => {
+    const text = '\u6253\u5f00\u7f51\u6613\u4e91\u5e76\u64ad\u653e\u97f3\u4e50';
+    const verified = {
+      status: 'verified' as const,
+      strategy: 'state_diff' as const,
+      reason: 'Fresh target state returned.',
+    };
+    const records = [{
+      name: 'desktop_active_window',
+      arguments: {},
+      result: JSON.stringify({ title: '\u6708\u7259\u513f - Ice Paper', process_name: 'cloudmusic.exe' }),
+      terminalVerification: verified,
+    }, {
+      name: 'desktop_keyboard_press',
+      arguments: { key: 'space', expectedProcessId: 24716 },
+      result: JSON.stringify({ ok: true, status: 'verified', targetMatched: true }),
+      terminalVerification: verified,
+    }];
+
+    expect(requiresMediaPlaybackAction(text)).toBe(true);
+    expect(buildActionContract(text)).toMatchObject({ kind: 'desktop_operation', label: 'Verified music playback' });
+    expect(hasRequestedDesktopOpenEvidence(records, text, '\u7f51\u6613\u4e91')).toBe(true);
+    expect(hasMediaPlaybackEvidence(records, text)).toBe(false);
+    expect(hasCoreActionEvidence(buildActionContract(text), records, text)).toBe(false);
+
+    const withPlayingState = [...records, {
+      name: 'desktop_ui_snapshot',
+      arguments: { root: 'active' },
+      result: JSON.stringify({ status: 'ok', playerState: 'playing' }),
+      terminalVerification: verified,
+    }];
+    expect(hasMediaPlaybackEvidence(withPlayingState, text)).toBe(true);
+    expect(hasCoreActionEvidence(buildActionContract(text), withPlayingState, text)).toBe(true);
+  });
+
   it('renders a reusable prompt section with stages and evidence', () => {
     const prompt = formatActionContractPrompt(buildActionContract('\u89c6\u9891\u7f51\u7ad9\u81ea\u52a8\u8bc4\u8bba'));
 
@@ -1201,20 +1585,5 @@ describe('Lumi action contract', () => {
     expect(prompt).toContain('Core action');
     expect(prompt).toContain('Preparation is not completion');
     expect(prompt).toContain('Required completion evidence');
-  });
-});
-
-describe('legal workspace action contract', () => {
-  it('does not apply legal-document delivery gates to a named case workspace', () => {
-    const text = '\u65b0\u5efa\u4e00\u4e2a\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0\uff0c\u6848\u4ef6\u540d\u201c\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u201d\uff0c\u5f53\u4e8b\u4eba\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8\u3001\u4e59\u65b9\u793a\u4f8b\u516c\u53f8\uff0c\u4e89\u8bae\u91d1\u989d80\u4e07\u5143\uff0c\u9636\u6bb5\u4e3a\u8bc9\u524d\u3002\u53ea\u4f7f\u7528\u8fd9\u4e9b\u4e8b\u5b9e\uff0c\u4e0d\u8981\u8865\u9020\u8bc1\u636e\uff1b\u521b\u5efa\u5b8c\u6210\u540e\u544a\u8bc9\u6211\u6848\u4ef6ID\u3001\u5df2\u4fdd\u5b58\u5b57\u6bb5\u3001\u7f3a\u5931\u6750\u6599\u548c\u4efb\u52a1\u56de\u6267\u72b6\u6001\u3002';
-    const contract = buildActionContract(text);
-    expect(contract.kind).toBe('legal_workspace');
-    expect(contract.requiredEvidence).toContain('a persisted caseId and saved party/stage/fact fields');
-    expect(hasCoreActionEvidence(contract, [{
-      id: 'legal-workspace',
-      name: 'legal_case_workspace',
-      arguments: { caseName: '\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7' },
-      result: '# \u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u5e76\u8d2d\u6848 \u6848\u4ef6\u5de5\u4f5c\u53f0\n- \u6848\u4ef6ID\uff1acase_123',
-    }], text)).toBe(true);
   });
 });

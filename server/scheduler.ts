@@ -3,7 +3,7 @@
 
 import crypto from 'node:crypto';
 import { Server as SocketIOServer } from 'socket.io';
-import { queryMemories, getDueReminders, fireReminder, runBehavioralAnalysis, decayMemories, dynamicDecayMemories, promoteMemories, getUnconsolidatedEpisodic, autoMarkCrossAgentShare } from './memory';
+import { queryMemories, getDueReminders, fireReminder, runBehavioralAnalysis, decayMemories, dynamicDecayMemories, promoteMemories, getUnconsolidatedEpisodic, isMemoryAvatarScoped } from './memory';
 import { consolidateEpisodic, consolidateNarrative, ConsolidationContext } from './memory/consolidator';
 import { runDreamCycle } from './memory/dream';
 import { buildTree, ensureBranch, moveNode } from './memory/tree';
@@ -12,13 +12,11 @@ import { getWeatherBrief, getTimeGreeting } from './services/weather';
 import { autoGenerateWorkflows } from './agents/workflows';
 import { runHealthAudit, HealthReport } from './agents/health_audit';
 import { flushDBOrThrow, readDB, writeDB } from '../db_layer';
-import { AgentRuntime, AgentRecord } from './agents/runtime';
 import { personalityRegistry } from './personality';
 import { evolvePersonality, generateReviewPrompt } from './personality/evolution';
 import { loadEmotionalState } from './personality/state';
 import { getSameMonthDayPast, getMonthDayFromISO } from './time/utils';
 import { detectSpatiotemporalPatterns } from './time/spatiotemporal';
-import { cleanupEphemeralAgents } from './agents/orchestrator';
 import { getRecentActivity } from './context/activity_stream';
 import {
   isFirstBootComplete,
@@ -2180,8 +2178,6 @@ export function registerScheduledTasks(
       for (const userId of userIds) {
         const emotionalState = loadEmotionalState(userId);
         totalPromoted += promoteMemories(userId, emotionalState.intimacy, 'personal', '');
-        // Auto-mark newly crystallized memories as cross-agent shareable
-        autoMarkCrossAgentShare(userId, 'personal', '');
       }
       if (totalPromoted > 0) {
         return `${totalPromoted} memories have crystallized into deeper knowledge.`;
@@ -2467,6 +2463,7 @@ Output ONLY the reflection — no preamble, no labels.`;
               m.userId === userId &&
               (m.domain || 'personal') === 'personal' &&
               (m.orgId || '') === '' &&
+              !isMemoryAvatarScoped(m) &&
               m.nodeType !== 'branch' &&
               !m.parentId,
           );
@@ -2475,7 +2472,8 @@ Output ONLY the reflection — no preamble, no labels.`;
           const tree = buildTree(allMemories.filter((m: any) =>
             m.userId === userId &&
             (m.domain || 'personal') === 'personal' &&
-            (m.orgId || '') === ''
+            (m.orgId || '') === '' &&
+            !isMemoryAvatarScoped(m)
           ));
           const treeSummary = tree.map(
             t => `- ${t.node.content} [${t.node.nodeType}] (${t.children.length} children)`,
@@ -2525,6 +2523,8 @@ Rules:
             const branchNode = ensureBranch(userId, branch.title, '', null, { domain: 'personal', orgId: '' });
             totalBranches++;
             for (const memId of branch.memoryIds) {
+              const memory = allMemories.find((candidate: any) => candidate.id === memId);
+              if (!memory || isMemoryAvatarScoped(memory)) continue;
               const ok = moveNode(memId, branchNode.id, { userId, domain: 'personal', orgId: '' });
               if (ok) totalAssigned++;
             }
@@ -2574,6 +2574,7 @@ Rules:
                 m.userId === userId &&
                 (m.domain || 'personal') === 'personal' &&
                 (m.orgId || '') === '' &&
+                !isMemoryAvatarScoped(m) &&
                 m.perspective === 'owner_trait' &&
                 m.createdAt > lastEvolvedAt
               ).length
@@ -2640,7 +2641,7 @@ Rules:
           const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
 
           const weekMemories = (db.memories || []).filter((m: any) =>
-            m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.createdAt >= weekAgo,
+            m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.createdAt >= weekAgo,
           );
           const weekInteractions = (db.interactions || []).filter((i: any) =>
             i.userId === userId && (i.domain || 'personal') === 'personal' && (i.orgId || '') === '' && i.timestamp >= weekAgo,
@@ -2657,8 +2658,8 @@ Rules:
             newInteractionCount: weekInteractions.length,
             topMemoryTopics: [...new Set<string>(weekMemories.map((m: any) => (m.keywords || []) as string[]).flat())].slice(0, 10),
             connectionScore: loadEmotionalState(userId).connection,
-            totalFacts: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.type === 'fact').length,
-            totalPreferences: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.type === 'preference').length,
+            totalFacts: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.type === 'fact').length,
+            totalPreferences: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.type === 'preference').length,
             activeConversations: (db.conversations || []).filter((c: any) => c.userId === userId && (c.domain || 'personal') === 'personal' && (c.orgId || '') === '' && c.status === 'active').length,
           });
 
@@ -2709,7 +2710,7 @@ Rules:
           const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString();
 
           const monthMemories = (db.memories || []).filter((m: any) =>
-            m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.createdAt >= monthAgo,
+            m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.createdAt >= monthAgo,
           );
           const monthInteractions = (db.interactions || []).filter((i: any) =>
             i.userId === userId && (i.domain || 'personal') === 'personal' && (i.orgId || '') === '' && i.timestamp >= monthAgo,
@@ -2726,8 +2727,8 @@ Rules:
             newInteractionCount: monthInteractions.length,
             topMemoryTopics: [...new Set<string>(monthMemories.map((m: any) => (m.keywords || []) as string[]).flat())].slice(0, 15),
             connectionScore: loadEmotionalState(userId).connection,
-            totalFacts: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.type === 'fact').length,
-            totalPreferences: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.type === 'preference').length,
+            totalFacts: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.type === 'fact').length,
+            totalPreferences: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.type === 'preference').length,
             activeConversations: (db.conversations || []).filter((c: any) => c.userId === userId && (c.domain || 'personal') === 'personal' && (c.orgId || '') === '' && c.status === 'active').length,
           });
 
@@ -2777,7 +2778,7 @@ Rules:
           const yearAgo = new Date(Date.now() - 365 * 86400000).toISOString();
 
           const yearMemories = (db.memories || []).filter((m: any) =>
-            m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.createdAt >= yearAgo,
+            m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.createdAt >= yearAgo,
           );
           const yearInteractions = (db.interactions || []).filter((i: any) =>
             i.userId === userId && (i.domain || 'personal') === 'personal' && (i.orgId || '') === '' && i.timestamp >= yearAgo,
@@ -2794,8 +2795,8 @@ Rules:
             newInteractionCount: yearInteractions.length,
             topMemoryTopics: [...new Set<string>(yearMemories.map((m: any) => (m.keywords || []) as string[]).flat())].slice(0, 20),
             connectionScore: loadEmotionalState(userId).connection,
-            totalFacts: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.type === 'fact').length,
-            totalPreferences: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.type === 'preference').length,
+            totalFacts: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.type === 'fact').length,
+            totalPreferences: (db.memories || []).filter((m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.type === 'preference').length,
             activeConversations: (db.conversations || []).filter((c: any) => c.userId === userId && (c.domain || 'personal') === 'personal' && (c.orgId || '') === '' && c.status === 'active').length,
           });
 
@@ -2908,7 +2909,7 @@ Rules:
 
           // Collect yesterday's stats
           const newMemories = (db.memories || []).filter((m: any) =>
-            m.userId === userId && (m.domain || 'personal') === 'personal' && !m.orgId && m.createdAt && m.createdAt >= yesterday,
+            m.userId === userId && (m.domain || 'personal') === 'personal' && !m.orgId && !isMemoryAvatarScoped(m) && m.createdAt && m.createdAt >= yesterday,
           );
           const newInteractions = (db.interactions || []).filter((i: any) =>
             i.userId === userId && (i.domain || 'personal') === 'personal' && !i.orgId && i.timestamp && i.timestamp >= yesterday,
@@ -3040,97 +3041,6 @@ Write in first-person as Lumi, warm and introspective tone. Keep it under 150 Ch
     },
   });
 
-  // Agent autonomous tick (every 30 min) — LLM-driven reflective analysis
-  scheduler.register({
-    id: 'agent_autonomous_tick',
-    cron: 'every_30m',
-    quiet: true,
-    lastRun: null,
-    executionClass: 'autonomous_orchestration',
-    handler: async () => {
-      const db = readDB();
-      const agents: AgentRecord[] = db.agents || [];
-      const autonomousAgents = agents.filter(
-        (a: AgentRecord) => a.autonomyLevel === 'scheduled' || a.autonomyLevel === 'autonomous',
-      );
-
-      if (autonomousAgents.length === 0) return null;
-
-      const messages: string[] = [];
-
-      for (const agentRecord of autonomousAgents) {
-        try {
-          const userId = agentRecord.ownerUid || agentRecord.userId || 'anonymous';
-          if (!isAutonomousWorkAllowed(userId).allowed) continue;
-          const domain = agentRecord.domain === 'work' && agentRecord.orgId ? 'work' : 'personal';
-          const orgId = domain === 'work' ? (agentRecord.orgId || '') : '';
-          const personality = personalityRegistry.getForUser(
-            agentRecord.personalityId || 'lumi',
-            userId,
-            domain === 'work' ? orgId : undefined,
-          ) || personalityRegistry.getDefault();
-
-          // Gather recent data for analysis
-          const recentMemories = queryMemories({
-            userId,
-            limit: 30,
-            minConfidence: 0.3,
-            agentId: agentRecord.memoryScope === 'private' ? agentRecord.id : undefined,
-            domain,
-            orgId,
-          });
-          const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
-          const recentInteractions = (db.interactions || [])
-            .filter((i: any) =>
-              i.userId === userId &&
-              (i.domain || 'personal') === domain &&
-              (i.orgId || '') === orgId &&
-              i.timestamp >= sixHoursAgo
-            )
-            .slice(0, 20);
-
-          if (recentMemories.length < 3 && recentInteractions.length < 3) continue;
-
-          // Use AgentRuntime for unified tick logic
-          const { AgentRuntime } = await import('./agents/runtime');
-          const runtime = new AgentRuntime(agentRecord, personality);
-          runtime.loadState(userId);
-
-          const analyze = async (prompt: string): Promise<string> => {
-            return runAgentAutonomousAnalysis(userId, async signal => {
-              const result = await makeLLMCall(
-                [{ role: 'user', content: prompt }],
-                [],
-                {
-                  ...getUserPreferredLLMConfig(userId, { maxTokens: 200, domain, orgId, source: 'scheduler_agent_autonomous_tick' }),
-                  signal,
-                },
-                getDeepSeek, getGemini, getOpenAI, getAnthropic, getQwen,
-                getOllama, getLmStudio, getArk, getXiaomi, getKimi, getGlm, getRelay,
-              );
-              return result.text?.trim() || '';
-            });
-          };
-
-          const tickResult = await runtime.autonomousTick(userId, recentMemories, recentInteractions, analyze);
-
-          // Store reflection via runtime's addMemory (with proper scoping)
-          if (tickResult.memoryUpdate) {
-            // Memory already stored inside autonomousTick() via runtime.addMemory()
-          }
-
-          if (tickResult.message) {
-            messages.push(`[${agentRecord.name}] ${tickResult.message}`);
-          }
-        } catch (err: any) {
-          // Skip agents that fail to tick
-        }
-      }
-
-      return messages.length > 0 ? messages.join('\n') : null;
-    },
-  });
-
   // ── Proactive Lumi Scan (every 1h) — background anomaly/pattern detection ──
   scheduler.register({
     id: 'proactive_lumi_scan',
@@ -3151,10 +3061,10 @@ Write in first-person as Lumi, warm and introspective tone. Keep it under 150 Ch
 
           // 1. Memory spike detection: unusually high memory creation rate
           const recentMemories = (db.memories || []).filter(
-            (m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.createdAt >= oneHourAgo,
+            (m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.createdAt >= oneHourAgo,
           );
           const dayMemories = (db.memories || []).filter(
-            (m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && m.createdAt >= twentyFourHoursAgo,
+            (m: any) => m.userId === userId && (m.domain || 'personal') === 'personal' && (m.orgId || '') === '' && !isMemoryAvatarScoped(m) && m.createdAt >= twentyFourHoursAgo,
           );
 
           const anomalySignals: string[] = [];
@@ -3450,22 +3360,6 @@ Output ONLY the prediction message — no preamble, no labels.`;
       return messages.length > 0
         ? `时空模式分析 — ${messages.join('\n')}`
         : null;
-    },
-  });
-
-  // Ephemeral agent cleanup (every 1h) — removes orphaned auto-created workers
-  scheduler.register({
-    id: 'ephemeral_cleanup',
-    cron: 'every_1h',
-    quiet: true,
-    lastRun: null,
-    executionClass: 'maintenance',
-    handler: async () => {
-      const removed = cleanupEphemeralAgents(6);
-      if (removed > 0) {
-        return `Cleaned up ${removed} ephemeral worker agents`;
-      }
-      return null;
     },
   });
 

@@ -26,6 +26,7 @@ import {
   rankReadOnlyToolPatterns,
   type RankedReadOnlyToolPattern,
 } from '../context/read_only_tool_learning';
+import { buildDesktopObservationPlan } from './desktop_observation';
 
 export type LumiCapabilityLane =
   | 'conversation'
@@ -88,17 +89,23 @@ export interface ModelToolProjectionHints {
 export function buildModelCapabilityPolicy(
   execution: LumiExecutionDecision,
 ): ToolPolicy {
-  const base = execution.resumesPinnedTask ? execution.toolPolicy : execution.baseToolPolicy;
+  // A terse continuation owns an immutable server-bound policy snapshot.
+  // Semantic routes normally rank only, but this snapshot is authorization
+  // state, not model prose, so it must survive into the resumed turn.
+  const base = execution.resumesPinnedTask
+    ? execution.toolPolicy
+    : execution.baseToolPolicy;
   const forbiddenTools = unique(base.forbiddenTools || []);
   const forbidden = new Set(forbiddenTools);
   const blockAll = forbidden.has('*') || execution.allowToolUse === false;
-  const baseAllowed = (base.allowedTools || []).filter(name => name === '*' || !forbidden.has(name));
+  const baseAllowed = (base.allowedTools || [])
+    .filter(name => name === '*' || !forbidden.has(name));
   const baseAllowedSet = new Set(baseAllowed);
   const baseWildcard = baseAllowedSet.has('*');
   const hardRoute = execution.toolRoute?.hardAllowlist === true
     ? execution.toolRoute
     : null;
-  const hardAllowed = hardRoute && hardRoute.toolNames.length > 0
+  const hardAllowed = hardRoute
     ? unique(hardRoute.toolNames).filter(name => (
         !forbidden.has(name)
         && (baseWildcard || baseAllowedSet.has(name))
@@ -116,7 +123,10 @@ export function buildModelCapabilityPolicy(
       ? []
       : hardAllowed || baseAllowed,
     forbiddenTools: blockAll ? unique([...forbiddenTools, '*']) : forbiddenTools,
-    requireConfirmation: unique(base.requireConfirmation || []).filter(name => !forbidden.has(name) && (!hardAllowed || hardAllowed.includes(name))),
+    requireConfirmation: unique(base.requireConfirmation || []).filter(name => (
+      !forbidden.has(name)
+      && (!hardAllowed || hardAllowed.includes(name))
+    )),
     maxIterations: blockAll ? 0 : maxIterations,
   };
 }
@@ -144,16 +154,43 @@ export function buildModelToolProjection(
   const allowed = new Set(authorization.allowedTools || []);
   const forbidden = new Set(authorization.forbiddenTools || []);
   const wildcard = allowed.has('*');
-  const isAuthorized = (name: string) => Boolean(name && !forbidden.has('*') && !forbidden.has(name) && (wildcard || allowed.has(name)));
+  const isAuthorized = (name: string) => Boolean(
+    name
+    && !forbidden.has('*')
+    && !forbidden.has(name)
+    && (wildcard || allowed.has(name)),
+  );
   const routedNames = unique(route?.toolNames || []).filter(isAuthorized);
-  const pinnedNames = hardAllowlist ? [] : unique(Array.from(hints.pinnedTools || [])).filter(isAuthorized);
-  const semanticNames = hardAllowlist ? [] : unique(Array.from(hints.preferredTools || [])).filter(isAuthorized);
-  let toolNames = unique([...pinnedNames, ...(hardAllowlist ? routedNames : semanticNames), ...(!hardAllowlist ? routedNames : [])]).slice(0, maxTools);
-  const allowUnroutedDiscovery = hints.allowUnroutedDiscovery ?? hints.lane !== 'conversation';
-  const shouldExposeDiscovery = !hardAllowlist && isAuthorized(MODEL_CAPABILITY_DISCOVERY_TOOL) && (Boolean(route?.toolNames?.length) || semanticNames.length > 0 || allowUnroutedDiscovery);
+  const pinnedNames = hardAllowlist
+    ? []
+    : unique(Array.from(hints.pinnedTools || [])).filter(isAuthorized);
+  const semanticNames = hardAllowlist
+    ? []
+    : unique(Array.from(hints.preferredTools || [])).filter(isAuthorized);
+  let toolNames = unique([
+    ...pinnedNames,
+    ...(hardAllowlist ? routedNames : semanticNames),
+    ...(!hardAllowlist ? routedNames : []),
+  ]).slice(0, maxTools);
+
+  const allowUnroutedDiscovery = hints.allowUnroutedDiscovery
+    ?? hints.lane !== 'conversation';
+  const shouldExposeDiscovery = !hardAllowlist
+    && isAuthorized(MODEL_CAPABILITY_DISCOVERY_TOOL)
+    && (Boolean(route?.toolNames?.length) || semanticNames.length > 0 || allowUnroutedDiscovery);
+
   if (shouldExposeDiscovery && !toolNames.includes(MODEL_CAPABILITY_DISCOVERY_TOOL)) {
-    if (toolNames.length < maxTools) toolNames.push(MODEL_CAPABILITY_DISCOVERY_TOOL);
-    else if (!route?.toolNames?.length) toolNames = [...toolNames.slice(0, Math.max(0, maxTools - 1)), MODEL_CAPABILITY_DISCOVERY_TOOL];
+    if (toolNames.length < maxTools) {
+      toolNames.push(MODEL_CAPABILITY_DISCOVERY_TOOL);
+    } else if (!route?.toolNames?.length) {
+      // An unrouted projection must never become an arbitrary dead-end list.
+      // Preserve semantic winners and reserve the last slot for scoped
+      // capability discovery.
+      toolNames = [
+        ...toolNames.slice(0, Math.max(0, maxTools - 1)),
+        MODEL_CAPABILITY_DISCOVERY_TOOL,
+      ];
+    }
   }
 
   return {
@@ -182,8 +219,10 @@ function routeHasTool(input: LumiCapabilitySelectionInput, pattern: RegExp): boo
 }
 
 function availablePreferredTools(input: LumiCapabilitySelectionInput, lane: LumiCapabilityLane): string[] {
+  if (lane === 'conversation' || lane === 'client_surface' || lane === 'blocked_no_tools') return [];
   const routeTools = input.execution.toolRoute?.toolNames || [];
-  const allowedNames = (input.execution.toolPolicy.allowedTools || []).filter(name => name && name !== '*');
+  const allowedNames = (buildModelCapabilityPolicy(input.execution).allowedTools || [])
+    .filter(name => name && name !== '*');
   // The turn route is already the manifest-derived narrow capability set.
   // Personality policy is only a fallback when no route exists; using the
   // whole policy here reintroduces unrelated tools and hides the useful ones
@@ -231,6 +270,25 @@ function availablePreferredTools(input: LumiCapabilitySelectionInput, lane: Lumi
   return unique(routeTools.filter(name => available.has(name))).slice(0, 48);
 }
 
+function essentialToolsForLane(lane: LumiCapabilityLane): string[] {
+  switch (lane) {
+    case 'client_surface':
+      return ['client_get_state', 'client_action'];
+    case 'self_repair':
+      return [
+        'client_get_state',
+        'client_health_check',
+        'client_self_repair',
+        'client_action',
+        'adapter_registry_list',
+        'adapter_health_check',
+        'desktop_capability_status',
+      ];
+    default:
+      return [];
+  }
+}
+
 function isStrictReadOnlyManifestTool(name: string, registry: ToolRegistry = toolRegistry): boolean {
   const manifest = registry.getCapabilityManifestEntry(name);
   if (!manifest || (manifest.operation !== 'observe' && manifest.operation !== 'test')) return false;
@@ -254,7 +312,7 @@ function asksForRawDesktopOperation(text: string): boolean {
     || /(?:\u9f20\u6807|\u952e\u76d8|\u5149\u6807|\u70b9\u51fb|\u62d6\u62fd|\u8f93\u5165|\u5750\u6807|\u63a5\u7ba1\u684c\u9762|\u684c\u9762\u63a7\u5236|\u5c4f\u5e55\u63a7\u5236|\u539f\u751f\u63a7\u4ef6)/u.test(text);
 }
 
-function asksForDesktopAiCollaboration(text: string): boolean {
+function asksForDesktopAiRequest(text: string): boolean {
   return /(?:WorkBuddy|Codex|ChatGPT|Claude|Gemini|DeepSeek|Kimi|豆包|通义|文心|Perplexity|Cursor|Copilot|Ollama|LM Studio|Cherry Studio|AnythingLLM|外部AI|外部 AI|桌面AI|桌面 AI|其它AI|其他AI|AI工具|AI客户端|AI\s*app)/iu.test(text)
     || /(?:问|发给|发送给|交给|询问)[\s\S]{0,80}(?:AI|模型|agent|智能体)/iu.test(text)
     || /(?:AI|模型|agent|智能体)[\s\S]{0,80}(?:回答|结果|总结|对比|汇总)/iu.test(text);
@@ -385,11 +443,11 @@ function selectLane(input: LumiCapabilitySelectionInput): Pick<LumiCapabilitySel
     };
   }
 
-  if (asksForDesktopAiCollaboration(text) && (routeHas(input, 'external_control') || routeHasTool(input, /^(?:external_ai_|desktop_ai_)/))) {
+  if (asksForDesktopAiRequest(text) && (routeHas(input, 'external_control') || routeHasTool(input, /^(?:external_ai_|desktop_ai_)/))) {
     return {
       lane: 'external_tool',
-      primary: 'persistent external AI collaboration',
-      reasons: [...reasons, 'the user wants Lumi to coordinate external AI targets through the fixed API/MCP, CLI, structured-browser, then desktop-visual route'],
+      primary: 'single external AI tool request',
+      reasons: [...reasons, 'the user named an external AI tool that LumiCore can use as one bounded target'],
     };
   }
 
@@ -456,7 +514,11 @@ function selectLane(input: LumiCapabilitySelectionInput): Pick<LumiCapabilitySel
   };
 }
 
-function laneRule(selection: Pick<LumiCapabilitySelection, 'lane'>, text = ''): string {
+function laneRule(
+  selection: Pick<LumiCapabilitySelection, 'lane'>,
+  text = '',
+  preferredTools: readonly string[] = [],
+): string {
   switch (selection.lane) {
     case 'conversation':
       return 'Answer as Lumi. Do not invent work, tool calls, or hidden task progress.';
@@ -485,11 +547,17 @@ function laneRule(selection: Pick<LumiCapabilitySelection, 'lane'>, text = ''): 
         return 'Use mcp_cad-drafting_autocad_new_document to create and focus exactly one real blank AutoCAD drawing. Do not prepare geometry, infer dimensions, draw a placeholder boundary, or claim source verification.';
       }
       if (requiresVisibleAutoCadExecution(text)) {
+        if (preferredTools.includes('cad_draw_floorplan_in_autocad')) {
+          return 'Use cad_draw_floorplan_in_autocad as the single resumable owner of source resolution, geometry verification, operation preparation, real AutoCAD MCP/COM playback, and final entity-count verification. Source-inspection tools may establish the intended input first, but do not manually replay the composite workflow stages while this capability is available. Never substitute DXF/DWG generation, LISP, scripts, batch commands, cursor drawing, or an opened window for verified drawing completion.';
+        }
         return 'Run floorplan_extract_geometry and continue only when it returns geometryReady=true, geometryVerified=true, and a geometryReceiptPath; then call cad_prepare_autocad_operations with the receipt handoff directly. Never copy, shorten, or reconstruct coordinates in chat. Then call mcp_cad-drafting_autocad_playback_file for observable stroke-by-stroke drawing in real AutoCAD; never substitute DXF/DWG generation, LISP, scripts, batch commands, cursor drawing, or an opened window. Accept completion only when the verified operationSetId matches and operationCount=expectedEntityCount=entitiesAdded with entityCountMatches=true.';
       }
       return 'Prefer structured design/CAD tools over raw cursor work; use desktop CAD only when the user asks to operate visible software or a tool needs it.';
     case 'desktop_control':
       if (isRecoveredCurrentAppEditingContinuation(text)) {
+        if (preferredTools.includes('wps_create_document_with_text')) {
+          return 'Use wps_create_document_with_text as the single resumable owner of creating the real WPS document, entering the exact requested text, and verifying the editable document state. Use active-window/UIA tools only for explicit verification or recovery reported by that workflow; do not start a parallel manual New/Blank/type sequence while the composite capability is available.';
+        }
         return 'Follow the current-app UIA state machine. Observe the active window and UI tree, invoke one precise New/Blank control, re-snapshot, and do not type or paste until the fresh UI tree proves an editable Document/editor control. Focus that control, type through desktop_ui_type, and verify the requested text. Never repeat the same New/Blank selector or fall back to computer_use/raw coordinates.';
       }
       return 'Use screen/window state as evidence. Move through visible UI deliberately and verify the app/result before claiming completion.';
@@ -499,8 +567,8 @@ function laneRule(selection: Pick<LumiCapabilitySelection, 'lane'>, text = ''): 
       if (buildActionContract(text).kind === 'external_ai_history') {
         return 'Use only external_ai_history_* tools. Reuse an exact confirmed source, enforce its conversation/content/attachment scopes, persist every page cursor and source receipt, and query the local synchronized archive. Never submit a new prompt. If only desktop-visible access exists, prefer a healthy local vision model, capture the current viewport without scrolling, and report partial_visible completeness.';
       }
-      if (asksForDesktopAiCollaboration(text)) {
-        return 'Use external_ai_collaborate as the only new submission entry. Preserve its task/session binding, exact confirmation, idempotency key, fixed API/MCP to CLI to structured-browser to desktop-visual priority, and source receipts. Use external_ai_collect_answers only for read-only follow-up; never resend after an unknown result.';
+      if (asksForDesktopAiRequest(text)) {
+        return 'Use desktop_ai_ask for exactly one named target and desktop_ai_collect_answer only to read back that same target. Keep LumiCore responsible for the task and its verified result.';
       }
       return 'Use the selected external tools as Lumi hands, keep ownership of the result, and verify before final claims.';
     case 'blocked_no_tools':
@@ -522,11 +590,16 @@ export function buildLumiCapabilitySelection(input: LumiCapabilitySelectionInput
   const contractPreferredTools = actionContract.applies
     ? actionContract.preferredTools.filter(isHardAuthorized)
     : [];
+  const desktopObservationTools = buildDesktopObservationPlan(routeText)
+    .map(call => call.name)
+    .filter(isHardAuthorized);
   const basePreferredTools = unique([
-    ...availablePreferredTools(input, selected.lane),
+    ...essentialToolsForLane(selected.lane).filter(isHardAuthorized),
+    ...contractPreferredTools,
+    ...desktopObservationTools,
     ...((input.dispatch.flow.workflowHint || input.dispatch.flow.specialWorkflow)?.requiredTools || [])
       .filter(isHardAuthorized),
-    ...contractPreferredTools,
+    ...availablePreferredTools(input, selected.lane),
   ]).filter(name => (
     (!visibleAutoCad || ![
       'cad_generate_dxf',
@@ -575,7 +648,7 @@ export function buildLumiCapabilitySelection(input: LumiCapabilitySelectionInput
     readOnlyPattern
       ? `Verified read-only history hint: ${readOnlyPattern.toolNames.join(' -> ')} (confidence=${readOnlyPattern.confidence.toFixed(2)}, action=${readOnlyPattern.action}). This hint may only reorder the current authorized read tools; it does not authorize or execute anything.`
       : '',
-    laneRule(selected, routeText),
+    laneRule(selected, routeText, preferredTools),
     formatActionContractPrompt(actionContract),
     exactArtifactText.length
       ? `Exact artifact text requirements: ${JSON.stringify(exactArtifactText)}. Preserve every string exactly, then verify the written artifact with work_product_verify using artifacts[].requiredText before claiming completion. If verification fails, repair the artifact and verify again.`

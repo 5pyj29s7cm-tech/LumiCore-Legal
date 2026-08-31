@@ -9702,5 +9702,41 @@
   "command-center.no-external-ai-sessions.123849148a": {
     "en": "No scoped external-AI collaboration session yet. Ask Lumi in chat to consult one or more external AI systems.",
     "zh": "\u5f53\u524d\u5de5\u4f5c\u533a\u8fd8\u6ca1\u6709\u5916\u90e8 AI \u534f\u540c\u4f1a\u8bdd\u3002\u53ef\u5728\u5bf9\u8bdd\u4e2d\u8ba9 Lumi \u8c03\u7528\u4e00\u4e2a\u6216\u591a\u4e2a\u5916\u90e8 AI\u3002"
+  },
+  "agent-chat-page.memory-avatar.8c4e1f7a20": {
+    "en": "Memory Avatar",
+    "zh": "\u8bb0\u5fc6\u5316\u8eab"
+  },
+  "agent-chat-page.open-memory-avatar.2d7a9c4e16": {
+    "en": "Open Memory Avatar",
+    "zh": "\u6253\u5f00\u8bb0\u5fc6\u5316\u8eab"
+  },
+  "desktop-ui.personalization.2c4d8e1f06": {
+    "en": "Personalization",
+    "zh": "\u4e2a\u6027\u5316"
+  },
+  "command-center.switcher.4b7c2d1e09": {
+    "en": "Command center destinations",
+    "zh": "\u6307\u6325\u4e2d\u5fc3\u5207\u6362"
+  },
+  "command-center.memory-avatar-hint.6a1d9e3c20": {
+    "en": "Private memory space",
+    "zh": "\u79c1\u5bc6\u8bb0\u5fc6\u7a7a\u95f4"
+  },
+  "command-center.lumicore-hint.8f2d4c1a09": {
+    "en": "Core and system view",
+    "zh": "\u6838\u5fc3\u4e0e\u7cfb\u7edf\u89c6\u56fe"
+  },
+  "command-center.inner-realm.4d8f2a1c09": {
+    "en": "Breath Realm",
+    "zh": "\u7075\u606f\u4e4b\u5883"
+  },
+  "memory-avatar.switch-avatar.2c6f8a1d04": {
+    "en": "Switch memory avatar",
+    "zh": "\u5207\u6362\u8bb0\u5fc6\u5316\u8eab"
+  },
+  "sanctuary.request-unavailable.9d1c4a7e20": {
+    "en": "This memory avatar could not accept the message. Please try again.",
+    "zh": "\u8fd9\u4e2a\u8bb0\u5fc6\u5316\u8eab\u6682\u65f6\u65e0\u6cd5\u63a5\u6536\u6d88\u606f\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002"
   }
 }

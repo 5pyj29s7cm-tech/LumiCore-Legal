@@ -54,8 +54,6 @@ import {
   getConversationActionStatus,
   prepareConversationActionExecution,
   persistConversationExecutionPlan,
-  persistConversationModelExecutionResult,
-  getConversationModelExecutionRecovery,
   cancelConversationActionExecution,
   createDurableForegroundReleaseGate,
   convergeConversationActionRequestLease,
@@ -78,16 +76,8 @@ import {
 import { resolveExactConversationCorrection } from "../conversation/exact_correction";
 import { scheduleConversationSummary } from "../conversation/summary_scheduler";
 import { processInput, CognitiveContext, extractSentiment } from "../cognition";
-import {
-  runOrchestratedTask,
-  classifyComplexity,
-  isTerminalOrchestrationToolEvent,
-  shouldAttemptOrchestration,
-  type LlmGetters,
-  type OrchestrationWorkflowCheckpoint,
-} from "../agents/orchestrator";
+import type { LLMGetters as LlmGetters } from '../llm/dispatch';
 import { retrieveChunks } from "../agents/rag";
-import { markLatestUserTurn } from "../agents/background_delivery";
 import { executeSkillWorkflowAdapter } from "../skills/workflow_registry";
 import { queryMemories, addMemory } from "../memory/store";
 import { CONVERSATIONAL_MEMORY_EVIDENCE } from "../memory/types";
@@ -110,11 +100,16 @@ import {
   type OperationMode,
 } from "../cognition/operation_modes";
 import { getStoredOperationMode, saveStoredOperationMode } from "../cognition/operation_mode_store";
+import { shouldBlockForDesktopControlPause } from '../cognition/desktop_control_pause';
 import { formatOperationModeSwitchResponse } from "../i18n/operation_mode_messages";
 import { buildInternalOpenCommand } from "../i18n/naturalness_messages";
+import { formatDesktopControlPausePresentation } from '../regions/packs/cn/desktop_control_messages';
 import { buildInteractionModeOverlay } from "../cognition/turn_flow";
 import { buildLumiExecutionPipeline } from "../cognition/execution_pipeline";
-import { buildModelToolProjection } from "../cognition/capability_selection";
+import {
+  buildModelCapabilityPolicy,
+  buildModelToolProjection,
+} from "../cognition/capability_selection";
 import { shouldRunLegacyDirectExecution } from "../cognition/legacy_route_policy";
 import { bindCapabilityExecutionPlanTask } from "../cognition/capability_execution_plan";
 import { buildForegroundMessagingArguments, executeForegroundMessagingAction } from "../cognition/foreground_messaging_execution";
@@ -131,8 +126,6 @@ import { buildCapabilityMetaResponse, isCapabilityMetaQuestion } from "../cognit
 import { buildLumiOperatingKernelPrompt } from "../cognition/operating_kernel";
 import { persistLumiPostTurnLearning } from "../cognition/post_turn_learning";
 import { persistWorkTakeoverTurnExecution } from "../work_takeover/execution_writeback";
-import { appendReadOnlyConversationActionReceipts } from "../conversation/action_ledger";
-import { parseLegalCaseStatus } from "../cognition/legal_case_status";
 import { canAutoApproveAction } from "../tools/action_constitution";
 import { isConfirmationBlockedToolRecord } from '../tools/confirmation_block';
 import {
@@ -180,9 +173,7 @@ import {
   type ChatExecutionScope,
 } from './chat_execution_registry';
 import {
-  persistVoiceWorkflowCheckpointDurably,
   sanitizeVoiceAgentErrorPayload,
-  VoiceWorkflowCheckpointError,
   voiceDurabilityUnknownText,
 } from './voice_durability';
 import {
@@ -224,7 +215,6 @@ import {
   formatConversationActionTaskStatus,
   getRecoveredApplicationContinuationTarget,
   isUserObservedTaskCompletion,
-  needsNaturalConversationActionStatusAnswer,
   resolveRecentActionOpenTarget,
 } from "../cognition/action_continuation";
 import {
@@ -285,8 +275,6 @@ interface AudioSession {
   isSpeaking: boolean;
   /** Tool iteration loop is running — new input is queued, not dropped */
   isProcessing: boolean;
-  /** True during orchestrator multi-agent execution — status checks get quick ack */
-  isOrchestrating: boolean;
   /** AbortController for the full LLM+tool pipeline — aborted on barge-in */
   pipelineAbortController: AbortController | null;
   /** Independent conversational response while the work pipeline keeps running. */
@@ -324,7 +312,7 @@ interface AudioSession {
   }>;
   /** True when background agent is executing tools (barge-in requires wake word) */
   isBackgroundWork: boolean;
-  activeWorkStatus: 'idle' | 'planning' | 'executing' | 'orchestrating' | 'waiting_confirmation' | 'completed';
+  activeWorkStatus: 'idle' | 'planning' | 'executing' | 'waiting_confirmation' | 'completed';
   activeWorkStep: string;
   activeWorkToolCalls: number;
   /** Server-owned liveness for a real work lease; UI timers may observe but never cancel it. */
@@ -795,7 +783,6 @@ async function cancelActiveVoiceTurn(
   session.isSpeaking = false;
   session.ttsPlaybackUntil = 0;
   session.isProcessing = false;
-  session.isOrchestrating = false;
   if (!preserveInputQueue) session.inputQueue = [];
   session.accumulatedText = '';
   if (session.bargeinTimer) {
@@ -1246,9 +1233,6 @@ function buildActiveVoiceWorkProgressReply(session: AudioSession, userText: stri
   const toolStep = rawStep.match(/^(?:Running\s+)?([a-z][\w-]+?)(?:\s+(completed|failed))?$/i);
   const step = (() => {
     if (!toolStep) {
-      if (/^Coordinating worker agents$/i.test(rawStep)) {
-        return isEnglish ? 'coordinating the parallel work' : CN_VOICE_WORK_MESSAGES.coordinatingParallelWork;
-      }
       if (!rawStep) return '';
       if (!isEnglish && !/[\u3400-\u9fff]/u.test(rawStep)) return CN_VOICE_WORK_MESSAGES.executingCurrentStep;
       return rawStep.slice(0, 36);
@@ -1285,9 +1269,7 @@ function buildActiveVoiceWorkProgressReply(session: AudioSession, userText: stri
   }
   return step
     ? CN_VOICE_WORK_MESSAGES.progressWithStep(step)
-    : session.isOrchestrating
-      ? CN_VOICE_WORK_MESSAGES.coordinatingTask(task)
-      : CN_VOICE_WORK_MESSAGES.continuingTask(task);
+    : CN_VOICE_WORK_MESSAGES.continuingTask(task);
 }
 
 function stopVoiceWorkHeartbeat(session: AudioSession): void {
@@ -1923,11 +1905,6 @@ async function processVoiceInput(
     asrFinalAt: inputTiming.asrFinalAt,
     pipelineStartedAt: Date.now(),
   });
-  markLatestUserTurn({
-    userId: session.userId,
-    domain: session.domain,
-    orgId: session.orgId,
-  }, requestId);
   session.pipelineAbortController = pipelineAbort;
   session.activeTurnText = userText;
   session.activeTurnRequestId = requestId;
@@ -2158,11 +2135,11 @@ async function processVoiceInput(
   const clientActionOnlyTurn = turnFlow.clientActionOnlyTurn;
   const workSurfaceRoute = turnFlow.workSurfaceRoute;
   const visionIntent = turnFlow.visionIntent;
-  const exposeAgentWork = turnFlow.exposeAgentWork;
   const executionDecision = executionPipeline.execution;
+  const requestedToolSession = executionPipeline.executionRequested;
   const voiceInputTokenBudget = resolveVoiceModelInputBudget({
     text: actionIntentText,
-    allowToolUse: executionDecision.allowToolUse,
+    allowToolUse: requestedToolSession,
   });
   const capabilityMetaResponse = buildCapabilityMetaResponse({
     text: actionIntentText,
@@ -2198,12 +2175,12 @@ async function processVoiceInput(
       userText,
     );
   }
-  session.isBackgroundWork = executionDecision.allowToolUse;
-  session.activeWorkStatus = executionDecision.allowToolUse ? 'planning' : 'idle';
-  if (executionDecision.allowToolUse && !session.workHeartbeatTimer) {
+  session.isBackgroundWork = requestedToolSession;
+  session.activeWorkStatus = requestedToolSession ? 'planning' : 'idle';
+  if (requestedToolSession && !session.workHeartbeatTimer) {
     emitVoiceWorkProgress(socket, session, requestId, 'planning', CN_VOICE_WORK_MESSAGES.workAccepted);
     startVoiceWorkHeartbeat(socket, session, requestId);
-  } else if (!executionDecision.allowToolUse) {
+  } else if (!requestedToolSession) {
     stopVoiceWorkHeartbeat(session);
   }
   const intentTrace = executionPipeline.intentTrace;
@@ -2217,21 +2194,27 @@ async function processVoiceInput(
   });
   const desktopExecutionTracker = createDesktopExecutionTracker(desktopExecutionPolicy.executionPlan);
   const routedToolPolicy = restrictToolPolicyForExecutionBoundary(
-    executionDecision.toolPolicy,
+    buildModelCapabilityPolicy(executionDecision),
     toolSecurityContext.executionBoundary,
   );
+  executionDecision.baseToolPolicy = routedToolPolicy;
   executionDecision.toolPolicy = routedToolPolicy;
   executionDecision.maxIterations = routedToolPolicy.maxIterations;
   executionDecision.toolRoute = restrictVisibleToolRouteForExecutionBoundary(
     executionDecision.toolRoute,
     toolSecurityContext.executionBoundary,
   );
-  const modelToolProjection = buildModelToolProjection(executionDecision);
+  const modelToolProjection = buildModelToolProjection(executionDecision, {
+    lane: capabilitySelection.lane,
+    preferredTools: capabilitySelection.preferredTools,
+  });
+  const toolSessionActive = requestedToolSession
+    && modelToolProjection.toolNames.length > 0;
   const actionFollowupIntent = classifyConversationActionFollowupIntent(
     actionIntentText,
     conversationTurn.conversation.actionContinuationState,
   );
-  const actionTaskExecution = turnFlow.conceptualCapabilityQuestion || turnFlow.specialWorkflow?.createsTask === false
+  const actionTaskExecution = turnFlow.conceptualCapabilityQuestion
     ? { state: null, kind: 'conversation' as const }
     : userObservedCompletion
     ? {
@@ -2245,7 +2228,7 @@ async function processVoiceInput(
         requestId,
         userMessageId: voiceUserMessageId,
         toolPolicy: routedToolPolicy,
-        forceTask: executionDecision.allowToolUse,
+        forceTask: toolSessionActive,
         forceResume: Boolean(
           pendingConfirmation
           || interruptedMerge.usedInterruptedTurn
@@ -2445,7 +2428,7 @@ async function processVoiceInput(
     coalesceToolExecutionRecords([...priorTaskRecords, ...records])
   );
   if (
-    executionDecision.allowToolUse
+    toolSessionActive
     && (actionTaskExecution.kind === 'new' || actionTaskExecution.kind === 'resume')
   ) {
     setConversationActionExecutionStatus(
@@ -2456,7 +2439,7 @@ async function processVoiceInput(
     );
   }
   const remoteRestricted = toolSecurityContext.executionBoundary === 'remote_restricted';
-  logger.info(`[Audio] tool gate: ${executionDecision.allowToolUse ? 'enabled' : 'chat-only'} mode=${operationMode} effective=${effectiveOperationMode} surface=${turnFlow.surface} clientActionOnly=${clientActionOnlyTurn} selfRepair=${selfRepairTurn} capabilityLane=${capabilitySelection.lane} trace=${intentTrace.summary} route=${executionDecision.toolRoute ? `${executionDecision.toolRoute.toolNames.length}/${executionDecision.toolRoute.totalAvailable}` : 'none'}`);
+  logger.info(`[Audio] tool gate: ${executionDecision.allowToolUse ? 'authorized' : 'off'} session=${toolSessionActive ? 'active' : 'conversation'} mode=${operationMode} effective=${effectiveOperationMode} surface=${turnFlow.surface} clientActionOnly=${clientActionOnlyTurn} selfRepair=${selfRepairTurn} capabilityLane=${capabilitySelection.lane} trace=${intentTrace.summary} route=${executionDecision.toolRoute ? `${executionDecision.toolRoute.toolNames.length}/${executionDecision.toolRoute.totalAvailable}` : 'none'}`);
   emitAgent('agent:intent_trace', intentTrace);
   if (executionDecision.toolRoute) {
     emitAgent('agent:tool_route', {
@@ -2495,15 +2478,15 @@ async function processVoiceInput(
       source: 'voice',
     });
   }
-  const needsExecutionPrompt = executionDecision.allowToolUse && !remoteRestricted;
+  const needsExecutionPrompt = toolSessionActive && !remoteRestricted;
   const opModeOverlay = remoteRestricted ? '' : '\n\n' + buildInteractionModeOverlay(turnFlow);
   const workSurfaceOverlay = workSurfaceRoute.promptOverlay && needsExecutionPrompt ? '\n\n' + workSurfaceRoute.promptOverlay : '';
   const visionRoutingOverlay = visionIntent && effectiveOperationMode !== 'meeting' && needsExecutionPrompt ? '\n\n' + buildVisionRoutingOverlay(session.userId, routedUserText) : '';
   const interactionOverlay = remoteRestricted
     ? baseVoiceOverlay
-    : executionDecision.allowToolUse
+    : toolSessionActive
       ? toolVoiceOverlay
-      : baseVoiceOverlay + '\n\n## Interaction Mode\nThis turn is chat-only. Do not call tools, operate the desktop, assemble a team, or claim that you are taking actions. Answer naturally unless the user gives an explicit command.';
+      : baseVoiceOverlay + '\n\n## Interaction Mode\nThis turn is conversational. Do not call tools, operate the desktop, or claim that you are taking actions. Answer naturally unless the user gives an explicit command.';
 
   const clientSelfPrompt = !remoteRestricted && (needsExecutionPrompt || isCapabilityMetaQuestion(actionIntentText))
     ? '\n\n' + formatCompactClientSelfPrompt(session.userId, voiceScope)
@@ -2542,7 +2525,7 @@ async function processVoiceInput(
   const voiceSystemPrompt = restrictSystemPromptForExecutionBoundary(
     fullPersonalityPrompt,
     toolSecurityContext.executionBoundary,
-  ) + interactionOverlay + opModeOverlay + workSurfaceOverlay + visionRoutingOverlay + buildVoiceReplyStyleOverlay() + proactiveContextOverlay + actionContinuationOverlay + clientSelfPrompt + topicContext + organizationKnowledgeOverlay + dispatchOverlay + turnFlowOverlay + executionOverlay + capabilitySelectionOverlay + desktopExecutionOverlay + runtimeCapabilityOverlay + operatingKernelOverlay + (executionDecision.allowToolUse && !remoteRestricted ? `\n${GENERIC_TOOL_PLANNING_PROMPT}` : '');
+  ) + interactionOverlay + opModeOverlay + workSurfaceOverlay + visionRoutingOverlay + buildVoiceReplyStyleOverlay() + proactiveContextOverlay + actionContinuationOverlay + clientSelfPrompt + topicContext + organizationKnowledgeOverlay + dispatchOverlay + turnFlowOverlay + executionOverlay + capabilitySelectionOverlay + desktopExecutionOverlay + runtimeCapabilityOverlay + operatingKernelOverlay + (toolSessionActive && !remoteRestricted ? `\n${GENERIC_TOOL_PLANNING_PROMPT}` : '');
 
   const userLLMPrefs = getScopedPreferredLLM(session.userId, voiceScope);
   const provider = userLLMPrefs.provider || 'deepseek';
@@ -2584,7 +2567,6 @@ async function processVoiceInput(
       cognitiveIntent?: string;
       llmWasCalled?: boolean;
       source?: string;
-      skipActionContinuation?: boolean;
       terminalTaskDisposition?: {
         outcome: 'blocked';
         taskId: string;
@@ -2612,9 +2594,8 @@ async function processVoiceInput(
       domain: voiceScope.domain,
       orgId: voiceScope.orgId,
       requestId,
-      skipActionContinuation: options.skipActionContinuation === true,
       ...(voiceTurnProvenance || {}),
-      taskIntent: executionDecision.allowToolUse ? 'task' : 'conversation',
+      taskIntent: toolSessionActive ? 'task' : 'conversation',
       terminalTaskDisposition: options.terminalTaskDisposition,
     });
     voiceAssistantMessagePersisted = true;
@@ -2676,7 +2657,6 @@ async function processVoiceInput(
     toolCalls?: ToolExecutionRecord[];
     speechText?: string;
     notification?: Record<string, any>;
-    skipActionContinuation?: boolean;
     persistTerminalState?: () => T;
     publishAfter?: (terminalState: T | undefined) => void;
   }): Promise<boolean> => {
@@ -2711,7 +2691,6 @@ async function processVoiceInput(
             cognitiveIntent: input.cognitiveIntent,
             llmWasCalled: input.llmWasCalled,
             source: input.source,
-            skipActionContinuation: input.skipActionContinuation === true,
             terminalTaskDisposition: input.blocked && foregroundRequestIdentity?.expectedTaskId
               ? {
                   outcome: 'blocked',
@@ -2786,7 +2765,7 @@ async function processVoiceInput(
     return committed;
   };
 
-  const maxIterations = executionDecision.allowToolUse
+  const maxIterations = toolSessionActive
     ? Math.max(1, executionDecision.maxIterations || 1)
     : 1;
   const toolResultPreviewLimit = 500;
@@ -2871,6 +2850,7 @@ async function processVoiceInput(
     signal: pipelineAbort.signal,
     leaseTimeoutMs: VOICE_DESKTOP_LEASE_WAIT_MS,
   });
+  const desktopPausePresentation = () => formatDesktopControlPausePresentation(routedUserText);
 
   const runtimeOwnedDeterministicRecoveryCall = buildDurableTaskDeterministicToolRecoveryCall(
     actionTaskExecution.state,
@@ -3052,39 +3032,12 @@ async function processVoiceInput(
     });
     return executionWriteback;
   };
-  const persistVoiceReadOnlyWorkflowReceipts = (records: ToolExecutionRecord[], workflowId: string) => {
-    if (records.length === 0) return [];
-    const db = readDB();
-    const statusText = records
-      .filter(record => record.name === 'legal_case_workflow_status' && !record.error)
-      .map(record => String(record.result || ''))
-      .join('\n');
-    const status = parseLegalCaseStatus(statusText);
-    const receiptRecords = records.map((record, index) => ({
-      ...record,
-      turnId: requestId,
-      requestId,
-      idempotencyKey: `readonly:${workflowId}:${requestId}:${record.name}:${index}`,
-    }));
-    const appended = appendReadOnlyConversationActionReceipts(db, {
-      conversationId: conversationTurn.conversation.id,
-      userId: session.userId,
-      records: receiptRecords,
-      anchors: [status?.caseId || '', status?.title || ''],
-      preferredIntentKinds: ['legal_workspace', 'legal_document'],
-      turnId: requestId,
-      requestId,
-    });
-    if (appended.length) writeDB(db);
-    else logger.warn(`[Audio] ${workflowId} could not bind its read-only receipt to an existing task.`);
-    return appended;
-  };
   let sentenceIdx = 0;
   const ttsPromises: Promise<void>[] = [];
   let previousToolSig: string | null = null;
   const deferCompletionSpeech = shouldDeferModelOutputUntilFinalized({
     taskText: actionIntentText,
-    allowToolUse: executionDecision.allowToolUse,
+    allowToolUse: toolSessionActive,
     flow: turnFlow,
   });
   const modelTextGate = createPreFinalizationTextGate();
@@ -3148,7 +3101,7 @@ async function processVoiceInput(
     const ttsProvider = getTTSProvider();
     if (
       speculativeSpeech
-      || executionDecision.allowToolUse
+      || toolSessionActive
       || deferCompletionSpeech
       || !ttsProvider
       || !session.currentVoiceId
@@ -3470,10 +3423,7 @@ async function processVoiceInput(
     return;
   }
 
-  if (
-    actionFollowupIntent === 'status'
-    && !needsNaturalConversationActionStatusAnswer(actionIntentText)
-  ) {
+  if (actionFollowupIntent === 'status') {
     responseText = getConversationActionStatus(
       conversationTurn.conversation.id,
       session.userId,
@@ -3783,20 +3733,17 @@ async function processVoiceInput(
       reason: finalizedWorkflow.reason || '',
       cognitiveIntent: finalizedWorkflow.blocked ? 'work_product_guard' : (specialWorkflow.id || 'skill_workflow'),
       llmWasCalled: false,
-      skipActionContinuation: specialWorkflow.createsTask === false,
       toolCalls: toolResults,
       speechText: workflowSpeechText,
       notification: finalizedWorkflow.notification,
-      persistTerminalState: () => specialWorkflow.createsTask === false
-        ? persistVoiceReadOnlyWorkflowReceipts(toolResults, specialWorkflow.id)
-        : persistVoiceTakeoverExecution(responseText, {
-            toolRecords: toolResults,
-            source: specialWorkflow.source,
-            sourceInteractionId: `voice_workflow_${Date.now()}`,
-            finalizationBlocked: finalizedWorkflow.blocked,
-            assistantTextTrusted: !finalizedWorkflow.blocked,
-            finalizationReason: finalizedWorkflow.reason,
-          }),
+      persistTerminalState: () => persistVoiceTakeoverExecution(responseText, {
+        toolRecords: toolResults,
+        source: specialWorkflow.source,
+        sourceInteractionId: `voice_workflow_${Date.now()}`,
+        finalizationBlocked: finalizedWorkflow.blocked,
+        assistantTextTrusted: !finalizedWorkflow.blocked,
+        finalizationReason: finalizedWorkflow.reason,
+      }),
     });
     await Promise.allSettled(ttsPromises);
     if (!isCurrentTurn()) {
@@ -3903,7 +3850,7 @@ async function processVoiceInput(
 
   try {
     const quickResult = preMatchedQuickResult;
-    if (!foregroundWeChatReadArgs && !foregroundWeChatSendArgs && quickResult?.matched && (!quickResult.toolCall || executionDecision.allowToolUse)) {
+    if (!foregroundWeChatReadArgs && !foregroundWeChatSendArgs && quickResult?.matched && (!quickResult.toolCall || toolSessionActive)) {
       logger.info(`[Audio] Quick command: "${userText}" → "${quickResult.responseText.slice(0, 50)}"`);
       let quickResponseText = quickResult.responseText;
       let quickToolResult = '';
@@ -4023,7 +3970,7 @@ async function processVoiceInput(
 
   // Voice and chat share the same deterministic read route. Inbound language
   // such as “张勇给我发了什么” can never fall through to the send capability.
-  if (foregroundWeChatReadArgs && executionDecision.allowToolUse && !clientActionOnlyTurn && !selfRepairTurn) {
+  if (foregroundWeChatReadArgs && toolSessionActive && !clientActionOnlyTurn && !selfRepairTurn) {
     const toolName = 'wechat_read_recent_chat';
     const correlationId = `voice-wechat-read-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     let toolRecord: ToolExecutionRecord = {
@@ -4114,7 +4061,7 @@ async function processVoiceInput(
 
   // Explicit ordinary foreground WeChat sends use the same deterministic path
   // as text chat. Do not ask the model to rediscover a registered capability.
-  if (foregroundWeChatSendArgs && executionDecision.allowToolUse && !clientActionOnlyTurn && !selfRepairTurn) {
+  if (foregroundWeChatSendArgs && toolSessionActive && !clientActionOnlyTurn && !selfRepairTurn) {
     const toolName = 'wechat_send_message';
     const correlationId = `voice-wechat-send-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const toolRecord: ToolExecutionRecord = {
@@ -4281,142 +4228,11 @@ async function processVoiceInput(
     const effectiveModel = voiceModel;
     logger.info(`[Audio] Cognition: ${cognition.intent.category} (confidence: ${cognition.intent.confidence}), model: ${effectiveModel}`);
 
-    // ── Orchestrator: complex/moderate tasks → multi-agent decomposition ──
-    let usedOrchestrator = false;
     let recoveryConversationMessages: NormalizedMessage[] = [
       { role: 'system', content: voiceSystemPrompt },
       { role: 'user', content: routedUserText },
     ];
-    const complexity = classifyComplexity(routedUserText, { userId: session.userId, personalityId: session.personalityId });
-    const shouldOrchestrate = !runtimeOwnedDeterministicRecoveryCall && shouldAttemptOrchestration({
-      channel: 'voice',
-      text: turnFlow.routeText,
-      complexity,
-      allowToolUse: executionDecision.allowToolUse,
-      clientActionOnly: clientActionOnlyTurn,
-      selfRepair: selfRepairTurn,
-      artifactFirst: workSurfaceRoute.artifactFirst,
-      directDesktop: workSurfaceRoute.directDesktop,
-    });
-    if (shouldOrchestrate) {
-      let voiceWorkflowCheckpointed = false;
-      try {
-        emitAgent("agent:status", { status: "thinking", agentName: "Lumi", phase: exposeAgentWork ? 'orchestrator' : 'background' });
-        session.isOrchestrating = true;
-        session.activeWorkStatus = 'orchestrating';
-        session.activeWorkStep = 'Coordinating worker agents';
-
-        const voiceModelRecovery = actionTaskExecution.state?.taskId
-          ? getConversationModelExecutionRecovery({
-              conversationId: conversationTurn.conversation.id,
-              userId: session.userId,
-              taskId: actionTaskExecution.state.taskId,
-            })
-          : null;
-        const orchResult = await runOrchestratedTask(
-          routedUserText,
-          {
-            ...toolSecurityContext,
-            userId: session.userId,
-            personalityId: session.personalityId,
-            domain: voiceScope.domain,
-            orgId: voiceScope.orgId,
-            desktopRelay,
-            toolPolicy: routedToolPolicy,
-            taskId: actionTaskExecution.state?.taskId,
-            desktopExecutionTracker,
-            resumeNodeReceipts: voiceModelRecovery?.receipts,
-            resumeExecutionGraph: voiceModelRecovery?.graph,
-            isCancelled: () => pipelineAbort?.signal.aborted ?? false,
-          },
-          {
-            provider,
-            model: effectiveModel,
-            inputTokenBudget: voiceInputTokenBudget,
-            ...reasoningRoutePolicy,
-          },
-          llmGetters,
-          exposeAgentWork && !deferCompletionSpeech
-            ? (msg) => {
-                if (shouldForwardPreFinalizationProgress(msg)) {
-                  emitAgent("agent:chunk", { text: msg, agentName: "Lumi" });
-                }
-              }
-            : undefined,
-          (record, meta) => {
-            session.activeWorkStatus = 'executing';
-            session.activeWorkStep = record.error
-              ? `${record.name} failed`
-              : record.result !== undefined
-                ? `${record.name} completed`
-                : `Running ${record.name}`;
-            if (isTerminalOrchestrationToolEvent(record)) {
-              session.activeWorkToolCalls++;
-              toolResults.push({ ...record, result: record.result || '' });
-            }
-            // Direct desktop relays already emit their own start/result lifecycle.
-            // Re-emitting here would duplicate every visible tool event.
-            if (isDirectDesktopTool(record.name)) return;
-            emitAgent("agent:tool_call", {
-              correlationId: record.id,
-              toolCallId: record.id,
-              name: record.name,
-              arguments: record.arguments,
-              args: record.arguments,
-              subTaskId: meta.subTaskId,
-              workerAgentId: meta.agentId,
-              workerAgentName: meta.agentName,
-              result: record.result?.slice(0, 500),
-              error: record.error,
-            });
-          },
-          async (checkpoint: OrchestrationWorkflowCheckpoint) => {
-            const taskId = actionTaskExecution.state?.taskId;
-            if (!taskId) {
-              throw new Error('Voice orchestration has no durable task identity');
-            }
-            await persistVoiceWorkflowCheckpointDurably({
-              conversationId: conversationTurn.conversation.id,
-              userId: session.userId,
-              taskId,
-              checkpoint,
-              resumeNodeReceipts: voiceModelRecovery?.receipts,
-            });
-            voiceWorkflowCheckpointed = true;
-          },
-        );
-        if (!isCurrentTurn()) return;
-        if (orchResult) {
-          if (actionTaskExecution.state?.taskId) {
-            const persistedModelResult = persistConversationModelExecutionResult({
-              conversationId: conversationTurn.conversation.id,
-              userId: session.userId,
-              taskId: actionTaskExecution.state.taskId,
-              workflowResult: orchResult.workflowResult,
-            });
-            if (!persistedModelResult) {
-              throw new Error('Voice orchestration final model result was rejected');
-            }
-            await flushDBOrThrow();
-          }
-          usedOrchestrator = true;
-          responseText = orchResult.responseText;
-          const rawSentences = responseText.split(/(?<=[。！？.!?\n])/);
-          // Orchestrator result text remains buffered until the shared finalizer
-          // has compared it with the complete tool ledger.
-          logger.info(`[Audio] Orchestrator response: "${responseText.slice(0, 80)}" (${rawSentences.length} sentences)`);
-        }
-        session.isOrchestrating = false;
-      } catch (e) {
-        session.isOrchestrating = false;
-        if (e instanceof VoiceWorkflowCheckpointError || voiceWorkflowCheckpointed) throw e;
-        logger.warn('[Audio] Orchestrator failed, falling back to LLM:', (e as Error).message);
-      }
-    }
-
-    if (!usedOrchestrator) {
-      // ── Single-phase: stream LLM → TTS with tool iteration, all inline ──
-      // Load recent conversation history for context continuity
+    // Stream the single LumiCore model/tool loop with bounded conversation history.
       // Include both user & assistant messages with correct roles
       const recentMsgs = getMessagesByTokenBudget(conversationTurn.conversation.id, 6_000, 6, requestId).filter(message => !(
         message.role === 'user' && message.externalMessageId === requestId
@@ -4439,10 +4255,17 @@ async function processVoiceInput(
       const voiceDeterministicRecoveryCallIds = new Set<string>();
       voiceToolLoop: for (let iter = 0; iter < maxIterations; iter++) {
       if (pipelineAbort?.signal.aborted) break;
+      if (desktopRelay.getControlPauseReason()) {
+        responseText = desktopPausePresentation().text;
+        break;
+      }
 
       logger.info(`[Audio] LLM iter ${iter + 1}/${maxIterations}: provider=${provider} model=${effectiveModel}`);
-      const toolDeclarations = executionDecision.allowToolUse
-        ? toolRegistry.getToolDeclarationsForPolicy(routedToolPolicy, { context: toolContext })
+      const toolDeclarations = toolSessionActive
+        ? toolRegistry.getToolDeclarationsForPolicy(routedToolPolicy, {
+            context: toolContext,
+            visibleToolNames: modelToolProjection.toolNames,
+          })
         : [];
 
       const streamResult = await makeLLMCallStreaming(
@@ -4473,6 +4296,10 @@ async function processVoiceInput(
         llmGetters.getOllama, llmGetters.getLmStudio, llmGetters.getArk, llmGetters.getXiaomi, llmGetters.getKimi, llmGetters.getGlm, llmGetters.getRelay,
       );
       if (!isCurrentTurn()) return;
+      if (desktopRelay.getControlPauseReason()) {
+        responseText = desktopPausePresentation().text;
+        break;
+      }
 
       let plannedToolCalls = streamResult.toolCalls?.length
         ? normalizePlannedToolScope(
@@ -4539,6 +4366,10 @@ async function processVoiceInput(
 
       for (const tc of plannedToolCalls) {
         if (pipelineAbort?.signal.aborted) break;
+        if (desktopRelay.getControlPauseReason()) {
+          responseText = desktopPausePresentation().text;
+          break voiceToolLoop;
+        }
         const cid = `${tc.name}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
         const currentAppGuard = guardCurrentAppToolCall({
           taskText: turnFlow.routeText,
@@ -4593,6 +4424,11 @@ async function processVoiceInput(
           name: tc.name,
         });
 
+        if (desktopRelay.getControlPauseReason()) {
+          responseText = desktopPausePresentation().text;
+          break voiceToolLoop;
+        }
+
         // A confirmation denial is a hard task boundary. Do not let the model
         // re-plan, replace the pending action, or run later calls from the same
         // batch before the user has confirmed the exact stored arguments.
@@ -4601,8 +4437,6 @@ async function processVoiceInput(
         }
       }
     }
-    } // end if (!usedOrchestrator)
-
     if (!isCurrentTurn()) return;
 
     if (pendingConfirmationCreatedThisTurn) {
@@ -4631,15 +4465,32 @@ async function processVoiceInput(
           source: 'voice',
           flow: turnFlow,
         });
+    const desktopPauseBlocksCurrentTask = () => {
+      return shouldBlockForDesktopControlPause({
+        pauseReason: desktopRelay.getControlPauseReason(),
+        waitingForConfirmation: Boolean(pendingConfirmationCreatedThisTurn),
+        taskText: actionIntentText,
+        toolRecords: taskAwareRecords(toolResults),
+      });
+    };
+    if (desktopPauseBlocksCurrentTask()) {
+      const pausePresentation = desktopPausePresentation();
+      finalResponse = {
+        ...finalResponse,
+        text: pausePresentation.text,
+        blocked: true,
+        reason: pausePresentation.reason,
+      };
+    }
     const guardRecovery = await recoverBlockedExecutionOnce({
       task: routedUserText,
       responseText,
       finalization: finalResponse,
-      allowToolUse: executionDecision.allowToolUse,
+      allowToolUse: toolSessionActive,
       pendingConfirmation: Boolean(pendingConfirmationCreatedThisTurn),
       requiresFreshConfirmation: correctionRequiresFreshConfirmation,
-      aborted: !isCurrentTurn(),
-      isAborted: () => !isCurrentTurn(),
+      aborted: !isCurrentTurn() || desktopPauseBlocksCurrentTask(),
+      isAborted: () => !isCurrentTurn() || desktopPauseBlocksCurrentTask(),
       isPendingConfirmation: () => Boolean(pendingConfirmationCreatedThisTurn),
       toolRecords: toolResults,
       attempt: async ({ instruction, priorToolRecords, recordTool }) => {
@@ -4759,7 +4610,7 @@ async function processVoiceInput(
         speechText: responseText,
         notification: finalResponse.notification,
         persistTerminalState: () => {
-          if (finalResponse.blocked && actionTaskExecution.state?.taskId && turnFlow.allowToolUseForTurn) {
+          if (finalResponse.blocked && actionTaskExecution.state?.taskId && toolSessionActive) {
             setConversationActionExecutionStatus(conversationTurn.conversation.id, session.userId, 'blocked', {
               blocker: finalResponse.reason || 'The current work product did not pass final verification.',
               assistantState: responseText,
@@ -4788,7 +4639,7 @@ async function processVoiceInput(
       });
     }
 
-    // Candidate model/orchestrator text is never spoken before the strict
+    // Candidate model text is never spoken before the strict
     // database and terminal-receipt fences have both committed.
     await Promise.allSettled(ttsPromises);
     if (!isCurrentTurn()) return;
@@ -5217,7 +5068,23 @@ export function registerVoiceHandlers(
     session.lastAcceptedCommandChunkAt = 0;
     session.userId = getUserId(socket);
     setRealtimeVoiceSessionActive(session.userId, socket.id, true);
-    session.agentId = data.agentId || 'lumi';
+    const requestedAgentId = String(data.agentId || 'lumi').trim() || 'lumi';
+    // Memory Avatars are deliberately text-only, frozen, tool-free surfaces.
+    // Voice currently uses the full Lumi execution lane, so accepting a
+    // memory_avatar_* id here would silently bypass that boundary. Reject it
+    // explicitly until a separately constrained voice lane exists.
+    if (requestedAgentId.startsWith('memory_avatar_')) {
+      logger.warn(`[Audio] Refused voice start for Memory Avatar lane: ${requestedAgentId}`);
+      session.isActive = false;
+      setRealtimeVoiceSessionActive(session.userId, socket.id, false);
+      session.agentId = 'lumi';
+      socket.emit('audio:error', {
+        code: 'MEMORY_AVATAR_VOICE_UNAVAILABLE',
+        message: 'Memory Avatars are available in their private text sanctuary, not in the voice execution lane.',
+      });
+      return;
+    }
+    session.agentId = requestedAgentId;
     session.sessionId = normalizeVoiceSessionId(data.sessionId);
     const voiceStartSessionId = session.sessionId;
     session.voiceCaptureProvenance = createVoiceCaptureProvenance({

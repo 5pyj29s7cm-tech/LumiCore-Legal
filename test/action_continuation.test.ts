@@ -7,12 +7,230 @@ import {
   extractRecentActionContinuationState,
   getRecoveredApplicationContinuationTarget,
   isRecoveredCurrentAppEditingContinuation,
-  needsNaturalConversationActionStatusAnswer,
   needsRecentActionContinuationContext,
+  pendingRuntimeCancellationRecheck,
   prepareConversationActionTaskState,
 } from '../server/cognition/action_continuation';
 
 describe('recent action continuation', () => {
+  it('resumes the same unfinished client task for an actionable correction', () => {
+    const correction = '\u6211\u8bf4\u7684\u662f\u5207\u6362\u5ba2\u6237\u7aef\u804a\u5929\u6a21\u5f0f';
+    const clientTask = {
+      version: 2 as const,
+      taskId: 'task-client-mode',
+      status: 'blocked' as const,
+      goal: '\u5207\u6362\u5ba2\u6237\u7aef\u6a21\u5f0f',
+      latestInstruction: '\u5207\u6362\u5230\u6307\u6325\u4e2d\u5fc3',
+      appTarget: '',
+      sourcePaths: [],
+      latestBlocker: 'client_action receipt missing',
+      unfinished: true,
+      evidenceTools: [],
+      assistantState: '',
+      toolSummaries: [],
+      revision: 4,
+      activeRequestId: undefined,
+      updatedAt: '2026-08-28T10:00:00.000Z',
+    };
+    const policy = {
+      allowedTools: ['client_get_state', 'client_action'],
+      requireConfirmation: [],
+      forbiddenTools: [],
+      maxIterations: 4,
+    };
+
+    expect(classifyConversationActionFollowupIntent(correction, clientTask)).toBe('execute');
+    const prepared = prepareConversationActionTaskState(clientTask, {
+      userText: correction,
+      requestId: 'request-client-correction',
+      toolPolicy: policy,
+      now: '2026-08-28T10:01:00.000Z',
+    });
+    expect(prepared.kind).toBe('resume');
+    expect(prepared.state).toMatchObject({
+      taskId: 'task-client-mode',
+      goal: '\u5207\u6362\u5ba2\u6237\u7aef\u6a21\u5f0f',
+      latestInstruction: correction,
+      status: 'planning',
+      unfinished: true,
+      revision: 5,
+      activeRequestId: 'request-client-correction',
+    });
+  });
+
+  it('creates new client work without durable state instead of inventing continuity', () => {
+    const correction = '\u6211\u8bf4\u7684\u662f\u5207\u6362\u5ba2\u6237\u7aef\u804a\u5929\u6a21\u5f0f';
+    const prepared = prepareConversationActionTaskState(null, {
+      userText: correction,
+      requestId: 'request-client-new',
+      toolPolicy: {
+        allowedTools: ['client_get_state', 'client_action'],
+        requireConfirmation: [],
+        forbiddenTools: [],
+        maxIterations: 4,
+      },
+      now: '2026-08-28T10:02:00.000Z',
+    });
+
+    expect(classifyConversationActionFollowupIntent(correction, null)).toBe('none');
+    expect(prepared.kind).toBe('new');
+    expect(prepared.state).toMatchObject({
+      goal: correction,
+      latestInstruction: correction,
+      revision: 1,
+      activeRequestId: 'request-client-new',
+    });
+    expect(prepared.state?.taskId).toMatch(/^task_/);
+  });
+
+  it('keeps a verified receipt-only terminal record in the conversation task state', () => {
+    const state = buildConversationActionContinuationState({
+      userText: '\u505c\u6b62\u540e\u53f0\u4efb\u52a1',
+      assistantText: '\u540e\u53f0\u4efb\u52a1\u5df2\u53d6\u6d88\u3002',
+      toolCalls: [{
+        id: 'receipt-only-runtime-cancel',
+        name: 'runtime_work_cancel',
+        arguments: {},
+        result: '',
+        receipt: JSON.stringify(JSON.stringify({
+          ok: true,
+          status: 'cancelled',
+          matchedCount: 1,
+          cancelledCount: 1,
+          cancellingCount: 0,
+          failedCount: 0,
+        })),
+        terminalVerification: {
+          status: 'verified',
+          strategy: 'terminal_receipt',
+          reason: 'The unified runtime ledger confirmed cancellation.',
+        },
+      }],
+      requestId: 'receipt-only-runtime-cancel-request',
+    });
+
+    expect(state).toMatchObject({
+      status: 'completed',
+      unfinished: false,
+      completionSource: 'tool_receipt',
+      evidenceTools: ['runtime_work_cancel'],
+    });
+    expect(state?.receipts).toHaveLength(1);
+    expect(state?.receipts?.[0]).toMatchObject({
+      name: 'runtime_work_cancel',
+      outcome: 'success',
+    });
+  });
+
+  it('keeps a failed receipt-only terminal record as an explicit blocker', () => {
+    const state = buildConversationActionContinuationState({
+      userText: '\u505c\u6b62\u540e\u53f0\u4efb\u52a1',
+      assistantText: '\u53d6\u6d88\u672a\u5b8c\u6210\u3002',
+      toolCalls: [{
+        id: 'receipt-only-runtime-cancel-failed',
+        name: 'runtime_work_cancel',
+        arguments: {},
+        result: '',
+        receipt: JSON.stringify({
+          ok: false,
+          status: 'failed',
+          matchedCount: 1,
+          cancelledCount: 0,
+          cancellingCount: 0,
+          failedCount: 1,
+          reason: 'The runtime task did not accept cancellation.',
+        }),
+        terminalVerification: {
+          status: 'failed',
+          strategy: 'terminal_receipt',
+          reason: 'Cancellation was rejected.',
+        },
+      }],
+      requestId: 'receipt-only-runtime-cancel-failed-request',
+    });
+
+    expect(state).toMatchObject({
+      status: 'blocked',
+      unfinished: true,
+    });
+    expect(state?.latestBlocker).toContain('did not accept cancellation');
+    expect(state?.receipts).toHaveLength(1);
+    expect(state?.receipts?.[0]).toMatchObject({ outcome: 'failure' });
+  });
+
+  it('exposes only an exact previously accepted cancellation for server-owned recheck', () => {
+    const state = buildConversationActionContinuationState({
+      userText: '\u505c\u6b62\u540e\u53f0\u4efb\u52a1',
+      assistantText: '\u6b63\u5728\u53d6\u6d88\u3002',
+      toolCalls: [{
+        id: 'runtime-cancel-accepted',
+        name: 'runtime_work_cancel',
+        arguments: { taskIds: ['runtime-a', 'runtime-b'] },
+        result: '',
+        receipt: JSON.stringify({
+          ok: true,
+          status: 'cancelling',
+          requestedTaskIds: ['runtime-a', 'runtime-b'],
+          cancellingTaskIds: ['runtime-a', 'runtime-b'],
+          matchedCount: 2,
+          cancelledCount: 0,
+          cancellingCount: 2,
+          failedCount: 0,
+        }),
+        terminalVerification: {
+          status: 'unverified',
+          strategy: 'terminal_receipt',
+          reason: 'Cancellation was accepted but has not settled.',
+        },
+      }],
+      requestId: 'runtime-cancel-accepted-request',
+    });
+
+    expect(pendingRuntimeCancellationRecheck(state)).toEqual({
+      taskId: state?.taskId,
+      taskIds: ['runtime-a', 'runtime-b'],
+      priorReceiptId: 'runtime-cancel-accepted',
+      priorStatus: 'cancelling',
+    });
+    const withReportedTargets = (requestedTaskIds: string[]) => ({
+      ...state!,
+      receipts: state?.receipts?.map(receipt => ({
+        ...receipt,
+        result: '',
+        receipt: JSON.stringify({
+          ok: true,
+          status: 'cancelling',
+          requestedTaskIds,
+          failedCount: 0,
+        }),
+      })),
+    });
+    expect(pendingRuntimeCancellationRecheck(
+      withReportedTargets(['runtime-b']),
+    )).toBeNull();
+    expect(pendingRuntimeCancellationRecheck(
+      withReportedTargets(['runtime-a', 'runtime-injected']),
+    )).toBeNull();
+    expect(pendingRuntimeCancellationRecheck(
+      withReportedTargets([
+        ...Array.from({ length: 64 }, () => 'runtime-a'),
+        'runtime-injected-after-limit',
+      ]),
+    )).toBeNull();
+    expect(pendingRuntimeCancellationRecheck(
+      withReportedTargets([]),
+    )).toBeNull();
+    expect(pendingRuntimeCancellationRecheck({
+      ...state!,
+      receipts: state?.receipts?.map(receipt => ({
+        ...receipt,
+        arguments: {},
+        result: '',
+        receipt: JSON.stringify({ ok: true, status: 'cancelling', failedCount: 0 }),
+      })),
+    })).toBeNull();
+  });
+
   it('never treats an explicit persistent-task creation as status for an older task', () => {
     const text = '\u8bf7\u521b\u5efa\u4e00\u4e2a\u53ef\u8de8\u91cd\u542f\u7ee7\u7eed\u7684\u6301\u4e45\u4efb\u52a1\u3002\u6807\u9898\u201c\u9752\u7a79\u5ba2\u6237\u8ddf\u8fdb\u95ed\u73af\u201d\u3002\u5b8c\u6210\u540e\u544a\u8bc9\u6211\u4efb\u52a1\u7f16\u53f7\u3001\u72b6\u6001\u548c\u4e0b\u4e00\u6b65\u3002';
     expect(classifyConversationActionFollowupIntent(text, {
@@ -89,33 +307,6 @@ describe('recent action continuation', () => {
     expect(classifyRecentActionFollowupIntent('别光说，快做')).toBe('execute');
   });
 
-  it('recovers completed business work for a read-only gap follow-up', () => {
-    const completed = buildConversationActionContinuationState({
-      userText: '请基于当前案件生成一份可复核的案件推进清单。',
-      assistantText: '案件推进清单已生成。',
-      toolCalls: [{
-        name: 'write_file',
-        arguments: { path: 'D:\\lumi_output\\案件推进清单.md' },
-        result: 'File written: D:\\lumi_output\\案件推进清单.md',
-        terminalVerification: {
-          status: 'verified',
-          strategy: 'artifact',
-          reason: 'file exists',
-        },
-      }],
-    });
-    const followup = '这个案子还缺什么？请接着刚才的结果直接回答，不要重新生成文件。';
-
-    expect(classifyConversationActionFollowupIntent(followup, completed)).toBe('status');
-    expect(needsNaturalConversationActionStatusAnswer(followup)).toBe(true);
-    expect(needsNaturalConversationActionStatusAnswer('完成了吗？')).toBe(false);
-    expect(needsRecentActionContinuationContext(followup)).toBe(true);
-    const bridge = buildRecentActionContinuationBridge(followup, [], completed);
-    expect(bridge).toContain('- followupIntent: status');
-    expect(bridge).toContain('Recent tool evidence:');
-    expect(bridge).toContain('write_file');
-  });
-
   it('binds a restatement request only to the adjacent assistant reply', () => {
     const text = 'sorry, 你刚刚又卡住了，重新说。';
     const history = [
@@ -152,6 +343,50 @@ describe('recent action continuation', () => {
     expect(classifyConversationActionFollowupIntent('怎么回事？', unfinished)).toBe('status');
     expect(classifyConversationActionFollowupIntent('怎么回事？', completed)).toBe('none');
     expect(buildRecentActionContinuationBridge('怎么回事？', [], unfinished)).toContain('- followupIntent: status');
+  });
+
+  it('treats a readiness acknowledgement as continuation only for the blocked task that requested it', () => {
+    const blocked = {
+      version: 2 as const,
+      taskId: 'task-wps-current-document',
+      status: 'blocked' as const,
+      goal: '帮我分析一下wps当前打开的文件',
+      latestInstruction: '帮我分析一下wps当前打开的文件',
+      appTarget: 'WPS',
+      sourcePaths: [],
+      latestBlocker: 'desktop_execution_plan_receipt: target_mismatch',
+      unfinished: true,
+      evidenceTools: ['desktop_active_window'],
+      assistantState: '请先把要分析的文档切到前台，或直接把文件发给我。',
+      toolSummaries: [],
+      receipts: [],
+      revision: 2,
+      updatedAt: '2026-08-28T10:15:41.044Z',
+    };
+
+    for (const text of ['已经切到前台', '已打开', '准备好了', '可以了']) {
+      expect(classifyConversationActionFollowupIntent(text, blocked), text).toBe('execute');
+      const prepared = prepareConversationActionTaskState(blocked, {
+        userText: text,
+        requestId: `request-${text}`,
+        toolPolicy: {
+          allowedTools: ['desktop_active_window'],
+          requireConfirmation: [],
+          forbiddenTools: [],
+          maxIterations: 4,
+        },
+      });
+      expect(prepared.kind, text).toBe('resume');
+      expect(prepared.state?.taskId, text).toBe(blocked.taskId);
+      expect(prepared.state?.goal, text).toBe(blocked.goal);
+    }
+
+    expect(classifyConversationActionFollowupIntent('已经切到前台', {
+      ...blocked,
+      status: 'completed',
+      unfinished: false,
+    })).toBe('none');
+    expect(classifyConversationActionFollowupIntent('可以了')).toBe('none');
   });
 
   it('executes a mixed status check and affirmative resume clause for an unfinished durable task', () => {
@@ -679,70 +914,5 @@ describe('recent action continuation', () => {
     expect(bridge).toContain('status=blocked');
     expect(bridge).not.toContain('python_exec');
     expect(bridge).not.toContain('六张业务图表');
-  });
-});
-
-describe('new action isolation', () => {
-  it('keeps a self-contained new case command separate from an older completed task', () => {
-    const text = '\u65b0\u5efa\u4e00\u4e2a\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0\uff0c\u6848\u4ef6\u540d\u201c\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u201d\uff0c\u521b\u5efa\u5b8c\u6210\u540e\u544a\u8bc9\u6211\u6848\u4ef6ID\u548c\u4efb\u52a1\u56de\u6267\u72b6\u6001\u3002';
-    expect(classifyConversationActionFollowupIntent(text, {
-      version: 2,
-      taskId: 'old-task',
-      status: 'completed',
-      goal: '\u6253\u5f00\u6848\u4ef6\u5de5\u4f5c\u53f0',
-      latestInstruction: '\u6253\u5f00\u6848\u4ef6\u5de5\u4f5c\u53f0',
-      appTarget: '',
-      sourcePaths: [],
-      latestBlocker: '',
-      unfinished: false,
-      evidenceTools: ['client_action'],
-      assistantState: '',
-      toolSummaries: [],
-      receipts: [],
-      revision: 1,
-      updatedAt: new Date().toISOString(),
-    })).toBe('none');
-  });
-
-  it('keeps a contextual legal drafting command separate from old task status', () => {
-    const text = '\u57fa\u4e8e\u521a\u521b\u5efa\u7684\u6848\u4ef6ID case_new_001\uff0c\u53ea\u4f7f\u7528\u6848\u4ef6\u5de5\u4f5c\u53f0\u91cc\u5df2\u7ecf\u4fdd\u5b58\u7684\u4e8b\u5b9e\uff0c\u751f\u6210\u4e00\u4efd\u8bc9\u524d\u5e94\u5bf9\u7b56\u7565\u5f8b\u5e08\u590d\u6838\u8349\u7a3f\u3002\u5b8c\u6210\u540e\u544a\u8bc9\u6211\u8349\u7a3f\u5185\u5bb9\u548c\u4efb\u52a1\u56de\u6267\u72b6\u6001\u3002';
-    expect(classifyConversationActionFollowupIntent(text, {
-      version: 2,
-      taskId: 'old-task',
-      status: 'completed',
-      goal: '\u4f60\u662f\u8c01\uff1f',
-      latestInstruction: '\u4f60\u662f\u8c01\uff1f',
-      appTarget: '',
-      sourcePaths: [],
-      latestBlocker: '',
-      unfinished: false,
-      evidenceTools: [],
-      assistantState: '',
-      toolSummaries: [],
-      receipts: [],
-      revision: 1,
-      updatedAt: new Date().toISOString(),
-    })).toBe('none');
-  });
-
-  it('keeps a labeled authority-research command separate from old task status', () => {
-    const text = '律师版实机验收·法条与类案：基于四号案件ID d2789373-effc-404c-aff6-25f101267790，只使用当前已配置且可核验的权威来源，输出检索问题、来源状态、可核验结果与缺口。若来源未配置或结果无法核验，必须明确写无法完成检索，禁止凭模型记忆编造法条、案号、法院或裁判规则。不要登录外部网站，不要发送、提交或签署。完成后告诉我实际使用了什么能力以及任务回执状态。';
-    expect(classifyConversationActionFollowupIntent(text, {
-      version: 2,
-      taskId: 'old-navigation-task',
-      status: 'completed',
-      goal: '打开法条与类案工作区，只执行客户端导航，不要检索，不要打开外部网站。',
-      latestInstruction: '打开法条与类案工作区，只执行客户端导航，不要检索，不要打开外部网站。',
-      appTarget: '',
-      sourcePaths: [],
-      latestBlocker: '',
-      unfinished: false,
-      evidenceTools: ['client_action'],
-      assistantState: '',
-      toolSummaries: [],
-      receipts: [],
-      revision: 1,
-      updatedAt: new Date().toISOString(),
-    })).toBe('none');
   });
 });

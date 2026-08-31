@@ -59,7 +59,21 @@ const EMPTY_INTENT: NormalizedActionIntent = {
 
 // i18n-allow: Multilingual client-navigation input recognition; not user-visible copy.
 const CLIENT_NAVIGATION_VERB_RE = // i18n-allow: Multilingual client-navigation input recognition; not user-visible copy.
-  /(?:打开|开启|启用|进入|切换到|切到|回到|返回|显示|展开|关闭|收起|open|show|enter|switch|turn\s+on|return|close)/iu;
+  /(?:打开|开启|启用|进入|切换到|切换|切到|回到|返回|显示|展开|关闭|收起|open|show|enter|switch|turn\s+on|return|close)/iu;
+
+// An actionable correction restates the command after a discourse prefix.
+// Parse that command through the same normalized-intent pipeline instead of
+// letting task relation, tool intent, and client navigation each invent a
+// different correction rule.
+const ACTIONABLE_CORRECTION_PREFIX_RE =
+  /^(?:(?:我说的是|我说的|我的意思是|我的意思|我指的是|刚才(?:我)?说的是|刚才(?:我)?说的|刚刚(?:我)?说的是|刚刚(?:我)?说的)\s*[:：,，]?\s*|(?:what\s+I\s+meant\s+was|I\s+was\s+asking\s+you\s+to|I\s+meant)\s*[:,-]?\s*)/iu; // i18n-allow: Multilingual actionable-correction input recognition; not user-visible copy.
+
+export function extractActionableCorrectionInstruction(value: string): string | null {
+  const text = currentTurnText(value).replace(/\s+/gu, ' ').trim();
+  if (!ACTIONABLE_CORRECTION_PREFIX_RE.test(text)) return null;
+  const instruction = text.replace(ACTIONABLE_CORRECTION_PREFIX_RE, '').trim();
+  return instruction && instruction !== text ? instruction : null;
+}
 
 // Some speech recognizers render “壁纸模式” as “壁纸状态”. A standalone
 // imperative using that phrase still means entering Lumi's wallpaper surface;
@@ -97,7 +111,6 @@ const REGISTERED_CLIENT_SURFACE_RULES: ReadonlyArray<{ pattern: RegExp; target: 
   });
 
 const CLIENT_SURFACE_RULES: ReadonlyArray<{ pattern: RegExp; target: string; action: string }> = [
-  { pattern: /(?:Lumi\s*)?指挥中心|command\s*center/iu, target: 'command-center', action: 'open_command_center' }, // i18n-allow: Multilingual Lumi surface aliases.
   { pattern: /(?:自主模式|autonomy|autonomous\s*mode)/iu, target: 'autonomous', action: 'set_client_mode' }, // i18n-allow: Multilingual Lumi mode aliases.
   { pattern: /(?:助理模式|assistant\s*mode)/iu, target: 'assistant', action: 'set_client_mode' }, // i18n-allow: Multilingual Lumi mode aliases.
   { pattern: /(?:聊天模式|chat\s*mode)/iu, target: 'chat', action: 'set_client_mode' }, // i18n-allow: Multilingual Lumi mode aliases.
@@ -138,38 +151,44 @@ function trimSlot(value: string): string {
     .trim();
 }
 
-/**
- * A complete foreground command may ask Lumi to report IDs, receipts or
- * status after the requested action finishes. Those trailing reporting words
- * describe the expected result; they do not turn the whole turn into a
- * read-only lookup of an older task.
- */
-function hasExplicitFreshActionRequest(text: string): boolean {
-  const firstClause = String(text || '').trim().split(/[\u3002\uff1b;\uff01!\uff1f?\n]/u, 1)[0].trim();
-  if (!firstClause) return false;
-  // Test/replay prompts and industry commands often prefix the actual work
-  // with a short label (for example "律师版实机验收·法条与类案："). Strip
-  // that label before deciding whether trailing words such as "状态" or
-  // "回执" describe the expected output of a fresh task.
-  const operativeClause = firstClause
-    .replace(/^[^\uff1a:\r\n]{1,48}[\uff1a:]\s*/u, '')
-    .trim();
-  const startsWithAction = /^(?:(?:\u8bf7|\u9ebb\u70e6|\u73b0\u5728|\u5148|\u5e2e\u6211|\u7ed9\u6211|\u66ff\u6211|\u8bf7\u4f60|\u8bf7\u5e2e\u6211)[\uff0c,\s]*){0,3}(?:\u65b0\u5efa|\u521b\u5efa|\u5efa\u7acb|\u751f\u6210|\u5236\u4f5c|\u5f00\u59cb|\u6267\u884c|\u5904\u7406|\u6574\u7406|\u5ba1\u67e5|\u5ba1\u6838|\u5206\u6790|\u68c0\u7d22|\u8f93\u51fa|\u6838\u5bf9|\u51c6\u5907|\u5bfc\u5165|\u5f52\u6863|\b(?:create|start|run|execute|generate|prepare|review|analy[sz]e|process|search|output|import|archive)\b)/iu.test(operativeClause);
-  const contextualAction = /^(?:\u57fa\u4e8e|\u6839\u636e|\u7ed3\u5408|\u9488\u5bf9|\u56f4\u7ed5|\u4f9d\u7167|\u6309\u7167|\u4f7f\u7528|\u53ea\u4f7f\u7528|\u4e3a)[\s\S]{1,320}?(?:\u6267\u884c|\u751f\u6210(?!\u7684)|\u8d77\u8349|\u5236\u4f5c|\u5efa\u7acb|\u521b\u5efa|\u5ba1\u67e5|\u5904\u7406|\u6574\u7406|\u5206\u6790|\u68c0\u7d22|\u8f93\u51fa|\u6838\u5bf9|\u5bfc\u5165|\u5f52\u6863|\b(?:run|execute|create|generate|draft|prepare|review|process|analy[sz]e|search|output|import|archive)\b)/iu.test(operativeClause);
-  if (!startsWithAction && !contextualAction) return false;
-  return !/(?:\u5b8c\u6210\u4e86?\u5417|\u505a\u5b8c\u4e86?\u5417|\u597d\u4e86\u5417|\u6709\u6ca1\u6709|\u600e\u4e48\u6837|\u5982\u4f55)(?:[\uff0c,\s]*)?$/u.test(operativeClause);
-}
-
 const ARTIFACT_FILE_EXTENSION_RE = /\.(?:txt|md|csv|json|docx?|xlsx?|pptx?|pdf)\b/iu;
 
+/**
+ * Find a basename without asking the regexp engine to retry a bounded
+ * filename capture at every character in a long, delimiter-free turn. The
+ * previous `{1,160}\.ext` expression did up to 160 failed scans per input
+ * position when no filename was present, which made ordinary long Chinese
+ * conversation disproportionately expensive.
+ */
+function relativeArtifactPath(text: string, includeJson = true): string {
+  const extensionMatches = text.matchAll(includeJson
+    ? /\.(?:txt|md|csv|json|docx?|xlsx?|pptx?|pdf)\b/giu
+    : /\.(?:txt|md|csv|docx?|xlsx?|pptx?|pdf)\b/giu);
+  for (const match of extensionMatches) {
+    const extensionStart = match.index;
+    if (extensionStart == null || extensionStart <= 0) continue;
+    const lowerBound = Math.max(0, extensionStart - 160);
+    let start = extensionStart;
+    while (
+      start > lowerBound
+      && !/[\s\\/:*?"<>|\r\n]/u.test(text[start - 1] || '')
+    ) start -= 1;
+    if (start === extensionStart) continue;
+    const candidate = trimSlot(text.slice(start, extensionStart + match[0].length));
+    if (candidate) return candidate;
+  }
+  return '';
+}
+
 function explicitArtifactPath(text: string): string {
+  // Most turns do not contain a supported artifact suffix. This linear gate
+  // keeps them away from the more specific absolute-path matcher entirely.
+  if (!ARTIFACT_FILE_EXTENSION_RE.test(text)) return '';
   const absolute = text.match(
     /([A-Za-z]:[\\/][^\r\n"'<>|?*]+?\.(?:txt|md|csv|json|docx?|xlsx?|pptx?|pdf))(?=$|[\s.,，。;；:：!！?？)）\]}'"])/iu,
   )?.[1];
   if (absolute) return trimSlot(absolute);
-  return trimSlot(
-    text.match(/([^\s\\/:*?"<>|\r\n]{1,160}\.(?:txt|md|csv|json|docx?|xlsx?|pptx?|pdf))\b/iu)?.[1] || '',
-  );
+  return relativeArtifactPath(text);
 }
 
 function hasAffirmativeArtifactCreationAction(text: string): boolean {
@@ -262,6 +281,37 @@ function explicitLocalArtifactReadIntent(text: string): NormalizedActionIntent |
   };
 }
 
+function currentAuthoringDocumentReadIntent(text: string): NormalizedActionIntent | null {
+  // A current WPS/Office document is an external desktop read target even when
+  // the user cannot provide its filesystem path yet. Classifying this as
+  // `none` lets downstream task bookkeeping fall back to a mutation contract,
+  // although the requested operation is strictly observational.
+  // i18n-allow: Multilingual current-authoring-document read recognition; not user-visible copy.
+  const readAction = /(?:分析|读取|读一下|查看|审查|检查|总结|概括|提取|讲了什么|主要内容)|\b(?:analy[sz]e|read|inspect|review|check|summari[sz]e|extract|what(?:'s|\s+is)\s+(?:it|this).{0,12}about)\b/iu.test(text);
+  const currentDocument = /(?:当前|现在|正在|刚才|刚刚).{0,24}(?:文件|文档|PPT|演示文稿|表格|资料)|(?:当前|现在|正在|刚才|刚刚).{0,16}打开(?:着|的)?.{0,12}(?:文件|文档|PPT|演示文稿|表格|资料)|\b(?:current(?:ly)?(?:\s+open)?|currently\s+open|active|foreground|opened)\b.{0,24}\b(?:file|document|presentation|sheet|workbook)\b|\b(?:file|document|presentation|sheet|workbook)\b.{0,24}\b(?:current(?:ly)?\s+open|active|foreground|opened)\b/iu.test(text);
+  if (!readAction || !currentDocument) return null;
+
+  let target = '';
+  if (/(?:^|\b)WPS(?:\b|$)|金山(?:文字|表格|演示|WPS)/iu.test(text)) target = 'WPS'; // i18n-allow: Reviewed WPS input aliases; not user-visible copy.
+  else if (/(?:Microsoft\s+)?PowerPoint|POWERPNT\.EXE/iu.test(text)) target = 'Microsoft PowerPoint';
+  else if (/(?:Microsoft\s+)?Excel|EXCEL\.EXE/iu.test(text)) target = 'Microsoft Excel';
+  else if (/(?:Microsoft\s+)?Word|WINWORD\.EXE/iu.test(text)) target = 'Microsoft Word';
+  else if (/\b(?:Microsoft\s+)?Office\b/iu.test(text)) target = 'Microsoft Office';
+  if (!target) return null;
+
+  return {
+    kind: 'desktop_operation',
+    operation: 'read',
+    subject: 'user',
+    target,
+    payload: text,
+    sideEffectClass: 'none',
+    relation: 'new',
+    confidence: 0.99,
+    rule: 'current-authoring-document-read',
+  };
+}
+
 export function isExplicitArtifactCreationText(text: string): boolean {
   return Boolean(explicitArtifactCreationIntent(currentTurnText(String(text || ''))));
 }
@@ -289,16 +339,6 @@ function correctionOrExplanation(text: string): NormalizedActionIntent | null {
   // i18n-allow: Chinese terse-complaint input recognition; not user-visible copy.
   const terseComplaint = // i18n-allow: Chinese terse-complaint input recognition; not user-visible copy.
     /^(?:(?:我操|卧槽|靠|妈的|搞什么|什么鬼)[，,\s]*)?(?:你|lumi)[^。！？!?\n]{0,20}(?:打开|发送|执行|操作|做|画)了[^。！？!?\n]{0,28}(?:什么|啥|为什么|怎么回事)[^。！？!?\n]*[啊呀呢吧。！？!?]*$/iu;
-  // i18n-allow: Explicit correction prefaces remain explanation-only even when
-  // the rest of the sentence contains a tool or usage verb.
-  const explicitCorrection = /(?:\u4f60(?:\u641e\u9519|\u5f04\u9519)\u4e86?|\u4e0d\u662f\u8fd9\u4e2a\u610f\u601d|\u6211\u8bf4\u7684\u662f|\u6211\u53ea\u662f(?:\u95ee|\u60f3\u77e5\u9053))/u;
-  const lacksLegacyCorrection = (
-    !negativeAuthorization.test(text)
-    && !authorizationOrExecutionObjection.test(text)
-    && !actionComplaint.test(text)
-    && !terseComplaint.test(text)
-    && !explicitCorrection.test(text)
-  );
   // A user can correct task identity while quoting the wrongly selected old
   // action. Quoted verbs remain evidence about the previous turn and must not
   // become a fresh command.
@@ -311,10 +351,15 @@ function correctionOrExplanation(text: string): NormalizedActionIntent | null {
     isRecentActionReceiptQuery(text)
     && !negativeAuthorization.test(text)
     && !authorizationOrExecutionObjection.test(text)
-    && !explicitCorrection.test(text)
     && !taskIdentityCorrection.test(text)
   ) return null;
-  if (lacksLegacyCorrection && !taskIdentityCorrection.test(text)) return null;
+  if (
+    !negativeAuthorization.test(text)
+    && !authorizationOrExecutionObjection.test(text)
+    && !actionComplaint.test(text)
+    && !terseComplaint.test(text)
+    && !taskIdentityCorrection.test(text)
+  ) return null;
   return {
     kind: 'correction_explanation',
     operation: 'explain',
@@ -440,41 +485,56 @@ export function hasMixedStatusExecutionIntent(value: string): boolean {
 }
 
 function statusQuery(text: string): NormalizedActionIntent | null {
+  // A new work instruction may ask Lumi to report its receipt/status after
+  // completion. That trailing reporting clause is part of the requested
+  // delivery, not a retrospective query about an older task.
+  // i18n-allow: Reviewed Chinese new-work input recognition; not user-visible copy.
+  const affirmativeNewWork = /(?:请|帮我|给我|替我).{0,96}(?:制作|生成|创建|新建|起草|审查|审核|分析|处理|整理|准备)|(?:^|[：:；;。])\s*为[^。！？!?\n]{1,96}(?:制作|生成|创建|起草)/u.test(text);
+  // i18n-allow: Reviewed Chinese post-completion receipt input recognition; not user-visible copy.
+  const postCompletionReport = /(?:完成|做完|执行完|生成完)(?:之后|以后|后).{0,48}(?:告诉|报告|汇报).{0,32}(?:任务)?(?:回执|状态|结果|证据)/u.test(text);
+  if (affirmativeNewWork && postCompletionReport) return null;
   // A concrete new write owns the turn even when a separate scope fence uses
   // a status noun. Retrospective/status-only forms are excluded by the strict
   // affirmative artifact-action recognizer.
   if (explicitArtifactCreationIntent(text)) return null;
-
-  // A question about the remaining gaps or next step of the current business
-  // object is a read-only continuation. Negated phrases such as "不要重新生成
-  // 文件" must win before mixed status/execution detection sees the embedded
-  // words "接着" or "生成" and incorrectly starts a new task.
-  // Keep this question-shaped and anchored so a fresh command such as
-  // "缺少材料，生成清单" still follows the normal action route.
-  // i18n-allow: Chinese result/status follow-up recognition; not user-visible copy.
-  const businessResultFollowup =
-    /^(?=.{0,180}$)(?=.*(?:这个|当前|本案|案子|案件|这(?:项|个)?(?:任务|工作|项目)|刚才|上一步))(?=.*(?:还缺什么|缺什么|还要补什么|要补什么|下一步(?:是什么|怎么做)|还要做什么|需要(?:谁|人工|律师)?确认什么))[\s\S]*[？?。!！]*$/u;
-  const rejectsNewArtifact = /(?:不要|无需|不必|不用).{0,10}(?:重新|再)?(?:生成|创建|制作|写入|保存|提交|发送)/u.test(text);
-  const requestsNewArtifact = /(?:请|帮我|现在|然后|并且|顺便|再|重新).{0,16}(?:生成|创建|制作|写入|保存|提交|发送)/u.test(text);
-  if (businessResultFollowup.test(text) && (!requestsNewArtifact || rejectsNewArtifact)) {
-    return {
-      kind: 'status_query',
-      operation: 'status',
-      subject: 'lumi',
-      target: 'recent_task',
-      payload: text,
-      sideEffectClass: 'none',
-      relation: 'status',
-      confidence: 0.97,
-      rule: 'business-result-followup-before-action',
-    };
-  }
-  if (hasExplicitFreshActionRequest(text)) return null;
   if (hasMixedStatusExecutionIntent(text)) return null;
   if (WALLPAPER_STATE_MUTATION_RE.test(text)) return null;
   // Reporting the id/status after creating a specifically described new task
   // is part of that creation contract, not a query about an older task.
   if (persistentWorkTaskCreation(text)) return null;
+  // Explicit current-runtime questions must be read-only status intents even
+  // when they do not contain the narrow "task status/progress" wording. This
+  // covers the production utterance "你现在有在执行的任务吗" and keeps it out
+  // of the generic desktop-operation fallback.
+  if (/^(?:\u4f60|lumi)?\s*(?:\u73b0\u5728|\u5f53\u524d)?\s*(?:\u6709\s*)?(?:\u5728|\u6b63\u5728)?\s*(?:\u6267\u884c|\u5904\u7406|\u8fd0\u884c|\u505a)\s*(?:\u7684)?\s*(?:\u4efb\u52a1|\u5de5\u4f5c)(?:\u5417|\u5462|\u6ca1\u6709)?[\u3002\uff01\uff1f.!?\s]*$/iu.test(text)) {
+    return {
+      kind: 'status_query',
+      operation: 'status',
+      subject: 'lumi',
+      target: 'runtime_work',
+      payload: '',
+      sideEffectClass: 'none',
+      relation: 'status',
+      confidence: 0.99,
+      rule: 'current-runtime-work-status',
+    };
+  }
+  // Terse questions immediately after an operation ask for its persisted
+  // outcome. Treat them as receipt reads; task relation resolution decides
+  // which exact adjacent task they bind to.
+  if (/^(?:\u6e05\u7406|\u6e05\u6389|\u53d6\u6d88|\u505c\u6b62|\u5904\u7406|\u6267\u884c|\u5b8c\u6210)(?:\u7684|\u5f97)?(?:\u600e\u4e48\u6837|\u5982\u4f55|\u597d\u4e86|\u5b8c\u6210|\u6210\u529f|\u4e86\u5417|\u4e86\u6ca1|\u6ca1\u6709)[\u3002\uff01\uff1f.!?\s]*$/u.test(text)) {
+    return {
+      kind: 'status_query',
+      operation: 'status',
+      subject: 'lumi',
+      target: 'previous_action',
+      payload: '',
+      sideEffectClass: 'none',
+      relation: 'status',
+      confidence: 0.98,
+      rule: 'terse-adjacent-action-status',
+    };
+  }
   // i18n-allow: Chinese task-status control recognition; not user-visible copy.
   if (/^(?:你|lumi)?\s*(?:现在|当前)?\s*(?:在)?\s*(?:干嘛|干啥|做什么|搞什么|忙什么)[啊呀吧嘛呢，,。！？?!\s]*$/iu.test(text)) {
     return {
@@ -489,7 +549,7 @@ function statusQuery(text: string): NormalizedActionIntent | null {
       rule: 'active-task-status-control',
     };
   }
-  const namedArtifact = text.match(/([^\s\\/:*?"<>|\r\n]{1,160}\.(?:txt|md|docx?|xlsx?|pptx?|pdf|csv))\b/iu)?.[1]?.trim();
+  const namedArtifact = relativeArtifactPath(text, false);
   const asksNamedArtifactStatus = Boolean(
     namedArtifact
     && /(?:\u6587\u4ef6|\u4ea7\u7269|\u4efb\u52a1).{0,24}(?:\u73b0\u5728)?(?:\u662f\u4ec0\u4e48|\u4ec0\u4e48|\u5565)\u72b6\u6001|\u662f\u5426(?:\u5df2\u7ecf)?(?:\u5199\u5165|\u56de\u8bfb).{0,12}[\uff1f?]|\u6700\u7ec8\u72b6\u6001|\b(?:what\s+is|final)\b.{0,24}\bstatus\b|\bwas\b.{0,32}\b(?:written|read\s*back)\b/iu.test(text)
@@ -577,20 +637,15 @@ function statusQuery(text: string): NormalizedActionIntent | null {
     };
   }
 
-  const registeredIndustrySurfaceStatus =
-    /(?:进度|状态|结果呢|做到哪|到哪了|怎么样|做完了吗|完成了吗|好了吗)/u.test(text) // i18n-allow: Reviewed Chinese status-follow-up input recognition.
-      ? REGISTERED_CLIENT_SURFACE_RULES.find(candidate => candidate.pattern.test(text))
-      : undefined;
   // A new artifact instruction may contain literal field values such as
   // "状态：..." or text mentioning a Lumi surface. Those nouns do not make
   // the turn a status follow-up; the explicit create/write action wins.
   if (isExplicitArtifactCreationText(text)) return null;
 
-  const registeredSurfaceStatus = registeredIndustrySurfaceStatus || (
+  const registeredSurfaceStatus =
     /(?:进度|状态|结果呢|做到哪|到哪了|怎么样|做完了吗|完成了吗|好了吗)/u.test(text) // i18n-allow: Reviewed Chinese status-follow-up input recognition.
       ? CLIENT_SURFACE_RULES.find(candidate => candidate.pattern.test(text))
-      : undefined
-  );
+      : undefined;
   if (registeredSurfaceStatus) {
     return {
       kind: 'status_query', operation: 'status', subject: 'lumi', target: registeredSurfaceStatus.target,
@@ -649,7 +704,9 @@ function clientNavigation(text: string): NormalizedActionIntent | null {
   // i18n-allow: Multilingual wallpaper close-action recognition; not user-visible copy.
   const clientActionArguments = surface.action === 'set_wallpaper_mode'
     ? { enabled: !/(?:关闭|退出|收起|close|exit|turn\s+off)/iu.test(text) }
-    : undefined;
+    : surface.action === 'set_client_mode'
+      ? { mode: surface.target }
+      : undefined;
   return {
     kind: 'client_navigation',
     operation: 'navigate',
@@ -675,7 +732,7 @@ function externalAiHistoryRead(text: string): NormalizedActionIntent | null {
     || /\b(?:external\s+AI|AI\s+(?:assistant|agent|app|chat))\b|外部\s*AI|AI\s*(?:助手|智能体|客户端|应用)/iu.test(text); // i18n-allow: Multilingual external-AI target input recognition.
   // i18n-allow: Multilingual external-AI history action input recognition; not user-visible copy.
   const hasHistoryAction = /(?:聊天(?:历史|记录|内容)|对话(?:历史|记录|内容)|历史(?:消息|会话)|(?:同步|导入|归档|授权|注册|添加|撤销|读取|查看|搜索|查询|总结).{0,40}(?:聊天|对话|历史|内容|来源)|(?:聊天|对话|历史).{0,40}(?:同步|导入|归档|授权|注册|读取|查看|搜索|查询|总结)|\b(?:chat|conversation|message)\s+(?:history|content|archive|source)\b|\b(?:sync|import|archive|authorize|register|revoke|read|view|search|query)\b.{0,48}\b(?:chat|conversation|message)\s+(?:history|content|archive|source)\b)/iu.test(text);
-  // A fresh prompt to another model belongs to the collaboration lane, even
+  // A fresh prompt to one named external model belongs to its own request lane, even
   // when the requested prompt happens to mention history or conversations.
   // i18n-allow: Multilingual external-AI submission exclusion; not user-visible copy.
   const explicitNewSubmission = /(?:发给|发送给|交给|问问|询问|提问|让.{0,20}(?:回答|处理))|\b(?:ask|send\s+to|delegate|submit|prompt)\b/iu.test(text);
@@ -876,8 +933,25 @@ function persistentWorkTaskCreation(text: string): NormalizedActionIntent | null
 export function normalizeActionIntent(value: string): NormalizedActionIntent {
   const text = currentTurnText(value);
   if (!text) return { ...EMPTY_INTENT };
+  const correctedInstruction = extractActionableCorrectionInstruction(text);
+  if (correctedInstruction) {
+    const corrected = normalizeActionIntent(correctedInstruction);
+    if (
+      corrected.kind !== 'none'
+      && corrected.kind !== 'correction_explanation'
+      && corrected.operation !== 'status'
+    ) {
+      return {
+        ...corrected,
+        relation: 'correction',
+        confidence: Math.min(corrected.confidence, 0.98),
+        rule: `actionable-correction:${corrected.rule}`,
+      };
+    }
+  }
   const artifactCreation = explicitArtifactCreationIntent(text);
   const artifactRead = explicitLocalArtifactReadIntent(text);
+  const currentAuthoringDocumentRead = currentAuthoringDocumentReadIntent(text);
   const explicitArtifactCreation = Boolean(artifactCreation);
 
   // Order is a safety invariant. Later action-shaped words cannot override a
@@ -889,6 +963,7 @@ export function normalizeActionIntent(value: string): NormalizedActionIntent {
     persistentWorkTaskCreation(text),
     artifactCreation,
     artifactRead,
+    currentAuthoringDocumentRead,
     explicitArtifactCreation ? null : clientNavigation(text),
     explicitArtifactCreation ? null : externalAiHistoryRead(text),
     explicitArtifactCreation ? null : inboundMessageRead(text),

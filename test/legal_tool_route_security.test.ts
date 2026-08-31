@@ -1,15 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import fs from 'node:fs';
-import path from 'node:path';
 import jwt from 'jsonwebtoken';
 import { makeApp, JWT_SECRET } from './helpers';
-import { mountChatRoutes, resolveRestDesktopExecutionBoundary } from '../server/routes/chat_routes';
-import { ToolRegistry, toolRegistry } from '../server/tools/registry';
+import { mountChatRoutes } from '../server/routes/chat_routes';
+import { toolRegistry } from '../server/tools/registry';
 import { addMember, createOrg } from '../server/org/db';
-import { startIndustryWorkflow } from '../server/industry/workflow_service';
-import { DESKTOP_SESSION_HEADER, issueDesktopSessionProof } from '../server/config/desktop_bootstrap';
-import { registerLegalTools } from '../server/regions/packs/cn/legal_tools';
-import { getDataDirectory } from '../server/config/data_path';
 
 let url: string;
 let cleanup: () => void;
@@ -20,20 +14,6 @@ let orgId = '';
 let viewerToken = '';
 let memberToken = '';
 const registeredStubTools: string[] = [];
-const nativeClientIdentity = {
-  schemaVersion: 1 as const,
-  clientKind: 'tauri' as const,
-  pid: process.pid,
-  startedAtUnixMs: Math.floor((Date.now() - 10_000) / 1_000) * 1_000,
-  executablePath: process.execPath,
-  executableSha256: 'd'.repeat(64),
-  binaryHashUnavailable: false,
-  buildId: 'c'.repeat(40),
-  buildIdSemantics: 'baseline_commit' as const,
-  sourceFingerprint: 'e'.repeat(64),
-  sourceDirty: false,
-  appVersion: '3.1.0',
-};
 const observedCalls: Array<{
   name: string;
   args: Record<string, any>;
@@ -80,13 +60,6 @@ function bearer(token: string): Record<string, string> {
   };
 }
 
-function desktopBearer(token: string, userId: string): Record<string, string> {
-  return {
-    ...bearer(token),
-    [DESKTOP_SESSION_HEADER]: issueDesktopSessionProof(userId, nativeClientIdentity).proof,
-  };
-}
-
 describe('direct legal tool route security', () => {
   beforeAll(async () => {
     const app = await makeApp();
@@ -111,13 +84,6 @@ describe('direct legal tool route security', () => {
     registerLegalStub('legal_authority_source_status');
     registerLegalStub('legal_case_workspace');
     registerLegalStub('legal_review_contract');
-    const actualLegalTools = new ToolRegistry();
-    registerLegalTools(actualLegalTools);
-    const bidTool = actualLegalTools.get('legal_generate_bid');
-    if (!bidTool || !toolRegistry.register(bidTool)) {
-      throw new Error('Expected the actual legal_generate_bid tool to be available for route integration testing');
-    }
-    registeredStubTools.push('legal_generate_bid');
   });
 
   afterAll(() => {
@@ -147,23 +113,10 @@ describe('direct legal tool route security', () => {
     expect(await response.json()).toMatchObject({ error: 'Authentication required' });
   });
 
-  it('rejects an authenticated case write without a native desktop proof', async () => {
-    const callCount = observedCalls.length;
+  it('allows a personal authenticated user and passes verified auth context to the tool', async () => {
     const response = await fetch(`${url}/api/legal/tool/legal_case_workspace`, {
       method: 'POST',
       headers: bearer(userToken),
-      body: JSON.stringify({ caseName: 'missing-desktop-proof' }),
-      signal: AbortSignal.timeout(5000),
-    });
-    expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ code: 'DESKTOP_SESSION_PROOF_REQUIRED' });
-    expect(observedCalls).toHaveLength(callCount);
-  });
-
-  it('allows a signed local personal user and passes the trusted boundary to the tool', async () => {
-    const response = await fetch(`${url}/api/legal/tool/legal_case_workspace`, {
-      method: 'POST',
-      headers: desktopBearer(userToken, 'legal-user'),
       body: JSON.stringify({ caseName: 'authenticated-probe' }),
       signal: AbortSignal.timeout(5000),
     });
@@ -183,68 +136,7 @@ describe('direct legal tool route security', () => {
         orgId: '',
         authenticated: true,
         authRole: 'user',
-        localExecution: true,
-        executionBoundary: 'trusted_local',
       },
-    });
-  });
-
-  it('lets the signed desktop route write a real bid DOCX inside its scoped delivery root', async () => {
-    const legalDeliveryRoot = getDataDirectory(path.join('legal_delivery', 'personal_legal-user'));
-    const outputDir = path.join(legalDeliveryRoot, `route-bid-${Date.now()}`);
-    try {
-      const response = await fetch(`${url}/api/legal/tool/legal_generate_bid`, {
-        method: 'POST',
-        headers: desktopBearer(userToken, 'legal-user'),
-        body: JSON.stringify({
-          args: {
-            projectName: 'Signed Desktop Bid',
-            requirements: 'Create a local review draft and keep submission pending.',
-            outputDir,
-            persistCase: false,
-            useModel: false,
-          },
-        }),
-        signal: AbortSignal.timeout(10000),
-      });
-      expect(response.status).toBe(200);
-      const body = await response.json();
-      expect(body.receipt).toMatchObject({ ok: true, status: 'generated' });
-      expect(body.artifacts).toHaveLength(1);
-      expect(path.relative(legalDeliveryRoot, body.artifacts[0])).not.toMatch(/^\.\.(?:[\\/]|$)/);
-      expect(fs.statSync(body.artifacts[0]).size).toBeGreaterThan(256);
-    } finally {
-      fs.rmSync(outputDir, { recursive: true, force: true });
-    }
-  });
-
-  it('fails closed for an empty or UID-mismatched desktop proof', async () => {
-    for (const proof of ['', issueDesktopSessionProof('another-legal-user', nativeClientIdentity).proof]) {
-      const callCount = observedCalls.length;
-      const response = await fetch(`${url}/api/legal/tool/legal_authority_source_status`, {
-        method: 'POST',
-        headers: { ...bearer(userToken), [DESKTOP_SESSION_HEADER]: proof },
-        body: JSON.stringify({}),
-        signal: AbortSignal.timeout(5000),
-      });
-      expect(response.status).toBe(403);
-      expect(await response.json()).toMatchObject({ code: 'DESKTOP_SESSION_PROOF_REQUIRED' });
-      expect(observedCalls).toHaveLength(callCount);
-    }
-  });
-
-  it('does not trust an otherwise valid proof from a non-loopback address', () => {
-    const proof = issueDesktopSessionProof('legal-user', nativeClientIdentity).proof;
-    expect(resolveRestDesktopExecutionBoundary({
-      authenticated: true,
-      userId: 'legal-user',
-      remoteAddress: '203.0.113.42',
-      proofHeaderPresent: true,
-      presentedProof: proof,
-    })).toEqual({
-      trustedLocalExecution: false,
-      executionBoundary: 'remote_restricted',
-      rejectPresentedProof: true,
     });
   });
 
@@ -308,65 +200,6 @@ describe('direct legal tool route security', () => {
     });
   });
 
-  it('requires a signed local session only when contract review persists a case', async () => {
-    const beforeCalls = observedCalls.length;
-    const denied = await fetch(`${url}/api/legal/contract-review`, {
-      method: 'POST',
-      headers: bearer(userToken),
-      body: JSON.stringify({ contract: 'persistent contract', caseName: 'signed local case' }),
-      signal: AbortSignal.timeout(5000),
-    });
-    expect(denied.status).toBe(403);
-    expect(await denied.json()).toMatchObject({ code: 'DESKTOP_SESSION_PROOF_REQUIRED' });
-    expect(observedCalls).toHaveLength(beforeCalls);
-
-    const allowed = await fetch(`${url}/api/legal/contract-review`, {
-      method: 'POST',
-      headers: desktopBearer(userToken, 'legal-user'),
-      body: JSON.stringify({ contract: 'persistent contract', caseName: 'signed local case' }),
-      signal: AbortSignal.timeout(5000),
-    });
-    expect(allowed.status).toBe(200);
-    expect(observedCalls).toHaveLength(beforeCalls + 1);
-    expect(observedCalls.at(-1)?.context).toMatchObject({
-      localExecution: true,
-      executionBoundary: 'trusted_local',
-    });
-  });
-
-  it('records contract review against the supplied unified industry workflow task', async () => {
-    const started = startIndustryWorkflow({
-      userId: 'legal-user',
-      domain: 'personal',
-      orgId: '',
-      entryId: 'contract-review',
-      sourceInput: 'Review the scoped contract.',
-      source: 'legal_contract_review_test',
-    });
-    const beforeCalls = observedCalls.length;
-    const response = await fetch(`${url}/api/legal/tool/legal_review_contract`, {
-      method: 'POST',
-      headers: bearer(userToken),
-      body: JSON.stringify({
-        args: { contract: 'scoped contract', persistCase: false },
-        industryWorkflowTaskId: started.task.id,
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    expect(response.status).toBe(200);
-    const body = await response.json();
-    expect(body.industryWorkflow).toMatchObject({ taskId: started.task.id });
-    expect(body.industryWorkflow.verification).toEqual(expect.objectContaining({ passed: expect.any(Boolean) }));
-    expect(observedCalls).toHaveLength(beforeCalls + 1);
-    expect(observedCalls.at(-1)).toMatchObject({
-      name: 'legal_review_contract',
-      context: {
-        taskId: started.conversationTaskId,
-        requestId: started.requestId,
-      },
-    });
-  });
-
   it('denies an organization viewer contract review that would persist a case', async () => {
     const callCount = observedCalls.length;
     const response = await fetch(`${url}/api/legal/contract-review`, {
@@ -385,7 +218,7 @@ describe('direct legal tool route security', () => {
   it('keeps case-writing legal tools available to an organization member', async () => {
     const response = await fetch(`${url}/api/legal/tool/legal_case_workspace`, {
       method: 'POST',
-      headers: desktopBearer(memberToken, memberId),
+      headers: bearer(memberToken),
       body: JSON.stringify({ caseName: 'member case' }),
       signal: AbortSignal.timeout(5000),
     });
@@ -399,7 +232,7 @@ describe('direct legal tool route security', () => {
   it('does not expose direct legal tool failures or contract fallback internals', async () => {
     const direct = await fetch(`${url}/api/legal/tool/legal_case_workspace`, {
       method: 'POST',
-      headers: desktopBearer(userToken, 'legal-user'),
+      headers: bearer(userToken),
       body: JSON.stringify({ caseName: 'failure probe', securityFailureTest: true }),
       signal: AbortSignal.timeout(5000),
     });

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ArrowLeft, Heart, Users, Briefcase, GraduationCap, User, Send, Loader2, Sparkles, AlertTriangle, Castle } from 'lucide-react';
+import { ArrowLeft, Heart, Users, Briefcase, GraduationCap, User, Send, Loader2, Sparkles, AlertTriangle, Castle, Plus, ChevronDown } from 'lucide-react';
 import { useSocket } from '@/hooks/useSocket';
 import { useT } from '../lib/useT';
 import { useApp } from '@/contexts/AppContext';
@@ -27,9 +27,18 @@ interface SanctuaryAgent {
   createdAt?: string;
 }
 
+interface SanctuaryProps {
+  agent: SanctuaryAgent | null;
+  lang?: 'en' | 'zh';
+  isOpen: boolean;
+  onClose: () => void;
+  avatars?: SanctuaryAgent[];
+  onSelectAvatar?: (id: string) => void;
+  onCreateAnother?: () => void;
+}
+
 type RelationshipMeta = { color: string; bg: string; border: string; icon: React.ReactNode };
 
-const localize = (isZh: boolean, zh: string, en: string) => (isZh ? zh : en);
 const RELATIONSHIP_META: Record<string, RelationshipMeta> = {
   family: { color: 'text-amber-400', bg: 'from-amber-950/60 to-zinc-950', border: 'border-amber-500/20', icon: <Heart size={14} /> },
   close_friend: { color: 'text-emerald-400', bg: 'from-emerald-950/60 to-zinc-950', border: 'border-emerald-500/20', icon: <Users size={14} /> },
@@ -56,37 +65,82 @@ function checkDependencySignals(text: string): { detected: boolean; level: strin
   return { detected: false, level: '', matched: '' };
 }
 
-export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | null; isOpen: boolean; onClose: () => void }) {
+export function Sanctuary({ agent, lang, isOpen, onClose, avatars = [], onSelectAvatar, onCreateAnother }: SanctuaryProps) {
   const [messages, setMessages] = useState<any[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [showGuardrail, setShowGuardrail] = useState(true);
+  const [showAvatarMenu, setShowAvatarMenu] = useState(false);
   const [dependencyWarning, setDependencyWarning] = useState<string | null>(null);
   const t_s = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const socket = useSocket();
   const { user } = useApp();
-  const isZh = t_s.langCode !== 'en';
-  const ui = (zh: string, en: string) => localize(isZh, zh, en);
+  // The desktop shell owns the active language; useT remains a fallback for
+  // standalone renders so a lazy-loaded Sanctuary cannot briefly fall back to
+  // English during a shell locale transition.
+  const isZh = (lang || t_s.langCode || 'zh') !== 'en';
+  const locale = isZh ? 'zh' : 'en';
+  // Bind lazy-loaded sanctuary labels to the shell locale.  The old calls
+  // relied on uiMessage's global default, which can still be English during
+  // the render immediately after switching the desktop language.
+  const message = (key: Parameters<typeof uiMessage>[0]) => uiMessage(key, locale);
   const memoryCopy = memoryAvatarCopy(isZh ? 'zh' : 'en');
 
   const relationshipType = agent?.relationshipType || '';
   const meta = RELATIONSHIP_META[relationshipType] || DEFAULT_META;
   const relationshipLabel = memoryCopy.relationships[relationshipType as keyof typeof memoryCopy.relationships]?.label || memoryCopy.memoryLabel;
   const agentId = agent?.id || '';
-  const agentName = agent?.name || t_s.defaultMemoryLabel || 'Memory';
+  // Prefer the explicitly selected locale for all generated/fallback labels.
+  // `useT()` can still contain the previous shell locale for one lazy render.
+  const agentName = agent?.name || memoryCopy.memoryLabel;
+  const activeRequestIdRef = useRef<string | null>(null);
+  const safetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearActiveRequest = useCallback(() => {
+    if (safetyTimerRef.current) {
+      clearTimeout(safetyTimerRef.current);
+      safetyTimerRef.current = null;
+    }
+    activeRequestIdRef.current = null;
+    streamingMsgId.current = null;
+  }, []);
+
+  const eventBelongsToAvatar = useCallback((data?: {
+    agentId?: string;
+    requestId?: string;
+  }) => {
+    const eventAgentId = String(data?.agentId || '').trim();
+    if (eventAgentId && eventAgentId !== agentId) return false;
+    const expectedRequestId = activeRequestIdRef.current;
+    if (!expectedRequestId) return false;
+    const eventRequestId = String(data?.requestId || '').trim();
+    // Request IDs are the primary fence.  The agent ID fallback keeps the
+    // client compatible with older server frames that did not echo a request
+    // ID, while still rejecting frames belonging to another avatar.
+    return eventRequestId === expectedRequestId
+      || (!eventRequestId && eventAgentId === agentId);
+  }, [agentId]);
 
   // Load existing messages for this agent
   useEffect(() => {
-    if (!agentId || !user) return;
-    fetch(`/api/agents/${agentId}/history`)
+    // Switching avatars must never leave the previous avatar's transcript on
+    // screen while the new history is loading.
+    setMessages([]);
+    setIsTyping(false);
+    setDependencyWarning(null);
+    setShowAvatarMenu(false);
+    clearActiveRequest();
+    if (!agentId || !user) return undefined;
+    let cancelled = false;
+    fetch(`/api/memory-avatars/${agentId}/history`, { credentials: 'include' })
       .then(r => r.json())
       .then(data => {
-        if (Array.isArray(data)) {
+        if (!cancelled && Array.isArray(data)) {
           const history = data.map((m: any, idx: number) => ({
             id: `hist-${idx}`,
             text: m.content || m.message || '',
-            userName: m.role === 'assistant' ? agentName : (user.displayName || user.username),
+            userName: m.role === 'assistant' ? agentName : (user.displayName || user.username || memoryCopy.youLabel),
             timestamp: m.timestamp || new Date().toISOString(),
             type: m.role === 'assistant' ? 'agent' : 'user',
           }));
@@ -94,7 +148,8 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
         }
       })
       .catch(() => {});
-  }, [agentId, user, agentName]);
+    return () => { cancelled = true; };
+  }, [agentId, user, agentName, memoryCopy.youLabel, clearActiveRequest]);
 
   // Socket listeners
   const streamingMsgId = useRef<string | null>(null);
@@ -102,7 +157,8 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
   useEffect(() => {
     if (!socket) return;
 
-    const onChunk = (data: { text: string; agentName: string }) => {
+    const onChunk = (data: { text: string; agentName: string; agentId?: string; requestId?: string }) => {
+      if (!eventBelongsToAvatar(data)) return;
       if (streamingMsgId.current) {
         setMessages(prev => prev.map(m =>
           m.id === streamingMsgId.current ? { ...m, text: m.text + data.text } : m
@@ -114,8 +170,14 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
       }
     };
 
-    const onResponse = (data: AgentResponseDelivery & { agentName?: string }) => {
+    const onResponse = (data: AgentResponseDelivery & { agentName?: string; agentId?: string; requestId?: string }) => {
+      if (!eventBelongsToAvatar(data)) return;
+      if (safetyTimerRef.current) {
+        clearTimeout(safetyTimerRef.current);
+        safetyTimerRef.current = null;
+      }
       setIsTyping(false);
+      activeRequestIdRef.current = null;
       if (!shouldDisplayAgentResponse(data)) {
         if (streamingMsgId.current) {
           const streamingId = streamingMsgId.current;
@@ -134,20 +196,31 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
       }
     };
 
-    const onStatus = (data: { status: string }) => {
+    const onStatus = (data: { status: string; agentId?: string; requestId?: string }) => {
+      if (!eventBelongsToAvatar(data)) return;
       if (data.status === 'thinking' || data.status === 'responding') {
         setIsTyping(true);
       } else if (isTerminalAgentStatus(data.status)) {
+        if (safetyTimerRef.current) {
+          clearTimeout(safetyTimerRef.current);
+          safetyTimerRef.current = null;
+        }
         setIsTyping(false);
         if (streamingMsgId.current) {
           const streamingId = streamingMsgId.current;
           setMessages(prev => prev.filter(m => m.id !== streamingId));
         }
         streamingMsgId.current = null;
+        activeRequestIdRef.current = null;
       }
     };
 
-    const onError = (data: { message: string }) => {
+    const onError = (data: { message: string; agentId?: string; requestId?: string }) => {
+      if (!eventBelongsToAvatar(data)) return;
+      if (safetyTimerRef.current) {
+        clearTimeout(safetyTimerRef.current);
+        safetyTimerRef.current = null;
+      }
       setIsTyping(false);
       streamingMsgId.current = null;
       setMessages(prev => [...prev, {
@@ -157,6 +230,7 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
         timestamp: new Date().toISOString(),
         type: 'error',
       }]);
+      activeRequestIdRef.current = null;
     };
 
     socket.on('agent:chunk', onChunk);
@@ -170,7 +244,9 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
       socket.off('agent:status', onStatus);
       socket.off('agent:error', onError);
     };
-  }, [socket, agentName]);
+  }, [socket, agentName, eventBelongsToAvatar]);
+
+  useEffect(() => () => clearActiveRequest(), [clearActiveRequest]);
 
   // Auto-scroll
   useEffect(() => {
@@ -194,7 +270,7 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
     const userMsg = {
       id: Date.now().toString(),
       text,
-      userName: user?.displayName || user?.username || t_s.defaultYouLabel || 'You',
+      userName: user?.displayName || user?.username || memoryCopy.youLabel,
       timestamp: new Date().toISOString(),
       type: 'user',
     };
@@ -205,13 +281,19 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
     // Check for dependency signals
     const dep = checkDependencySignals(text);
     if (dep.detected && dep.level === 'high') {
-      setDependencyWarning(uiMessage('sanctuary.a-gentle-lumi-reminder-this.68e34eba16', (isZh) ? 'zh' : 'en'));
+      setDependencyWarning(message('sanctuary.a-gentle-lumi-reminder-this.68e34eba16'));
     }
 
+    const requestId = `memory_avatar_${agentId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    activeRequestIdRef.current = requestId;
+    if (safetyTimerRef.current) clearTimeout(safetyTimerRef.current);
     // Safety timeout
-    const safetyTimer = setTimeout(() => {
+    safetyTimerRef.current = setTimeout(() => {
+      if (activeRequestIdRef.current !== requestId) return;
       setIsTyping(false);
       streamingMsgId.current = null;
+      activeRequestIdRef.current = null;
+      safetyTimerRef.current = null;
     }, 45000);
 
     socket.emit('agent:chat', {
@@ -219,20 +301,23 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
       history: messages.map(m => ({ role: m.type === 'agent' ? 'assistant' : 'user', content: m.text })),
       personalityId: 'lumi',
       agentId,
+      requestId,
+      source: 'memory-avatar',
+      domain: 'personal',
+      orgId: null,
+    }, (ack?: { ok?: boolean; error?: string }) => {
+      if (ack?.ok !== false || activeRequestIdRef.current !== requestId) return;
+      clearActiveRequest();
+      setIsTyping(false);
+      setMessages(prev => [...prev, {
+        id: `error-${Date.now()}`,
+        text: ack.error || message('sanctuary.request-unavailable.9d1c4a7e20'),
+        userName: agentName,
+        timestamp: new Date().toISOString(),
+        type: 'error',
+      }]);
     });
-
-    const onResponse = () => { clearTimeout(safetyTimer); setIsTyping(false); };
-    const onError = () => { clearTimeout(safetyTimer); setIsTyping(false); };
-    const onStatus = (data: { status: string }) => {
-      if (data.status === 'idle' || data.status === 'error') {
-        clearTimeout(safetyTimer);
-        setIsTyping(false);
-      }
-    };
-    socket.once('agent:response', onResponse);
-    socket.once('agent:error', onError);
-    socket.once('agent:status', onStatus);
-  }, [newMessage, socket, messages, user, agentId, isZh, t_s.defaultYouLabel]);
+  }, [newMessage, socket, messages, user, agentId, agentName, memoryCopy.youLabel, clearActiveRequest]);
 
   if (!agent) return null;
 
@@ -270,7 +355,7 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
               className="flex items-center gap-2 px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-white/40 hover:text-white hover:border-white/20 transition-all text-xs font-bold"
             >
               <ArrowLeft size={14} />
-              {uiMessage('sanctuary.leave-sanctuary.52b6dd4924')}
+              {message('sanctuary.leave-sanctuary.52b6dd4924')}
             </button>
 
             <div className="flex items-center gap-3">
@@ -281,12 +366,68 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
                 <h2 className="text-sm font-black text-white/80 tracking-tight">{agentName}</h2>
                 <div className="flex items-center gap-2">
                   <span className={`text-[12px] font-bold uppercase tracking-wider ${meta.color}`}>{relationshipLabel}</span>
-                  <span className="text-xs text-white/40 font-mono">{t_s.sanctuaryLabel || uiMessage('sanctuary.sanctuary.d94722bbd1')}</span>
+                  <span className="text-xs text-white/40 font-mono">{message('sanctuary.sanctuary.d94722bbd1')}</span>
                 </div>
               </div>
             </div>
 
-            <div className="w-[100px]" />
+            <div className="relative flex min-w-[100px] items-center justify-end gap-2">
+              {onSelectAvatar && avatars.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAvatarMenu(value => !value)}
+                  className="flex h-9 items-center gap-1 rounded-xl border border-white/10 bg-white/5 px-2.5 text-white/55 transition-colors hover:border-fuchsia-300/25 hover:bg-fuchsia-300/10 hover:text-white"
+                  title={message('memory-avatar.switch-avatar.2c6f8a1d04')}
+                  aria-label={message('memory-avatar.switch-avatar.2c6f8a1d04')}
+                  aria-expanded={showAvatarMenu}
+                >
+                  <Users size={14} />
+                  <ChevronDown size={12} className={`transition-transform ${showAvatarMenu ? 'rotate-180' : ''}`} />
+                </button>
+              )}
+              {onCreateAnother && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAvatarMenu(false);
+                    onCreateAnother();
+                  }}
+                  className="flex h-9 w-9 items-center justify-center rounded-xl border border-fuchsia-300/20 bg-fuchsia-300/10 text-fuchsia-100/75 transition-colors hover:border-fuchsia-200/35 hover:bg-fuchsia-300/20 hover:text-white"
+                  title={message('memory-avatar-lab.create-another.e1f98b1538')}
+                  aria-label={message('memory-avatar-lab.create-another.e1f98b1538')}
+                >
+                  <Plus size={15} />
+                </button>
+              )}
+              {showAvatarMenu && onSelectAvatar && avatars.length > 1 && (
+                <div className="absolute right-0 top-11 z-40 w-64 overflow-hidden rounded-2xl border border-fuchsia-300/15 bg-[#090b12]/98 p-1.5 shadow-2xl shadow-black/50 backdrop-blur-2xl">
+                  <div className="px-2.5 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-white/40">
+                    {message('memory-avatar.switch-avatar.2c6f8a1d04')}
+                  </div>
+                  {avatars.map(option => {
+                    const optionMeta = RELATIONSHIP_META[option.relationshipType || ''] || DEFAULT_META;
+                    const selected = option.id === agentId;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        onClick={() => {
+                          setShowAvatarMenu(false);
+                          onSelectAvatar(option.id);
+                        }}
+                        className={`flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors ${selected ? 'bg-fuchsia-300/12 text-white' : 'text-white/60 hover:bg-white/[0.06] hover:text-white'}`}
+                      >
+                        <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${optionMeta.border} bg-white/[0.04] ${optionMeta.color}`}>
+                          {optionMeta.icon}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-xs font-semibold">{option.name}</span>
+                        {selected && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-fuchsia-300" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Guardrail notice */}
@@ -302,19 +443,19 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
                   <AlertTriangle size={16} className="text-amber-400/60 mt-0.5 flex-shrink-0" />
                   <div className="flex-1">
                     <p className="text-xs text-amber-300/70 leading-relaxed">
-                      {uiMessage('sanctuary.this-is-a-simulation-distilled.86cae03071')}
+                      {message('sanctuary.this-is-a-simulation-distilled.86cae03071')}
                     </p>
                     <div className="flex items-center gap-3 mt-2 text-[12px] text-white/45 font-mono">
-                      <span>{uiMessage('sanctuary.evidence.00759cc2ae')}<span className="text-emerald-400/60">{uiMessage('sanctuary.quote.fcb6e37e05')}</span>/<span className="text-blue-400/60">{uiMessage('sanctuary.fact.0dfbbdcfc8')}</span>/<span className="text-amber-400/60">{uiMessage('sanctuary.inferred.9b6e0e37e2')}</span></span>
-                      {agent.isFrozen !== false && <span>{uiMessage('sanctuary.evolution-frozen.d66cdb416b')}</span>}
-                      <span>{uiMessage('sanctuary.tools-disabled.4e1aaa0eb6')}</span>
+                      <span>{message('sanctuary.evidence.00759cc2ae')}<span className="text-emerald-400/60">{message('sanctuary.quote.fcb6e37e05')}</span>/<span className="text-blue-400/60">{message('sanctuary.fact.0dfbbdcfc8')}</span>/<span className="text-amber-400/60">{message('sanctuary.inferred.9b6e0e37e2')}</span></span>
+                      {agent.isFrozen !== false && <span>{message('sanctuary.evolution-frozen.d66cdb416b')}</span>}
+                      <span>{message('sanctuary.tools-disabled.4e1aaa0eb6')}</span>
                     </div>
                   </div>
                   <button
                     onClick={() => setShowGuardrail(false)}
                     className="text-white/40 hover:text-white/40 transition-colors text-xs font-bold uppercase tracking-wider flex-shrink-0 mt-0.5"
                   >
-                    {uiMessage('sanctuary.got-it.83aa55c237')}
+                    {message('sanctuary.got-it.83aa55c237')}
                   </button>
                 </div>
               </motion.div>
@@ -348,8 +489,8 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
                 <div className="h-full flex flex-col items-center justify-center text-center py-20 space-y-4 opacity-30">
                   <Castle size={48} className={meta.color.replace('text-', 'text-')} />
                   <div>
-                    <p className="text-sm font-medium text-white/60">{formatUiMessage('sanctuary.this-is-value0-s-sanctuary.b6612d3d3e', { value0: agentName })}</p>
-                    <p className="text-xs text-white/45 mt-1">{uiMessage('sanctuary.they-are-here-and-only.b927165289')}</p>
+                  <p className="text-sm font-medium text-white/60">{formatUiMessage('sanctuary.this-is-value0-s-sanctuary.b6612d3d3e', { value0: agentName }, locale)}</p>
+                    <p className="text-xs text-white/45 mt-1">{message('sanctuary.they-are-here-and-only.b927165289')}</p>
                   </div>
                 </div>
               )}
@@ -388,7 +529,7 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
                       />
                     ))}
                   </div>
-                  <span className="text-[12px] text-white/40 font-mono">{uiMessage('sanctuary.thinking.0bd67fc167')}</span>
+                  <span className="text-[12px] text-white/40 font-mono">{message('sanctuary.thinking.0bd67fc167')}</span>
                 </div>
               )}
             </div>
@@ -400,7 +541,7 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
               <input
                 value={newMessage}
                 onChange={e => setNewMessage(e.target.value)}
-                placeholder={formatUiMessage('sanctuary.say-something-to-value0.6793beb5ca', { value0: agentName })}
+                placeholder={formatUiMessage('sanctuary.say-something-to-value0.6793beb5ca', { value0: agentName }, locale)}
                 className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-5 py-3.5 text-sm text-white/80 placeholder:text-white/40 focus:outline-none focus:border-fuchsia-500/20 transition-colors"
                 autoFocus
               />
@@ -413,7 +554,7 @@ export function Sanctuary({ agent, isOpen, onClose }: { agent: SanctuaryAgent | 
               </button>
             </form>
             <div className="max-w-3xl mx-auto mt-2 text-center">
-              <span className="text-xs text-white/35 font-mono">{uiMessage('sanctuary.esc-leave-sanctuary-no-tools.7937ac5393')}</span>
+              <span className="text-xs text-white/35 font-mono">{message('sanctuary.esc-leave-sanctuary-no-tools.7937ac5393')}</span>
             </div>
           </div>
         </motion.div>

@@ -11,7 +11,6 @@ import { registerVerifyTools } from './verify_tools';
 import { registerSkillTools, setSkillLLMGetters } from './skill_tools';
 import { registerOfficeTools } from './office_tools';
 import { registerCalendarTools } from './calendar_tools';
-import { registerAgentTools } from './agent_tools';
 import { registerScreenMonitorTools } from './screen_monitor';
 import { registerClipboardTools } from './clipboard_tools';
 import { registerOCRTools } from './ocr_tools';
@@ -39,7 +38,6 @@ import { registerWorkProductTools } from './work_product_tools';
 import { registerAuthorityResearchTools } from './authority_research_tools';
 import { registerWorkTakeoverTools } from './work_takeover_tools';
 import { registerDesktopAiTools } from './desktop_ai_tools';
-import { registerExternalAiCollaborationTools } from './external_ai_collaboration_tools';
 import { registerExternalAiHistoryTools } from './external_ai_history_tools';
 import { registerMessagingTools } from './messaging_tools';
 import { registerModelConfigurationTools } from './model_configuration_tools';
@@ -73,7 +71,6 @@ export function registerAllTools(
   registerSkillTools(registry);
   registerOfficeTools(registry);
   registerCalendarTools(registry);
-  registerAgentTools(registry);
   registerScreenMonitorTools(registry);
   registerClipboardTools(registry);
   registerOCRTools(registry);
@@ -104,7 +101,6 @@ export function registerAllTools(
   registerWorkTakeoverTools(registry);
   registerIndustryWorkflowTools(registry);
   registerDesktopAiTools(registry);
-  registerExternalAiCollaborationTools(registry);
   registerExternalAiHistoryTools(registry);
   registerMessagingTools(registry);
   registerDesktopWechatWatchTools(registry);
@@ -149,7 +145,6 @@ export function registerProductVariantTools(
   registerVerifyTools(registry);
   registerSkillTools(registry);
   registerOfficeTools(registry);
-  registerAgentTools(registry);
   registerScreenMonitorTools(registry);
   registerClipboardTools(registry);
   registerOCRTools(registry);
@@ -174,7 +169,6 @@ export function registerProductVariantTools(
   registerWorkTakeoverTools(registry);
   registerIndustryWorkflowTools(registry);
   registerDesktopAiTools(registry);
-  registerExternalAiCollaborationTools(registry);
   registerExternalAiHistoryTools(registry);
   registerMessagingTools(registry);
   registerDesktopWechatWatchTools(registry);

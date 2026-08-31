@@ -69,6 +69,7 @@ const PERFORMANCE_INDEX_SQL = [
   `CREATE INDEX IF NOT EXISTS idx_interactions_agent ON interactions(agentId)`,
   `CREATE INDEX IF NOT EXISTS idx_memories_user_type_tier ON memories(userId, type, tier)`,
   `CREATE INDEX IF NOT EXISTS idx_memories_user_agent ON memories(userId, agentId)`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_avatars_user_status ON memory_avatars(userId, status, updatedAt)`,
   `CREATE INDEX IF NOT EXISTS idx_memories_user_parent ON memories(userId, parentId)`,
   `CREATE INDEX IF NOT EXISTS idx_conversations_user_status ON conversations(userId, status)`,
   `CREATE INDEX IF NOT EXISTS idx_token_usage_user_ts ON token_usage(userId, timestamp)`,
@@ -618,6 +619,18 @@ function migrateSchema(): Promise<void> {
       nodeType TEXT NOT NULL DEFAULT 'leaf',
       domain TEXT DEFAULT 'personal',
       orgId TEXT DEFAULT ''
+    )`, onAlter);
+    // Memory Avatars are a personal single-core feature. Keep them separate
+    // from the legal organization's workflow-template and participant tables.
+    db!.run(`CREATE TABLE IF NOT EXISTS memory_avatars (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      name TEXT NOT NULL,
+      relationshipType TEXT NOT NULL DEFAULT 'close_friend',
+      status TEXT NOT NULL DEFAULT 'active',
+      payload TEXT NOT NULL DEFAULT '{}',
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
     )`, onAlter);
     // Migrate: add new columns to existing memories table
     db!.run("ALTER TABLE memories ADD COLUMN tier TEXT NOT NULL DEFAULT 'episodic'", onAlter);
@@ -1390,6 +1403,22 @@ async function loadMemoryDB(): Promise<void> {
     ...m,
     keywords: m.keywords ? JSON.parse(m.keywords) : [],
   }));
+  const memoryAvatarsRaw = await query<any>('SELECT * FROM memory_avatars');
+  const memoryAvatars = memoryAvatarsRaw.map((row: any) => {
+    let payload: Record<string, any> = {};
+    try {
+      const parsed = typeof row.payload === 'string' ? JSON.parse(row.payload || '{}') : row.payload;
+      if (parsed && typeof parsed === 'object') payload = parsed;
+    } catch {}
+    return {
+      ...row,
+      payload,
+      personalityConfig: payload.personalityConfig || {},
+      evidenceMap: Array.isArray(payload.evidenceMap) ? payload.evidenceMap : [],
+      seedMemories: Array.isArray(payload.seedMemories) ? payload.seedMemories : [],
+      isFrozen: payload.isFrozen !== false,
+    };
+  });
 
   // Load reminders
   const remindersRaw = await query<any>('SELECT * FROM reminders');
@@ -1558,6 +1587,7 @@ async function loadMemoryDB(): Promise<void> {
     founderVision,
     founderVisionUpdatedAt,
     memories: (memories || []).map((m: any) => ({ ...m, domain: m.domain || 'personal', orgId: m.orgId || '' })),
+    memoryAvatars,
     reminders: remindersRaw || [],
     conversations,
     conversationActionTasks: conversationActionTasks || [],
@@ -2135,6 +2165,28 @@ function buildPersistenceTableSpecs(): PersistenceTableSpec[] {
       createSQL: `CREATE TABLE _temp_memories (id TEXT PRIMARY KEY, userId TEXT NOT NULL, type TEXT NOT NULL, content TEXT NOT NULL, keywords TEXT NOT NULL DEFAULT '[]', confidence REAL NOT NULL DEFAULT 0.5, sourceInteractionId TEXT NOT NULL DEFAULT '', createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL, lastRetrievedAt TEXT, retrieveCount INTEGER NOT NULL DEFAULT 0, tier TEXT NOT NULL DEFAULT 'episodic', perspective TEXT NOT NULL DEFAULT 'owner_trait', importance REAL NOT NULL DEFAULT 0.3, parentId TEXT, agentId TEXT DEFAULT '', nodeType TEXT NOT NULL DEFAULT 'leaf', location TEXT DEFAULT '', domain TEXT DEFAULT 'personal', orgId TEXT DEFAULT '')`,
       insertSQL: `INSERT INTO _temp_memories (id, userId, type, content, keywords, confidence, sourceInteractionId, createdAt, updatedAt, lastRetrievedAt, retrieveCount, tier, perspective, importance, parentId, agentId, nodeType, location, domain, orgId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       rows: () => (memoryDB.memories || []).map((m: any) => [m.id, m.userId, m.type, m.content, JSON.stringify(m.keywords || []), m.confidence || 0.5, m.sourceInteractionId || '', m.createdAt, m.updatedAt, m.lastRetrievedAt, m.retrieveCount || 0, m.tier || 'episodic', m.perspective || 'owner_trait', m.importance ?? 0.3, m.parentId || null, m.agentId || '', m.nodeType || 'leaf', m.location || '', m.domain || 'personal', m.orgId || '']),
+    },
+    {
+      name: 'memory_avatars',
+      createSQL: `CREATE TABLE _temp_memory_avatars (id TEXT PRIMARY KEY, userId TEXT NOT NULL, name TEXT NOT NULL, relationshipType TEXT NOT NULL DEFAULT 'close_friend', status TEXT NOT NULL DEFAULT 'active', payload TEXT NOT NULL DEFAULT '{}', createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL)`,
+      insertSQL: `INSERT INTO _temp_memory_avatars (id, userId, name, relationshipType, status, payload, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      rows: () => (memoryDB.memoryAvatars || []).map((avatar: any) => [
+        avatar.id,
+        avatar.userId,
+        avatar.name || 'Memory',
+        avatar.relationshipType || 'close_friend',
+        avatar.status || 'active',
+        JSON.stringify({
+          ...(avatar.payload && typeof avatar.payload === 'object' ? avatar.payload : {}),
+          personalityConfig: avatar.personalityConfig || avatar.payload?.personalityConfig || {},
+          evidenceMap: Array.isArray(avatar.evidenceMap) ? avatar.evidenceMap : (avatar.payload?.evidenceMap || []),
+          seedMemories: Array.isArray(avatar.seedMemories) ? avatar.seedMemories : (avatar.payload?.seedMemories || []),
+          narrative: avatar.narrative || avatar.payload?.narrative || '',
+          isFrozen: avatar.isFrozen !== false,
+        }),
+        avatar.createdAt || new Date().toISOString(),
+        avatar.updatedAt || avatar.createdAt || new Date().toISOString(),
+      ]),
     },
     {
       name: 'reminders',

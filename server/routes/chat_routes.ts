@@ -5,7 +5,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { runWithTools } from "../llm/adapter";
 import { makeLLMCall } from "../llm/providers";
 import { toolRegistry } from "../tools/registry";
-import { executeToolCall, executeToolCallOrThrow } from "../tools/execution_engine";
+import { executeToolCallOrThrow } from "../tools/execution_engine";
 import { recordLatency } from "../monitor/latency_store";
 import { optionalAuth, requireAuth, resolveDomain } from "../middleware/auth";
 import { getUserPreferredLLMConfig } from "../llm/user_preferences";
@@ -17,9 +17,8 @@ import {
   type ExecutionGuardRecoveryRunInput,
 } from "../cognition/execution_guard_recovery";
 import { buildLumiTurnDispatch } from "../cognition/turn_dispatch";
-import { buildLumiExecutionDecision } from "../cognition/execution_decision";
+import { buildLumiExecutionPipeline } from "../cognition/execution_pipeline";
 import {
-  buildModelCapabilityPolicy,
   buildModelToolProjection,
 } from "../cognition/capability_selection";
 import {
@@ -28,17 +27,6 @@ import {
 } from "../cognition/response_delivery";
 import type { LumiTurnFlow } from "../cognition/turn_flow";
 import type { ToolExecutionRecord } from "../tools/types";
-import {
-  blockIndustryWorkflowExecution,
-  getIndustryWorkflowTask,
-  recordIndustryWorkflowExecution,
-} from "../industry/workflow_service";
-import { bindIndustryWorkspaceContext } from '../industry/workspace_context';
-import * as LegalCases from '../org/legal_cases';
-import {
-  formatIndustryCapabilityProfilePrompt,
-  formatIndustryWorkflowRoutingPrompt,
-} from '../regions/packs/cn/industry_capability_profile';
 import { restrictToolPolicyForExecutionBoundary } from "../tools/remote_policy";
 import { isLoopbackAddress } from "../config/local_identity";
 import {
@@ -111,12 +99,7 @@ function buildRestChatSystemInstruction(input: {
     channel: 'chat',
     source: input.source,
   });
-  return [
-    REST_CHAT_BASE_SYSTEM_INSTRUCTION,
-    formatIndustryCapabilityProfilePrompt(),
-    formatIndustryWorkflowRoutingPrompt(input.routeText),
-    legalOverlay,
-  ].filter(Boolean).join('\n\n');
+  return [REST_CHAT_BASE_SYSTEM_INSTRUCTION, legalOverlay].filter(Boolean).join('\n\n');
 }
 
 type RestChatFinalization = ReturnType<typeof finalizeLumiResponse>;
@@ -153,42 +136,6 @@ async function finalizeRestChatResponse(input: {
       flow: input.flow,
     }),
   });
-}
-
-function bindIndustryToolRecords(records: ToolExecutionRecord[], input: {
-  workTakeoverTaskId: string;
-  conversationTaskId: string;
-  requestId: string;
-}): ToolExecutionRecord[] {
-  return records.map(record => ({
-    ...record,
-    taskId: record.taskId || input.conversationTaskId,
-    requestId: record.requestId || input.requestId,
-    idempotencyKey: record.idempotencyKey || `industry:${input.workTakeoverTaskId}:${record.id || record.name}`,
-  }));
-}
-
-export function resolveRestDesktopExecutionBoundary(input: {
-  authenticated: boolean;
-  userId: string;
-  remoteAddress?: string | null;
-  proofHeaderPresent: boolean;
-  presentedProof: unknown;
-}): {
-  trustedLocalExecution: boolean;
-  executionBoundary: 'trusted_local' | 'remote_restricted';
-  rejectPresentedProof: boolean;
-} {
-  const trustedLocalExecution = Boolean(
-    input.authenticated
-    && isLoopbackAddress(input.remoteAddress)
-    && verifyDesktopSessionProof(input.presentedProof, input.userId),
-  );
-  return {
-    trustedLocalExecution,
-    executionBoundary: trustedLocalExecution ? 'trusted_local' : 'remote_restricted',
-    rejectPresentedProof: input.proofHeaderPresent && !trustedLocalExecution,
-  };
 }
 
 function dateLikeToIso(value: unknown, fallback = Date.now()): string {
@@ -252,9 +199,10 @@ function buildLegalMeetingMinutesArgs(input: {
 }
 
 const DIRECT_LEGAL_TOOL_ALLOWLIST = new Set([
+  'legal_external_source_status',
   'legal_search_case',
   'legal_search_statute',
-  'legal_case_strategy',
+  'legal_search_tender_projects',
   'legal_case_workspace',
   'legal_case_workflow_status',
   'legal_message_intake_to_case',
@@ -271,8 +219,6 @@ const DIRECT_LEGAL_TOOL_ALLOWLIST = new Set([
   'legal_download_and_extract_document',
   'legal_trace_assets',
   'legal_equity_penetration',
-  'legal_external_source_status',
-  'legal_search_tender_projects',
   'legal_external_research_plan',
   'legal_search_external_authorities',
   'legal_company_database_lookup',
@@ -282,6 +228,7 @@ const DIRECT_LEGAL_TOOL_ALLOWLIST = new Set([
   'legal_authority_source_status',
   'legal_verify_citation',
   'legal_import_judgment',
+  'legal_case_strategy',
 ]);
 
 /**
@@ -292,6 +239,7 @@ const DIRECT_LEGAL_TOOL_ALLOWLIST = new Set([
  * and no case identity is supplied.
  */
 const ORGANIZATION_VIEWER_LEGAL_READ_TOOL_ALLOWLIST = new Set([
+  'legal_external_source_status',
   'legal_search_case',
   'legal_search_statute',
   'legal_case_workflow_status',
@@ -308,38 +256,6 @@ function isOrganizationViewerLegalRead(
   return args.persistCase === false
     && !String(args.caseId || '').trim()
     && !String(args.caseName || args.title || '').trim();
-}
-
-function legalToolRequiresTrustedDesktop(
-  toolName: string,
-  args: Record<string, any>,
-): boolean {
-  const hasCaseIdentity = Boolean(String(args.caseId || args.caseName || args.title || '').trim());
-  if (args.persistCase === true || (args.persistCase !== false && hasCaseIdentity)) return true;
-  if (toolName === 'legal_review_contract' && args.persistCase === false && !hasCaseIdentity) return false;
-  const capability = toolRegistry.getCapabilityManifestEntry(toolName);
-  return Boolean(capability?.sideEffects.some(effect => (
-    effect.type === 'local_write' || effect.type === 'local_state_change'
-  )));
-}
-
-function legalReceipt(record: ToolExecutionRecord): Record<string, any> {
-  return record.receipt && typeof record.receipt === 'object' && !Array.isArray(record.receipt)
-    ? record.receipt as Record<string, any>
-    : {};
-}
-
-function legalCaseUpdates(
-  record: ToolExecutionRecord,
-  legalOrgId: string,
-  userId: string,
-): LegalCases.OrgLegalCaseFile[] {
-  const changedCaseIds = Array.isArray(legalReceipt(record).changedCaseIds)
-    ? legalReceipt(record).changedCaseIds.map((value: unknown) => String(value || '').trim()).filter(Boolean)
-    : [];
-  return changedCaseIds
-    .map((caseId: string) => LegalCases.getCase(legalOrgId, caseId, userId, 'read'))
-    .filter((caseFile): caseFile is LegalCases.OrgLegalCaseFile => Boolean(caseFile));
 }
 
 export function formatMeetingTranscriptForAnalysis(notes: unknown[]): string {
@@ -378,31 +294,22 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
     }
     const userId = req.user?.uid || 'anonymous';
     const presentedDesktopSession = req.headers[DESKTOP_SESSION_HEADER];
-    const desktopExecution = resolveRestDesktopExecutionBoundary({
-      authenticated: Boolean(req.user),
-      userId,
-      remoteAddress: req.socket?.remoteAddress,
-      proofHeaderPresent: Object.prototype.hasOwnProperty.call(req.headers, DESKTOP_SESSION_HEADER),
-      presentedProof: presentedDesktopSession,
-    });
-    if (desktopExecution.rejectPresentedProof) {
+    const desktopSessionPresented = Object.prototype.hasOwnProperty.call(req.headers, DESKTOP_SESSION_HEADER);
+    const trustedLocalExecution = Boolean(
+      req.user
+      && isLoopbackAddress(req.socket?.remoteAddress)
+      && verifyDesktopSessionProof(presentedDesktopSession, userId),
+    );
+    if (desktopSessionPresented && !trustedLocalExecution) {
       return res.status(403).json({
         error: 'Native desktop session proof expired or is invalid',
         code: 'DESKTOP_SESSION_PROOF_REQUIRED',
       });
     }
-    const { trustedLocalExecution, executionBoundary } = desktopExecution;
+    const executionBoundary = trustedLocalExecution ? 'trusted_local' as const : 'remote_restricted' as const;
     const requestScope = req.user ? resolveDomain(req.user) : { domain: 'personal' as const, orgId: '' };
     const domain = requestScope.domain;
     const orgId = requestScope.orgId;
-    const industryWorkflowTaskId = String(req.body?.industryWorkflowTaskId || '').trim();
-    const industryWorkflowTask = industryWorkflowTaskId
-      ? getIndustryWorkflowTask({ userId, domain, orgId }, industryWorkflowTaskId)
-      : null;
-    if (industryWorkflowTaskId && !industryWorkflowTask) {
-      return res.status(404).json({ error: 'Industry workflow task not found in the current user scope.' });
-    }
-    const industryWorkflow = industryWorkflowTask?.metadata?.industryWorkflow || {};
     const routeText = buildRestChatRouteText(messages, prompt);
     const restTurnDispatch = buildLumiTurnDispatch({
       userId,
@@ -415,20 +322,36 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
       operationMode: 'assistant',
       targetIsLumi: true,
     });
-    const restExecutionDecision = buildLumiExecutionDecision({
-      flow: restTurnDispatch.flow,
-      text: routeText,
-      toolDeclarations: toolRegistry.getToolDeclarations(),
-      toolRegistry,
+    const restExecutionPipeline = buildLumiExecutionPipeline({
+      dispatch: {
+        userId,
+        text: routeText,
+        channel: 'chat',
+        source: 'rest_chat',
+        category: 'command',
+        domain,
+        orgId,
+        operationMode: 'assistant',
+        targetIsLumi: true,
+      },
+      prebuiltDispatch: restTurnDispatch,
+      registry: toolRegistry,
       isSanctuary: !req.user,
     });
+    const restExecutionDecision = restExecutionPipeline.execution;
     const restModelToolPolicy = restrictToolPolicyForExecutionBoundary(
-      buildModelCapabilityPolicy(restExecutionDecision),
+      restExecutionPipeline.authorizationPolicy,
       executionBoundary,
     );
-    const restModelToolProjection = buildModelToolProjection(restExecutionDecision);
+    restExecutionDecision.baseToolPolicy = restModelToolPolicy;
+    const restModelToolProjection = buildModelToolProjection(restExecutionDecision, {
+      lane: restExecutionPipeline.capabilityPlan.lane,
+      preferredTools: restExecutionPipeline.capabilityPlan.preferredTools,
+    });
+    const restToolSessionActive = restExecutionPipeline.executionRequested
+      && restModelToolProjection.toolNames.length > 0;
     const deferRestStream =
-      restExecutionDecision.allowToolUse
+      restToolSessionActive
       || shouldDeferModelOutputUntilFinalized({
         taskText: routeText,
         flow: restTurnDispatch.flow,
@@ -447,13 +370,6 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
       actionIntent: routeText,
       routedTaskText: restTurnDispatch.flow.routeText,
       toolPolicy: restModelToolPolicy,
-      ...(industryWorkflowTask
-        ? {
-            taskId: String(industryWorkflow.conversationTaskId || ''),
-            conversationId: String(industryWorkflow.conversationId || ''),
-            requestId: String(industryWorkflow.requestId || ''),
-          }
-        : {}),
       modelToolProjection: restModelToolProjection,
     };
     const systemInstruction = buildRestChatSystemInstruction({
@@ -542,16 +458,13 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
           llm.getQwen,
           onChunk,
           { ...toolContext, source },
-        );
-
-        const bindRestIndustryRecords = (records: ToolExecutionRecord[]): ToolExecutionRecord[] => (
-          industryWorkflowTask
-            ? bindIndustryToolRecords(records, {
-                workTakeoverTaskId: industryWorkflowTask.id,
-                conversationTaskId: String(industryWorkflow.conversationTaskId || ''),
-                requestId: String(industryWorkflow.requestId || ''),
-              })
-            : records
+          llm.getOllama,
+          llm.getLmStudio,
+          llm.getArk,
+          llm.getXiaomi,
+          llm.getKimi,
+          llm.getGlm,
+          llm.getRelay,
         );
 
         const finalizeRestToolResult = async (
@@ -560,19 +473,14 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
           source: string,
         ) => {
           const usageRecords = [...(result.usageRecords || [])];
-          const initialToolRecords = bindRestIndustryRecords(result.toolCalls);
           const outbound = await finalizeRestChatResponse({
             taskText: routeText,
             responseText: candidateText,
-            toolRecords: initialToolRecords,
+            toolRecords: result.toolCalls,
             source,
             flow: restTurnDispatch.flow,
-            allowToolUse: restExecutionDecision.allowToolUse,
+            allowToolUse: restToolSessionActive,
             attempt: async ({ instruction, recordTool }) => {
-              const recordBoundTool = (record: ToolExecutionRecord) => {
-                const [boundRecord] = bindRestIndustryRecords([record]);
-                recordTool(boundRecord);
-              };
               const recovery = await runRestToolTurn(
                 [
                   ...normalizedMessages,
@@ -581,24 +489,18 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
                     : []),
                   { role: 'user', content: instruction },
                 ],
-                recordBoundTool,
+                recordTool,
                 undefined,
                 'rest_chat_guard_recovery',
               );
               usageRecords.push(...(recovery.usageRecords || []));
               return {
                 text: recovery.text,
-                toolRecords: bindRestIndustryRecords(recovery.toolCalls),
+                toolRecords: recovery.toolCalls,
               };
             },
           });
-          return {
-            outbound: {
-              ...outbound,
-              toolRecords: bindRestIndustryRecords(outbound.toolRecords),
-            },
-            usageRecords,
-          };
+          return { outbound, usageRecords };
         };
 
         const stream = req.query.stream === 'true';
@@ -628,7 +530,6 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
           responseText = result.text || '';
           const delivery = await finalizeRestToolResult(responseText, result, 'rest_chat_stream');
           const finalized = delivery.outbound.finalization;
-          const boundRecords = delivery.outbound.toolRecords;
           responseText = finalized.text;
           for (const u of delivery.usageRecords) {
             recordTokenUsage(userId, u.provider, u.model, {
@@ -637,12 +538,6 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
               totalTokens: u.totalTokens,
             }, `rest_chat_${Date.now()}`, 'chat');
           }
-          const workflowRecord = industryWorkflowTask
-            ? recordIndustryWorkflowExecution({
-                userId, domain, orgId, taskId: industryWorkflowTask.id,
-                resultText: responseText, toolRecords: boundRecords, source: 'rest_chat_stream',
-              })
-            : null;
           res.write(`data: ${JSON.stringify({
             done: true,
             text: responseText,
@@ -651,11 +546,6 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
             blocked: finalized.blocked,
             reason: finalized.reason,
             notification: finalized.notification,
-            ...(workflowRecord ? { industryWorkflow: {
-              taskId: workflowRecord.task.id,
-              status: workflowRecord.task.status,
-              verification: workflowRecord.verification,
-            } } : {}),
           })}\n\n`);
           return res.end();
         }
@@ -665,7 +555,6 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         responseText = result.text || '';
         const delivery = await finalizeRestToolResult(responseText, result, 'rest_chat');
         const finalized = delivery.outbound.finalization;
-        const boundRecords = delivery.outbound.toolRecords;
         responseText = finalized.text;
         for (const u of delivery.usageRecords) {
           recordTokenUsage(userId, u.provider, u.model, {
@@ -678,12 +567,6 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
           totalTokens: delivery.usageRecords.reduce((sum, item) => sum + item.totalTokens, 0),
           records: delivery.usageRecords.length,
         };
-        const workflowRecord = industryWorkflowTask
-          ? recordIndustryWorkflowExecution({
-              userId, domain, orgId, taskId: industryWorkflowTask.id,
-              resultText: responseText, toolRecords: boundRecords, source: 'rest_chat',
-            })
-          : null;
         return res.json({
           text: responseText,
           usage,
@@ -692,11 +575,6 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
           blocked: finalized.blocked,
           reason: finalized.reason,
           notification: finalized.notification,
-          ...(workflowRecord ? { industryWorkflow: {
-            taskId: workflowRecord.task.id,
-            status: workflowRecord.task.status,
-            verification: workflowRecord.verification,
-          } } : {}),
         });
       }
 
@@ -728,48 +606,6 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
 
   router.post("/ai/chat", optionalAuth, handleChat);
   router.post("/chat", optionalAuth, handleChat);
-
-  router.post("/legal/client-case-sync", requireAuth, asyncHandler(async (req, res) => {
-    const caseSnapshot = req.body?.case && typeof req.body.case === 'object' ? req.body.case : req.body;
-    const caseId = String(caseSnapshot?.id || '').trim();
-    if (!caseId) return res.status(400).json({ error: 'A client case id is required.' });
-    const userId = req.user!.uid;
-    const requestScope = resolveDomain(req.user!);
-    const domain = requestScope.domain;
-    const orgId = requestScope.orgId;
-    if (domain === 'work' && req.user!.orgRole === 'viewer') {
-      return res.status(403).json({ error: 'Organization viewers may not modify legal case workspaces.' });
-    }
-    const legalOrgId = resolveLegalCaseworkOrgId({ domain, userOrgId: orgId, userId });
-    const caseFile = LegalCases.upsertCaseSnapshot(legalOrgId, userId, caseSnapshot);
-    const active = bindIndustryWorkspaceContext({ userId, domain, orgId }, {
-      name: caseFile.title || caseFile.party || caseFile.caseNumber,
-      attributes: {
-        caseId: caseFile.id,
-        caseName: caseFile.title,
-        caseNumber: caseFile.caseNumber,
-        clientName: caseFile.party,
-        court: caseFile.court,
-        stage: caseFile.stage,
-      },
-    });
-    return res.json({ ok: true, status: 'synced', caseId: caseFile.id, case: caseFile, activeWorkspace: active });
-  }));
-
-  router.delete("/legal/client-case-sync/:caseId", requireAuth, asyncHandler(async (req, res) => {
-    const userId = req.user!.uid;
-    const requestScope = resolveDomain(req.user!);
-    if (requestScope.domain === 'work' && req.user!.orgRole === 'viewer') {
-      return res.status(403).json({ error: 'Organization viewers may not delete legal cases.' });
-    }
-    const legalOrgId = resolveLegalCaseworkOrgId({
-      domain: requestScope.domain,
-      userOrgId: requestScope.orgId,
-      userId,
-    });
-    const deleted = LegalCases.deleteCase(legalOrgId, userId, String(req.params?.caseId || '').trim());
-    return res.json({ ok: true, status: deleted ? 'deleted' : 'not_found', caseId: deleted?.id || '' });
-  }));
 
   router.post("/legal/tool/:toolName", requireAuth, asyncHandler(async (req, res) => {
     const toolName = String(req.params?.toolName || '').trim();
@@ -809,104 +645,31 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
       return res.status(404).json({ error: `Legal tool "${toolName}" is not registered` });
     }
 
-    const presentedDesktopSession = req.headers[DESKTOP_SESSION_HEADER];
-    const desktopExecution = resolveRestDesktopExecutionBoundary({
-      authenticated: true,
-      userId,
-      remoteAddress: req.socket?.remoteAddress,
-      proofHeaderPresent: Object.prototype.hasOwnProperty.call(req.headers, DESKTOP_SESSION_HEADER),
-      presentedProof: presentedDesktopSession,
-    });
-    if (desktopExecution.rejectPresentedProof) {
-      return res.status(403).json({
-        error: 'Native desktop session proof expired or is invalid',
-        code: 'DESKTOP_SESSION_PROOF_REQUIRED',
+    try {
+      const text = await executeToolCallOrThrow({
+        registry: toolRegistry,
+        name: toolName,
+        arguments: args,
+        context: {
+          userId,
+          domain,
+          orgId,
+          llmGetters: llm,
+          source: 'legal-direct-tool',
+          authenticated: true,
+          authRole: req.user!.role,
+          orgRole: req.user!.orgRole,
+          localExecution: false,
+        } as any,
       });
-    }
-    if (legalToolRequiresTrustedDesktop(toolName, args) && !desktopExecution.trustedLocalExecution) {
-      return res.status(403).json({
-        error: 'A trusted local desktop session is required for legal file writes or case persistence.',
-        code: 'DESKTOP_SESSION_PROOF_REQUIRED',
-      });
-    }
-
-    const industryWorkflowTaskId = String(req.body?.industryWorkflowTaskId || '').trim();
-    const industryWorkflowTask = industryWorkflowTaskId
-      ? getIndustryWorkflowTask({ userId, domain, orgId }, industryWorkflowTaskId)
-      : null;
-    if (industryWorkflowTaskId && !industryWorkflowTask) {
-      return res.status(404).json({ error: 'Industry workflow task not found in the current user scope.' });
-    }
-    const industryMetadata = industryWorkflowTask?.metadata?.industryWorkflow || {};
-    const record = await executeToolCall({
-      registry: toolRegistry,
-      name: toolName,
-      arguments: args,
-      context: {
-        userId,
-        domain,
-        orgId,
-        llmGetters: llm,
-        source: 'legal-direct-tool',
-        ...(industryWorkflowTask ? {
-          taskId: String(industryMetadata.conversationTaskId || ''),
-          conversationId: String(industryMetadata.conversationId || ''),
-          requestId: String(industryMetadata.requestId || ''),
-        } : {}),
-        authenticated: true,
-        authRole: req.user!.role,
-        orgRole: req.user!.orgRole,
-        localExecution: desktopExecution.trustedLocalExecution,
-        ...(desktopExecution.trustedLocalExecution ? { executionBoundary: 'trusted_local' as const } : {}),
-      } as any,
-    });
-    if (record.error || record.terminalVerification?.status !== 'verified') {
-      console.warn(
-        '[LegalDirectTool] Execution failed:',
-        redactDiagnosticSecrets(record.error || record.terminalVerification?.reason || 'unverified receipt').slice(0, 500),
-      );
+      return res.json({ text, toolName });
+    } catch (err: any) {
+      console.warn('[LegalDirectTool] Execution failed:', redactDiagnosticSecrets(err?.message || err).slice(0, 500));
       return res.status(500).json({
         error: 'Legal tool execution failed',
         code: 'LEGAL_TOOL_EXECUTION_FAILED',
       });
     }
-    const receipt = legalReceipt(record);
-    const receiptStatus = String(receipt.status || '').trim().toLowerCase();
-    const workflowRecord = industryWorkflowTask
-      ? receiptStatus === 'needs_source'
-        ? blockIndustryWorkflowExecution({
-            userId,
-            domain,
-            orgId,
-            taskId: industryWorkflowTask.id,
-            resultText: record.result,
-            toolRecords: [record],
-            source: 'legal_direct_tool',
-            blockerStatus: 'needs_source',
-            reason: 'The legal workflow needs an authorized, verifiable external source before this step can be completed.',
-          })
-        : recordIndustryWorkflowExecution({
-            userId,
-            domain,
-            orgId,
-            taskId: industryWorkflowTask.id,
-            resultText: record.result,
-            toolRecords: [record],
-            source: 'legal_direct_tool',
-          })
-      : null;
-    return res.json({
-      text: record.result,
-      toolName,
-      receipt,
-      artifacts: Array.isArray(receipt.artifacts) ? receipt.artifacts : [],
-      caseUpdates: legalCaseUpdates(record, legalOrgId, userId),
-      ...(workflowRecord ? { industryWorkflow: {
-        taskId: workflowRecord.task.id,
-        status: workflowRecord.task.status,
-        verification: workflowRecord.verification,
-      } } : {}),
-    });
   }));
 
   router.post("/legal/contract-review", requireAuth, asyncHandler(async (req, res) => {
@@ -939,35 +702,7 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         error: 'Organization viewers may only run contract review without case persistence.',
       });
     }
-    const presentedDesktopSession = req.headers[DESKTOP_SESSION_HEADER];
-    const desktopExecution = resolveRestDesktopExecutionBoundary({
-      authenticated: true,
-      userId,
-      remoteAddress: req.socket?.remoteAddress,
-      proofHeaderPresent: Object.prototype.hasOwnProperty.call(req.headers, DESKTOP_SESSION_HEADER),
-      presentedProof: presentedDesktopSession,
-    });
-    if (desktopExecution.rejectPresentedProof) {
-      return res.status(403).json({
-        error: 'Native desktop session proof expired or is invalid',
-        code: 'DESKTOP_SESSION_PROOF_REQUIRED',
-      });
-    }
-    if (legalToolRequiresTrustedDesktop('legal_review_contract', args) && !desktopExecution.trustedLocalExecution) {
-      return res.status(403).json({
-        error: 'A trusted local desktop session is required for legal file writes or case persistence.',
-        code: 'DESKTOP_SESSION_PROOF_REQUIRED',
-      });
-    }
-    const industryWorkflowTaskId = String(req.body?.industryWorkflowTaskId || '').trim();
-    const industryWorkflowTask = industryWorkflowTaskId
-      ? getIndustryWorkflowTask({ userId, domain, orgId }, industryWorkflowTaskId)
-      : null;
-    if (industryWorkflowTaskId && !industryWorkflowTask) {
-      return res.status(404).json({ error: 'Industry workflow task not found in the current user scope.' });
-    }
-    const industryMetadata = industryWorkflowTask?.metadata?.industryWorkflow || {};
-    const contractReviewRecord = await executeToolCall({
+    const llmReview = executeToolCallOrThrow({
       registry: toolRegistry,
       name: 'legal_review_contract',
       arguments: args,
@@ -977,56 +712,55 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         orgId,
         llmGetters: llm,
         source: 'legal-contract-review',
-        ...(industryWorkflowTask ? {
-          taskId: String(industryMetadata.conversationTaskId || ''),
-          conversationId: String(industryMetadata.conversationId || ''),
-          requestId: String(industryMetadata.requestId || ''),
-        } : {}),
         authenticated: true,
         authRole: req.user!.role,
         orgRole: req.user!.orgRole,
-        localExecution: desktopExecution.trustedLocalExecution,
-        ...(desktopExecution.trustedLocalExecution ? { executionBoundary: 'trusted_local' as const } : {}),
+        localExecution: false,
       } as any,
     });
-    if (contractReviewRecord.error || contractReviewRecord.terminalVerification?.status !== 'verified') {
-      console.warn(
-        '[LegalContractReview] Execution failed:',
-        redactDiagnosticSecrets(
-          contractReviewRecord.error || contractReviewRecord.terminalVerification?.reason || 'unverified receipt',
-        ).slice(0, 500),
-      );
-      return res.status(500).json({
-        error: 'Contract review failed',
-        code: 'LEGAL_CONTRACT_REVIEW_FAILED',
-      });
+    llmReview.catch(() => undefined);
+
+    try {
+      const text = await Promise.race([
+        llmReview,
+        new Promise<string>((_, reject) => {
+          setTimeout(() => reject(new Error('合同深度审查超时，已改用本地规则审查')), 15_000);
+        }),
+      ]);
+
+      return res.json({ text, degraded: false });
+    } catch (err: any) {
+      console.warn('[LegalContractReview] Deep review unavailable:', redactDiagnosticSecrets(err?.message || err).slice(0, 500));
+      try {
+        const fallback = await executeToolCallOrThrow({
+          registry: toolRegistry,
+          name: 'legal_review_contract',
+          arguments: args,
+          context: {
+            userId,
+            domain,
+            orgId,
+            source: 'legal-contract-review-fallback',
+            authenticated: true,
+            authRole: req.user!.role,
+            orgRole: req.user!.orgRole,
+            localExecution: false,
+          } as any,
+        });
+        return res.json({
+          text: `${fallback}\n\n*提示：深度 LLM 审查暂未及时完成，已先返回本地规则审查结果。*`,
+          degraded: true,
+          warning: 'Deep contract review unavailable; local rules fallback used.',
+          warningCode: 'LEGAL_REVIEW_FALLBACK_USED',
+        });
+      } catch (fallbackErr: any) {
+        console.warn('[LegalContractReview] Fallback failed:', redactDiagnosticSecrets(fallbackErr?.message || fallbackErr).slice(0, 500));
+        return res.status(500).json({
+          error: 'Contract review failed',
+          code: 'LEGAL_CONTRACT_REVIEW_FAILED',
+        });
+      }
     }
-    const contractReceipt = legalReceipt(contractReviewRecord);
-    const contractWorkflowRecord = industryWorkflowTask
-      ? recordIndustryWorkflowExecution({
-          userId,
-          domain,
-          orgId,
-          taskId: industryWorkflowTask.id,
-          resultText: contractReviewRecord.result,
-          toolRecords: [contractReviewRecord],
-          source: 'legal_contract_review',
-        })
-      : null;
-    const contractCaseUpdates = legalCaseUpdates(contractReviewRecord, legalOrgId, userId);
-    return res.json({
-      text: contractReviewRecord.result,
-      degraded: false,
-      toolName: 'legal_review_contract',
-      receipt: contractReceipt,
-      artifacts: Array.isArray(contractReceipt.artifacts) ? contractReceipt.artifacts : [],
-      caseUpdates: contractCaseUpdates,
-      ...(contractWorkflowRecord ? { industryWorkflow: {
-        taskId: contractWorkflowRecord.task.id,
-        status: contractWorkflowRecord.task.status,
-        verification: contractWorkflowRecord.verification,
-      } } : {}),
-    });
   }));
 
   router.post("/meeting/analyze", requireAuth, asyncHandler(async (req, res) => {

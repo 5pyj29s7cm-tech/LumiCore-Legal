@@ -27,6 +27,19 @@ export function requiresLegalCurrentLawGate(text: string): boolean {
   // deliverable. Preserve its verified draft and blocker list; the current-law
   // gate remains mandatory once the user asks for a formal/submittable package.
   if (strictInternalBidDraft) return false;
+  const sourceOnlyContractReview =
+    // i18n-allow: Reviewed multilingual source-only legal review input recognition; not user-visible copy.
+    /(?:审查|审核|检查|复核|review).{0,16}(?:合同|协议)|(?:合同|协议).{0,16}(?:审查|审核|检查|复核|review)/iu.test(normalized)
+    // i18n-allow: Reviewed multilingual source-only legal review input recognition; not user-visible copy.
+    && /(?:只|仅)(?:能|可)?(?:依据|基于|按照).{0,16}(?:原文|条款)|source[- ]only|only\s+(?:the\s+)?(?:source|contract\s+text)/iu.test(normalized)
+    // i18n-allow: Reviewed multilingual source-only legal review input recognition; not user-visible copy.
+    && /(?:不要|不得|无需|不需要).{0,20}(?:补造|编造|具体法条|法条)|(?:do\s+not|without).{0,28}(?:invent|fabricat|specific\s+(?:law|citation))/iu.test(normalized)
+    // i18n-allow: Reviewed multilingual source-only legal review input recognition; not user-visible copy.
+    && /(?:不要|不得|未)[^。\n]{0,100}(?:发送|提交|签署)|(?:do\s+not|without)[^.!?\n]{0,100}(?:send|submit|sign)/iu.test(normalized);
+  // A source-only clause review is an internal risk analysis, not a formal
+  // legal opinion. Its verified review receipt is sufficient when the user
+  // explicitly forbids invented authorities and every external action.
+  if (sourceOnlyContractReview) return false;
   if (
     /(?:\u68c0\u7d22\u8ba1\u5212|\u68c0\u7d22\u884c\u52a8\u5355|\u5916\u90e8\u68c0\u7d22|\u6765\u6e90\u767b\u8bb0|\u6388\u6743\u534f\u4f5c|\u88c1\u5224\u6587\u4e66\u7f51|\u4eba\u6c11\u6cd5\u9662\u6848\u4f8b\u5e93|\u6cd5\u8749|\bAlpha\b|\u4f01\u67e5\u67e5|research plan|source register|authorized collaboration)/iu.test(normalized) &&
     !/(?:\u8d77\u8bc9\u72b6|\u8981\u7d20\u5f0f\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u8d28\u8bc1\u610f\u89c1|\u4ee3\u7406\u8bcd|\u6cd5\u5f8b\u610f\u89c1\u4e66|\u59d4\u6258\u624b\u7eed|\u7acb\u6848\u6750\u6599|\u8bc1\u636e\u76ee\u5f55|\u5408\u540c|\u534f\u8bae|\u6807\u4e66|\u6295\u6807\u4e66|\u6b63\u5f0f\u6587\u4e66|\u4ea4\u4ed8\u5305|pleading|complaint|defense|legal\s+opinion|contract|agreement|bid|tender|filing\s+packet|evidence\s+catalog)/iu.test(normalized)

@@ -24,7 +24,6 @@ import {
 } from "../cognition/capability_selection";
 import { trustedContinuationEvidenceTools } from "../cognition/tool_router";
 import { buildLumiExecutionPipeline } from "../cognition/execution_pipeline";
-import { isCurrentIndustryMultiWorkspaceLedgerStatusRequest } from "../regions/packs/cn/industry_capability_profile";
 import { buildDesktopExecutionStabilityPolicy } from "../cognition/desktop_execution_stability";
 import { createDesktopExecutionTracker, withDesktopExecutionReceipt } from "../desktop/execution_runtime";
 import { finalizeLumiResponse } from "../cognition/result_finalizer";
@@ -46,6 +45,7 @@ import {
   buildActionContract,
   summarizeActionContractBlocker,
 } from "../cognition/action_contract";
+import { shouldBlockForDesktopControlPause } from '../cognition/desktop_control_pause';
 import {
   createPreFinalizationTextGate,
   shouldDeferModelOutputUntilFinalized,
@@ -82,7 +82,6 @@ import {
   buildPendingAssistantOfferContextFromTranscript,
   resolvePendingRuntimeCleanupOffer,
 } from '../cognition/pending_assistant_offer';
-import { classifyRuntimeWorkIntent } from '../cognition/runtime_work_intent';
 import { formatRuntimeCleanupReceipt } from '../i18n/runtime_cleanup_messages';
 import {
   admitAcceptedUserTurnDurably,
@@ -91,8 +90,9 @@ import {
 } from './action_turn_durability';
 import { queryMemories, queryMemoriesVector, addMemory, addReminder, extractMemories, CONVERSATIONAL_MEMORY_EVIDENCE } from "../memory";
 import { loadEmotionalState, saveEmotionalState, updateEmotionalState, updateEmotionalStateWithHIM, loadHIMState, saveHIMState, generateContextualGreeting, vectorMemoryBias } from "../personality/state";
-import { buildModeOverlay } from "../personality/engine";
+import { buildModeOverlay, generateSystemPrompt } from "../personality/engine";
 import { personalityRegistry } from "../personality";
+import { getMemoryAvatar } from '../memory_avatar/store';
 import { lightweightEvolve } from "../personality/evolution";
 import {
   getOrCreateConversationForTurn,
@@ -111,8 +111,6 @@ import {
   getOrCreateActiveConversation,
   getConversationActionStatus,
   bindConversationActionExecutionTurn,
-  persistConversationModelExecutionResult,
-  getConversationModelExecutionRecovery,
   cancelConversationActionExecution,
   createDurableForegroundReleaseGate,
   convergeConversationActionRequestLease,
@@ -162,30 +160,18 @@ import {
   taskReceiptsToRecords,
   toolRecordSucceeded,
 } from "../cognition/task_execution_ledger";
-import { hasExplicitTeamExecutionRequest, isUserCorrectionOrExplanationQuestion } from "../cognition/tool_intent";
+import { isUserCorrectionOrExplanationQuestion } from "../cognition/tool_intent";
 import { summarizeToolRecordForPersistence } from "../cognition/tool_record_status";
 import {
   buildDeterministicWorkTaskStatusCommand,
 } from "../cognition/quick_commands";
+import { classifyRuntimeWorkIntent } from '../cognition/runtime_work_intent';
 import { recordTokenUsage } from "../llm/token_tracker";
-import {
-  classifyComplexity,
-  listAvailableOrchestrationAgents,
-  shouldAttemptOrchestration,
-} from "../agents/orchestrator";
-import { buildDelegationAck, shouldDelegateWorkInBackground } from "../agents/background_delegation";
-import { markLatestUserTurn } from "../agents/background_delivery";
-import {
-  getBackgroundTask,
-  requestCancelBackgroundTask,
-  requestPauseBackgroundTask,
-  resumeBackgroundTask,
-} from "../agents/background_tasks";
-import { shouldChainTask } from "../agents/nl_chainer";
 import { searchKnowledgeBase } from "../org/kb";
 import { buildProfessionOverlay } from "../autonomy/professions";
 import { buildResponseLanguageInstruction } from "../utils/language";
 import { CN_MESSAGING_MESSAGES } from "../regions/packs/cn/messaging_messages";
+import { formatDesktopControlPausePresentation } from '../regions/packs/cn/desktop_control_messages';
 import {
   CN_TASK_EXECUTION_MESSAGES,
   CN_VOICE_FAST_PATH_MESSAGES,
@@ -228,7 +214,6 @@ import {
   resolveActiveTaskMessageRelation,
   type ActiveTaskMessageResolution,
 } from "../cognition/task_concurrency";
-import { backgroundTaskMatchesScope, projectBackgroundTask } from "../agents/background_task_public";
 import { SerialExecutionQueue } from "../cognition/serial_execution_queue";
 import {
   isGuardGeneratedAssistantText,
@@ -609,7 +594,7 @@ export function buildClientSurfaceContinuationBridge(userText: string, history: 
 
   return [
     '## Internal client-surface continuation context',
-    'The user is continuing a Lumi client/UI operation or self-inspection request. Treat this as foreground client work, not background delegation.',
+    'The user is continuing a Lumi client/UI operation or self-inspection request. Treat this as foreground client work, not deferred automation.',
     'Use client_get_state first unless a fresh client state is already available. For "中枢世界", "中枢", "Nexus", or "cloud canvas", use client_action with action=open_nexus.',
     'Do not claim that a client surface was opened, checked, or changed unless client_action verification is verified/not_applicable or fresh client state proves it. If verification is pending or failed, say the exact blocker and next retry.',
   ].join('\n');
@@ -751,61 +736,6 @@ export function registerChatHandler(
     try { ack?.({ ok: true, requestId: snapshot.requestId, status: 'cancelling' }); } catch {}
   });
 
-  socket.on("agent:background_cancel", (data: { taskId?: string }) => {
-    const uid = userIdFn(socket);
-    const taskId = typeof data?.taskId === 'string' ? data.taskId : '';
-    const socketScope = resolveSocketScope(socket, uid);
-    const taskScope = { domain: socketScope.domain, orgId: socketScope.orgId || '' };
-    if (!taskId) {
-      socket.emit("agent:background_task_update", {
-        taskId,
-        error: 'Missing background task id',
-        source: 'background_delegation',
-      });
-      return;
-    }
-
-    const existing = getBackgroundTask(taskId, uid);
-    const task = existing && backgroundTaskMatchesScope(existing, taskScope)
-      ? requestCancelBackgroundTask(taskId, uid)
-      : null;
-    if (!task) {
-      socket.emit("agent:background_task_update", {
-        taskId,
-        error: 'Background task not found',
-        source: 'background_delegation',
-      });
-      return;
-    }
-
-    socket.emit("agent:background_task_update", {
-      taskId: task.id,
-      task: projectBackgroundTask(task),
-      source: 'background_delegation',
-    });
-  });
-
-  const updateBackgroundTaskState = (
-    data: { taskId?: string },
-    operation: 'pause' | 'resume',
-  ) => {
-    const uid = userIdFn(socket);
-    const taskId = typeof data?.taskId === 'string' ? data.taskId : '';
-    const socketScope = resolveSocketScope(socket, uid);
-    const taskScope = { domain: socketScope.domain, orgId: socketScope.orgId || '' };
-    const existing = taskId ? getBackgroundTask(taskId, uid) : null;
-    const task = existing && backgroundTaskMatchesScope(existing, taskScope)
-      ? operation === 'pause'
-        ? requestPauseBackgroundTask(taskId, uid)
-        : resumeBackgroundTask(taskId, uid)
-      : null;
-    socket.emit("agent:background_task_update", task
-      ? { taskId: task.id, task: projectBackgroundTask(task), source: 'background_delegation' }
-      : { taskId, error: `Background task not found or not ${operation === 'pause' ? 'pausable' : 'resumable'}`, source: 'background_delegation' });
-  };
-  socket.on("agent:background_pause", (data: { taskId?: string }) => updateBackgroundTaskState(data, 'pause'));
-  socket.on("agent:background_resume", (data: { taskId?: string }) => updateBackgroundTaskState(data, 'resume'));
-
   socket.on("agent:chat", async (
     data: { text?: string; history?: any[]; attachments?: any[]; personalityId?: string; category?: string; agentId?: string; domain?: string; orgId?: string | null; mode?: string; operationMode?: string; source?: string; requestId?: string; conversationId?: string; controlTargetRequestId?: string; controlTargetTaskId?: string; controlTargetRevision?: number },
     ack?: (payload: { ok: boolean; requestId?: string; receivedAt?: string; error?: string }) => void,
@@ -830,25 +760,50 @@ export function registerChatHandler(
       : `chat_${crypto.randomUUID()}`;
     const requestReceivedAt = new Date().toISOString();
     const eventSource = source || 'chat';
-    const allowAdaptiveLearning = shouldPersistPostTurnLearningSource(eventSource);
     const toolResultPreviewLimit = 500;
     const formatToolResultForUi = (value?: string) => value?.slice(0, toolResultPreviewLimit) || '';
-    const conversationAgentId = agentId || 'lumi';
+    const requestedAgentId = typeof agentId === 'string' ? agentId.trim() : '';
     const uid = userIdFn(socket);
     const nativeRequestBinding = buildSocketNativeRequestBinding(socket);
     let pendingConfirmation: Awaited<ReturnType<typeof getPendingConfirmationDurably>> = null;
     let pendingConfirmationPrompt = '';
-    console.log('[ChatHandler] uid:', uid, 'agentId:', agentId, 'source:', source);
+    console.log('[ChatHandler] uid:', uid, 'agentId:', requestedAgentId || 'lumi', 'source:', source);
 
     // Work context comes from the authenticated socket token. Personal mode can be
     // explicitly requested by the desktop UI to avoid a stale org token leaking into
     // local personal conversations.
-    const requestScope = resolveSocketScope(socket, uid, {
+    const socketScope = resolveSocketScope(socket, uid, {
       domain: data.domain === 'work' ? 'work' : data.domain === 'personal' ? 'personal' : undefined,
       orgId: data.orgId,
     });
+    // Only a user-owned Memory Avatar may opt into the private persona lane.
+    // Ordinary chat always remains the single LumiCore identity; arbitrary
+    // client-supplied Agent IDs cannot create another conversation owner or
+    // grant a different execution policy.  This is the server-side single-core
+    // boundary; LAP and the private Memory Avatar surface remain explicit lanes.
+    const requestedMemoryAvatar = requestedAgentId.startsWith('memory_avatar_')
+      ? getMemoryAvatar(uid, requestedAgentId)
+      : null;
+    if (
+      requestedAgentId.startsWith('memory_avatar_')
+      && (!requestedMemoryAvatar || requestedMemoryAvatar.status !== 'active')
+    ) {
+      try { ack?.({ ok: false, requestId, error: 'Memory Avatar is unavailable for this user' }); } catch {}
+      return;
+    }
+    const memoryAvatar = requestedMemoryAvatar;
+    const conversationAgentId = memoryAvatar?.id || 'lumi';
+    const isMemoryAvatar = Boolean(memoryAvatar && memoryAvatar.status === 'active');
+    // A Memory Avatar is a personal, private reflection even when the shell
+    // is currently connected to an organization workspace. Never let the
+    // transport's work scope pull company KB/RAG or org-scoped memories into
+    // that conversation.
+    const requestScope = isMemoryAvatar
+      ? { domain: 'personal' as const, orgId: '' }
+      : socketScope;
     const resolvedDomain = requestScope.domain;
     const resolvedOrgId = requestScope.orgId;
+    const allowAdaptiveLearning = !isMemoryAvatar && shouldPersistPostTurnLearningSource(eventSource);
     const toolSecurityContext = buildSocketToolSecurityContext(socket, requestScope);
     const requestedConversationId = String(data.conversationId || '').trim();
     const persistedRequestTurn = getMessageByRequestId({
@@ -935,6 +890,47 @@ export function registerChatHandler(
     let executionRoom = chatExecutionRoom(executionScope);
     let sessionKey = `${uid}:${resolvedDomain}:${resolvedOrgId || ''}:${eventSource}:${selectedConversationId}`;
     let resolvedTaskRelation: ActiveTaskMessageResolution | null = null;
+    const refreshResolvedTaskRelationFromLedger = (
+      exactConversationId: string,
+      exactTaskId = resolvedTaskRelation?.taskId || '',
+      exactRequestId = requestId,
+    ): ActiveTaskMessageResolution | null => {
+      if (!exactConversationId || !resolvedTaskRelation) return null;
+      const db = readDB();
+      const requestTurns = (db.conversationActionTurns || []).filter((turn: any) => (
+        turn.conversationId === exactConversationId
+        && turn.userId === uid
+        && turn.requestId === exactRequestId
+        && String(turn.taskId || '').trim()
+      ));
+      // A deterministic tool turn may acquire its durable task only when the
+      // assistant/tool receipt is persisted. The immutable request binding is
+      // safer than selecting whichever task happens to be newest.
+      const requestBoundTaskId = requestTurns.length === 1
+        ? String(requestTurns[0].taskId || '').trim()
+        : '';
+      const normalizedTaskId = String(exactTaskId || requestBoundTaskId || '').trim();
+      const durableConversation = (db.conversations || []).find((candidate: any) => (
+        candidate.id === exactConversationId && candidate.userId === uid
+      ));
+      const durableState = normalizedTaskId
+        ? getConversationActionStateByTaskId(db, {
+            conversationId: exactConversationId,
+            userId: uid,
+            taskId: normalizedTaskId,
+          })
+        : durableConversation?.actionContinuationState;
+      if (!durableState?.taskId) return null;
+      resolvedTaskRelation = {
+        ...resolvedTaskRelation,
+        binding: durableState.unfinished ? 'active_task' : 'previous_task',
+        taskId: durableState.taskId,
+        revision: durableState.revision,
+        // An idle/terminal durable task no longer owns this request lease.
+        targetRequestId: durableState.activeRequestId || undefined,
+      };
+      return resolvedTaskRelation;
+    };
     const normalizeAgentPayload = (
       event: string,
       payload: Record<string, any> = {},
@@ -955,6 +951,11 @@ export function registerChatHandler(
       delete boundedPublicPayload.completionFeedback;
       return {
         ...boundedPublicPayload,
+        // Every client-visible event carries the conversation owner.  The
+        // desktop shell shares one user-level socket across Lumi, LAP, and
+        // Memory Avatar surfaces; consumers must be able to reject a late
+        // event from another surface instead of treating it as their own.
+        agentId: conversationAgentId,
         ...(completionFeedback ? { completionFeedback } : {}),
         source: boundedPublicPayload.source || eventSource,
         requestId,
@@ -970,6 +971,14 @@ export function registerChatHandler(
         // event through the user/workspace room without duplicating it here.
         socket.emit(event, normalizedPayload);
         socket.to(executionRoom).emit(event, normalizedPayload);
+        return;
+      }
+      if (isMemoryAvatar) {
+        // Memory Avatar requests are forced into the personal data scope. An
+        // organization-authenticated socket may not be a member of that room,
+        // so deliver its private stream/status frames directly to the socket
+        // that initiated the request instead of silently dropping them.
+        socket.emit(event, normalizedPayload);
         return;
       }
       io.to(executionRoom).emit(event, normalizedPayload);
@@ -1006,7 +1015,17 @@ export function registerChatHandler(
       });
       const committed = await commitChatTerminalBoundary({
         persistTerminalState: () => undefined,
-        persistAssistantMessage: input.persistAssistantMessage || (() => undefined),
+        persistAssistantMessage: () => {
+          input.persistAssistantMessage?.();
+          const relation = refreshResolvedTaskRelationFromLedger(
+            selectedConversationId,
+            resolvedTaskRelation?.taskId,
+          );
+          if (relation) {
+            terminalPayload.taskRelation = relation;
+            unknownPayload.taskRelation = relation;
+          }
+        },
         flush: flushDBOrThrow,
         persistTerminalReceipt: () => recordChatExecutionTerminalEventDurably(
           executionScope,
@@ -1168,7 +1187,16 @@ export function registerChatHandler(
 
     // A status question is a side conversation, not a replacement command.
     // Answer it without aborting/superseding the foreground executor.
-    const existingSession = chatExecutionQueue.getCurrent(sessionKey);
+    const observedExistingSession = chatExecutionQueue.getCurrent(sessionKey);
+    // Socket delivery happens immediately after the terminal durability fence,
+    // while queue-resource release finishes a few microtasks later. A fast
+    // follow-up can therefore observe the old queue slot even though its
+    // request already has a durable terminal. Do not answer that follow-up as
+    // "still executing"; let it queue briefly and resolve against the ledger.
+    const existingSession = observedExistingSession
+      && getChatExecution(executionScope, observedExistingSession.requestId)?.terminal !== true
+      ? observedExistingSession
+      : null;
     const controlTargetRequestId = String(data.controlTargetRequestId || '').trim().slice(0, 120);
     const controlTargetTaskId = String(data.controlTargetTaskId || '').trim().slice(0, 180);
     const controlTargetRevision = typeof data.controlTargetRevision === 'number'
@@ -1452,35 +1480,9 @@ export function registerChatHandler(
           skipActionContinuation: true,
         });
       }
-      // Resolve status from the durable ledger, not only the in-memory
-      // conversation snapshot. A pending confirmation can be written by the
-      // preceding request after this socket handler captured the conversation;
-      // the ledger still knows the exact task and must surface “等待确认”
-      // instead of generic active-without-receipt text.
-      const durableStatusState = activeConversation
-        ? (resolvedTaskRelation.taskId
-          ? getConversationActionStateByTaskId(readDB(), {
-              conversationId: activeConversation.id,
-              userId: uid,
-              taskId: resolvedTaskRelation.taskId,
-            })
-          : getLatestConversationActionState(readDB(), {
-              conversationId: activeConversation.id,
-              userId: uid,
-            }))
-        : null;
-      const statusTaskId = resolvedTaskRelation.taskId || durableStatusState?.taskId || '';
-      const statusText = activeConversation && statusTaskId
-        ? getConversationActionStatus(
-            activeConversation.id,
-            uid,
-            visibleUserText,
-            durableStatusState || activeConversation.actionContinuationState,
-            statusTaskId,
-          )
-        : durableStatusState
-          ? formatConversationActionTaskStatus(durableStatusState)
-          : CN_TASK_EXECUTION_MESSAGES.activeWithoutReceipt;
+      const statusText = activeConversation && resolvedTaskRelation.taskId
+        ? getConversationActionStatus(activeConversation.id, uid, visibleUserText, activeConversation.actionContinuationState)
+        : CN_TASK_EXECUTION_MESSAGES.activeWithoutReceipt;
       try { ack?.({ ok: true, requestId, receivedAt: new Date().toISOString() }); } catch {}
       await commitDeterministicTerminal({
         payload: {
@@ -1491,7 +1493,7 @@ export function registerChatHandler(
           sidecar: true,
           finalized: true,
           blocked: false,
-          reason: 'task_status',
+          reason: '',
         },
         persistAssistantMessage: activeConversation
           ? () => addMessageIdempotent({ userId: uid, agentId: conversationAgentId, conversationId: activeConversation.id, role: 'assistant', content: statusText, domain: resolvedDomain, orgId: resolvedOrgId, source: eventSource, channel: 'chat', cognitiveIntent: 'task_status', requestId, skipActionContinuation: true })
@@ -1859,7 +1861,6 @@ export function registerChatHandler(
     if (superseded?.terminalEvent) {
       io.to(executionRoom).emit(superseded.terminalEvent.event, superseded.terminalEvent.payload);
     }
-    markLatestUserTurn(executionScope, requestId);
     if (!acknowledged) {
       try { ack?.({ ok: true, requestId, receivedAt: new Date().toISOString() }); } catch {}
     }
@@ -2379,21 +2380,14 @@ export function registerChatHandler(
         ) || conversation;
       }
 
-      // Look up agent record for memory/emotion isolation
-      const agentRecord = agentId
-        ? readDB().agents.find((a: any) => a.id === agentId) || null
-        : null;
-      console.log('[ChatHandler] agentRecord found:', !!agentRecord);
-      const memoryScope = agentRecord?.memoryScope || 'shared';
-      const agentMemoryFilter = memoryScope === 'private' ? agentId : undefined;
-      const isSanctuary = agentRecord?.territory === 'sanctuary';
-
       // Retrieve personality vector early to bias memory retrieval (cross-system fusion: vector→memory)
-      const personalityConfig = personalityRegistry.getForUser(
-        personalityId,
-        uid,
-        resolvedDomain === 'work' ? resolvedOrgId : undefined,
-      );
+      const personalityConfig = isMemoryAvatar && memoryAvatar?.personalityConfig
+        ? memoryAvatar.personalityConfig
+        : personalityRegistry.getForUser(
+            personalityId,
+            uid,
+            resolvedDomain === 'work' ? resolvedOrgId : undefined,
+          );
       console.log('[ChatHandler] personalityConfig:', !!personalityConfig);
       const retrievalBiases = personalityConfig?.personalityVector
         ? vectorMemoryBias(personalityConfig.personalityVector)
@@ -2401,7 +2395,11 @@ export function registerChatHandler(
 
       // Vector semantic search with keyword fallback
       const relevantMemories = await queryMemoriesVector({
-        userId: uid, query: text, limit: 5, minConfidence: 0.4, agentId: agentMemoryFilter,
+        userId: uid,
+        query: text,
+        limit: isMemoryAvatar ? Math.min(20, Number(memoryAvatar?.personalityConfig?.memoryPolicy?.retrieveLimit) || 10) : 5,
+        minConfidence: isMemoryAvatar ? (Number(memoryAvatar?.personalityConfig?.memoryPolicy?.minConfidence) || 0.3) : 0.4,
+        agentId: isMemoryAvatar ? conversationAgentId : undefined,
         retrievalTypeWeights: retrievalBiases.typeWeights,
         retrievalPerspectiveWeights: retrievalBiases.perspectiveWeights,
         domain: resolvedDomain,
@@ -2413,7 +2411,9 @@ export function registerChatHandler(
 
       // RAG: retrieve relevant knowledge chunks from agent-scoped and Lumi knowledge.
       let ragChunks: string[] = [];
-      const ragAgentIds = Array.from(new Set([conversationAgentId, 'lumi'].filter(Boolean)));
+      const ragAgentIds = isMemoryAvatar
+        ? [conversationAgentId]
+        : Array.from(new Set([conversationAgentId, 'lumi'].filter(Boolean)));
       for (const ragAgentId of ragAgentIds) {
         const chunks = await retrieveChunks(uid, ragAgentId, text, 3, {
           domain: resolvedDomain,
@@ -2443,7 +2443,7 @@ export function registerChatHandler(
         }
       }
 
-      const emotionKey = scopedEmotionalStateKey(uid, requestScope, agentMemoryFilter ? agentId : undefined);
+      const emotionKey = scopedEmotionalStateKey(uid, requestScope, isMemoryAvatar ? conversationAgentId : undefined);
       const emotionalState = loadEmotionalState(emotionKey);
       const himState = loadHIMState(emotionKey);
       console.log('[ChatHandler] emotionalState loaded');
@@ -2569,13 +2569,15 @@ export function registerChatHandler(
           .map(record => ({ role: record.role, message: record.message, response: record.response }));
         chatContextBridge = buildClientSurfaceContinuationBridge(visibleUserText, dbHistoryItems);
       }
-      actionContinuationBridge = buildRecentActionContinuationBridge(
-        visibleUserText,
-        conversationTurn.rolledOver
-          ? persistedConversationHistory
-          : [...historyItems, ...persistedConversationHistory],
-        conversation?.actionContinuationState,
-      );
+      actionContinuationBridge = explicitRuntimeWorkStatusRequest
+        ? ''
+        : buildRecentActionContinuationBridge(
+            visibleUserText,
+            conversationTurn.rolledOver
+              ? persistedConversationHistory
+              : [...historyItems, ...persistedConversationHistory],
+            conversation?.actionContinuationState,
+          );
       const taskRelationContext = formatActiveTaskRelationContext(
         resolvedTaskRelation,
         conversation?.actionContinuationState,
@@ -2595,19 +2597,33 @@ export function registerChatHandler(
 
       const sensory = sensoryFn(uid);
       console.log('[ChatHandler] sensory loaded');
-      const { config: personality, systemPrompt: systemInstruction } = personalityRegistry.buildSystemPrompt(
-        personalityId,
-        { mode: 'chat', sensory },
-        {
-          memories: relevantMemories.length > 0 ? relevantMemories : undefined,
-          ragKnowledge: ragChunks.length > 0 ? ragChunks : undefined,
-          emotionalState,
-          userId: uid,
-          userText: text,
-          domain: resolvedDomain,
-          orgId: resolvedOrgId,
-        },
-      );
+      const personalityContext = {
+        mode: 'chat' as const,
+        sensory,
+      };
+      const personalityOptions = {
+        memories: relevantMemories.length > 0 ? relevantMemories : undefined,
+        ragKnowledge: ragChunks.length > 0 ? ragChunks : undefined,
+        emotionalState,
+        userId: uid,
+        userText: text,
+        domain: resolvedDomain,
+        orgId: resolvedOrgId,
+      };
+      const { config: personality, systemPrompt: systemInstruction } = isMemoryAvatar
+        ? {
+            config: personalityConfig,
+            systemPrompt: generateSystemPrompt(
+              personalityConfig as any,
+              personalityContext,
+              personalityOptions,
+            ),
+          }
+        : personalityRegistry.buildSystemPrompt(
+            personalityId,
+            personalityContext,
+            personalityOptions,
+          );
       console.log('[ChatHandler] systemPrompt built, personality name:', personality?.name);
 
       // Inject conversation summary chain for long-running conversations (anti-entropy)
@@ -2683,7 +2699,7 @@ export function registerChatHandler(
         personalityToolPolicy: personality.toolPolicy,
         actionTaskState: conversation?.actionContinuationState,
         pendingAssistantOfferContext,
-        isSanctuary,
+        isSanctuary: isMemoryAvatar,
         traceText: currentTurnDecisionText,
         source: eventSource,
       });
@@ -2799,7 +2815,7 @@ export function registerChatHandler(
             domain: resolvedDomain,
             orgId: resolvedOrgId,
             defaultSourceInteractionId: interactionId,
-            agentId: agentId || '',
+            agentId: conversationAgentId,
             source: eventSource,
             log: { info: console.log, warn: console.warn },
           },
@@ -2841,26 +2857,25 @@ export function registerChatHandler(
         });
         return executionWriteback;
       };
-      const publishDurableTaskRelation = () => {
-        if (!conversationId) return;
-        const durableConversation = getConversationForScope(
-          conversationId,
-          uid,
-          resolvedDomain,
-          resolvedOrgId,
-        );
-        const durableState = durableConversation?.actionContinuationState;
-        if (!durableState?.taskId) return;
-        resolvedTaskRelation = {
-          ...resolvedTaskRelation,
-          binding: durableState.unfinished ? 'active_task' : 'previous_task',
-          taskId: durableState.taskId,
-          revision: durableState.revision,
-          targetRequestId: durableState.activeRequestId,
-        };
+      const refreshDurableTaskRelation = (
+        exactTaskId = resolvedTaskRelation?.taskId || '',
+      ): ActiveTaskMessageResolution | null => {
+        return refreshResolvedTaskRelationFromLedger(conversationId, exactTaskId);
+      };
+      const refreshTerminalPayloadTaskRelation = (
+        payload: Record<string, any>,
+        exactTaskId = resolvedTaskRelation?.taskId || '',
+      ) => {
+        const relation = refreshDurableTaskRelation(exactTaskId);
+        if (relation) payload.taskRelation = relation;
+        return relation;
+      };
+      const publishDurableTaskRelation = (exactTaskId = resolvedTaskRelation?.taskId || '') => {
+        const relation = refreshDurableTaskRelation(exactTaskId);
+        if (!relation) return;
         io.to(executionRoom).emit('agent:task_relation', {
-          relation: resolvedTaskRelation,
-          taskRelation: resolvedTaskRelation,
+          relation,
+          taskRelation: relation,
           source: eventSource,
           requestId,
           conversationId,
@@ -2869,8 +2884,6 @@ export function registerChatHandler(
       };
 
       const actionFollowupIntent = acceptedFollowupIntent;
-      const explicitMultiIndustryLedgerStatus =
-        isCurrentIndustryMultiWorkspaceLedgerStatusRequest(visibleUserText);
       const operationModeMetaText = buildOperationModeMetaResponse({
         text: visibleUserText,
         operationMode: turnFlow.operationMode,
@@ -2951,10 +2964,7 @@ export function registerChatHandler(
       }
 
       const groundedTurnEvidence: string[] = [];
-      if (
-        conversationId
-        && (actionFollowupIntent === 'status' || explicitMultiIndustryLedgerStatus)
-      ) {
+      if (conversationId && actionFollowupIntent === 'status') {
         groundedTurnEvidence.push(`Current action status evidence:\n${getConversationActionStatus(
           conversationId,
           uid,
@@ -3068,7 +3078,6 @@ export function registerChatHandler(
       const clientActionOnlyTurn = turnFlow.clientActionOnlyTurn;
       const workSurfaceRoute = turnFlow.workSurfaceRoute;
       const visionIntent = turnFlow.visionIntent;
-      const explicitTeamOrchestration = hasExplicitTeamExecutionRequest(turnFlow.routeText);
       const executionDecision = getTurnExecutionDecision();
       const intentTrace = executionPipeline.intentTrace;
       const capabilitySelection = getTurnCapabilitySelection();
@@ -3105,7 +3114,7 @@ export function registerChatHandler(
         preferredTools: capabilitySelection.preferredTools,
         pinnedTools: pinnedContinuationTools,
       });
-      const toolSessionActive = executionPipeline.executionRequested
+      const toolSessionActive = !isMemoryAvatar && executionPipeline.executionRequested
         && modelToolProjection.toolNames.length > 0;
       // The semantic execution plan owns durable task creation. Main Chat may
       // expose a tool manifest to the model for open-ended reasoning, but that
@@ -3127,9 +3136,30 @@ export function registerChatHandler(
         !preparesExistingAction
         && !preparesConfirmedAction
         && conversationId
-        && (executionDecision.allowToolUse || Boolean(pendingConfirmation)),
+        && (executionPipeline.capabilityPlan.taskLedgerRequired || Boolean(pendingConfirmation)),
       );
-      const actionTaskExecution = bindsExistingAction && conversationId
+      // Reading the runtime ledger and accepting its cleanup proposal are
+      // separate operations. The latter owns a new mutate task; resuming the
+      // adjacent status task would leave its durable goal/intent/audit policy
+      // as an observe action even though it now contains cancellation receipts.
+      const actionTaskExecution = acceptedRuntimeCleanupOffer && conversationId
+        ? prepareConversationActionExecution({
+            conversationId,
+            userId: uid,
+            userText: visibleUserText,
+            requestId,
+            userMessageId: acceptedUserMessageId,
+            toolPolicy: {
+              allowedTools: ['runtime_work_cancel'],
+              requireConfirmation: [],
+              forbiddenTools: [],
+              maxIterations: 1,
+            },
+            forceTask: true,
+            forceNewTask: true,
+            preserveExistingTask: false,
+          })
+        : bindsExistingAction && conversationId
         ? prepareConversationActionExecution({
             conversationId,
             userId: uid,
@@ -3267,11 +3297,10 @@ export function registerChatHandler(
       const taskAwareRecords = (records: ToolExecutionRecord[]) => (
         coalesceToolExecutionRecords([...priorTaskRecords, ...records])
       );
-      const exposeAgentWork = turnFlow.exposeAgentWork;
       if (toolSecurityContext.executionBoundary !== 'remote_restricted') {
         effectiveSystemPrompt += '\n\n' + formatClientSelfPromptForTurn(uid, visibleUserText, { domain: resolvedDomain, orgId: resolvedOrgId });
       }
-      console.log('[ChatHandler] tool gate:', executionDecision.allowToolUse ? 'enabled' : 'chat-only', 'operationMode:', operationMode, 'effective:', effectiveOperationMode, 'surface:', turnFlow.surface, 'clientActionOnly:', clientActionOnlyTurn, 'selfRepair:', selfRepairTurn, 'capabilityLane:', capabilitySelection.lane, 'trace:', intentTrace.summary, 'route:', toolRoute ? `${toolRoute.toolNames.length}/${toolRoute.totalAvailable} ${toolRoute.categories.join(',') || 'fallback'}` : 'none');
+      console.log('[ChatHandler] tool gate:', executionDecision.allowToolUse ? 'authorized' : 'off', 'session:', toolSessionActive ? 'active' : 'conversation', 'operationMode:', operationMode, 'effective:', effectiveOperationMode, 'surface:', turnFlow.surface, 'clientActionOnly:', clientActionOnlyTurn, 'selfRepair:', selfRepairTurn, 'capabilityLane:', capabilitySelection.lane, 'trace:', intentTrace.summary, 'route:', toolRoute ? `${toolRoute.toolNames.length}/${toolRoute.totalAvailable} ${toolRoute.categories.join(',') || 'fallback'}` : 'none');
       socket.emit('agent:intent_trace', intentTrace);
       if (toolRoute) {
         socket.emit('agent:tool_route', {
@@ -3475,6 +3504,10 @@ export function registerChatHandler(
               requestId,
               completionFeedback: cleanupCompletionFeedback,
             });
+            // `addMessageIdempotent` finalizes the foreground action and may
+            // remove the live conversation pointer. Rebuild from the durable
+            // task row now, before the recovery receipt captures this payload.
+            refreshTerminalPayloadTaskRelation(cleanupTerminalPayload, durableTaskId);
           },
           flush: flushDBOrThrow,
           persistTerminalReceipt: () => recordChatExecutionTerminalEventDurably(
@@ -3819,6 +3852,7 @@ export function registerChatHandler(
           persistAssistantMessage: () => {
             if (!conversationId) return;
             addMessageIdempotent({ userId: uid, agentId: conversationAgentId, conversationId, role: 'assistant', content: confirmationResponseText, personality: personality.id, domain: resolvedDomain, orgId: resolvedOrgId, source: eventSource, channel: 'chat', toolCalls: confirmationRecords, cognitiveIntent: finalized.blocked ? 'work_product_guard' : 'confirmation', llmWasCalled: confirmationLlmWasCalled, requestId, completionFeedback: confirmationCompletionFeedback });
+            refreshTerminalPayloadTaskRelation(confirmationTerminalPayload, durableTaskId);
           },
           flush: flushDBOrThrow,
           persistTerminalReceipt: () => recordChatExecutionTerminalEventDurably(
@@ -3916,7 +3950,7 @@ export function registerChatHandler(
       // ── Lumi Cognitive Engine: classify intent BEFORE calling any LLM ──
       const cognitiveCtx: CognitiveContext = {
         userId: uid,
-        agentId: agentId || undefined,
+        agentId: conversationAgentId,
         personalityId: personality.id,
         personalityName: personality.name,
         llmProvider: activeProvider,
@@ -3967,152 +4001,12 @@ export function registerChatHandler(
 
       const deferCompletionStream = shouldDeferModelOutputUntilFinalized({
         taskText: executionTaskText,
-        allowToolUse: executionDecision.allowToolUse,
+        allowToolUse: toolSessionActive,
         flow: turnFlow,
       });
       const chatTextGate = createPreFinalizationTextGate();
-      const prefersSequentialWorkflow =
-        shouldChainTask(executionTaskText) &&
-        workSurfaceRoute.artifactFirst &&
-        !workSurfaceRoute.directDesktop;
-      const availableWorkerAgents = (() => {
-        try {
-          return listAvailableOrchestrationAgents({
-            userId: uid,
-            personalityId,
-            domain: resolvedDomain,
-            orgId: resolvedOrgId,
-          }).filter((agent: any) => agent.id !== conversationAgentId);
-        } catch {
-          return [];
-        }
-      })();
-      const backgroundComplexity = classifyComplexity(executionTaskText, {
-        userId: uid,
-        personalityId,
-        domain: resolvedDomain,
-        orgId: resolvedOrgId,
-        desktopRelay,
-      });
-      const legacyDelegationHint = shouldDelegateWorkInBackground({
-        text: visibleUserText || text,
-        source: eventSource,
-        category: cognition.intent.category,
-        complexity: backgroundComplexity,
-        allowToolUse: executionDecision.allowToolUse,
-        clientActionOnly: clientActionOnlyTurn,
-        clientSurfaceRequest: Boolean(chatContextBridge) || isClientSurfaceRequestText(routingText),
-        continuationContext: Boolean(actionContinuationBridge),
-        selfRepair: selfRepairTurn,
-        sanctuary: isSanctuary,
-        directDesktop: workSurfaceRoute.directDesktop,
-        capabilityLane: capabilitySelection.lane,
-        industryWorkflow: Boolean(turnFlow.industryWorkflowEntryId),
-        prefersSequentialWorkflow,
-        availableAgentCount: availableWorkerAgents.length,
-      });
-      const legacyOrchestrationHint = shouldAttemptOrchestration({
-        channel: 'chat',
-        text: turnFlow.routeText,
-        complexity: backgroundComplexity,
-        allowToolUse: executionDecision.allowToolUse,
-        clientActionOnly: clientActionOnlyTurn,
-        selfRepair: selfRepairTurn,
-        responseReady: false,
-        hasPreflightContext: false,
-        prefersSequentialWorkflow,
-        capabilityLane: capabilitySelection.lane,
-        cognitionCategory: cognition.intent.category,
-      });
-      const legacyExecutionHints = [
-        legacyDelegationHint.shouldDelegate ? `background candidate: ${legacyDelegationHint.reason}` : '',
-        legacyOrchestrationHint ? 'multi-agent orchestration candidate' : '',
-        shouldChainTask(executionTaskText) ? 'multi-step execution candidate' : '',
-      ].filter(Boolean);
-      if (legacyExecutionHints.length) {
-        effectiveSystemPrompt += [
-          '',
-          '## Advisory execution candidates',
-          'Legacy routing observed the candidates below. They are hints only: decide whether to respond, use a registered capability, or execute a model-planned sequence from the current hard-policy manifest. Do not claim delegation, background work, or orchestration unless a current-turn tool receipt proves it.',
-          ...legacyExecutionHints.map(item => `- ${item}`),
-        ].join('\n');
-      }
-
-      if (!responseText && !runtimeOwnedDeterministicRecoveryCall && legacyDelegationHint.shouldDelegate) {
-        const delegationRecord = await executeToolCall({
-          registry: toolRegistry,
-          id: `background-register-${requestId}`,
-          name: 'agent_delegate_background',
-          arguments: {
-            task: executionTaskText,
-            title: visibleUserText.slice(0, 140) || storedUserContent.slice(0, 140) || 'Background task',
-            reason: legacyDelegationHint.reason,
-            preferredAgentIds: availableWorkerAgents.slice(0, 8).map((agent: any) => agent.id),
-            forceOrchestration: true,
-          },
-          context: {
-            ...toolSecurityContext,
-            userId: uid,
-            taskId: durableTaskId,
-            conversationId: conversation.id,
-            conversationAgentId,
-            personalityId,
-            turnId: requestId,
-            requestId,
-            idempotencyKey: `background:${conversation.id}:${requestId}`,
-            domain: resolvedDomain,
-            orgId: resolvedOrgId,
-            actionIntent: visibleUserText,
-            routedTaskText: turnFlow.routeText,
-            source: 'chat_background_registration',
-            modelRouting: {
-              provider: activeProvider,
-              model: activeModel,
-              selectionMode: reasoningRoutePolicy.selectionMode,
-              fallbackCandidates: reasoningRoutePolicy.fallbackCandidates,
-              allowCloudFallback: reasoningRoutePolicy.allowCloudFallback,
-            },
-            toolPolicy: {
-              allowedTools: ['agent_delegate_background'],
-              requireConfirmation: [],
-              forbiddenTools: [],
-              maxIterations: 1,
-            },
-          },
-        });
-        allToolRecords.push(delegationRecord);
-        let registeredTask: any = null;
-        try {
-          const payload = JSON.parse(delegationRecord.result || '{}');
-          if (!delegationRecord.error && payload?.ok === true && payload?.status === 'registered') {
-            registeredTask = payload.task;
-          }
-        } catch {}
-        if (registeredTask?.id) {
-          responseText = buildDelegationAck(registeredTask.workerNames || [], registeredTask.id);
-          llmWasCalled = false;
-          emitAgent('agent:delegation', {
-            taskId: registeredTask.id,
-            task: registeredTask,
-            reason: legacyDelegationHint.reason,
-            complexity: backgroundComplexity,
-            workers: registeredTask.workerNames || [],
-          });
-          emitAgent('agent:background_task_update', {
-            taskId: registeredTask.id,
-            task: registeredTask,
-            source: 'background_delegation',
-          });
-          pushNotification(uid, {
-            type: 'background_delegation',
-            title: 'Lumi background agents',
-            message: `Task registered for ${Math.max(1, registeredTask.workerNames?.length || 0)} worker agent(s): ${visibleUserText.slice(0, 80)}`,
-          });
-        }
-      }
-
       if (!responseText) {
-        // Path C: Normal LLM path (simple queries, or orchestrator fallback)
+        // LumiCore owns every normal and complex task through this single model/tool path.
 
         // Load conversation history from persistence (survives page reload / reconnect)
         let persistedHistory: NormalizedMessage[] = [];
@@ -4153,7 +4047,7 @@ export function registerChatHandler(
         normalTurnMessages = messages;
 
         try {
-          console.log('[ChatHandler] Calling Path C with provider:', activeProvider, 'model:', activeModel, 'tools:', executionDecision.allowToolUse ? 'enabled' : 'off');
+          console.log('[ChatHandler] Calling Path C with provider:', activeProvider, 'model:', activeModel, 'tools:', toolSessionActive ? 'active' : 'conversation');
           const streamChunks: string[] = [];
           const onChunk: StreamCallback = (chunk) => {
             streamChunks.push(chunk);
@@ -4166,7 +4060,7 @@ export function registerChatHandler(
           };
 
           // Sanctuary agents get zero tool access — they can only talk
-          if (!executionDecision.allowToolUse) {
+          if (!toolSessionActive) {
             const response = await makeLLMCallStreaming(
               messages,
               [],
@@ -4243,7 +4137,7 @@ export function registerChatHandler(
               signal: abortController.signal,
               ...reasoningRoutePolicy,
             },
-            isSanctuary ? undefined : (record) => {
+            (record) => {
               allToolRecords.push(record);
               if (isDirectDesktopTool(record.name)) return;
               const toolPayload = {
@@ -4296,7 +4190,7 @@ export function registerChatHandler(
               routedTaskText: turnFlow.routeText,
               ...(runtimeOwnedDeterministicRecoveryCall ? { runtimeOwnedDeterministicRecoveryCall } : {}),
               desktopExecutionTracker,
-              ...(executionDecision.allowToolUse || clientActionOnlyTurn || selfRepairTurn ? { requestConfirmation: requestToolConfirmation } : {}),
+              ...(toolSessionActive ? { requestConfirmation: requestToolConfirmation } : {}),
             },
             llmGetters.getOllama,
             llmGetters.getLmStudio,
@@ -4350,6 +4244,7 @@ export function registerChatHandler(
       }
       const verifiedClientMode = getVerifiedClientModeChange(allToolRecords);
       if (verifiedClientMode) saveStoredOperationMode(uid, verifiedClientMode);
+      const finalTaskRecords = taskAwareRecords(allToolRecords);
       // Waiting for an immutable one-time confirmation is a valid terminal
       // state for this turn, not a failed completion attempt. The model/tool
       // path must render the same confirmation receipt as the deterministic
@@ -4365,19 +4260,36 @@ export function registerChatHandler(
         : finalizeLumiResponse({
             taskText: executionTaskText,
             responseText,
-            toolRecords: taskAwareRecords(allToolRecords),
+            toolRecords: finalTaskRecords,
             source: 'chat',
             flow: turnFlow,
           });
+      const desktopPauseBlocksCurrentTask = () => {
+        return shouldBlockForDesktopControlPause({
+          pauseReason: desktopRelay.getControlPauseReason(),
+          waitingForConfirmation: Boolean(pendingConfirmationCreatedThisTurn),
+          taskText: executionTaskText,
+          toolRecords: taskAwareRecords(allToolRecords),
+        });
+      };
+      if (desktopPauseBlocksCurrentTask()) {
+        const pausePresentation = formatDesktopControlPausePresentation(executionTaskText);
+        finalResponse = {
+          ...finalResponse,
+          text: pausePresentation.text,
+          blocked: true,
+          reason: pausePresentation.reason,
+        };
+      }
       const guardRecovery = await recoverBlockedExecutionOnce({
         task: executionTaskText,
         responseText,
         finalization: finalResponse,
-        allowToolUse: executionDecision.allowToolUse && !isSanctuary,
+        allowToolUse: toolSessionActive,
         pendingConfirmation: Boolean(pendingConfirmationCreatedThisTurn),
         requiresFreshConfirmation: correctionRequiresFreshConfirmation,
-        aborted: abortController.signal.aborted,
-        isAborted: () => abortController.signal.aborted,
+        aborted: abortController.signal.aborted || desktopPauseBlocksCurrentTask(),
+        isAborted: () => abortController.signal.aborted || desktopPauseBlocksCurrentTask(),
         isPendingConfirmation: () => Boolean(pendingConfirmationCreatedThisTurn),
         toolRecords: taskAwareRecords(allToolRecords),
         attempt: async ({ instruction, priorToolRecords, recordTool }) => {
@@ -4633,6 +4545,7 @@ export function registerChatHandler(
             requestId,
             completionFeedback: responseCompletionFeedback,
           });
+          refreshTerminalPayloadTaskRelation(responseTerminalPayload, durableTaskId);
         },
         flush: flushDBOrThrow,
         persistTerminalReceipt: () => recordChatExecutionTerminalEventDurably(
@@ -4719,7 +4632,7 @@ export function registerChatHandler(
         scheduleChatSummary(conversationId);
       }
 
-      if (!finalResponse.blocked) {
+      if (!isMemoryAvatar && !finalResponse.blocked) {
         persistChatLearning(responseText, { toolRecords: allToolRecords, logLabel: 'chat' });
       }
 
@@ -4740,7 +4653,7 @@ export function registerChatHandler(
             addMemory({
               userId: uid, type: mem.type, content: mem.content,
               keywords: mem.keywords, confidence: Math.min((mem.confidence || 0.5) + 0.2, 1.0),
-              sourceInteractionId: interactionId, agentId: agentId || '',
+              sourceInteractionId: interactionId, agentId: conversationAgentId,
             } as any, { domain: resolvedDomain, orgId: resolvedOrgId, source: 'chat' });
           }
           console.log(`[ChatHandler] Correction learned: ${corrected.memories.length} memories with boosted confidence`);
@@ -4779,11 +4692,11 @@ export function registerChatHandler(
 
       // Lightweight per-conversation evolution — micro-shifts after meaningful chats
       // Fires if enough owner_trait memories have accumulated, no 7-day wait needed
-      if (allowAdaptiveLearning && resolvedDomain === 'personal' && !isSanctuary && responseText && !finalResponse.blocked && cognition.intent.category !== 'command' && !personalityRegistry.isEvolutionFrozen(personalityId, uid)) {
+      if (allowAdaptiveLearning && resolvedDomain === 'personal' && responseText && !finalResponse.blocked && cognition.intent.category !== 'command' && !personalityRegistry.isEvolutionFrozen(personalityId, uid)) {
         try {
           const evolutionConfig = personalityRegistry.getEvolutionConfig(personalityId, uid);
           const step = await lightweightEvolve(
-            personalityConfig,
+            personalityConfig as any,
             uid,
             evolutionConfig,
             llmGetters.getDeepSeek,
@@ -4823,13 +4736,13 @@ export function registerChatHandler(
         for (const mem of extracted.memories) {
           let parentId: string | null = null;
           if ((mem as any).branchHint) {
-            const branch = ensureBranch(uid, (mem as any).branchHint, agentId || '', null, { domain: resolvedDomain, orgId: resolvedOrgId });
+            const branch = ensureBranch(uid, (mem as any).branchHint, conversationAgentId, null, { domain: resolvedDomain, orgId: resolvedOrgId });
             parentId = branch.id;
           }
           addMemory({
             userId: uid, type: mem.type, content: mem.content,
             keywords: mem.keywords, confidence: mem.confidence, sourceInteractionId: interactionId,
-            agentId: agentId || '',
+            agentId: conversationAgentId,
           } as any, { parentId, location: locationTag, domain: resolvedDomain, orgId: resolvedOrgId, source: 'chat' });
         }
         for (const rem of extracted.reminders) {
@@ -4866,8 +4779,8 @@ export function registerChatHandler(
       saveEmotionalState(emotionKey, himUpdated);
       saveHIMState(emotionKey, newHim);
 
-      // Emit contextual greeting on reconnect (sanctuary agents don't initiate)
-      if (!isSanctuary && isReconnect && updatedState.intimacy > 0.2) {
+      // Emit a contextual greeting on reconnect.
+      if (!isMemoryAvatar && isReconnect && updatedState.intimacy > 0.2) {
         const greeting = generateContextualGreeting(updatedState, uid);
         if (greeting) {
           const greetingTs = new Date().toISOString();
@@ -4876,7 +4789,7 @@ export function registerChatHandler(
           greetingDb.interactions.push({
             id: `greeting-${uid}-${Date.now()}`,
             userId: uid,
-            agentId: agentId || '',
+            agentId: conversationAgentId,
             conversationId: conversationId || '',
             content: greeting,
             response: '',

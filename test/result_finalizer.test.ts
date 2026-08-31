@@ -45,138 +45,6 @@ describe('Lumi result finalizer', () => {
     expect(result.text).not.toContain('client.modes');
   });
 
-  it('keeps a legal edition introduction as a conceptual response', async () => {
-    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const responseText = '\u6211\u662f Lumi \u5f8b\u5e08\u5ba2\u6237\u5b9a\u5236\u7248\u3002\u6211\u53ef\u4ee5\u5e2e\u4f60\u5b8c\u6210\u6750\u6599\u6574\u7406\u548c\u6587\u4e66\u8349\u7a3f\uff0c\u4f46\u6b63\u5f0f\u7ed3\u8bba\u5fc5\u987b\u7531\u6267\u4e1a\u5f8b\u5e08\u590d\u6838\u3002';
-    const result = finalizeLumiResponse({
-      taskText: '\u4f60\u662f\u8c01\uff0c\u80fd\u5e2e\u5f8b\u5e08\u5b8c\u6210\u54ea\u4e9b\u5de5\u4f5c\uff1f',
-      responseText,
-      toolRecords: [],
-      source: 'chat',
-      flow: {
-        conceptualCapabilityQuestion: true,
-      } as any,
-    });
-
-    expect(result).toMatchObject({ blocked: false, text: responseText });
-  });
-
-  it('keeps a zero-tool edition introduction even when it describes work Lumi can complete', async () => {
-    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const responseText = '\u6211\u662f Lumi \u5f8b\u5e08\u5ba2\u6237\u5b9a\u5236\u7248\u3002\u6211\u53ef\u4ee5\u5e2e\u4f60\u5b8c\u6210\u6750\u6599\u6574\u7406\u548c\u6587\u4e66\u8349\u7a3f\uff0c\u4f46\u6b63\u5f0f\u7ed3\u8bba\u5fc5\u987b\u7531\u6267\u4e1a\u5f8b\u5e08\u590d\u6838\u3002';
-    const result = finalizeLumiResponse({
-      taskText: '\u4f60\u662f\u8c01\uff0c\u80fd\u5e2e\u5f8b\u5e08\u5b8c\u6210\u54ea\u4e9b\u5de5\u4f5c\uff1f',
-      responseText,
-      toolRecords: [],
-      source: 'chat',
-      flow: {
-        conceptualCapabilityQuestion: true,
-      } as any,
-    });
-
-    expect(result).toMatchObject({ blocked: false, text: responseText });
-  });
-
-  it('formats a newly created legal case workspace from its verified persisted receipt', async () => {
-    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const caseId = 'case_new_legal_001';
-    const content = [
-      '# \u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7 \u6848\u4ef6\u5de5\u4f5c\u53f0',
-      '',
-      '## \u4e00\u3001\u6848\u4ef6\u7a7a\u95f4',
-      `- \u6848\u4ef6ID\uff1a${caseId}`,
-      '- \u9636\u6bb5\uff1a\u8bc9\u524d',
-      '- \u5f53\u4e8b\u4eba\uff1a\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8\uff1b\u4e59\u65b9\u793a\u4f8b\u516c\u53f8',
-      '- \u4e8b\u5b9e\u6458\u8981\uff1a\u4e89\u8bae\u91d1\u989d\uff1a\u4eba\u6c11\u5e01800000\u5143',
-      '',
-      '## \u516d\u3001\u8bc1\u636e\u7f3a\u53e3\u4e0e\u8865\u5f3a\u6e05\u5355',
-      '- 1. \u5f85\u6574\u7406\u8bc1\u636e\u6750\u6599\uff1a\u9700\u8865\u5145\u8bc1\u636e\u540d\u79f0\u3001\u6765\u6e90\u3001\u9875\u7801\u548c\u539f\u4ef6\u72b6\u6001',
-      '',
-      '## \u4e03\u3001\u6cd5\u6e90\u4e0e\u7c7b\u6848\u68c0\u7d22\u987a\u5e8f',
-    ].join('\n');
-    const result = finalizeLumiResponse({
-      taskText: '\u65b0\u5efa\u4e00\u4e2a\u6d4b\u8bd5\u6848\u4ef6\u5de5\u4f5c\u53f0\uff0c\u6848\u4ef6\u540d\u201c\u5f8b\u5e08\u7248\u7a33\u5b9a\u6027\u9a8c\u6536\u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u201d\uff0c\u5f53\u4e8b\u4eba\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8\u3001\u4e59\u65b9\u793a\u4f8b\u516c\u53f8\uff0c\u4e89\u8bae\u91d1\u989d80\u4e07\u5143\uff0c\u9636\u6bb5\u4e3a\u8bc9\u524d\u3002\u53ea\u4f7f\u7528\u8fd9\u4e9b\u4e8b\u5b9e\uff0c\u4e0d\u8981\u8865\u9020\u8bc1\u636e\uff1b\u521b\u5efa\u5b8c\u6210\u540e\u544a\u8bc9\u6211\u6848\u4ef6ID\u3001\u5df2\u4fdd\u5b58\u5b57\u6bb5\u3001\u7f3a\u5931\u6750\u6599\u548c\u4efb\u52a1\u56de\u6267\u72b6\u6001\u3002',
-      responseText: '\u5df2\u7ecf\u521b\u5efa\u5e76\u4fdd\u5b58\u6848\u4ef6\u5de5\u4f5c\u53f0\u3002',
-      toolRecords: [{
-        name: 'legal_case_workspace',
-        arguments: {},
-        result: content,
-        receipt: {
-          ok: true,
-          status: 'updated',
-          persisted: true,
-          changedCaseIds: [caseId],
-          articleIds: [],
-          artifacts: [],
-          content,
-        },
-        terminalVerification: {
-          status: 'verified',
-          strategy: 'terminal_receipt',
-          reason: 'verified',
-        },
-      }],
-      source: 'command-center-chat',
-    });
-
-    expect(result.blocked).toBe(false);
-    expect(result.text).toContain(caseId);
-    expect(result.text).toContain('\u9636\u6bb5 \u8bc9\u524d');
-    expect(result.text).toContain('\u7532\u65b9\u6d4b\u8bd5\u516c\u53f8\uff1b\u4e59\u65b9\u793a\u4f8b\u516c\u53f8');
-    expect(result.text).toContain('\u4eba\u6c11\u5e01800000\u5143');
-    expect(result.text).toContain('\u4efb\u52a1\u56de\u6267\uff1a\u5df2\u9a8c\u8bc1\uff08legal_case_workspace\uff09');
-    expect(result.text).not.toContain('\u6211\u8fd8\u4e0d\u80fd\u8bf4\u8fd9\u4ef6\u4e8b\u5df2\u7ecf\u5b8c\u6210');
-  });
-
-  it('summarizes a safe legal review draft from the verified industry receipt', async () => {
-    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const content = [
-      '# \u4e70\u5356\u5408\u540c\u7ea0\u7eb7\u8bc9\u524d\u5e94\u5bf9\u7b56\u7565\u8349\u7a3f',
-      '',
-      '## \u4e8c\u3001\u5df2\u77e5\u4e8b\u5b9e',
-      '1. \u7532\u65b9\u4e3a\u6d4b\u8bd5\u516c\u53f8\uff0c\u4e59\u65b9\u4e3a\u793a\u4f8b\u516c\u53f8\u3002',
-      '2. \u4e89\u8bae\u91d1\u989d\u4e3a80\u4e07\u5143\u3002',
-      '',
-      '## \u4e94\u3001\u9700\u8981\u5f8b\u5e08\u590d\u6838\u7684\u70b9',
-      '1. \u6211\u65b9\u8eab\u4efd\u548c\u7acb\u573a\u5f85\u786e\u8ba4\u3002',
-      '2. \u8bc1\u636e\u539f\u4ef6\u548c\u6765\u6e90\u5f85\u786e\u8ba4\u3002',
-      '',
-      '## \u516d\u3001\u8fb9\u754c\u58f0\u660e',
-      '- \u672a\u53d1\u9001\u3001\u672a\u63d0\u4ea4\u3001\u672a\u7b7e\u7f72\u3002',
-    ].join('\n');
-    const result = finalizeLumiResponse({
-      taskText: '\u57fa\u4e8e\u6848\u4ef6\u5de5\u4f5c\u53f0\u5df2\u4fdd\u5b58\u4e8b\u5b9e\uff0c\u751f\u6210\u4e00\u4efd\u8bc9\u524d\u5e94\u5bf9\u7b56\u7565\u5f8b\u5e08\u590d\u6838\u8349\u7a3f\u3002\u4e0d\u8981\u53d1\u9001\u3001\u63d0\u4ea4\u6216\u7b7e\u7f72\u3002',
-      responseText: '\u6587\u4ef6\u5df2\u751f\u6210\u3002',
-      toolRecords: [{
-        name: 'legal_generate_argument_or_opinion',
-        arguments: { documentType: '\u5e94\u5bf9\u7b56\u7565' },
-        result: content,
-        receipt: {
-          ok: true,
-          status: 'generated',
-          persisted: true,
-          changedCaseIds: ['case_001'],
-          articleIds: [],
-          artifacts: [],
-          content,
-        },
-        terminalVerification: {
-          status: 'verified',
-          strategy: 'terminal_receipt',
-          reason: 'verified',
-        },
-      }],
-      source: 'command-center-chat',
-    });
-
-    expect(result.blocked).toBe(false);
-    expect(result.text).toContain('\u8349\u7a3f\u8981\u70b9');
-    expect(result.text).toContain('\u7532\u65b9\u4e3a\u6d4b\u8bd5\u516c\u53f8');
-    expect(result.text).toContain('\u5f8b\u5e08\u590d\u6838\u70b9');
-    expect(result.text).toContain('\u5df2\u9a8c\u8bc1\uff08legal_generate_argument_or_opinion\uff09');
-    expect(result.text).toContain('\u672a\u53d1\u9001\u3001\u672a\u63d0\u4ea4\u3001\u672a\u7b7e\u7f72');
-  });
-
   it('grounds receipt-only runtime cancellation after nested JSON normalization', async () => {
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
     const result = finalizeLumiResponse({
@@ -792,51 +660,9 @@ describe('Lumi result finalizer', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.text).toContain('cannot honestly mark this complete yet');
+    expect(result.text).toBe('I could not complete the requested action because it never reached a successful execution.');
+    expect(result.text).not.toMatch(/tool|receipt|evidence/i);
     expect(result.notification?.type).toBe('work_product_guard');
-  });
-
-  it('allows a read-only follow-up to summarize persisted completion receipts without a new write', async () => {
-    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const responseText = '这个案子目前还缺送达凭证、验收异议记录和对方付款安排；刚才的案件推进清单已经生成，本轮没有重新生成文件。';
-    const result = finalizeLumiResponse({
-      taskText: '这个案子还缺什么？请接着刚才的结果直接回答，不要重新生成文件。',
-      responseText,
-      toolRecords: [],
-      source: 'chat',
-      flow: {
-        statusOnlyContinuation: true,
-        routeText: [
-          '这个案子还缺什么？请接着刚才的结果直接回答，不要重新生成文件。',
-          '## Recent action continuation context',
-          'Recovered structured action state:',
-          '- followupIntent: status',
-          '- taskStatus: completed',
-          'Recent tool evidence:',
-          '- write_file | path=D:\\lumi_output\\案件推进清单.md | status=verified',
-        ].join('\n'),
-      } as any,
-    });
-
-    expect(result.blocked).toBe(false);
-    expect(result.text).toBe(responseText);
-    expect(result.reason).toContain('persisted recent-action receipts');
-  });
-
-  it('does not trust a status-shaped completion claim without recovered receipts', async () => {
-    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const result = finalizeLumiResponse({
-      taskText: '这个案子还缺什么？',
-      responseText: '案件推进清单已经生成。',
-      toolRecords: [],
-      source: 'chat',
-      flow: {
-        statusOnlyContinuation: true,
-        routeText: 'Recovered structured action state:\n- followupIntent: status\n- taskStatus: completed',
-      } as any,
-    });
-
-    expect(result.blocked).toBe(true);
   });
 
   it('does not bypass the generic guard when no task contract is recognized', async () => {
@@ -1297,6 +1123,63 @@ describe('Lumi result finalizer', () => {
     expect(result.reason).toContain('Structured evidence correction');
   });
 
+  it('blocks a claimed client mode switch when the current turn has no action receipt', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const result = finalizeLumiResponse({
+      taskText: '\u5207\u6362\u5ba2\u6237\u7aef\u804a\u5929\u6a21\u5f0f',
+      responseText: '\u5df2\u7ecf\u5207\u6362\u5230\u804a\u5929\u6a21\u5f0f\u3002',
+      toolRecords: [],
+      source: 'chat',
+      flow: { clientActionOnlyTurn: true, requestedMode: 'chat' } as any,
+    });
+
+    expect(result.blocked).toBe(true);
+  });
+
+  it('completes a client mode switch from an exact verified client_action receipt', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const result = finalizeLumiResponse({
+      taskText: '\u5207\u6362\u5ba2\u6237\u7aef\u804a\u5929\u6a21\u5f0f',
+      responseText: '\u8fd9\u6b21\u8fd8\u6ca1\u6709\u5b8c\u6210\u3002',
+      toolRecords: [{
+        name: 'client_action',
+        arguments: { action: 'set_client_mode', mode: 'chat' },
+        result: JSON.stringify({
+          ok: true,
+          action: 'set_client_mode',
+          mode: 'chat',
+          verification: { status: 'verified' },
+        }),
+      }],
+      source: 'chat',
+      flow: { clientActionOnlyTurn: true, requestedMode: 'chat' } as any,
+    });
+
+    expect(result.blocked).toBe(false);
+  });
+
+  it('does not complete a client mode switch from a verified receipt for another client action', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const result = finalizeLumiResponse({
+      taskText: '\u5207\u6362\u5ba2\u6237\u7aef\u804a\u5929\u6a21\u5f0f',
+      responseText: '\u5df2\u7ecf\u5207\u6362\u5230\u804a\u5929\u6a21\u5f0f\u3002',
+      toolRecords: [{
+        name: 'client_action',
+        arguments: { action: 'open_command_center' },
+        result: JSON.stringify({
+          ok: true,
+          action: 'open_command_center',
+          target: 'command-center',
+          verification: { status: 'verified' },
+        }),
+      }],
+      source: 'chat',
+      flow: { clientActionOnlyTurn: true, requestedMode: 'chat' } as any,
+    });
+
+    expect(result.blocked).toBe(true);
+  });
+
   it('treats explicit no-input and no-substitute clauses as open constraints, not remaining work', async () => {
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
 
@@ -1621,8 +1504,7 @@ describe('Lumi result finalizer', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.text).toContain('not actually started');
-    expect(result.text).toContain('no successful tool evidence');
+    expect(result.text).toContain('never reached a successful execution');
   });
 
   it('blocks a runtime-repair plan when no tool actually started', async () => {
@@ -1670,11 +1552,11 @@ describe('Lumi result finalizer', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.text).toContain('not actually started');
+    expect(result.text).toContain('available result does not confirm it');
     expect(result.reason).toContain('content-read/open/review');
   });
 
-  it('keeps blocked background delegation results compact', async () => {
+  it('keeps blocked autonomous task results compact', async () => {
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
 
     const result = finalizeLumiResponse({
@@ -1686,7 +1568,7 @@ describe('Lumi result finalizer', () => {
         result: '',
         error: 'Desktop tool "desktop_open" timed out (30s)',
       }],
-      source: 'background_delegation',
+      source: 'task',
     });
 
     expect(result.blocked).toBe(true);
@@ -1810,109 +1692,13 @@ describe('Lumi result finalizer', () => {
         result: '',
         error: 'write_file requires a file path',
       }],
-      source: 'background_delegation',
+      source: 'task',
     });
 
     expect(result.blocked).toBe(false);
     expect(result.text).toContain('运行快照');
     expect(result.text).toContain('lumi-core.exe');
     expect(result.text).not.toContain('write_file');
-  });
-
-  it('grounds desktop AI roundtable summaries in submission and answer status', async () => {
-    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const toolResult = {
-      ok: false,
-      targets: [{ id: 'chatgpt', label: 'ChatGPT' }, { id: 'claude', label: 'Claude' }],
-      targetSelection: {
-        mode: 'explicit',
-        runningTargetIds: [],
-        installedTargetIds: [],
-        note: 'Targets were explicitly selected by the caller.',
-      },
-      ask: {
-        submittedCount: 2,
-        results: [
-          { target: 'chatgpt', label: 'ChatGPT', status: 'submitted_unverified' },
-          { target: 'claude', label: 'Claude', status: 'submitted_unverified' },
-        ],
-      },
-      answers: [
-        { target: 'chatgpt', label: 'ChatGPT', status: 'pending', answerText: null },
-        { target: 'claude', label: 'Claude', status: 'pending', answerText: null },
-      ],
-    };
-
-    const result = finalizeLumiResponse({
-      taskText: 'Use desktop_ai_roundtable with ChatGPT and Claude, collect their visible answers, then summarize them.',
-      responseText: 'ChatGPT and Claude are not installed or running.',
-      toolRecords: [{
-        name: 'desktop_ai_roundtable',
-        arguments: { targets: ['chatgpt', 'claude'] },
-        result: JSON.stringify(toolResult),
-      }],
-      source: 'chat',
-    });
-
-    expect(result.blocked).toBe(false);
-    expect(result.reason).toContain('structured tool evidence');
-    expect(result.text).toContain('ChatGPT: question pasted and submitted');
-    expect(result.text).toContain('Claude: question pasted and submitted');
-    expect(result.text).toContain('2 target(s) are submitted and pending');
-    expect(result.text).toContain('This is not app unavailable');
-    expect(result.text).not.toContain('not installed or running');
-  });
-
-  it('grounds external AI collaboration in the persistent per-target source receipt', async () => {
-    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const result = finalizeLumiResponse({
-      taskText: 'Ask ChatGPT and Claude, collect their answers, and compare them.',
-      responseText: 'Both models completed successfully and agreed.',
-      toolRecords: [{
-        name: 'external_ai_collaborate',
-        arguments: { question: 'Compare A and B.', targets: ['chatgpt', 'claude'] },
-        result: JSON.stringify({
-          verified: true,
-          status: 'partial',
-          sessionId: 'external-ai-session-grounded',
-          taskId: 'task-grounded',
-          counts: { targets: 2, answered: 1, pending: 1, blocked: 0, failed: 0, lateAnswers: 0 },
-          results: [
-            {
-              id: 'dispatch-chatgpt',
-              targetId: 'chatgpt',
-              targetLabel: 'ChatGPT',
-              status: 'answered',
-              answerText: 'Approach A has lower operational risk.',
-              sourceEvidence: {
-                routeKind: 'api',
-                provider: 'openai',
-                model: 'gpt-test',
-                responseDigest: 'digest-chatgpt',
-              },
-            },
-            {
-              id: 'dispatch-claude',
-              targetId: 'claude',
-              targetLabel: 'Claude',
-              status: 'unknown',
-              error: 'Timed out after a possible external submission; resend stopped.',
-              sourceEvidence: { routeKind: 'mcp', toolName: 'mcp_claude_ask' },
-            },
-          ],
-        }),
-      }],
-      source: 'chat',
-    });
-
-    expect(result.blocked).toBe(false);
-    expect(result.reason).toContain('external-ai-session-grounded');
-    expect(result.text).toContain('ChatGPT: answered; source api:openai/gpt-test');
-    expect(result.text).toContain('Approach A has lower operational risk.');
-    expect(result.text).toContain('Claude: unknown; source mcp:mcp_claude_ask');
-    expect(result.text).toContain('1 answered, 1 pending/unknown');
-    expect(result.text).toContain('not automatically resent');
-    expect(result.text).not.toContain('Both models completed successfully');
   });
 
   it('grounds external AI history status in the persistent sync receipt instead of model narration', async () => {
@@ -2080,7 +1866,7 @@ describe('Lumi result finalizer', () => {
         arguments: { path: 'C:\\tmp\\charts.py' },
         result: 'Generated C:\\tmp\\sales_dashboard.png',
       }],
-      source: 'background_delegation',
+      source: 'task',
     });
 
     expect(result.blocked).toBe(true);
@@ -2279,57 +2065,6 @@ describe('Lumi result finalizer', () => {
           result: '\u73b0\u884c\u6709\u6548\u6cd5\u5f8b\u786c\u95e8\u69db\uff1a\u901a\u8fc7\n\u5df2\u5e9f\u6b62/\u5931\u6548\u98ce\u9669\uff1a0',
         },
       ],
-      source: 'chat',
-    });
-
-    expect(result.blocked).toBe(false);
-    expect(result.text).toBe(responseText);
-  });
-
-  it('keeps a verified internal bid working draft that explicitly forbids citations and submission', async () => {
-    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const taskText = '\u4e3a\u201c\u56ed\u533aAI\u6cd5\u5f8b\u670d\u52a1\u8bd5\u70b9\u9879\u76ee\u201d\u5236\u4f5c\u5185\u90e8\u6295\u6807\u54cd\u5e94\u5de5\u4f5c\u5e95\u7a3f\uff1b\u4e0d\u5f97\u5f15\u7528\u65e0\u6cd5\u6838\u9a8c\u7684\u5177\u4f53\u6cd5\u6761\u6216\u6848\u4f8b\uff1b\u4e0d\u8981\u4e0a\u4f20\u3001\u53d1\u9001\u3001\u63d0\u4ea4\u3001\u7b7e\u7f72\u6216\u6295\u6807\u3002';
-    const responseText = '# \u5185\u90e8\u6295\u6807\u5de5\u4f5c\u5e95\u7a3f\n\u5df2\u751f\u6210\u5e76\u5f52\u6863\u5de5\u4f5c\u5e95\u7a3f\u3002\n## \u6b63\u5f0f\u6295\u6807\u963b\u65ad\u9879\n\u8d44\u8d28\u3001\u62a5\u4ef7\u3001\u4fdd\u8bc1\u91d1\u548c\u7b7e\u7ae0\u5747\u5f85\u786e\u8ba4\u3002\n\u672c\u8f6e\u4ec5\u662f\u5185\u90e8\u5e95\u7a3f\uff0c\u672a\u4e0a\u4f20\u3001\u672a\u53d1\u9001\u3001\u672a\u63d0\u4ea4\u3001\u672a\u7b7e\u7f72\u3001\u672a\u6295\u6807\u3002';
-    const result = finalizeLumiResponse({
-      taskText,
-      responseText,
-      toolRecords: [{
-        name: 'legal_generate_bid',
-        arguments: { projectName: '\u56ed\u533aAI\u6cd5\u5f8b\u670d\u52a1\u8bd5\u70b9\u9879\u76ee', useModel: false },
-        result: responseText,
-        receipt: { ok: true, status: 'generated', persisted: true },
-        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'internal draft archived' },
-      } as any],
-      source: 'chat',
-    });
-
-    expect(result.blocked).toBe(false);
-    expect(result.text).toBe(responseText);
-  });
-
-  it('keeps a receipt-backed delivery assessment when the document remains blocked', async () => {
-    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const taskText = '针对案件工作台中已归档的律师复核草稿执行交付核验，核对引用、时效、管辖、文件状态和律师复核边界；不要重新生成文书。';
-    const responseText = [
-      '# 已归档文书交付核验',
-      '## 逐项结果',
-      '- 阻断：草稿未检测到可核验的现行法条引用。',
-      '## 总体结论',
-      '- 不可正式交付；本轮只完成核验，没有重新生成文书。',
-      '## 执行记录',
-      '- 任务回执状态：核验已完成并形成结构化回执。',
-    ].join('\n');
-    const result = finalizeLumiResponse({
-      taskText,
-      responseText,
-      toolRecords: [{
-        id: 'delivery-verification',
-        name: 'legal_verify_archived_delivery',
-        arguments: { caseId: 'case-1', materialTitle: '律师复核草稿' },
-        result: responseText,
-        receipt: { ok: true, status: 'verified', persisted: false },
-        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'read-only assessment' },
-      } as any],
       source: 'chat',
     });
 
@@ -2695,6 +2430,312 @@ describe('Lumi result finalizer', () => {
     expect(result.reason).toContain('Primary desktop-open verified');
   });
 
+  it('fuses the real Aliyun open observation and does not let later desktop pauses erase it', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const result = finalizeLumiResponse({
+      taskText: '\u6253\u5f00\u963f\u91cc\u4e91\u5b98\u7f51',
+      responseText: [
+        '\u72b6\u6001\uff1a\u5931\u8d25\u3002',
+        '\u8bc1\u636e\uff1a\u684c\u9762\u64cd\u4f5c\u5931\u8d25\u3002',
+        '\u5177\u4f53\u963b\u585e\uff1adesktop_control_paused_for_user_activity',
+        '\u6211\u5df2\u4fdd\u7559\u539f\u76ee\u6807\u3001\u5df2\u6267\u884c\u6b65\u9aa4\u548c\u56de\u6267\u3002',
+      ].join('\n'),
+      toolRecords: [{
+        name: 'desktop_open',
+        arguments: { target: 'https://www.aliyun.com' },
+        result: JSON.stringify({
+          ok: false,
+          status: 'target_mismatch',
+          target: 'https://www.aliyun.com',
+          targetMatched: false,
+          actualTarget: {
+            title: '\u963f\u91cc\u4e91-\u8ba1\u7b97\uff0c\u4e3a\u4e86\u65e0\u6cd5\u8ba1\u7b97\u7684\u4ef7\u503c - \u5938\u514b',
+            processName: 'quark.exe',
+          },
+        }),
+        terminalVerification: {
+          status: 'failed',
+          strategy: 'state_diff',
+          reason: 'The terminal receipt reported target_mismatch.',
+        },
+        envelope: {
+          version: 1,
+          status: 'target_mismatch',
+          toolName: 'desktop_open',
+          taskId: 'aliyun-task',
+          turnId: 'aliyun-turn',
+          requestId: 'aliyun-request',
+          idempotencyKey: 'aliyun-open',
+          targetIdentity: 'https://www.aliyun.com',
+          completedAt: '2026-08-28T10:20:51.107Z',
+          verification: { status: 'failed', reason: 'The terminal receipt reported target_mismatch.' },
+        },
+      }, {
+        name: 'desktop_active_window',
+        arguments: {},
+        result: JSON.stringify({ title: 'LumiCore', process_name: 'lumi-core.exe' }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'desktop_running_processes',
+        arguments: { top: 15 },
+        result: JSON.stringify({ count: 15 }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'browser_open_task',
+        arguments: { url: 'https://www.aliyun.com', open: true },
+        result: '',
+        error: 'Desktop control is paused: desktop_control_paused_for_user_activity',
+        terminalVerification: {
+          status: 'failed',
+          strategy: 'state_diff',
+          reason: 'Desktop control is paused: desktop_control_paused_for_user_activity',
+        },
+      }, {
+        name: 'desktop_execution_plan_receipt',
+        arguments: {},
+        result: '{}',
+        error: 'Desktop execution ended as target_mismatch.',
+      }],
+      source: 'chat',
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toContain('\u5df2\u6253\u5f00\u963f\u91cc\u4e91\u5b98\u7f51');
+    expect(result.text).not.toMatch(/\u72b6\u6001|\u8bc1\u636e|\u56de\u6267|target_mismatch|desktop_|browser_open_task/iu);
+  });
+
+  it('reports the real NetEase sequence as opened but playback-unconfirmed', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const result = finalizeLumiResponse({
+      taskText: '\u6253\u5f00\u7f51\u6613\u4e91\u5e76\u64ad\u653e\u97f3\u4e50',
+      responseText: '\u5df2\u83b7\u53d6\u5c4f\u5e55\u753b\u9762\uff0c\u4f46\u89c6\u89c9\u8bc6\u522b\u6ca1\u6709\u5b8c\u6210\u3002',
+      toolRecords: [{
+        name: 'desktop_list_apps',
+        arguments: { query: '\u7f51\u6613\u4e91' },
+        result: JSON.stringify({ apps: ['NetEase Cloud Music'] }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'desktop_active_window',
+        arguments: {},
+        result: JSON.stringify({ title: 'LumiCore', process_name: 'lumi-core.exe' }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'desktop_open',
+        arguments: { target: '\u7f51\u6613\u4e91\u97f3\u4e50' },
+        result: JSON.stringify({
+          ok: false,
+          status: 'target_mismatch',
+          target: '\u7f51\u6613\u4e91\u97f3\u4e50',
+          targetMatched: false,
+          actualTarget: { title: '\u6708\u7259\u513f - Ice Paper', processName: 'cloudmusic.exe' },
+        }),
+        terminalVerification: {
+          status: 'failed',
+          strategy: 'state_diff',
+          reason: 'The terminal receipt reported target_mismatch.',
+        },
+      }, {
+        name: 'desktop_ui_snapshot',
+        arguments: { root: 'active' },
+        result: JSON.stringify({ status: 'ok', tree: { name: '\u6708\u7259\u513f - Ice Paper', processId: 24716 } }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'ocr_screen',
+        arguments: { query: '\u662f\u5426\u6b63\u5728\u64ad\u653e\uff1f' },
+        result: JSON.stringify({ format: 'screenshot_base64', error: 'Visual request failed.' }),
+        terminalVerification: {
+          status: 'failed',
+          strategy: 'terminal_receipt',
+          reason: 'The visual request failed.',
+        },
+      }, {
+        name: 'desktop_active_window',
+        arguments: {},
+        result: JSON.stringify({ title: '\u6708\u7259\u513f - Ice Paper', process_name: 'cloudmusic.exe' }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'desktop_keyboard_press',
+        arguments: { key: 'mediaplaypause', expectedProcessId: 24716 },
+        result: '',
+        error: 'Unknown key: mediaplaypause.',
+      }, {
+        name: 'desktop_keyboard_press',
+        arguments: { key: 'space', expectedProcessId: 24716 },
+        result: JSON.stringify({
+          ok: true,
+          status: 'verified',
+          targetMatched: true,
+          actualTarget: { title: '\u6708\u7259\u513f - Ice Paper', process_name: 'cloudmusic.exe', pid: 24716 },
+        }),
+        ...verifiedDesktopReceipt,
+      }],
+      source: 'chat',
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(result.text).toContain('\u5df2\u6253\u5f00\u7f51\u6613\u4e91');
+    expect(result.text).toContain('\u65e0\u6cd5\u533a\u5206\u662f\u64ad\u653e\u8fd8\u662f\u6682\u505c');
+    expect(result.text).not.toMatch(/ocr_screen|desktop_|mediaplaypause|target_mismatch|\u8bc1\u636e|\u56de\u6267|C:\\/iu);
+  });
+
+  it('keeps verified playback successful when a later auxiliary visual check fails', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const result = finalizeLumiResponse({
+      taskText: '\u6253\u5f00\u7f51\u6613\u4e91\u5e76\u64ad\u653e\u97f3\u4e50',
+      responseText: '\u540e\u7eed OCR \u5931\u8d25\uff0c\u4efb\u52a1\u53d7\u963b\u3002',
+      toolRecords: [{
+        name: 'desktop_active_window',
+        arguments: {},
+        result: JSON.stringify({ title: '\u7f51\u6613\u4e91\u97f3\u4e50', process_name: 'cloudmusic.exe' }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'desktop_keyboard_press',
+        arguments: { key: 'space' },
+        result: JSON.stringify({ ok: true, status: 'verified', targetMatched: true }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'desktop_ui_snapshot',
+        arguments: { root: 'active' },
+        result: JSON.stringify({ status: 'ok', playerState: 'playing', title: '\u6708\u7259\u513f - Ice Paper' }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'ocr_screen',
+        arguments: {},
+        result: JSON.stringify({ error: 'Vision provider unavailable.' }),
+        terminalVerification: { status: 'failed', strategy: 'terminal_receipt', reason: 'Vision provider unavailable.' },
+      }],
+      source: 'chat',
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toContain('\u97f3\u4e50\u6b63\u5728\u64ad\u653e');
+    expect(result.text).not.toMatch(/OCR|ocr_screen|\u53d7\u963b|\u8bc1\u636e|\u56de\u6267/iu);
+  });
+
+  it('does not let successful file searches prove that the visual model is available', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const result = finalizeLumiResponse({
+      taskText: '\u68c0\u67e5\u89c6\u89c9\u6a21\u578b\u5f53\u524d\u662f\u5426\u53ef\u7528',
+      responseText: '\u72b6\u6001\uff1a\u5931\u8d25\u3002\n\u8bc1\u636e\uff1asearch_files \u6210\u529f\uff0cocr_region \u5931\u8d25\u3002',
+      toolRecords: [{
+        name: 'search_files',
+        arguments: { path: 'D:\\lumiOS', pattern: 'vision' },
+        result: JSON.stringify({ ok: true, matches: ['server/cognition/vision_routing.ts'] }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'ocr_region',
+        arguments: { x: 0, y: 0, width: 400, height: 300 },
+        result: JSON.stringify({
+          format: 'screenshot_base64',
+          error: 'Access denied: account is not in good standing; overdue-payment.',
+        }),
+        terminalVerification: {
+          status: 'failed',
+          strategy: 'terminal_receipt',
+          reason: 'Access denied: account is not in good standing; overdue-payment.',
+        },
+      }],
+      source: 'chat',
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(result.text).toMatch(/\u6b20\u8d39|\u8d26\u6237\u72b6\u6001/iu);
+    expect(result.text).not.toMatch(/search_files|ocr_region|D:\\|overdue-payment|\u72b6\u6001\uff1a|\u8bc1\u636e\uff1a|\u56de\u6267/iu);
+  });
+
+  it('accepts one real visual probe even when unrelated auxiliary work fails later', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const result = finalizeLumiResponse({
+      taskText: '\u68c0\u67e5\u89c6\u89c9\u6a21\u578b\u5f53\u524d\u662f\u5426\u53ef\u7528',
+      responseText: '\u540e\u7eed\u8f85\u52a9\u68c0\u67e5\u5931\u8d25\u3002',
+      toolRecords: [{
+        name: 'ocr_screen',
+        arguments: { query: '\u8bf7\u8bc6\u522b\u5f53\u524d\u7a97\u53e3\u6807\u9898' },
+        result: '\u5f53\u524d\u7a97\u53e3\u662f LumiCore \u804a\u5929\u754c\u9762\u3002',
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'desktop_capture_screen',
+        arguments: {},
+        result: '',
+        error: 'Auxiliary capture failed.',
+      }],
+      source: 'chat',
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toContain('\u89c6\u89c9\u6a21\u578b\u5f53\u524d\u53ef\u7528');
+    expect(result.text).not.toMatch(/desktop_capture_screen|\u5931\u8d25|\u8bc1\u636e|\u56de\u6267/iu);
+  });
+
+  it('asks for the real foreground document naturally when Lumi itself is active', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const result = finalizeLumiResponse({
+      taskText: '\u5206\u6790\u6253\u5f00\u7684\u8fd9\u4efd\u6587\u4ef6',
+      responseText: '\u5df2\u7ecf\u5b8c\u6210\u8fd9\u4efd\u6587\u4ef6\u7684\u5206\u6790\u3002',
+      toolRecords: [{
+        name: 'desktop_active_window',
+        arguments: {},
+        result: JSON.stringify({
+          ok: true,
+          title: 'LumiCore',
+          process_name: 'lumi-core.exe',
+        }),
+        ...verifiedDesktopReceipt,
+      }],
+      source: 'chat',
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(result.text).toContain('LumiCore');
+    expect(result.text).toContain('\u6587\u6863\u5207\u5230\u524d\u53f0');
+    expect(result.text).toContain('\u6587\u4ef6\u53d1\u7ed9\u6211');
+    expect(result.text).not.toMatch(/\u72b6\u6001|\u8bc1\u636e|\u56de\u6267|\u53d7\u963b/iu);
+  });
+
+  it('keeps a verified current WPS document result when desktop control pauses afterwards', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const exactPath = 'C:\\Users\\Administrator\\Desktop\\Lumi_\u8def\u6f14.pptx';
+    const result = finalizeLumiResponse({
+      taskText: '\u5e2e\u6211\u5206\u6790\u4e00\u4e0b WPS \u5f53\u524d\u6253\u5f00\u7684\u6587\u4ef6\uff0c\u5148\u544a\u8bc9\u6211\u5b83\u4e3b\u8981\u8bb2\u4e86\u4ec0\u4e48\u3002',
+      responseText: 'execution_recovery_incomplete: desktop control paused; continue later.',
+      toolRecords: [{
+        name: 'desktop_running_processes',
+        arguments: {},
+        result: JSON.stringify({
+          processes: [{
+            name: 'wpp.exe',
+            window_titles: ['Lumi_\u8def\u6f14.pptx - WPS Office'],
+          }],
+        }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'desktop_list_files',
+        arguments: { directory: 'C:\\Users\\Administrator\\Desktop' },
+        result: JSON.stringify({ files: [{ path: exactPath }] }),
+        ...verifiedDesktopReceipt,
+      }, {
+        name: 'extract_document_text',
+        arguments: { filePath: exactPath },
+        result: JSON.stringify({
+          ok: true,
+          content: [
+            'Lumi Core \u662f\u9762\u5411\u4e2a\u4eba\u8fde\u7eed\u6027\u7684 AI \u64cd\u4f5c\u7cfb\u7edf',
+            '\u6388\u6743\u4e0e\u53ef\u9a8c\u8bc1\u884c\u52a8\u6784\u6210\u4efb\u52a1\u6267\u884c\u95ed\u73af',
+            '\u4ea4\u4ed8\u8def\u7ebf\u5305\u542b\u684c\u9762\u5ba2\u6237\u7aef\u3001\u591a\u6a21\u578b\u7f16\u6392\u548c\u5b50\u7a0b\u5e8f',
+          ].join('\\n'),
+        }),
+        ...verifiedDesktopReceipt,
+      }],
+      source: 'chat',
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.text).toContain('Lumi_\u8def\u6f14.pptx');
+    expect(result.text).toContain('\u4e2a\u4eba\u8fde\u7eed\u6027');
+    expect(result.text).toContain('\u6388\u6743\u4e0e\u53ef\u9a8c\u8bc1\u884c\u52a8');
+    expect(result.text).not.toMatch(/execution_|desktop_|C:\\\\Users|\u56de\u6267|\u53d7\u963b|\u7ee7\u7eed\u6267\u884c/iu);
+  });
+
   it('keeps socket entrypoints on the shared finalizer path', () => {
     const root = process.cwd();
     const chatSource = readFileSync(path.join(root, 'server/socket/chat.ts'), 'utf8');
@@ -2710,7 +2751,6 @@ describe('Lumi result finalizer', () => {
     expect(chatSource).not.toContain('responseText: completionCandidate');
     expect(chatSource).not.toContain('const completionText = finalizedBackground.text;');
     expect(voiceSource).toContain('responseText = finalResponse.text;');
-    expect(taskSource).toContain('orchestratedText = finalOrchestrated.text;');
     expect(taskSource).toContain('finalTaskText = finalTaskResponse.text;');
   });
 });

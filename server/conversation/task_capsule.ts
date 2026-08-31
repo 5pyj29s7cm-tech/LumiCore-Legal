@@ -581,6 +581,7 @@ export function normalizeTaskCapsuleV1(value: unknown): TaskCapsuleV1 | null {
     'tool_receipt',
     'user_correction',
     'active_window',
+    'running_window',
     'document_interface',
     'unknown',
   ]);

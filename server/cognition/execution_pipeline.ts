@@ -39,7 +39,6 @@ import {
 } from './capability_execution_plan';
 import { recordRoutingShadowComparison } from '../runtime/capability_metrics';
 import { hasExplicitNoMutationInstruction } from './tool_intent';
-import { buildActionContract } from './action_contract';
 import type { PendingAssistantOfferContext } from './pending_assistant_offer';
 
 export interface LumiCapabilityPlan extends LumiCapabilitySelection {
@@ -56,6 +55,7 @@ export interface LumiExecutionPipeline {
   execution: LumiExecutionDecision;
   authorizationPolicy: ToolPolicy;
   modelToolProjection: ReturnType<typeof buildModelToolProjection>;
+  /** True only when this turn has a concrete, authorized capability to run. */
   executionRequested: boolean;
   intentTrace: LumiIntentTrace;
   shadowComparison: LumiRoutingShadowComparison;
@@ -79,7 +79,7 @@ export interface BuildLumiExecutionPipelineInput {
   decisionText?: string;
   traceText?: string;
   source?: string;
-  /** Durable task identity supplied by non-conversation entrances such as scheduler/agent execution. */
+  /** Durable task identity supplied by non-conversation entrances such as scheduler/autonomy execution. */
   taskId?: string;
   pendingAssistantOfferContext?: PendingAssistantOfferContext;
 }
@@ -136,6 +136,7 @@ function applyCurrentTurnNoMutationConstraint(
   execution: LumiExecutionDecision,
   registry: ToolRegistry,
   text: string,
+  flow?: LumiTurnDispatch['flow'],
 ): LumiExecutionDecision {
   // A confirmation-only external-commit request deliberately says both
   // "prepare to send" and "do not send now". It must expose the exact
@@ -176,41 +177,21 @@ function applyCurrentTurnNoMutationConstraint(
     && normalizedIntent.operation === 'create'
     && normalizedIntent.sideEffectClass === 'local_write'
   ) return execution;
-  const actionContract = buildActionContract(text);
-  // A requested local deliverable may explicitly fence only consequential
-  // external actions (send/submit/publish/sign). That boundary must not erase
-  // the local workflow ledger and artifact tools needed to produce the draft.
-  // A separate prohibition on create/write/save still takes the strict
-  // read-only path below.
-  const externalCommitOnlyFence = actionContract.applies
-    && actionContract.kind !== 'none'
-    && /(?:不要|别|禁止|无需|不用|请勿|勿)[^。！？!?\n]{0,48}(?:发送|提交|发布|签署|对外)/u.test(text) // i18n-allow: reviewed input-recognition regex.
-    && !/(?:不要|别|禁止|无需|不用|请勿|勿)[^。！？!?\n]{0,24}(?:修改|改动|改写|写入|保存|覆盖|创建|新建|生成|删除)(?:文件|文档|内容|数据)?/u.test(text); // i18n-allow: reviewed input-recognition regex.
-  if (externalCommitOnlyFence) {
-    const externalCommitTools = registry.getCapabilityManifest(undefined)
-      .filter(entry => (
-        entry.operation === 'communicate'
-        || entry.sideEffects.some(effect => (
-          effect.type === 'external_communication'
-          || effect.type === 'external_state_change'
-        ))
-      ))
-      .map(entry => entry.toolName);
-    const restricted = applyAdditionalForbiddenTools(execution, externalCommitTools);
-    return {
-      ...restricted,
-      promptOverlay: [
-        execution.promptOverlay,
-        'Current-turn external-commit boundary: local reading, analysis, drafting, verification, and explicitly requested local persistence remain available. Do not send, submit, publish, sign, or mutate an external system.',
-      ].join('\n'),
-    };
-  }
+  // An edition workflow may ask for a local deliverable while explicitly
+  // fencing send/submit/publish. The semantic tool route already removes
+  // those external commits; do not let the generic read-only adapter also
+  // erase the internal workflow ledger and local production capabilities.
+  if (flow?.industryWorkflowEntryId) return execution;
   if (!hasExplicitNoMutationInstruction(text)) return execution;
+  const trustedWorkflowHintTools = new Set(flow?.workflowHint?.requiredTools || []);
   const mutationTools = registry.getCapabilityManifest(undefined)
     .filter(entry => (
-      entry.operation === 'create'
-      || entry.operation === 'mutate'
-      || entry.sideEffects.some(effect => effect.type !== 'local_read')
+      !trustedWorkflowHintTools.has(entry.toolName)
+      && (
+        entry.operation === 'create'
+        || entry.operation === 'mutate'
+        || entry.sideEffects.some(effect => effect.type !== 'local_read')
+      )
     ))
     .map(entry => entry.toolName);
   const restricted = applyAdditionalForbiddenTools(execution, mutationTools);
@@ -229,8 +210,14 @@ function hasTrustedActionContinuation(input: BuildLumiExecutionPipelineInput): b
   if (!state?.unfinished || !state.taskId || !context) return false;
   const followup = context.match(/(?:^|\n)-\s*followupIntent:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase();
   const taskId = context.match(/(?:^|\n)-\s*taskId:\s*([^\r\n]+)/i)?.[1]?.trim();
-  return new Set(['execute', 'correction', 'retry', 'accept', 'confirm']).has(followup || '')
-    && taskId === state.taskId;
+  // Corrections and retries are continuations of the same server-owned task,
+  // not new authorization requests.  Requiring the exact durable task id
+  // keeps this boundary fail-closed while allowing a voice-to-text handoff
+  // (whose classifier labels the turn `correction`) to retain the original
+  // capability envelope.  `status` remains observational and must never
+  // reacquire an execution lease.
+  const executionFollowups = new Set(['execute', 'correction', 'retry', 'accept', 'confirm']);
+  return executionFollowups.has(followup || '') && taskId === state.taskId;
 }
 
 function applySelectedWorkflowAdapterPolicy(
@@ -317,7 +304,6 @@ export function buildLumiExecutionPipeline(
   const legacyExecution = buildLumiExecutionDecision({
     flow: turnIntent.flow,
     text: decisionText,
-    currentTurnText: input.dispatch.text,
     toolDeclarations: input.registry.getToolDeclarations(),
     toolRegistry: input.registry,
     personalityToolPolicy: input.personalityToolPolicy,
@@ -343,6 +329,7 @@ export function buildLumiExecutionPipeline(
       ),
       input.registry,
       input.dispatch.text,
+      turnIntent.flow,
     ),
     input.additionalForbiddenTools,
   );
@@ -372,15 +359,20 @@ export function buildLumiExecutionPipeline(
     preferredTools: selection.preferredTools,
     pinnedTools: pinnedContinuationTools,
   });
-  const executionRequested = Boolean(execution.allowToolUse && modelToolProjection.toolNames.length > 0);
+  // Operation modes define the authorization ceiling. They must not create a
+  // task or tool loop on their own. A turn becomes executable only after the
+  // shared semantic route exposes at least one concrete authorized capability.
+  const executionRequested = Boolean(
+    execution.allowToolUse
+    && modelToolProjection.toolNames.length > 0,
+  );
   const capabilityPlan: LumiCapabilityPlan = {
     ...selection,
     schemaVersion: 1,
     capabilityIds,
     taskLedgerRequired: Boolean(
       !turnIntent.flow.industryGuidanceRequest
-      &&
-      (!turnIntent.flow.industryWorkflowEntryId || turnIntent.flow.domain === 'work')
+      && (!turnIntent.flow.industryWorkflowEntryId || turnIntent.flow.domain === 'work')
       && (
         turnIntent.flow.completionEvidenceNeeded
         || executionRequested
