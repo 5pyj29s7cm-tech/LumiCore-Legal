@@ -66,6 +66,7 @@ import {
   LUMI_OFFICIAL_DEFAULT_MODELS,
   LUMI_OFFICIAL_DOCS_URL,
   LUMI_OFFICIAL_PROVIDER_ID as SHARED_LUMI_OFFICIAL_PROVIDER_ID,
+  type LumiModelRoleId,
 } from '../../shared/model_provider_capabilities';
 
 const VoiceForge = lazy(() => import('./VoiceForge').then(m => ({ default: m.VoiceForge })));
@@ -77,6 +78,64 @@ const LUMI_OFFICIAL_API_LABEL_KEY = 'settings.lumi-official-api-label.a1b2c3d4e5
 const LUMI_OFFICIAL_SUPPORTED_KEY = 'settings.lumi-official-capability-supported.b2c3d4e5f6' as const;
 const LUMI_OFFICIAL_UNAVAILABLE_KEY = 'settings.lumi-official-capability-unavailable.c3d4e5f6a7' as const;
 const LUMI_RELAY_BASE_URL_PLACEHOLDER = LUMI_OFFICIAL_BASE_URL;
+const LUMI_OFFICIAL_CATALOG_REFRESH_EVENT = 'lumi:official-model-catalog-refresh';
+
+type LumiOfficialCatalog = {
+  models: Array<{ id: string; capability: string; endpoint?: string; ownedBy?: string }>;
+  byRole: Partial<Record<LumiModelRoleId, string[]>>;
+};
+
+let lumiOfficialCatalogCache: LumiOfficialCatalog | null = null;
+let lumiOfficialCatalogPromise: Promise<LumiOfficialCatalog> | null = null;
+
+async function loadLumiOfficialCatalog(force = false): Promise<LumiOfficialCatalog> {
+  if (force) lumiOfficialCatalogCache = null;
+  if (lumiOfficialCatalogCache) return lumiOfficialCatalogCache;
+  if (!lumiOfficialCatalogPromise) {
+    lumiOfficialCatalogPromise = apiFetch('/api/preferences/official/models', { credentials: 'include' })
+      .then(async response => {
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`);
+        const catalog: LumiOfficialCatalog = {
+          models: Array.isArray(body.models) ? body.models : [],
+          byRole: body.byRole && typeof body.byRole === 'object' ? body.byRole : {},
+        };
+        lumiOfficialCatalogCache = catalog;
+        return catalog;
+      })
+      .finally(() => { lumiOfficialCatalogPromise = null; });
+  }
+  return lumiOfficialCatalogPromise;
+}
+
+function useLumiOfficialCatalog(): LumiOfficialCatalog | null {
+  const [catalog, setCatalog] = useState<LumiOfficialCatalog | null>(lumiOfficialCatalogCache);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = (force = false) => {
+      void loadLumiOfficialCatalog(force)
+        .then(next => { if (!cancelled) setCatalog(next); })
+        .catch(() => { if (!cancelled) setCatalog(null); });
+    };
+    const onRefresh = () => refresh(true);
+    refresh(false);
+    window.addEventListener(LUMI_OFFICIAL_CATALOG_REFRESH_EVENT, onRefresh);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(LUMI_OFFICIAL_CATALOG_REFRESH_EVENT, onRefresh);
+    };
+  }, []);
+  return catalog;
+}
+
+function officialModelOptions(
+  catalog: LumiOfficialCatalog | null,
+  role: LumiModelRoleId,
+  fallback: string[],
+): string[] {
+  const live = catalog?.byRole?.[role];
+  return Array.isArray(live) && live.length > 0 ? live : fallback;
+}
 
 function readStoredRelayBaseUrl(): string {
   try {
@@ -1682,7 +1741,9 @@ type GenerationPreference = {
 
 type GenerationPreferences = {
   image: GenerationPreference;
+  imageEdit: GenerationPreference;
   video: GenerationPreference;
+  imageToVideo: GenerationPreference;
 };
 
 const DEFAULT_GENERATION_PREFERENCES: GenerationPreferences = {
@@ -1690,6 +1751,11 @@ const DEFAULT_GENERATION_PREFERENCES: GenerationPreferences = {
     provider: 'auto',
     model: '',
     models: { openai: 'gpt-image-1', qwen: 'wan2.2-t2i-plus', siliconflow: 'Kwai-Kolors/Kolors', relay: LUMI_OFFICIAL_DEFAULT_MODELS.image_generation },
+  },
+  imageEdit: {
+    provider: 'relay',
+    model: LUMI_OFFICIAL_DEFAULT_MODELS.image_edit,
+    models: { relay: LUMI_OFFICIAL_DEFAULT_MODELS.image_edit },
   },
   video: {
     provider: 'qwen',
@@ -1702,6 +1768,11 @@ const DEFAULT_GENERATION_PREFERENCES: GenerationPreferences = {
       relay: LUMI_OFFICIAL_DEFAULT_MODELS.video_generation,
     },
   },
+  imageToVideo: {
+    provider: 'relay',
+    model: LUMI_OFFICIAL_DEFAULT_MODELS.image_to_video,
+    models: { relay: LUMI_OFFICIAL_DEFAULT_MODELS.image_to_video },
+  },
 };
 
 const GENERATION_MODEL_OPTIONS: Record<string, string[]> = {
@@ -1713,7 +1784,9 @@ const GENERATION_MODEL_OPTIONS: Record<string, string[]> = {
   siliconflowVideo: ['Wan-AI/Wan2.2-T2V-A14B', 'Wan-AI/Wan2.1-T2V-14B-720P', 'Wan-AI/Wan2.1-T2V-14B-720P-Turbo'],
   openaiVideo: ['sora-2', 'sora-2-pro'],
   relayImage: [LUMI_OFFICIAL_DEFAULT_MODELS.image_generation],
+  relayImageEdit: [LUMI_OFFICIAL_DEFAULT_MODELS.image_edit],
   relayVideo: [LUMI_OFFICIAL_DEFAULT_MODELS.video_generation],
+  relayImageToVideo: [LUMI_OFFICIAL_DEFAULT_MODELS.image_to_video],
 };
 
 const IMAGE_GENERATION_PROVIDERS: Record<string, { label: string; models: string[] }> = {
@@ -1769,6 +1842,11 @@ function GenerativeModelsPage({ t }: { t: any }) {
   const [preferences, setPreferences] = useState<GenerationPreferences>(DEFAULT_GENERATION_PREFERENCES);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const officialCatalog = useLumiOfficialCatalog();
+  const relayImageModels = officialModelOptions(officialCatalog, 'image_generation', GENERATION_MODEL_OPTIONS.relayImage);
+  const relayImageEditModels = officialModelOptions(officialCatalog, 'image_edit', GENERATION_MODEL_OPTIONS.relayImageEdit);
+  const relayVideoModels = officialModelOptions(officialCatalog, 'video_generation', GENERATION_MODEL_OPTIONS.relayVideo);
+  const relayImageToVideoModels = officialModelOptions(officialCatalog, 'image_to_video', GENERATION_MODEL_OPTIONS.relayImageToVideo);
 
   useEffect(() => {
     let cancelled = false;
@@ -1794,7 +1872,9 @@ function GenerativeModelsPage({ t }: { t: any }) {
         provider,
         model: provider === 'auto'
           ? ''
-          : previous.image.models[provider] || IMAGE_GENERATION_PROVIDERS[provider]?.models[0] || '',
+          : previous.image.models[provider]
+            || (provider === LUMI_OFFICIAL_PROVIDER_ID ? relayImageModels[0] : IMAGE_GENERATION_PROVIDERS[provider]?.models[0])
+            || '',
       },
     }));
   };
@@ -1805,12 +1885,29 @@ function GenerativeModelsPage({ t }: { t: any }) {
       video: {
         ...previous.video,
         provider,
-        model: previous.video.models[provider] || VIDEO_GENERATION_PROVIDERS[provider]?.models[0] || '',
+        model: previous.video.models[provider]
+          || (provider === LUMI_OFFICIAL_PROVIDER_ID ? relayVideoModels[0] : VIDEO_GENERATION_PROVIDERS[provider]?.models[0])
+          || '',
       },
     }));
   };
 
-  const setRoleModel = (role: 'image' | 'video', provider: string, model: string) => {
+  const setImageToVideoProvider = (provider: string) => {
+    setPreferences(previous => ({
+      ...previous,
+      imageToVideo: {
+        ...previous.imageToVideo,
+        provider,
+        model: previous.imageToVideo.models[provider]
+          || (provider === LUMI_OFFICIAL_PROVIDER_ID
+            ? relayImageToVideoModels[0]
+            : VIDEO_GENERATION_PROVIDERS[provider]?.models[0])
+          || '',
+      },
+    }));
+  };
+
+  const setRoleModel = (role: 'image' | 'imageEdit' | 'video' | 'imageToVideo', provider: string, model: string) => {
     setPreferences(previous => ({
       ...previous,
       [role]: {
@@ -1843,8 +1940,16 @@ function GenerativeModelsPage({ t }: { t: any }) {
 
   if (loading) return <div className="flex h-40 items-center justify-center"><Loader2 className="animate-spin text-white/45" /></div>;
 
-  const imageProvider = IMAGE_GENERATION_PROVIDERS[preferences.image.provider];
-  const videoProvider = VIDEO_GENERATION_PROVIDERS[preferences.video.provider];
+  const imageProvider = preferences.image.provider === LUMI_OFFICIAL_PROVIDER_ID
+    ? { ...IMAGE_GENERATION_PROVIDERS.relay, models: relayImageModels }
+    : IMAGE_GENERATION_PROVIDERS[preferences.image.provider];
+  const imageEditProvider = { label: 'Lumi Official API', models: relayImageEditModels };
+  const videoProvider = preferences.video.provider === LUMI_OFFICIAL_PROVIDER_ID
+    ? { ...VIDEO_GENERATION_PROVIDERS.relay, models: relayVideoModels }
+    : VIDEO_GENERATION_PROVIDERS[preferences.video.provider];
+  const imageToVideoProvider = preferences.imageToVideo.provider === LUMI_OFFICIAL_PROVIDER_ID
+    ? { ...VIDEO_GENERATION_PROVIDERS.relay, models: relayImageToVideoModels }
+    : VIDEO_GENERATION_PROVIDERS[preferences.imageToVideo.provider];
 
   return (
     <div className="space-y-8">
@@ -1865,7 +1970,9 @@ function GenerativeModelsPage({ t }: { t: any }) {
                 <option value="openai">OpenAI</option>
                 <option value="qwen">Qwen / DashScope</option>
                 <option value="siliconflow">SiliconFlow</option>
-                <option value={LUMI_OFFICIAL_PROVIDER_ID}>{lumiOfficialApiLabel(t)}</option>
+                <option value={LUMI_OFFICIAL_PROVIDER_ID}>
+                  {lumiOfficialApiLabel(t)}
+                </option>
               </select>
             </div>
             {imageProvider && (
@@ -1877,6 +1984,25 @@ function GenerativeModelsPage({ t }: { t: any }) {
                 onChange={model => setRoleModel('image', preferences.image.provider, model)}
               />
             )}
+          </section>
+
+          <section className="py-5">
+            <div className="mb-4 grid gap-2 md:grid-cols-[150px_minmax(0,1fr)] md:items-center">
+              <div>
+                <h3 className="text-sm font-semibold text-white">{uiMessage('settings.image-edit-model.4a3f9e82c1')}</h3>
+                <p className="mt-1 text-xs text-white/35">{uiMessage('settings.image-edit-model-description.72bc0e11a4')}</p>
+              </div>
+              <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2.5 text-sm text-white/70">
+                {lumiOfficialApiLabel(t)}
+              </div>
+            </div>
+            <GenerationModelInput
+              id="generation-relay-image-edit-model"
+              label={imageEditProvider.label}
+              value={preferences.imageEdit.models.relay || preferences.imageEdit.model}
+              options={imageEditProvider.models}
+              onChange={model => setRoleModel('imageEdit', 'relay', model)}
+            />
           </section>
 
           <section className="py-5">
@@ -1902,6 +2028,32 @@ function GenerativeModelsPage({ t }: { t: any }) {
                 value={preferences.video.models[preferences.video.provider] || preferences.video.model}
                 options={videoProvider.models}
                 onChange={model => setRoleModel('video', preferences.video.provider, model)}
+              />
+            )}
+          </section>
+
+          <section className="py-5">
+            <div className="mb-4 grid gap-2 md:grid-cols-[150px_minmax(0,1fr)] md:items-center">
+              <div>
+                <h3 className="text-sm font-semibold text-white">{uiMessage('settings.image-to-video-model.0b7da532f4')}</h3>
+                <p className="mt-1 text-xs text-white/35">{uiMessage('settings.image-to-video-model-description.c1e68f204d')}</p>
+              </div>
+              <select
+                value={preferences.imageToVideo.provider}
+                onChange={event => setImageToVideoProvider(event.target.value)}
+                className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white outline-none focus:border-celestial-saturn/45"
+              >
+                <option value="minimax">MiniMax</option>
+                <option value={LUMI_OFFICIAL_PROVIDER_ID}>{lumiOfficialApiLabel(t)}</option>
+              </select>
+            </div>
+            {imageToVideoProvider && (
+              <GenerationModelInput
+                id={`generation-${preferences.imageToVideo.provider}-image-to-video-model`}
+                label={imageToVideoProvider.label}
+                value={preferences.imageToVideo.models[preferences.imageToVideo.provider] || preferences.imageToVideo.model}
+                options={imageToVideoProvider.models}
+                onChange={model => setRoleModel('imageToVideo', preferences.imageToVideo.provider, model)}
               />
             )}
           </section>
@@ -2791,6 +2943,20 @@ async function applyOfficialModelRoles(): Promise<OfficialRoleApplyResponse> {
 function OfficialProviderSettings({ t }: { t: any }) {
   const [applying, setApplying] = useState(false);
   const [result, setResult] = useState<OfficialRoleApplyResponse | null>(null);
+  const locale = t?.langCode === 'en' ? 'en' : 'zh';
+  const roleLabels: Record<string, string> = {
+    reasoning: uiMessage('settings.reasoning.6a171d96b4', locale),
+    vision: uiMessage('settings.vision-model.df2108ba57', locale),
+    world: uiMessage('settings.world-model.67c5d91de2', locale),
+    image_generation: uiMessage('settings.image-generation-model.fdd84f5c71', locale),
+    image_edit: uiMessage('settings.image-edit-model.4a3f9e82c1', locale),
+    video_generation: uiMessage('settings.video-generation-model.390997b87b', locale),
+    image_to_video: uiMessage('settings.image-to-video-model.0b7da532f4', locale),
+    embedding: uiMessage('settings.embedding-role-label.f7a8b9c0d1', locale),
+    rerank: uiMessage('settings.rerank-role-label.a8b9c0d1e2', locale),
+    speech_recognition: uiMessage('settings.speech-recognition-role-label.b9c0d1e2f3', locale),
+    speech_synthesis: uiMessage('settings.speech-synthesis-role-label.c0d1e2f3a4', locale),
+  };
   const apply = async () => {
     if (applying) return;
     setApplying(true);
@@ -2825,7 +2991,7 @@ function OfficialProviderSettings({ t }: { t: any }) {
           </Button>
         </div>
         {result && <div className="mt-3 border-t border-white/10 pt-3 text-[11px] text-white/55" role="status" aria-live="polite">
-          {Object.values(result.roles).map(item => <div key={item.role} className="flex flex-wrap gap-2"><span className={item.status === 'applied' ? 'text-emerald-300' : item.status === 'failed' ? 'text-red-300' : 'text-amber-200'}>{item.status}</span><span>{item.role}</span>{item.model && <span className="font-mono text-white/40">{item.provider}/{item.model}</span>}{item.reason && <span className="text-white/35">{item.reason}</span>}</div>)}
+          {Object.values(result.roles).map(item => <div key={item.role} className="flex flex-wrap gap-2"><span className={item.status === 'applied' ? 'text-emerald-300' : item.status === 'failed' ? 'text-red-300' : 'text-amber-200'}>{item.status}</span><span>{roleLabels[item.role] || item.role}</span>{item.model && <span className="font-mono text-white/40">{item.provider}/{item.model}</span>}{item.reason && <span className="text-white/35">{item.reason}</span>}</div>)}
           {result.error && <p className="mt-1 text-red-300/80">{result.error}</p>}
         </div>}
       </div>
