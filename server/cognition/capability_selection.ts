@@ -76,6 +76,12 @@ export interface ModelToolProjectionHints {
    * the model's bounded declaration list.
    */
   pinnedTools?: readonly string[];
+  /**
+   * Exact workflow/verification declarations that must survive provider
+   * request compaction.  These do not add authorization; they are intersected
+   * with the effective policy and final projection below.
+   */
+  requiredTools?: readonly string[];
   /** Ordinary conversation may stay tool-free even in an action-capable mode. */
   allowUnroutedDiscovery?: boolean;
 }
@@ -95,7 +101,14 @@ export function buildModelCapabilityPolicy(
   const base = execution.resumesPinnedTask
     ? execution.toolPolicy
     : execution.baseToolPolicy;
-  const forbiddenTools = unique(base.forbiddenTools || []);
+  // Semantic routes rank declarations, but their explicit deny set represents
+  // a server-owned safety boundary (for example, opening WeChat without any
+  // send intent). Preserve those denies without turning the route itself into
+  // an authorization allowlist.
+  const forbiddenTools = unique([
+    ...(base.forbiddenTools || []),
+    ...(execution.toolRoute?.forbiddenToolNames || []),
+  ]);
   const forbidden = new Set(forbiddenTools);
   const blockAll = forbidden.has('*') || execution.allowToolUse === false;
   const baseAllowed = (base.allowedTools || [])
@@ -161,17 +174,22 @@ export function buildModelToolProjection(
     && (wildcard || allowed.has(name)),
   );
   const routedNames = unique(route?.toolNames || []).filter(isAuthorized);
-  const pinnedNames = hardAllowlist
-    ? []
-    : unique(Array.from(hints.pinnedTools || [])).filter(isAuthorized);
+  const authorizedPinnedNames = unique(Array.from(hints.pinnedTools || []))
+    .filter(isAuthorized);
+  const pinnedNames = hardAllowlist ? [] : authorizedPinnedNames;
+  const hintedRequiredNames = unique(Array.from(hints.requiredTools || []))
+    .filter(isAuthorized);
   const semanticNames = hardAllowlist
     ? []
     : unique(Array.from(hints.preferredTools || [])).filter(isAuthorized);
-  let toolNames = unique([
-    ...pinnedNames,
-    ...(hardAllowlist ? routedNames : semanticNames),
-    ...(!hardAllowlist ? routedNames : []),
-  ]).slice(0, maxTools);
+  let toolNames = hardAllowlist
+    ? routedNames.slice(0, maxTools)
+    : unique([
+        ...pinnedNames,
+        ...hintedRequiredNames,
+        ...semanticNames,
+        ...routedNames,
+      ]).slice(0, maxTools);
 
   const allowUnroutedDiscovery = hints.allowUnroutedDiscovery
     ?? hints.lane !== 'conversation';
@@ -193,8 +211,23 @@ export function buildModelToolProjection(
     }
   }
 
+  const projected = new Set(toolNames);
+  const firstSemanticName = semanticNames.find(name => projected.has(name))
+    || routedNames.find(name => projected.has(name));
+  const requiredToolNames = unique([
+    ...authorizedPinnedNames,
+    ...hintedRequiredNames,
+    ...(hints.lane === 'skill_workflow' ? routedNames : []),
+    firstSemanticName || '',
+    ...(projected.has(MODEL_CAPABILITY_DISCOVERY_TOOL)
+      ? [MODEL_CAPABILITY_DISCOVERY_TOOL]
+      : []),
+    ...(projected.has('capability_gap_autofix') ? ['capability_gap_autofix'] : []),
+  ]).filter(name => projected.has(name));
+
   return {
     toolNames,
+    requiredToolNames,
     maxTools,
     allowDynamicDiscovery: !hardAllowlist && toolNames.includes(MODEL_CAPABILITY_DISCOVERY_TOOL),
     discoveryToolName: MODEL_CAPABILITY_DISCOVERY_TOOL,
@@ -247,6 +280,14 @@ function availablePreferredTools(input: LumiCapabilitySelectionInput, lane: Lumi
   const lanes = new Set(manifestLane[lane] || []);
   const runtimeManifest = (input.registry || toolRegistry).getCapabilityManifest(input.execution.toolPolicy, {
     executableOnly: true,
+    context: {
+      userId: input.userId,
+      domain: input.domain === 'work' ? 'work' : 'personal',
+      orgId: input.orgId,
+      autonomous: input.dispatch.flow.effectiveOperationMode === 'autonomous'
+        || ['autonomy', 'scheduler'].includes(input.dispatch.channel),
+      source: input.dispatch.source || input.dispatch.channel,
+    },
   });
   const manifest = runtimeManifest.length > 0
     ? runtimeManifest
@@ -289,8 +330,16 @@ function essentialToolsForLane(lane: LumiCapabilityLane): string[] {
   }
 }
 
-function isStrictReadOnlyManifestTool(name: string, registry: ToolRegistry = toolRegistry): boolean {
-  const manifest = registry.getCapabilityManifestEntry(name);
+function isStrictReadOnlyManifestTool(name: string, input: LumiCapabilitySelectionInput): boolean {
+  const registry = input.registry || toolRegistry;
+  const manifest = registry.getCapabilityManifestEntry(name, input.execution.toolPolicy, {
+    userId: input.userId,
+    domain: input.domain === 'work' ? 'work' : 'personal',
+    orgId: input.orgId,
+    autonomous: input.dispatch.flow.effectiveOperationMode === 'autonomous'
+      || ['autonomy', 'scheduler'].includes(input.dispatch.channel),
+    source: input.dispatch.source || input.dispatch.channel,
+  });
   if (!manifest || (manifest.operation !== 'observe' && manifest.operation !== 'test')) return false;
   if (manifest.sideEffects.length === 0) return false;
   return manifest.sideEffects.every(effect => (
@@ -617,7 +666,7 @@ export function buildLumiCapabilitySelection(input: LumiCapabilitySelectionInput
     && normalizedIntent.relation !== 'correction',
   );
   const strictReadOnlyTools = canUseLearnedReadPattern
-    ? basePreferredTools.filter(name => isStrictReadOnlyManifestTool(name, input.registry || toolRegistry))
+    ? basePreferredTools.filter(name => isStrictReadOnlyManifestTool(name, input))
     : [];
   const readOnlyPattern = strictReadOnlyTools.length > 0
     ? rankReadOnlyToolPatterns({

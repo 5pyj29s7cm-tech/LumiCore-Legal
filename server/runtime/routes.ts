@@ -24,6 +24,7 @@ import { mountExploreRoutes, mountPlanRoutes } from "../routes/plan_explore_rout
 import { mountCommandCenterPlanRoutes } from "../routes/command_center_plan_routes";
 import { mountIndustryWorkflowRoutes } from "../routes/industry_workflow_routes";
 import { mountTaskRegressionEvidenceRoutes } from "../evidence/task_truth_snapshot_route";
+import { mountExternalCapabilityRoutes } from "../routes/external_capability_routes";
 
 interface RouteContext {
   apiRouter: Router;
@@ -82,6 +83,7 @@ export function mountAllRoutes({ apiRouter, jwtSecret, llm, getCookieOptions, io
   // Skills & Marketplace
   mountSkillRoutes(apiRouter, jwtSecret, llmGetters, io);
   mountMarketplaceRoutes(apiRouter, jwtSecret, io, llmGetters);
+  mountExternalCapabilityRoutes(apiRouter, io);
 
   // Contacts
   mountContactsRoutes(apiRouter, jwtSecret);

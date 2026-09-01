@@ -29,7 +29,10 @@ import {
   isRegisteredOpenAICompatibleProvider,
   isRegisteredProviderLocal,
 } from '../extensions/registry';
-import { prepareModelRequestContext } from './request_context_budget';
+import {
+  prepareModelRequestContext,
+  type PreparedModelRequestContext,
+} from './request_context_budget';
 
 export type MessageContent =
   | string
@@ -66,6 +69,8 @@ export interface LLMCallConfig {
   attemptTimeouts?: Partial<ModelAttemptTimeouts>;
   /** Total input budget across system, history, current input, and tool schemas. */
   inputTokenBudget?: number;
+  /** Server-selected schemas that the final provider budget must retain. */
+  protectedToolNames?: string[];
   role?: 'reasoning' | 'vision' | 'world';
   selectionMode?: UserLLMSelectionMode;
   fallbackCandidates?: UserLLMFallbackCandidate[];
@@ -82,6 +87,13 @@ export interface LLMCallConfig {
   authorizedRoutingCandidate?: boolean;
   /** Local-only declaration names that preflight must retain or fail closed. */
   localRequiredToolNames?: string[];
+  /**
+   * Keep candidate chunks private until that candidate reaches a successful
+   * terminal frame. Tool/action turns use this because their caller already
+   * buffers output for final adjudication; a provider may then fail over
+   * without leaking or concatenating a partial first-candidate sentence.
+   */
+  bufferStreamUntilCandidateSuccess?: boolean;
   /**
    * Opt in to SSE for the official relay.  The currently deployed official
    * gateway accepts the OpenAI-compatible request but its SSE parser is
@@ -286,6 +298,26 @@ function markProviderSourceUserSlot<T extends object>(message: T, sourceMessageI
   const durableId = String(sourceMessageId || '').trim();
   if (durableId) providerSourceUserSlots.set(message, durableId);
   return message;
+}
+
+function attachModelRequestContext<T extends NormalizedLLMResponse>(
+  response: T,
+  prepared: PreparedModelRequestContext,
+  deliveredToolNames?: readonly string[],
+): T {
+  const preparedToolNames = prepared.toolDeclarations.map(declaration => declaration.function.name);
+  const delivered = deliveredToolNames
+    ? Array.from(new Set(deliveredToolNames.map(name => String(name || '').trim()).filter(Boolean)))
+    : preparedToolNames;
+  const deliveredSet = new Set(delivered);
+  response.modelRequestContext = {
+    deliveredToolNames: delivered,
+    droppedToolNames: Array.from(new Set([
+      ...prepared.droppedToolNames,
+      ...preparedToolNames.filter(name => !deliveredSet.has(name)),
+    ])),
+  };
+  return response;
 }
 
 function providerSourceUserSlot(messages: object[]): {
@@ -1056,9 +1088,13 @@ function attachProviderOutboundEvidenceToError(
 async function executeWithProviderOutboundEvidence(
   evidence: ProviderOutboundMessagesEvidence,
   operation: () => Promise<NormalizedLLMResponse>,
+  preparedContext?: PreparedModelRequestContext,
+  deliveredToolNames?: readonly string[],
 ): Promise<ResponseWithProviderOutboundEvidence> {
   try {
-    return attachProviderOutboundEvidence(await operation(), evidence);
+    const response = await operation();
+    if (preparedContext) attachModelRequestContext(response, preparedContext, deliveredToolNames);
+    return attachProviderOutboundEvidence(response, evidence);
   } catch (error) {
     throw attachProviderOutboundEvidenceToError(error, evidence);
   }
@@ -1262,6 +1298,7 @@ export async function makeLLMCallDirect(
     messages,
     toolDeclarations,
     inputTokenBudget: config.inputTokenBudget,
+    protectedToolNames: config.protectedToolNames,
   });
   messages = preparedContext.messages;
   toolDeclarations = preparedContext.toolDeclarations;
@@ -1365,7 +1402,8 @@ export async function makeLLMCallDirect(
         throw error;
       }
       return parseDeepSeekResponse(response);
-    });
+    }, preparedContext, (localRequest?.toolDeclarations || toolDeclarations)
+      .map(declaration => declaration.function.name));
   }
 
   if (config.provider === 'gemini') {
@@ -1406,7 +1444,7 @@ export async function makeLLMCallDirect(
         },
       );
       return parseGeminiResponse(result);
-    });
+    }, preparedContext);
   }
 
   if (config.provider === 'openai') {
@@ -1450,7 +1488,7 @@ export async function makeLLMCallDirect(
         },
       );
       return parseOpenAIResponse(response);
-    });
+    }, preparedContext);
   }
 
   if (config.provider === 'anthropic') {
@@ -1489,7 +1527,7 @@ export async function makeLLMCallDirect(
         },
       );
       return parseAnthropicResponse(response);
-    });
+    }, preparedContext);
   }
 
   throw new Error(`Unsupported provider: ${config.provider}`);
@@ -1830,6 +1868,7 @@ export async function makeLLMCallStreamingDirect(
     messages,
     toolDeclarations,
     inputTokenBudget: config.inputTokenBudget,
+    protectedToolNames: config.protectedToolNames,
   });
   messages = preparedContext.messages;
   toolDeclarations = preparedContext.toolDeclarations;
@@ -2098,7 +2137,8 @@ export async function makeLLMCallStreamingDirect(
         if (extensionProvider) throw extensionProviderFailure(config.provider, error);
         throw error;
       }
-    });
+    }, preparedContext, (localRequest?.toolDeclarations || toolDeclarations)
+      .map(declaration => declaration.function.name));
   }
 
   // ── Gemini streaming ──
@@ -2178,7 +2218,7 @@ export async function makeLLMCallStreamingDirect(
         }
       },
       { provider: 'gemini', model: config.model, maxRetries: 0, signal: config.signal },
-    ));
+    ), preparedContext);
   }
 
   // ── Anthropic streaming ──
@@ -2271,7 +2311,7 @@ export async function makeLLMCallStreamingDirect(
         }
       },
       { provider: 'anthropic', model: config.model, maxRetries: 0, signal: config.signal },
-    ));
+    ), preparedContext);
   }
 
   throw new Error(`Unsupported streaming provider: ${config.provider}`);

@@ -33,6 +33,8 @@ import {
 import { buildActionContract } from './action_contract';
 import { classifyRuntimeWorkIntent } from './runtime_work_intent';
 import type { PendingAssistantOfferContext } from './pending_assistant_offer';
+import { hasExplicitToolIntent } from './tool_intent';
+import type { ToolContext } from '../tools/types';
 
 type ToolDeclaration = ReturnType<ToolRegistry['getToolDeclarations']>[number];
 
@@ -46,6 +48,7 @@ export interface LumiExecutionDecisionInput {
   actionTaskState?: ConversationActionContinuationState | null;
   trustedActionContinuation?: boolean;
   pendingAssistantOfferContext?: PendingAssistantOfferContext;
+  visibilityContext?: Pick<ToolContext, 'userId' | 'domain' | 'orgId' | 'autonomous' | 'source'>;
 }
 
 export interface LumiExecutionDecision {
@@ -118,7 +121,11 @@ const SELF_REPAIR_LEARNING_INSPECTION_RE =
  * paid model probes require an explicit model symptom, and package repair
  * requires both a skill/MCP target and repair wording.
  */
-export function buildSelfRepairToolPolicy(text: string, registry?: ToolRegistry): ToolPolicy {
+export function buildSelfRepairToolPolicy(
+  text: string,
+  registry?: ToolRegistry,
+  visibilityContext?: Pick<ToolContext, 'userId' | 'domain' | 'orgId' | 'autonomous' | 'source'>,
+): ToolPolicy {
   const requested = String(text || '');
   const allowedTools = [
     'client_get_state',
@@ -152,6 +159,7 @@ export function buildSelfRepairToolPolicy(text: string, registry?: ToolRegistry)
     allowedTools.push(...registry.findRelevant(requested, {
       limit: 8,
       evidenceOperations: ['observe', 'test'],
+      context: visibilityContext,
     }).map(tool => tool.name));
   }
 
@@ -167,6 +175,7 @@ function fallbackPolicy(
   flow: LumiTurnFlow,
   personalityToolPolicy?: ToolPolicy,
   registry?: ToolRegistry,
+  visibilityContext?: Pick<ToolContext, 'userId' | 'domain' | 'orgId' | 'autonomous' | 'source'>,
 ): ToolPolicy {
   // The visible Chat posture is not a second permission prompt. For an open
   // model-owned chat turn, expose the ordinary foreground Assistant manifest
@@ -178,7 +187,7 @@ function fallbackPolicy(
     && flow.operationMode === 'chat'
       ? 'assistant'
       : flow.operationMode;
-  const opModePolicy = buildOperationModeToolPolicy(manifestMode, registry);
+  const opModePolicy = buildOperationModeToolPolicy(manifestMode, registry, visibilityContext);
   if (flow.channel === 'chat' && flow.modelToolAccess === 'manifest') {
     if (!personalityToolPolicy) return opModePolicy;
     const hardAllowed = new Set(opModePolicy.allowedTools || []);
@@ -413,13 +422,28 @@ function retainSemanticToolsWithinLimit(
 }
 
 const CAPABILITY_LEARNING_SEMANTIC_TOOLS = [
+  'skill_marketplace_search',
+  'extension_registry_list',
   'capability_learning_list',
   'self_extension_plan',
-  'capability_gap_autofix',
   'list_skills',
+  'capability_research',
+  'external_control_candidates',
+  'external_control_configure_candidate',
+  'generate_skill',
+  'skill_marketplace_install',
+  'install_skill',
+  'capability_gap_autofix',
   'adapter_registry_list',
   'external_app_list_adapters',
+];
+
+const CAPABILITY_GAP_DISCOVERY_TOOLS = [
+  'self_extension_plan',
+  'extension_registry_list',
+  'skill_marketplace_search',
   'external_control_candidates',
+  'capability_research',
 ];
 
 const TASK_CENTER_SEMANTIC_TOOLS = [
@@ -473,6 +497,7 @@ function enhanceToolRouteForFlow(
   declarations: ToolDeclaration[],
   registry?: ToolRegistry,
   semanticText = flow.routeText,
+  visibilityContext?: Pick<ToolContext, 'userId' | 'domain' | 'orgId' | 'autonomous' | 'source'>,
 ): ToolRoute {
   const available = new Set(declarations.map(declaration => declaration.function.name));
   if (flow.industryGuidanceRequest) {
@@ -512,6 +537,7 @@ function enhanceToolRouteForFlow(
   const discoveredEvidenceTools = registry?.findRelevant(semanticText, {
     limit: 8,
     evidenceOperations: ['observe', 'test'],
+    context: visibilityContext,
   }) || [];
   const industryWorkflowMatch = !recoveredCurrentAppEdit && flow.industryWorkflowEntryId
     ? matchCurrentIndustryWorkflow(flow.routeText)
@@ -553,6 +579,21 @@ function enhanceToolRouteForFlow(
     addAvailable(semanticPriority, available, CAPABILITY_LEARNING_SEMANTIC_TOOLS);
     categories.push('capability_learning');
     reasons.push('capability learning turns must inspect and reuse existing skills/adapters before adding new code');
+  }
+
+  const ordinaryWorkNeedsCapabilityDiscovery = !recoveredCurrentAppEdit
+    && flow.executionGovernance.capabilityLearningIntent === 'none'
+    && (
+      actionContract.applies
+      || classifyRuntimeWorkIntent(semanticText) !== 'none'
+      || hasExplicitToolIntent(semanticText)
+    )
+    && discoveredEvidenceTools.length === 0;
+  if (ordinaryWorkNeedsCapabilityDiscovery) {
+    addAvailable(additions, available, CAPABILITY_GAP_DISCOVERY_TOOLS);
+    addAvailable(semanticPriority, available, CAPABILITY_GAP_DISCOVERY_TOOLS);
+    categories.push('capability_gap_discovery');
+    reasons.push('an ordinary work request without a matched evidence-producing capability may inspect only the read-only reuse chain; installation, configuration, and generation remain separate confirmed actions');
   }
 
   if (flow.workSurfaceRoute.directDesktop) {
@@ -691,15 +732,22 @@ export function buildLumiExecutionDecision(input: LumiExecutionDecisionInput): L
     input.pendingAssistantOfferContext,
   );
   const unboundTerseContinuation = isUnboundTerseContinuation(input);
+  const reviewedExternalCapabilityMatches = input.toolRegistry?.findRelevant(
+    input.flow.routeText || input.text,
+    { limit: 6, context: input.visibilityContext },
+  ).filter(tool => tool.name.startsWith('external_capability_action_')) || [];
   const allowToolUse = !unboundTerseContinuation && (
     input.flow.allowToolUseForTurn
     || input.flow.modelToolAccess === 'manifest'
     || runtimeWorkIntent !== 'none'
   ) && !input.isSanctuary && !statusOnlyContinuation;
   const selfRepairToolPolicy = input.flow.selfRepairTurn && !statusOnlyContinuation && !modelOwnedMainChat
-    ? buildSelfRepairToolPolicy(input.flow.routeText || input.text, input.toolRegistry)
+    ? buildSelfRepairToolPolicy(input.flow.routeText || input.text, input.toolRegistry, input.visibilityContext)
     : null;
-  const clientActionToolPolicy = input.flow.clientActionOnlyTurn && !statusOnlyContinuation && !modelOwnedMainChat
+  const clientActionToolPolicy = input.flow.clientActionOnlyTurn
+    && reviewedExternalCapabilityMatches.length === 0
+    && !statusOnlyContinuation
+    && !modelOwnedMainChat
     ? CLIENT_ACTION_TOOL_POLICY
     : null;
   const industryGuidanceToolPolicy = buildRegisteredIndustryGuidanceToolPolicy(
@@ -722,7 +770,7 @@ export function buildLumiExecutionDecision(input: LumiExecutionDecisionInput): L
           : clientActionToolPolicy
             ? clientActionToolPolicy
             : allowToolUse
-              ? fallbackPolicy(input.flow, input.personalityToolPolicy, input.toolRegistry)
+              ? fallbackPolicy(input.flow, input.personalityToolPolicy, input.toolRegistry, input.visibilityContext)
               : NO_TOOLS_POLICY;
   const baseToolPolicy = input.isSanctuary || statusOnlyContinuation
     ? selectedBaseToolPolicy
@@ -732,21 +780,30 @@ export function buildLumiExecutionDecision(input: LumiExecutionDecisionInput): L
         input.toolRegistry,
         input.personalityToolPolicy,
       );
-  const rawToolRoute = allowToolUse && (
-    runtimeWorkIntent !== 'none' || shouldRouteTools(input.flow, input.isSanctuary)
-  )
-    ? routeToolsForTurn(input.flow.routeText || input.text, input.toolDeclarations, {
+  const rawToolRoute = reviewedExternalCapabilityMatches.length > 0 && allowToolUse && !input.isSanctuary
+    ? {
+        toolNames: reviewedExternalCapabilityMatches.map(tool => tool.name),
+        categories: ['reviewed_external_capability'],
+        reasons: ['current user wording semantically matched an active reviewed external capability'],
+        totalAvailable: input.toolDeclarations.length,
+        maxTools: input.flow.channel === 'voice' ? 24 : 32,
+        truncated: false,
+      }
+    : allowToolUse && (
+      runtimeWorkIntent !== 'none' || shouldRouteTools(input.flow, input.isSanctuary)
+    )
+      ? routeToolsForTurn(input.flow.routeText || input.text, input.toolDeclarations, {
         // Permission to use the full registry is not a reason to inject the
         // full registry into every model turn. A narrow per-turn manifest
         // keeps context stable while preserving access to every tool through
         // routing on the turn that actually needs it.
         maxTools: input.flow.channel === 'voice' ? 24 : 32,
-        capabilityManifest: input.toolRegistry?.getCapabilityManifest(baseToolPolicy),
+        capabilityManifest: input.toolRegistry?.getCapabilityManifest(baseToolPolicy, { context: input.visibilityContext }),
         pendingAssistantOfferContext: input.pendingAssistantOfferContext,
         actionTaskState: input.actionTaskState,
         trustedActionContinuation: input.trustedActionContinuation,
-      })
-    : null;
+        })
+      : null;
   const toolRoute = rawToolRoute
     ? enhanceToolRouteForFlow(
         rawToolRoute,
@@ -756,6 +813,7 @@ export function buildLumiExecutionDecision(input: LumiExecutionDecisionInput): L
         input.trustedActionContinuation && input.actionTaskState?.goal
           ? input.actionTaskState.goal
           : primaryUserInstruction(input.flow.routeText || input.text),
+        input.visibilityContext,
       )
     : null;
   const routedPolicy = toolRoute

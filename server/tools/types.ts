@@ -276,14 +276,28 @@ export interface ToolContext {
   cwd?: string;
   /** Actual native desktop host platform when it differs from the server. */
   desktopPlatform?: NodeJS.Platform;
-  /** Relay for desktop tools: sends execution request to Tauri frontend and returns result */
-  desktopRelay?: (toolName: string, args: Record<string, any>) => Promise<string>;
+  /** Relay for desktop tools: sends execution request to Tauri frontend and returns result. */
+  desktopRelay?: ((toolName: string, args: Record<string, any>) => Promise<string>) & {
+    /**
+     * Set after physical user activity pauses this turn's desktop lease. The
+     * tool loop must stop, while the durable task remains resumable.
+     */
+    getControlPauseReason?: () => string | null;
+  };
   /** Explicit personal-device relay used only for approved cross-workspace handoff, such as sending an organization file to the member's own WeChat. */
   personalDesktopRelay?: (toolName: string, args: Record<string, any>) => Promise<string>;
   /** Called when a tool requires confirmation. Returns true to proceed, false to abort. */
   requestConfirmation?: (toolName: string, args: Record<string, any>) => Promise<boolean>;
   /** Original user/task intent used to classify semantic risk for low-level actions. */
   actionIntent?: string;
+  /**
+   * Server-owned current-turn execution decision. False means a model may
+   * answer conversationally but no adapter may start, even if a capability
+   * manifest was visible to it.
+   */
+  currentTurnExecutionRequested?: boolean;
+  /** Exact durable continuation proof produced by the shared execution pipeline. */
+  trustedActionContinuation?: boolean;
   /**
    * Routed execution text, including trusted continuation state recovered for
    * the current turn. Task-specific guards may use this instead of the shorter
@@ -317,12 +331,25 @@ export interface ToolContext {
   modelToolProjection?: {
     /** Priority-ordered declaration names selected for this turn. */
     toolNames: string[];
+    /**
+     * Small server-owned subset that the final provider/local context budget
+     * must retain.  This is intentionally narrower than `toolNames`: the
+     * latter is the model's optional choice set, not a request-size pin for
+     * every schema in a hard route or resumed task.
+     */
+    requiredToolNames?: string[];
     /** Hard declaration ceiling, independent from the tool-call budget. */
     maxTools: number;
     /** Allow the manifest discovery receipt to replace low-priority schemas. */
     allowDynamicDiscovery?: boolean;
     /** Canonical discovery tool; defaults to client_capability_manifest. */
     discoveryToolName?: string;
+    /**
+     * Schemas removed by the final provider-input budget. The adapter keeps
+     * this on its private effective projection so later iterations cannot
+     * plan against a declaration the provider never received.
+     */
+    droppedToolNames?: string[];
   };
   /** Returns true if the task has been cancelled — checked between tool iterations */
   isCancelled?: () => boolean;
@@ -365,8 +392,38 @@ export interface ToolContext {
 
 export interface ToolDefinition {
   name: string;
+  /** Server-only visibility boundary. Omitted from model/tool manifests. */
+  internalVisibility?: {
+    ownerUserId: string;
+    /** Keep a user-owned capability out of organization/work projections. */
+    personalOnly?: boolean;
+    /** Model inventory gate; direct host/UI execution still uses owner checks. */
+    modelAccess?: 'hidden' | 'foreground' | 'automatic_candidate';
+    /** Host-owned readiness check for an automatic-candidate projection. */
+    automaticReady?: () => boolean;
+  };
+  /**
+   * Server-owned arguments are bound before canonical target checks, policy,
+   * idempotency digests, receipts, and handler admission. This hook is never
+   * exposed in a model declaration.
+   */
+  serverOwnedArgumentBinder?: (
+    args: Record<string, any>,
+    context?: ToolContext,
+  ) => Record<string, any>;
+  /** Underlying semantic identity used by generic safety/timeout machinery. */
+  semanticToolName?: string;
   description: string;
   parameters: Record<string, any>;
+  /**
+   * Validate the exact adapter arguments before any confirmation is requested.
+   * This is a fail-closed admission check, not an authorization decision: it
+   * may reject impossible/invalid input but must not perform side effects.
+   */
+  preflight?: (
+    args: Record<string, any>,
+    context?: ToolContext,
+  ) => void | Promise<void>;
   handler: (args: Record<string, any>, context?: ToolContext) => Promise<string>;
   /**
    * Keep the generic local side-effect fence only while the handler is in
@@ -434,6 +491,11 @@ export interface NormalizedLLMResponse {
   routing?: ModelRoutingTrace;
   /** Durable id minted only after the exact routing trace is persisted. */
   routingReceiptId?: string;
+  /** Exact schema projection delivered at the final provider boundary. */
+  modelRequestContext?: {
+    deliveredToolNames: string[];
+    droppedToolNames: string[];
+  };
 }
 
 export interface ToolExecutionRecord {

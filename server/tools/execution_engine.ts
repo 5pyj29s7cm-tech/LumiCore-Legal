@@ -12,6 +12,13 @@ import {
   isFileTargetTask,
   type TaskTargetEvidenceRecord,
 } from '../conversation/task_target_anchor';
+import {
+  extractDesktopLaunchTarget,
+  extractSimpleDesktopOpenTarget,
+  matchesRequestedDesktopActionTarget,
+  requestedMediaPlayerTarget,
+  requiresMediaPlaybackAction,
+} from '../cognition/action_contract';
 
 const CANONICAL_TOOL_EXECUTION_RECORD = Symbol('lumi.canonical_tool_execution_record');
 const CANONICAL_EXTERNAL_COMMIT_RECONCILIATION = Symbol('lumi.canonical_external_commit_reconciliation');
@@ -119,10 +126,70 @@ function brandCanonicalToolExecutionRecord(
 }
 
 function serverTargetPolicyTaskText(context?: ToolContext): string {
-  return [context?.routedTaskText, context?.actionIntent]
-    .map(value => String(value || '').trim())
-    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
-    .join('\n');
+  const currentTurn = String(context?.actionIntent || '').trim();
+  const routed = String(context?.routedTaskText || '').trim();
+  // Routed text may contain a durable capsule, but it is authoritative only
+  // after the shared pipeline proved an exact task continuation. For a fresh
+  // turn, the visible current instruction is the complete execution scope.
+  if (context?.trustedActionContinuation && context.taskId && routed) {
+    const routedTaskId = routed.match(/(?:^|\n)-\s*taskId:\s*([^\r\n]+)/i)?.[1]?.trim();
+    if (routedTaskId === context.taskId) return routed;
+  }
+  return currentTurn || routed;
+}
+
+function toolLaunchTargets(args: Record<string, unknown>): string[] {
+  return [
+    args.target,
+    args.url,
+    args.query,
+    args.app,
+    args.appTarget,
+    args.application,
+    args.applicationTarget,
+    args.path,
+    args.executable,
+  ]
+    .filter((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+    .map(value => value.trim());
+}
+
+function guardCurrentTurnToolCall(input: {
+  context?: ToolContext;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}): ToolExecutionPreflightResult {
+  if (input.context?.currentTurnExecutionRequested === false) {
+    return {
+      allowed: false,
+      arguments: input.arguments,
+      reason: 'Current turn is conversational and has no server-owned execution authority.',
+    };
+  }
+  if (!/^(?:desktop_open|browser_open_task)$/i.test(input.toolName)) {
+    return { allowed: true, arguments: input.arguments };
+  }
+
+  const taskText = serverTargetPolicyTaskText(input.context);
+  const requestedTarget = extractDesktopLaunchTarget(taskText)
+    || extractSimpleDesktopOpenTarget(taskText)
+    || (requiresMediaPlaybackAction(taskText) ? requestedMediaPlayerTarget(taskText) : '');
+  if (!requestedTarget) return { allowed: true, arguments: input.arguments };
+
+  const targets = toolLaunchTargets(input.arguments);
+  const browser = input.toolName === 'browser_open_task'
+    || targets.some(target => /^(?:https?:\/\/|www\.)/i.test(target));
+  if (
+    targets.length === 0
+    || !targets.some(target => matchesRequestedDesktopActionTarget(target, requestedTarget, browser))
+  ) {
+    return {
+      allowed: false,
+      arguments: input.arguments,
+      reason: `Tool target does not match the current task target '${requestedTarget}'.`,
+    };
+  }
+  return { allowed: true, arguments: input.arguments };
 }
 
 function serverTargetPolicyScopeKey(context: ToolContext, taskText: string): string {
@@ -230,7 +297,7 @@ export async function executeAttachedExternalCommitReconciliation(
   input: ExecuteAttachedExternalCommitReconciliationInput,
 ): Promise<ToolExecutionRecord> {
   const definition = input.registry.get(input.originalToolName);
-  const manifest = input.registry.getCapabilityManifestEntry(input.originalToolName, input.context.toolPolicy);
+  const manifest = input.registry.getCapabilityManifestEntry(input.originalToolName, input.context.toolPolicy, input.context);
   if (!definition?.reconcileExternalCommit || !manifest
     || manifest.capabilityId !== input.originalCapabilityId) {
     throw new Error(`Capability '${input.originalToolName}' has no compatible attached reconciliation hook.`);
@@ -425,21 +492,40 @@ export async function executeToolCall(
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
   const requestedArguments = input.arguments || {};
+  let preparedArguments = requestedArguments;
+  let semanticToolName = input.name;
+  let preparationError = '';
+  try {
+    const prepared = input.registry.prepareExecution(input.name, requestedArguments, input.context);
+    preparedArguments = prepared.arguments;
+    semanticToolName = prepared.semanticToolName;
+  } catch (error: any) {
+    preparationError = String(error?.message || error || 'Tool argument preparation failed.');
+  }
   const capabilityGetter = (input.registry as any)?.getCapabilityManifestEntry;
   const capability = typeof capabilityGetter === 'function'
-    ? capabilityGetter.call(input.registry, input.name, input.context?.toolPolicy)
+    ? capabilityGetter.call(input.registry, input.name, input.context?.toolPolicy, input.context)
     : undefined;
   // Snapshot the server-routed contract before invoking any caller-supplied
   // compatibility preflight. A preflight may narrow arguments, but it cannot
   // rewrite the task contract that the mandatory target guard enforces.
   const targetPolicyTaskText = serverTargetPolicyTaskText(input.context);
-  const callerPreflight = input.preflight?.(input.name, requestedArguments)
-    || { allowed: true, arguments: requestedArguments };
-  const callerArguments = callerPreflight.arguments || requestedArguments;
+  const currentTurnPolicy = guardCurrentTurnToolCall({
+    context: input.context,
+    toolName: semanticToolName,
+    arguments: preparedArguments,
+  });
+  const callerPreflight = preparationError
+    ? { allowed: false, arguments: requestedArguments, reason: preparationError }
+    : currentTurnPolicy.allowed
+      ? input.preflight?.(input.name, preparedArguments)
+        || { allowed: true, arguments: preparedArguments }
+      : currentTurnPolicy;
+  const callerArguments = callerPreflight.arguments || preparedArguments;
   const targetPolicy = callerPreflight.allowed && isFileTargetTask(targetPolicyTaskText)
     ? guardTaskTargetToolCall({
         taskText: targetPolicyTaskText,
-        toolName: input.name,
+        toolName: semanticToolName,
         arguments: callerArguments,
         toolRecords: serverTargetPolicyEvidence(input.context, targetPolicyTaskText),
         enforceStructuredFileRead: Boolean(
@@ -452,7 +538,7 @@ export async function executeToolCall(
         ),
       })
     : { allowed: true, reason: '' };
-  const serverPreflight: ToolExecutionPreflightResult = !callerPreflight.allowed
+  const targetPreflight: ToolExecutionPreflightResult = !callerPreflight.allowed
     ? { ...callerPreflight, arguments: callerArguments }
     : !targetPolicy.allowed
       ? { allowed: false, arguments: callerArguments, reason: targetPolicy.reason }
@@ -460,8 +546,26 @@ export async function executeToolCall(
           allowed: true,
           arguments: targetPolicy.normalizedArguments || callerArguments,
         };
+  let serverPreflight = targetPreflight;
+  if (serverPreflight.allowed) {
+    try {
+      const rebound = input.registry.prepareExecution(
+        input.name,
+        serverPreflight.arguments || callerArguments,
+        input.context,
+      );
+      serverPreflight = { allowed: true, arguments: rebound.arguments };
+      semanticToolName = rebound.semanticToolName;
+    } catch (error: any) {
+      serverPreflight = {
+        allowed: false,
+        arguments: serverPreflight.arguments || callerArguments,
+        reason: String(error?.message || error || 'Tool argument preparation failed.'),
+      };
+    }
+  }
   const desktopAuthorization = serverPreflight.allowed
-    ? input.context?.desktopExecutionTracker?.authorize(input.name, capability)
+    ? input.context?.desktopExecutionTracker?.authorize(semanticToolName, capability)
     : undefined;
   const preflight = desktopAuthorization && !desktopAuthorization.allowed
     ? { allowed: false, arguments: serverPreflight.arguments, reason: desktopAuthorization.reason }

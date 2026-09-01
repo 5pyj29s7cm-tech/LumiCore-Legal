@@ -8,7 +8,11 @@ import {
   type CapabilityRoutingProjection,
 } from '../tools/capability_projection';
 import type { CapabilityLane, CapabilityManifestEntry } from '../tools/types';
-import { mcpManager } from '../mcp/client';
+import {
+  getRegisteredMCPToolOwner,
+  mcpManager,
+  requireSafeMCPServerName,
+} from '../mcp';
 import {
   buildActionContract,
   extractDesktopLaunchTarget,
@@ -186,7 +190,7 @@ const MANIFEST_LANES_BY_GROUP: Record<string, CapabilityLane[]> = {
   design: ['cad', 'media'],
   code: ['files', 'system'],
   system: ['system', 'client', 'desktop'],
-  skills: ['agents', 'client'],
+  skills: ['system', 'client', 'agents'],
   externalControl: ['desktop', 'web', 'agents'],
   messaging: ['messaging', 'desktop'],
   workTakeover: ['agents'],
@@ -760,6 +764,8 @@ function priorityToolsForRoute(categories: string[], text: string): string[] {
       'legal_generate_argument_or_opinion',
       'legal_extract_dispute_focus',
       'legal_generate_litigation_packet',
+      'legal_prepare_filing_handoff',
+      'legal_finalize_delivery_package',
       'legal_case_strategy',
       'legal_search_case',
       'legal_search_statute',
@@ -781,9 +787,35 @@ function applyRoutePriority(ordered: string[], priorities: string[]): string[] {
   ];
 }
 
-function getMcpServerName(toolName: string): string | null {
-  const match = toolName.match(/^mcp_(.+?)_/);
-  return match?.[1] || null;
+function getMcpServerName(
+  toolName: string,
+  capabilityManifest?: CapabilityManifestEntry[],
+): string | null {
+  const manifestEntry = capabilityManifest?.find(entry => entry.toolName === toolName);
+  if (manifestEntry) {
+    const manifestProvider = manifestEntry.provenance?.provider || manifestEntry.provider;
+    if (
+      manifestProvider
+      && (
+        manifestEntry.source === 'mcp'
+        || manifestEntry.source === 'skill'
+        || manifestEntry.provenance?.kind === 'mcp'
+        || manifestEntry.provenance?.kind === 'skill'
+      )
+    ) {
+      try {
+        return requireSafeMCPServerName(manifestProvider);
+      } catch {
+        return null;
+      }
+    }
+    // The manifest passed to this route belongs to the exact ToolRegistry
+    // being planned. An explicit builtin/adapter entry is authoritative; a
+    // same-named owner cached in another (usually the process-global) MCP
+    // registry must never make this tool subject to an unrelated health gate.
+    return null;
+  }
+  return getRegisteredMCPToolOwner(toolName);
 }
 
 function getConnectedMcpGate(options?: {
@@ -794,9 +826,10 @@ function getConnectedMcpGate(options?: {
   if (options?.connectedMcpServers) return new Set(options.connectedMcpServers);
   try {
     const connected = mcpManager.getRoutableServers();
-    // In isolated tests or before MCP startup, no runtime signal exists. Do not
-    // hide synthetic MCP declarations unless the caller provided an explicit gate.
-    return connected.length ? new Set(connected) : null;
+    // An empty runtime inventory is still a real health signal. Synthetic test
+    // declarations without MCP provenance remain unaffected, while registered
+    // MCP/Skill tools fail closed until their exact owner is routable.
+    return new Set(connected);
   } catch {
     return null;
   }
@@ -988,6 +1021,23 @@ export function routeToolsForTurn(
       }
     }
     reasons.push('message reading hard-forbids every messaging capability with external side effects');
+  }
+
+  if (
+    actionContract.kind === 'desktop_operation'
+    && categories.includes('messaging')
+    && hasNamedMessagingSurface(instructionText)
+    && !isDirectMessagingSend(instructionText)
+  ) {
+    for (const entry of routingManifest) {
+      const externalCommit = entry.operation === 'communicate'
+        || /(?:send|reply|post|publish|upload|submit|message_file)/i.test(entry.toolName);
+      if (entry.lane === 'messaging' && externalCommit) {
+        selected.delete(entry.toolName);
+        forbiddenToolNames.add(entry.toolName);
+      }
+    }
+    reasons.push('opening a messaging surface without send intent hard-forbids messaging side effects');
   }
 
   if (readOnlyKnowledgeInspection && !currentAppEdit) {
@@ -1278,7 +1328,7 @@ export function routeToolsForTurn(
   const unavailableMcpServers: string[] = [];
   const ordered = connectedMcpGate
     ? orderedBeforeHealthGate.filter(name => {
-        const serverName = getMcpServerName(name);
+        const serverName = getMcpServerName(name, options?.capabilityManifest);
         if (!serverName) return true;
         if (connectedMcpGate.has(serverName)) return true;
         unavailableMcpServers.push(serverName);

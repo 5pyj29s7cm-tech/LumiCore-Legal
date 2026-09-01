@@ -10,6 +10,7 @@ import {
   hasExplicitNoMutationInstruction,
   hasExplicitNoToolInstruction,
   hasExplicitToolIntent,
+  isConversationalProductFeedback,
   isCurrentClientDiagnosticRequest,
   isDiagnosticOrRepairRequest,
   shouldAllowToolUseForTurn,
@@ -176,7 +177,7 @@ function buildTurnFlowPromptOverlay(flow: Omit<LumiTurnFlow, 'promptOverlay'>): 
     'Execution governance:',
     `- Result verification: ${flow.executionGovernance.verificationIntent} (${flow.executionGovernance.verificationReason}). Before saying work is done, rely on tool evidence, visible desktop evidence, file existence/content checks, or work_product_verify/work_takeover_task_verify_result.`,
     '- Execution ownership: one LumiCore execution owner keeps a continuous task identity and explains progress and results humanly.',
-    `- Capability learning: ${flow.executionGovernance.capabilityLearningIntent} (${flow.executionGovernance.capabilityLearningReason}). Before adding new code or wrappers, inspect capability_learning_list/self_extension_plan, reuse learned skills/adapters/tools when possible, and use capability_gap_autofix only for a real missing or brittle capability.`,
+    `- Capability learning: ${flow.executionGovernance.capabilityLearningIntent} (${flow.executionGovernance.capabilityLearningReason}). Follow one evidence-backed capability chain: inspect the live manifest and installed skills; search the Skill Hall and reuse a callable skill; inspect or configure an approved external MCP candidate when the store has no fit; generate an isolated draft only when a real gap remains. Installing or configuring requires its own explicit confirmation, must register exact tools into the live manifest, and still needs a real task receipt before claiming the user\'s work is complete. Use capability_gap_autofix only for a brittle implementation that already exists, never as a substitute for this discovery order.`,
     'If chat/work intent is ambiguous, ask one short clarification or continue the conversation naturally.',
     flow.conceptualCapabilityQuestion ? '' : flow.workTakeover.promptOverlay,
   ].filter(Boolean).join('\n');
@@ -392,13 +393,21 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     && !statusOnlyContinuation;
   const currentActionContract = buildActionContract(input.text);
   const normalizedActionIntent = normalizeActionIntent(input.text);
+  const matchedWorkflowCandidate = matchSkillWorkflow(routingText, { targetIsLumi: input.targetIsLumi });
   const industryGuidanceRequest = !conceptualCapabilityQuestion
     && !statusOnlyContinuation
     && normalizedActionIntent.kind !== 'correction_explanation'
     && isCurrentIndustryGuidanceRequest(input.text);
-  const readOnlyConversationTurn = explicitNoMutationInstruction
-    && currentActionContract.kind === 'none'
-    && /[？?]|(?:先聊|只回答|告诉我|你认为|解释|reply|answer|explain)/iu.test(input.text);
+  const readOnlyConversationTurn = (
+    isConversationalProductFeedback(input.text)
+    && !industryWorkflowExecutionRequested
+    && !matchedWorkflowCandidate
+  )
+    || (
+      explicitNoMutationInstruction
+      && currentActionContract.kind === 'none'
+      && /[？?]|(?:先聊|只回答|告诉我|你认为|解释|reply|answer|explain)/iu.test(input.text)
+    );
   const actionContract = currentActionContract.applies || !continuationMayDriveAction
     ? currentActionContract
     : buildActionContract(routingText);
@@ -485,7 +494,7 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
         : 'hard_off' as const;
   const matchedWorkflow = immediateAssistantRestatement || conceptualCapabilityQuestion || recoveredCurrentAppEdit || explicitNoToolInstruction
     ? null
-    : matchSkillWorkflow(routingText, { targetIsLumi: input.targetIsLumi });
+    : matchedWorkflowCandidate;
   // Main chat is open-ended natural language. A regex workflow match may enrich
   // the capability prompt, but it cannot own dispatch, expand permissions, or
   // produce a terminal answer before the model sees the manifest. Task/autonomy

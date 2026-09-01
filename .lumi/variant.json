@@ -24,7 +24,7 @@
     "repository": "https://github.com/5pyj29s7cm-tech/lumi-CEO.git",
     "branch": "main",
     "baselineCommit": "a778bd972f912d56252419c6ea31d22453e1eca2",
-    "lastSyncedCommit": "0be7c8fc61137fd944d1511cefd0248a83f3aef3"
+    "lastSyncedCommit": "f6eec0ee73ff0f9e252279ab9c1618ed10f8dc4d"
   },
   "repository": "https://github.com/5pyj29s7cm-tech/lumi-legal-client.git",
   "syncPolicy": {
@@ -33,7 +33,7 @@
     "defaultBranchUpdate": "verified fast-forward only"
   },
   "createdAt": "2026-08-03",
-  "lastSyncedAt": "2026-08-28T06:12:15.384Z",
+  "lastSyncedAt": "2026-09-01T21:12:12.272+08:00",
   "delivery": {
     "localBranch": "variant/legal-client",
     "remoteBranch": "main",

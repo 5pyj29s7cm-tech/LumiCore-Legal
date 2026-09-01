@@ -36,6 +36,7 @@ import {
 import { recoverInterruptedExternalAiHistorySyncs } from "../agents/external_ai_history_sync";
 import { hydrateActiveExtensions } from "../extensions/registry";
 import { PRODUCT_VARIANT } from "../../shared/product_variant";
+import { hydrateExternalCapabilities } from "../external_capabilities/registry";
 import { runScheduledReadOnlyPrewarm, readOnlyContextCache } from "../context/read_only_cache";
 import { getGptSovitsRuntimeStatus } from "../tts/gptsovits_runtime";
 import { getVoiceprintRuntimeStatus } from "../biometrics/voiceprint_provider";
@@ -218,9 +219,22 @@ export async function bootstrap(ctx: BootstrapContext) {
   if (inheritedSkillsDisabled.length > 0) {
     console.log(`[Variant] Disabled inherited non-${PRODUCT_VARIANT.productLine} skills: ${inheritedSkillsDisabled.join(', ')}`);
   }
+  const initialExternalCapabilities = await hydrateExternalCapabilities(toolRegistry);
+  if (initialExternalCapabilities.active > 0) {
+    console.log(
+      `[ExternalCapabilities] Active=${initialExternalCapabilities.active}, ready=${initialExternalCapabilities.ready}, proxies=${initialExternalCapabilities.proxies}`,
+    );
+  }
   registerMCPTools(io).then(mcpTools => {
     if (mcpTools.length > 0) {
       console.log(`[MCP] Registered ${mcpTools.length} MCP tools (total: ${toolRegistry.list().length})`);
+    }
+    return hydrateExternalCapabilities(toolRegistry);
+  }).then(externalCapabilities => {
+    if (externalCapabilities.active > 0) {
+      console.log(
+        `[ExternalCapabilities] Rehydrated after MCP: ready=${externalCapabilities.ready}, unavailable=${externalCapabilities.unavailable}, proxies=${externalCapabilities.proxies}`,
+      );
     }
   }).catch(err => {
     console.warn('[MCP] Tool registration warning:', err.message);

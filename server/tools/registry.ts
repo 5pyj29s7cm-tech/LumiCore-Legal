@@ -48,6 +48,7 @@ import {
   brandToolLifecyclePersistenceFailure,
   isToolLifecyclePersistenceFailure,
 } from './lifecycle_persistence_error';
+import { hasAutonomousHostAuthority } from './host_execution_authority';
 
 export {
   inferCapabilityFamily,
@@ -111,9 +112,71 @@ function isExternallySourcedToolContext(context?: PermissionExecutionContext): b
     );
 }
 
+type ToolVisibilityContext = Pick<ToolContext, 'userId' | 'domain' | 'orgId' | 'autonomous' | 'source'>;
+
+function isToolVisibleToContext(tool: ToolDefinition, context?: ToolVisibilityContext): boolean {
+  const ownerUserId = String(tool.internalVisibility?.ownerUserId || '').trim();
+  if (!ownerUserId) return true;
+  // Context-free inventory calls are retained for trusted internal audits.
+  if (!context) return true;
+  if (String(context.userId || '').trim() !== ownerUserId) return false;
+  if (tool.internalVisibility?.personalOnly && (context.domain === 'work' || String(context.orgId || '').trim())) {
+    return false;
+  }
+  return true;
+}
+
+function isAutonomousVisibilityContext(context?: ToolVisibilityContext): boolean {
+  return context?.autonomous === true || /(?:^|[_-])(?:autonomy|autonomous|scheduler)(?:$|[_-])/i.test(String(context?.source || ''));
+}
+
+function isToolVisibleToModelContext(tool: ToolDefinition, context?: ToolVisibilityContext): boolean {
+  if (!isToolVisibleToContext(tool, context)) return false;
+  // Context-free inventory calls remain available to trusted internal audits.
+  if (!context) return true;
+  const access = tool.internalVisibility?.modelAccess;
+  if (access === 'hidden') return false;
+  if (!isAutonomousVisibilityContext(context)) return true;
+  if (access === 'foreground') return false;
+  if (access === 'automatic_candidate') {
+    try { return tool.internalVisibility?.automaticReady?.() === true; } catch { return false; }
+  }
+  return true;
+}
+
 function assertToolPermission(tool: ToolDefinition, context?: ToolContext): void {
   const permissionContext = context as PermissionExecutionContext | undefined;
   const userId = String(permissionContext?.userId || '').trim();
+
+  if (!isToolVisibleToContext(tool, permissionContext)) {
+    throw new Error(`Tool "${tool.name}" is unavailable outside its owning user scope.`);
+  }
+  if (permissionContext && tool.internalVisibility?.modelAccess === 'hidden') {
+    if (String(permissionContext.source || '') !== 'external-capability-icon') {
+      throw new Error(`Tool "${tool.name}" is a manual external capability and requires its reviewed host entry point.`);
+    }
+  }
+  if (
+    permissionContext
+    && tool.internalVisibility?.modelAccess === 'foreground'
+    && isAutonomousVisibilityContext(permissionContext)
+  ) {
+    throw new Error(`Tool "${tool.name}" is assisted-only and unavailable to autonomous execution.`);
+  }
+  if (
+    permissionContext
+    && tool.internalVisibility?.modelAccess === 'automatic_candidate'
+    && isAutonomousVisibilityContext(permissionContext)
+  ) {
+    let ready = false;
+    try { ready = tool.internalVisibility.automaticReady?.() === true; } catch { ready = false; }
+    if (!ready) {
+      throw new Error(`Tool "${tool.name}" has not earned automatic execution through host-verified acceptance receipts.`);
+    }
+    if (!hasAutonomousHostAuthority(permissionContext, String(tool.internalVisibility.ownerUserId || ''))) {
+      throw new Error(`Tool "${tool.name}" requires host-owned autonomous task authority.`);
+    }
+  }
 
   // This check intentionally precedes `public` permission. A host/process tool
   // accidentally registered as public must still never cross a remote model
@@ -132,6 +195,10 @@ function assertToolPermission(tool: ToolDefinition, context?: ToolContext): void
   if (tool.permission === 'public') return;
 
   if (tool.permission === 'user') {
+    if (
+      tool.internalVisibility?.modelAccess === 'automatic_candidate'
+      && hasAutonomousHostAuthority(permissionContext, String(tool.internalVisibility.ownerUserId || ''))
+    ) return;
     if (
       permissionContext?.authenticated === true
       && !isAnonymousToolIdentity(userId)
@@ -289,11 +356,21 @@ export class ToolHandlerSettledAfterTimeoutError extends Error {
 function externalResultIsVerified(result: string): boolean {
   try {
     const payload = JSON.parse(result || '{}');
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
     if (payload.sent === false || payload.submitted === false || payload.published === false) return false;
-    if (payload.verificationStatus) return payload.verificationStatus === 'verified';
-    if (payload.verified !== undefined) return payload.verified === true;
-  } catch {}
-  return true;
+    if (Object.prototype.hasOwnProperty.call(payload, 'verificationStatus')) {
+      return payload.verificationStatus === 'verified';
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'verified')) {
+      return payload.verified === true;
+    }
+  } catch {
+    // External side effects must never become durable successes from prose or
+    // malformed provider output. Only an explicit verified receipt may close
+    // the idempotency fence; every other result remains unknown and blocks a
+    // resend until host-owned reconciliation can prove the outcome.
+  }
+  return false;
 }
 
 /**
@@ -540,6 +617,27 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
+  /** Bind immutable host arguments before the canonical execution pipeline. */
+  prepareExecution(
+    name: string,
+    args: Record<string, any>,
+    context?: ToolContext,
+  ): { arguments: Record<string, any>; semanticToolName: string } {
+    const tool = this.get(name);
+    if (!tool) throw new Error(`Tool "${name}" not found in registry`);
+    assertToolPermission(tool, context);
+    const bound = tool.serverOwnedArgumentBinder
+      ? tool.serverOwnedArgumentBinder(structuredClone(args || {}), context)
+      : args || {};
+    if (!bound || typeof bound !== 'object' || Array.isArray(bound)) {
+      throw new Error(`Tool "${name}" produced invalid server-owned arguments.`);
+    }
+    return {
+      arguments: bound,
+      semanticToolName: String(tool.semanticToolName || name),
+    };
+  }
+
   getEvidenceDescriptor(name: string): ToolDefinition['evidence'] | undefined {
     return this.tools.get(name)?.evidence;
   }
@@ -547,9 +645,12 @@ export class ToolRegistry {
   getCapabilityManifestEntry(
     name: string,
     policy?: ToolPolicy,
+    context?: ToolVisibilityContext,
   ): CapabilityManifestEntry | undefined {
     const tool = this.tools.get(name);
-    return tool ? this.buildCapabilityManifestEntry(tool, policy) : undefined;
+    return tool && isToolVisibleToContext(tool, context)
+      ? this.buildCapabilityManifestEntry(tool, policy)
+      : undefined;
   }
 
   /** Build the evidence envelope attached to a terminal tool receipt. */
@@ -589,10 +690,15 @@ export class ToolRegistry {
   findRelevant(text: string, options?: {
     limit?: number;
     evidenceOperations?: Array<NonNullable<ToolDefinition['evidence']>['operation']>;
+    context?: ToolVisibilityContext;
   }): ToolDefinition[] {
     const query = String(text || '').toLowerCase().trim();
     if (!query) return [];
-    const ascii = query.match(/[a-z0-9_]{3,}/g) || [];
+    // File-system path segments describe where work lives, not what capability
+    // the user requested. Without removing them first, a common path such as
+    // D:\\work\\brief.txt spuriously matches every "workflow/work" tool.
+    const semanticQuery = query.replace(/\b[a-z]:[\\/][^\s"'<>|]*/gi, ' ');
+    const ascii = semanticQuery.match(/[a-z0-9_]{3,}/g) || [];
     const cjkRuns = query.match(/[\u3400-\u9fff]+/g) || [];
     const cjk: string[] = [];
     for (const run of cjkRuns) {
@@ -607,11 +713,19 @@ export class ToolRegistry {
       ? new Set(options.evidenceOperations)
       : null;
     return this.list()
+      .filter(tool => isToolVisibleToModelContext(tool, options?.context))
       .filter(tool => !allowedOperations || (tool.evidence && allowedOperations.has(tool.evidence.operation)))
       .map(tool => {
         const haystack = `${tool.name} ${tool.description} ${(tool.routingHints || []).join(' ')}`.toLowerCase();
+        const haystackAsciiTokens = new Set(
+          (haystack.match(/[a-z0-9_]{3,}/g) || []).flatMap(token => [token, ...token.split('_').filter(Boolean)]),
+        );
         const score = tokens.reduce((total, token) => (
-          total + (haystack.includes(token) ? Math.min(4, token.length) : 0)
+          total + ((/^[a-z0-9_]+$/i.test(token)
+            ? haystackAsciiTokens.has(token)
+            : haystack.includes(token))
+            ? Math.min(4, token.length)
+            : 0)
         ), 0);
         return { tool, score };
       })
@@ -781,17 +895,19 @@ export class ToolRegistry {
    */
   getCapabilityManifest(
     policy?: ToolPolicy,
-    options?: { executableOnly?: boolean },
+    options?: { executableOnly?: boolean; context?: ToolVisibilityContext },
   ): CapabilityManifestEntry[] {
-    const entries = this.list().map(tool => this.buildCapabilityManifestEntry(tool, policy));
+    const entries = this.list()
+      .filter(tool => isToolVisibleToModelContext(tool, options?.context))
+      .map(tool => this.buildCapabilityManifestEntry(tool, policy));
     return options?.executableOnly ? entries.filter(entry => entry.executable) : entries;
   }
 
-  getToolDeclarations(): Array<{
+  getToolDeclarations(options?: { context?: ToolVisibilityContext }): Array<{
     type: 'function';
     function: { name: string; description: string; parameters: Record<string, any> };
   }> {
-    return this.list().map(t => ({
+    return this.list().filter(tool => isToolVisibleToModelContext(tool, options?.context)).map(t => ({
       type: 'function' as const,
       function: {
         name: t.name,
@@ -825,10 +941,10 @@ export class ToolRegistry {
       : policy;
     if (!effectivePolicy && options?.failClosedWithoutPolicy) return [];
     const executable = new Set(
-      this.getCapabilityManifest(effectivePolicy, { executableOnly: true })
+      this.getCapabilityManifest(effectivePolicy, { executableOnly: true, context: options?.context })
         .map(entry => entry.toolName),
     );
-    const declarations = this.getToolDeclarations();
+    const declarations = this.getToolDeclarations({ context: options?.context });
     if (options?.visibleToolNames) {
       const byName = new Map(declarations.map(declaration => [declaration.function.name, declaration]));
       const projected: ReturnType<ToolRegistry['getToolDeclarations']> = [];
@@ -846,25 +962,49 @@ export class ToolRegistry {
     return declarations.filter(declaration => executable.has(declaration.function.name));
   }
 
+  listForContext(
+    context?: ToolVisibilityContext,
+    filterPermission?: ToolPermission,
+  ): ToolDefinition[] {
+    return this.list(filterPermission).filter(tool => isToolVisibleToModelContext(tool, context));
+  }
+
   /** Resolve effective security level for a tool given a personality's policy */
   resolveSecurity(toolName: string, policy?: ToolPolicy): EffectiveSecurity {
     const tool = this.get(toolName);
     const builtIn: SecurityLevel = tool?.securityLevel || 'confirm';
+    const semanticToolName = String(tool?.semanticToolName || toolName);
 
     if (!policy) return { level: builtIn, reason: 'tool default' };
 
     // 1. forbiddenTools overrides everything
-    if (policy.forbiddenTools?.includes('*') || policy.forbiddenTools?.includes(toolName)) {
+    if (
+      policy.forbiddenTools?.includes('*')
+      || policy.forbiddenTools?.includes(toolName)
+      || (semanticToolName !== toolName && policy.forbiddenTools?.includes(semanticToolName))
+    ) {
       return { level: 'forbidden', reason: 'personality forbiddenTools list' };
     }
 
     // 2. Explicit per-tool security override
-    if (policy.securityOverrides?.[toolName]) {
-      return { level: policy.securityOverrides[toolName], reason: 'personality security override' };
+    const proxyOverride = policy.securityOverrides?.[toolName];
+    const semanticOverride = semanticToolName !== toolName
+      ? policy.securityOverrides?.[semanticToolName]
+      : undefined;
+    const override = proxyOverride === 'forbidden' || semanticOverride === 'forbidden'
+      ? 'forbidden'
+      : proxyOverride === 'confirm' || semanticOverride === 'confirm'
+        ? 'confirm'
+        : proxyOverride || semanticOverride;
+    if (override) {
+      return { level: override, reason: 'personality security override' };
     }
 
     // 3. Legacy requireConfirmation promotes to confirm
-    if (policy.requireConfirmation.includes(toolName) && builtIn === 'safe') {
+    if (
+      (policy.requireConfirmation.includes(toolName) || policy.requireConfirmation.includes(semanticToolName))
+      && builtIn === 'safe'
+    ) {
       return { level: 'confirm', reason: 'personality requireConfirmation list' };
     }
 
@@ -887,14 +1027,27 @@ export class ToolRegistry {
     // adapter-start barrier may yield; later mutation of the registry object
     // must not swap the reviewed implementation for this execution.
     const pinnedHandler = tool.handler;
+    const pinnedPreflight = tool.preflight;
     const pinnedReconcileExternalCommit = tool.reconcileExternalCommit;
     const pinnedLocalIdempotencyReplay = tool.localIdempotencyReplay || 'cached_result';
+    const pinnedArgumentBinder = tool.serverOwnedArgumentBinder;
+    const semanticToolName = String(tool.semanticToolName || name);
 
     try {
       assertToolPermission(tool, context);
     } catch (error) {
       finishMetric('forbidden');
       throw error;
+    }
+
+    let executionArgs = args || {};
+    if (pinnedArgumentBinder) {
+      try {
+        executionArgs = pinnedArgumentBinder(structuredClone(executionArgs), context);
+      } catch (error) {
+        finishMetric('forbidden');
+        throw error;
+      }
     }
 
     // Resolve effective security level
@@ -908,8 +1061,8 @@ export class ToolRegistry {
 
     const capability = this.buildCapabilityManifestEntry(tool, policy);
     const constitutional = evaluateActionConstitution(
-      name,
-      args,
+      semanticToolName,
+      executionArgs,
       effective.level,
       context,
       capability,
@@ -919,13 +1072,26 @@ export class ToolRegistry {
       throw new Error(`Tool "${name}" is forbidden: ${constitutional.reason}.`);
     }
 
+    // Validate the frozen input before asking the user to approve it. This
+    // prevents an impossible command (wrong platform, raw shell chaining, or
+    // a non-allowlisted executable) from creating a confirmation that can only
+    // fail when resumed. Handlers retain the same checks as defence in depth.
+    if (pinnedPreflight) {
+      try {
+        await pinnedPreflight(executionArgs, context);
+      } catch (error) {
+        finishMetric('forbidden');
+        throw error;
+      }
+    }
+
     let userConfirmed = false;
 
     if (constitutional.level === 'confirm') {
       if (context?.userConfirmed === true) {
         userConfirmed = true;
       } else if (context?.requestConfirmation) {
-        const allowed = await context.requestConfirmation(name, args);
+        const allowed = await context.requestConfirmation(name, executionArgs);
         if (!allowed) {
           finishMetric('waiting_confirmation');
           return `Tool "${name}" requires user confirmation and was not approved.`;
@@ -939,7 +1105,7 @@ export class ToolRegistry {
     }
 
     const adapterPermit = beforeAdapterExecution({
-      toolName: name,
+      toolName: semanticToolName,
       capability,
       context,
     });
@@ -949,7 +1115,7 @@ export class ToolRegistry {
     }
 
     // Wrap with timeouts to prevent hanging. Vision/CAD extraction needs more room than simple tools.
-    const timeoutMs = getToolExecutionTimeoutMs(name);
+    const timeoutMs = getToolExecutionTimeoutMs(semanticToolName);
     const externalCommit = capability.sideEffects.some(effect => (
       effect.type === 'external_communication' || effect.type === 'external_state_change'
     ));
@@ -962,12 +1128,12 @@ export class ToolRegistry {
         'network_read',
         'none',
       ].includes(effect.type));
-    const idempotencyKey = externalCommit ? executionIdempotencyKey(name, args, context) : '';
+    const idempotencyKey = externalCommit ? executionIdempotencyKey(name, executionArgs, context) : '';
     const sideEffectFenceKey = !externalCommit && hasSideEffect
       ? localSideEffectFenceKey(name, context)
       : '';
-    const sideEffectInputDigest = sideEffectFenceKey ? externalCommitInputDigest(name, args) : '';
-    const inputDigest = externalCommit ? externalCommitInputDigest(name, args) : '';
+    const sideEffectInputDigest = sideEffectFenceKey ? externalCommitInputDigest(name, executionArgs) : '';
+    const inputDigest = externalCommit ? externalCommitInputDigest(name, executionArgs) : '';
     let claimToken = externalCommit ? crypto.randomUUID() : '';
     let releasePreparation: (() => void) | null = null;
     if (sideEffectFenceKey) {
@@ -1111,7 +1277,7 @@ export class ToolRegistry {
           let reconciliationTimeout: ReturnType<typeof setTimeout> | undefined;
           try {
             reconciled = await Promise.race([
-              pinnedReconcileExternalCommit(args, context, idempotencyKey),
+              pinnedReconcileExternalCommit(executionArgs, context, idempotencyKey),
               new Promise<null>(resolve => {
                 reconciliationTimeout = setTimeout(() => resolve(null), 8_000);
               }),
@@ -1169,7 +1335,7 @@ export class ToolRegistry {
       toolRegistry: this,
       userConfirmed: context?.userConfirmed === true || userConfirmed,
     };
-    const retryPolicy = getAdapterRetryPolicy(name, capability);
+    const retryPolicy = getAdapterRetryPolicy(semanticToolName, capability);
     let handlerEntered = false;
     const execution = (async () => {
       let lastError: unknown;
@@ -1256,7 +1422,7 @@ export class ToolRegistry {
           try {
             // Normalize synchronous throws while retaining the exact pinned
             // handler promise as the sole owner of this execution attempt.
-            handlerResult = await Promise.resolve().then(() => pinnedHandler(args, executionContext));
+            handlerResult = await Promise.resolve().then(() => pinnedHandler(executionArgs, executionContext));
           } catch (error) {
             handlerRejected = true;
             handlerFailure = error;
@@ -1318,7 +1484,11 @@ export class ToolRegistry {
                 state: 'unknown',
                 expiresAt: Date.now() + 24 * 60 * 60_000,
               });
-              recordAdapterExecutionFailure(adapterPermit, 'durable verified settlement failed', { force: true });
+              // The adapter handler returned a verified receipt. A later local
+              // journal failure must keep the external outcome unknown and
+              // block replay, but it is not evidence that the adapter itself
+              // is unhealthy.
+              recordAdapterExecutionSuccess(adapterPermit);
               finishMetric('unknown_outcome');
               throw externalCommitUnknownError(
                 name,
@@ -1343,7 +1513,11 @@ export class ToolRegistry {
               state: 'unknown',
               expiresAt: Date.now() + 24 * 60 * 60_000,
             });
-            recordAdapterExecutionFailure(adapterPermit, 'unverified external commit result', { force: true });
+            // The handler fulfilled, so the adapter transport is healthy even
+            // though the business outcome is not sufficiently verified. Keep
+            // the durable attempt unknown (and therefore non-replayable), but
+            // do not turn missing provider evidence into an adapter outage.
+            recordAdapterExecutionSuccess(adapterPermit);
             finishMetric('unknown_outcome');
             return result;
           }
@@ -1384,7 +1558,7 @@ export class ToolRegistry {
             let reconciliationTimeout: ReturnType<typeof setTimeout> | undefined;
             try {
               reconciled = await Promise.race([
-                pinnedReconcileExternalCommit(args, context, idempotencyKey),
+                pinnedReconcileExternalCommit(executionArgs, context, idempotencyKey),
                 new Promise<null>(resolve => {
                   reconciliationTimeout = setTimeout(() => resolve(null), 8_000);
                 }),
@@ -1427,7 +1601,11 @@ export class ToolRegistry {
             state: 'unknown',
             expiresAt: Date.now() + 24 * 60 * 60_000,
           });
-          recordAdapterExecutionFailure(adapterPermit, error, { force: true });
+          // Only transient adapter/transport failures contribute to the
+          // resilience circuit. Business rejection and local lifecycle errors
+          // still leave the external commit unknown, but must not poison the
+          // shared adapter family for later read-only work.
+          recordAdapterExecutionFailure(adapterPermit, error);
           finishMetric('unknown_outcome');
           if (isToolLifecyclePersistenceFailure(error)) throw error;
           throw externalCommitUnknownError(
