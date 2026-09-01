@@ -124,6 +124,8 @@ const CHINA_LEGAL_COPY = {
       assetClues: 'Asset leads',
       deliveryVerification: 'Delivery verification',
       bidProduction: 'Bid production',
+      comicDramaCreation: 'Yijing AI Comic Drama',
+      externalToolOpenFailed: 'Unable to open the external tool',
     },
     assetTraceWorkflow: {
       title: 'Enforcement asset investigation',
@@ -281,6 +283,8 @@ const CHINA_LEGAL_COPY = {
       assetClues: '财产线索',
       deliveryVerification: '交付核验',
       bidProduction: '标书制作',
+      comicDramaCreation: '一镜AI漫剧',
+      externalToolOpenFailed: '无法打开外部工具',
     },
     assetTraceWorkflow: {
       title: '执行财产线索调查',

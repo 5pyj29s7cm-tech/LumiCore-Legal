@@ -12,6 +12,19 @@ export type WebLoginSitePreset = {
 
 export const LEGAL_WEB_LOGIN_PRESETS: WebLoginSitePreset[] = [
   {
+    id: 'aivid-comic-drama',
+    label: 'Aivid Comic Drama',
+    category: 'legal',
+    loginUrl: 'https://aivid.cn/',
+    matchHosts: ['aivid.cn'],
+    sourceUrl: 'https://aivid.cn/',
+    notes: [
+      'This is a law-firm customer-provided comic-drama creation platform. Lumi may open it and reuse an explicitly authorized browser session.',
+      'Provider usage or API documentation has not been supplied yet. Treat this integration as launch and session assistance only; do not claim generation, upload, publishing, or completion.',
+      'First login, CAPTCHA, QR or OTP verification, payment, publishing, and external account changes require the user.',
+    ].join(' '),
+  },
+  {
     id: 'faxin',
     label: '法信',
     category: 'legal',

@@ -46,6 +46,7 @@ import {
   Download,
   Upload,
   Folder,
+  Clapperboard,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { GlassCard } from './SharedUI';
@@ -135,6 +136,7 @@ import {
 } from '@/lib/desktopLayout';
 import { isClientSurfaceRendered, waitForClientSurfaceRendered } from '../lib/clientSurfaceCommit';
 import { PRODUCT_VARIANT } from '../../shared/product_variant';
+import { AIVID_EXTERNAL_TOOL, openExternalToolUrl } from '@/lib/externalToolLauncher';
 
 const IDLE_AWAY_SECONDS = 5 * 60;
 const RETURN_IDLE_SECONDS = 30;
@@ -1955,6 +1957,7 @@ export function DesktopUI({
     { id: 'legal-asset-trace', label: legalDesktop.assetClues, icon: <Activity size={24} />, colorClass: 'from-amber-500 to-orange-600', windowId: 'legal-asset-trace' },
     { id: 'legal-verify', label: legalDesktop.deliveryVerification, icon: <Shield size={24} />, colorClass: 'from-slate-400 to-slate-600', windowId: 'legal-verify' },
     { id: 'legal-bid', label: legalDesktop.bidProduction, icon: <Rocket size={24} />, colorClass: 'from-rose-500 to-orange-500', windowId: 'legal-bid' },
+    { id: AIVID_EXTERNAL_TOOL.id, label: legalDesktop.comicDramaCreation, icon: <Clapperboard size={24} />, colorClass: 'from-fuchsia-500 to-rose-600', externalUrl: AIVID_EXTERNAL_TOOL.url },
   ];
   const desktopIconAreaHeight = Math.max(
     desktopIconLayout.compact ? 300 : 400,
@@ -4686,12 +4689,12 @@ export function DesktopUI({
     { id: 'settings', label: t.settings || 'OS Integrity', icon: <SettingsIcon size={24} />, color: 'from-gray-400 to-slate-600' },
   ];
 
-  const desktopAppEntries = desktopIcons.map(def => ({
+  const desktopAppEntries = desktopIcons.flatMap(def => def.windowId ? [{
     id: def.windowId,
     label: def.label,
     icon: def.icon,
     color: def.colorClass,
-  }));
+  }] : []);
   const utilityAppEntries = [
     { id: 'knowledge', label: t.knowledgeBase || 'Knowledge Base', icon: <BrainCircuit size={24} />, color: 'from-cyan-400 to-blue-600' },
     { id: 'personalization', label: t.personalization || 'Personalization', icon: <Brush size={24} />, color: 'from-cyan-400 to-indigo-600' },
@@ -5499,15 +5502,22 @@ export function DesktopUI({
               {desktopIcons.map((def, i) => {
                 const { x, y } = getDefaultDesktopIconPosition(i);
                 const label = def.label;
-                const isIconOpen = openWindows.includes(def.windowId) || (def.windowId === 'command-center' && chatOpen);
-                const isIconFocused = focusedWindow === def.windowId || (def.windowId === 'command-center' && chatOpen);
+                const windowId = def.windowId;
+                const isIconOpen = Boolean(windowId && (openWindows.includes(windowId) || (windowId === 'command-center' && chatOpen)));
+                const isIconFocused = Boolean(windowId && (focusedWindow === windowId || (windowId === 'command-center' && chatOpen)));
                 const handleClick = () => {
-                  toggleWindow(def.windowId);
+                  if (def.externalUrl) {
+                    void openExternalToolUrl(def.externalUrl).catch((error: any) => {
+                      toast.error(error?.message || legalDesktop.externalToolOpenFailed);
+                    });
+                    return;
+                  }
+                  if (windowId) toggleWindow(windowId);
                 };
                 return (
                   <motion.div
                     key={def.id}
-                    data-lumi-target={def.windowId}
+                    data-lumi-target={windowId || def.id}
                     onDoubleClick={handleClick}
                     onClick={handleClick}
                     initial={{ opacity: 0, scale: 0.8 }}

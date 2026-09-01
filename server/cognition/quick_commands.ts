@@ -559,6 +559,7 @@ function resolveKnownSiteUrl(target: string): string | null {
   const clean = String(target || '').trim();
   // i18n-allow: Chinese site-name recognition patterns; not user-visible copy.
   const knownSites: Array<[RegExp, string]> = [
+    [/(?:aivid(?:\.cn)?|\u4e00\u955c\s*ai(?:\u6f2b\u5267)?)/iu, 'https://aivid.cn/'], // i18n-allow: customer tool brand input recognition
     [/(?:中国)?裁判文书网/u, 'https://wenshu.court.gov.cn/'], // i18n-allow: site-name input recognition
     [/人民法院案例库/u, 'https://rmfyalk.court.gov.cn/'], // i18n-allow: site-name input recognition
     [/人民法院在线服务/u, 'https://zxfw.court.gov.cn/'], // i18n-allow: site-name input recognition
