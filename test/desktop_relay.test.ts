@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deviceRegistry } from '../server/devices';
 import {
   getDesktopControlQueueLength,
+  reportDesktopUserActivity,
   resetDesktopControlLeasesForTests,
 } from '../server/desktop/control_lease';
 import {
@@ -34,6 +35,16 @@ function mockIo(sockets: Record<string, any> = {}, rooms: Record<string, string[
       },
     } as any,
   };
+}
+
+function acknowledgeDesktopOffer(
+  event: string,
+  payload: any,
+  acknowledge?: (value: any) => void,
+): boolean {
+  if (event !== 'tool:desktop_offer') return false;
+  acknowledge?.({ accepted: true, correlationId: payload.correlationId });
+  return true;
 }
 
 describe('desktop relay routing', () => {
@@ -120,7 +131,9 @@ describe('desktop relay routing', () => {
     const desktopSocket = {
       connected: true,
       data: { trustedLocalExecution: true },
-      emit: (event: string, payload: any) => sent.push({ target: 'desktop', event, payload }),
+      emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+        if (!acknowledgeDesktopOffer(event, payload, acknowledge)) sent.push({ target: 'desktop', event, payload });
+      },
     };
     const requestSocket = {
       connected: true,
@@ -158,11 +171,96 @@ describe('desktop relay routing', () => {
     expect(getPendingDesktopRelayCount()).toBe(0);
   });
 
+  it('does not execute when the desktop offer acknowledgement arrives after the delivery deadline', async () => {
+    const userId = `relay_unaccepted_${Date.now()}`;
+    const sent: any[] = [];
+    let acknowledgeOffer: (() => void) | null = null;
+    const desktopSocket = {
+      connected: true,
+      data: { trustedLocalExecution: true },
+      emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+        sent.push({ event, payload });
+        if (event === 'tool:desktop_offer') {
+          acknowledgeOffer = () => acknowledge?.({ accepted: true, correlationId: payload.correlationId });
+        }
+      },
+    };
+    const socketId = `relay_unaccepted_socket_${Date.now()}`;
+    deviceRegistry.register(userId, socketId, {
+      name: 'Unaccepted Relay Desktop',
+      type: 'desktop',
+      deviceFingerprint: userId,
+    });
+    const { io } = mockIo({ [socketId]: desktopSocket });
+    const relay = createDesktopRelay({
+      io,
+      userId,
+      source: 'chat',
+      timeoutMs: 1_000,
+      deliveryAckTimeoutMs: 20,
+    });
+
+    await expect(relay('desktop_active_window', {}))
+      .rejects.toThrow(/did not accept/i);
+    expect(sent.map(item => item.event)).toEqual(['tool:desktop_offer']);
+    expect(acknowledgeOffer).not.toBeNull();
+    acknowledgeOffer?.();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(sent.map(item => item.event)).toEqual(['tool:desktop_offer']);
+    expect(getPendingDesktopRelayCount()).toBe(0);
+  });
+
+  it('runs the normal offer to execute to terminal-result sequence on the exact desktop consumer', async () => {
+    const userId = `relay_accepted_${Date.now()}`;
+    const sent: any[] = [];
+    const socketId = `relay_accepted_socket_${Date.now()}`;
+    const desktopSocket = {
+      connected: true,
+      data: { trustedLocalExecution: true },
+      emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+        sent.push({ event, payload });
+        if (event === 'tool:desktop_offer') {
+          acknowledge?.({ accepted: true, correlationId: payload.correlationId });
+        }
+      },
+    };
+    deviceRegistry.register(userId, socketId, {
+      name: 'Accepted Relay Desktop',
+      type: 'desktop',
+      deviceFingerprint: userId,
+    });
+    const { io } = mockIo({ [socketId]: desktopSocket });
+    const relay = createDesktopRelay({
+      io,
+      userId,
+      source: 'chat',
+      timeoutMs: 1_000,
+      deliveryAckTimeoutMs: 20,
+    });
+
+    const result = relay('desktop_active_window', {});
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent.map(item => item.event)).toEqual(['tool:desktop_offer', 'tool:desktop_exec']);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(getPendingDesktopRelayCount()).toBe(1);
+    expect(handleDesktopRelayResult(
+      sent[1].payload.correlationId,
+      { output: '{"title":"LumiCore"}' },
+      socketId,
+    )).toBe(true);
+    await expect(result).resolves.toContain('LumiCore');
+    expect(getPendingDesktopRelayCount()).toBe(0);
+  });
+
   it('selects one preferred desktop socket instead of broadcasting duplicate input actions', async () => {
     const userId = `relay_user_${Date.now()}_b`;
     const sent: any[] = [];
-    const desktopOne = { connected: true, data: { trustedLocalExecution: true }, emit: (event: string, payload: any) => sent.push({ target: 'one', event, payload }) };
-    const desktopTwo = { connected: true, data: { trustedLocalExecution: true }, emit: (event: string, payload: any) => sent.push({ target: 'two', event, payload }) };
+    const desktopOne = { connected: true, data: { trustedLocalExecution: true }, emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+      if (!acknowledgeDesktopOffer(event, payload, acknowledge)) sent.push({ target: 'one', event, payload });
+    } };
+    const desktopTwo = { connected: true, data: { trustedLocalExecution: true }, emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+      if (!acknowledgeDesktopOffer(event, payload, acknowledge)) sent.push({ target: 'two', event, payload });
+    } };
 
     deviceRegistry.register(userId, 'sock_desktop_b1', {
       name: 'Relay Test Desktop B1',
@@ -198,12 +296,16 @@ describe('desktop relay routing', () => {
     const personalSocket = {
       connected: true,
       data: { trustedLocalExecution: true },
-      emit: (event: string, payload: any) => sent.push({ target: 'personal', event, payload }),
+      emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+        if (!acknowledgeDesktopOffer(event, payload, acknowledge)) sent.push({ target: 'personal', event, payload });
+      },
     };
     const orgSocket = {
       connected: true,
       data: { trustedLocalExecution: true },
-      emit: (event: string, payload: any) => sent.push({ target: 'org-a', event, payload }),
+      emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+        if (!acknowledgeDesktopOffer(event, payload, acknowledge)) sent.push({ target: 'org-a', event, payload });
+      },
     };
 
     deviceRegistry.register(userId, 'scope_personal_socket', {
@@ -239,7 +341,9 @@ describe('desktop relay routing', () => {
     const desktopSocket = {
       connected: true,
       data: { trustedLocalExecution: true },
-      emit: (event: string, payload: any) => sent.push({ event, payload }),
+      emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+        if (!acknowledgeDesktopOffer(event, payload, acknowledge)) sent.push({ event, payload });
+      },
     };
     deviceRegistry.register(userId, 'scope_abort_socket', {
       name: 'Abort Desktop', type: 'desktop', domain: 'personal', orgId: '', deviceFingerprint: userId,
@@ -270,7 +374,9 @@ describe('desktop relay routing', () => {
     const desktopSocket = {
       connected: true,
       data: { trustedLocalExecution: true },
-      emit: (event: string, payload: any) => sent.push({ event, payload }),
+      emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+        if (!acknowledgeDesktopOffer(event, payload, acknowledge)) sent.push({ event, payload });
+      },
     };
     const requestSocket = {
       id: 'request_disconnect_socket',
@@ -320,7 +426,9 @@ describe('desktop relay routing', () => {
     const desktopSocket = {
       connected: true,
       data: { trustedLocalExecution: true },
-      emit: (event: string, payload: any) => sent.push({ event, payload }),
+      emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+        if (!acknowledgeDesktopOffer(event, payload, acknowledge)) sent.push({ event, payload });
+      },
     };
     const socketId = `relay_lease_socket_${Date.now()}`;
     deviceRegistry.register(userId, socketId, {
@@ -368,7 +476,9 @@ describe('desktop relay routing', () => {
     const desktopSocket = {
       connected: true,
       data: { trustedLocalExecution: true },
-      emit: (event: string, payload: any) => sent.push({ event, payload }),
+      emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+        if (!acknowledgeDesktopOffer(event, payload, acknowledge)) sent.push({ event, payload });
+      },
     };
     const socketId = `relay_preempt_socket_${Date.now()}`;
     deviceRegistry.register(userId, socketId, {
@@ -410,5 +520,48 @@ describe('desktop relay routing', () => {
     )).toBe(true);
     await voiceCall;
     voiceRelay.releaseControlLease('voice_complete');
+  });
+
+  it('latches physical-user pause for the whole turn and never dispatches a later desktop mutation', async () => {
+    const userId = `relay_user_pause_${Date.now()}`;
+    const sent: any[] = [];
+    const desktopSocket = {
+      connected: true,
+      data: { trustedLocalExecution: true },
+      emit: (event: string, payload: any, acknowledge?: (value: any) => void) => {
+        if (!acknowledgeDesktopOffer(event, payload, acknowledge)) sent.push({ event, payload });
+      },
+    };
+    const socketId = `relay_user_pause_socket_${Date.now()}`;
+    deviceRegistry.register(userId, socketId, {
+      name: 'User Pause Desktop', type: 'desktop', deviceFingerprint: userId,
+    });
+    const { io } = mockIo({ [socketId]: desktopSocket });
+    const relay = createDesktopRelay({
+      io,
+      userId,
+      source: 'chat',
+      taskId: 'durable-user-pause-task',
+      timeoutMs: 30_000,
+    });
+
+    const observation = relay('desktop_active_window');
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(handleDesktopRelayResult(
+      sent[0].payload.correlationId,
+      { output: '{"title":"Aliyun","processName":"quark.exe"}' },
+      socketId,
+    )).toBe(true);
+    await observation;
+    expect(relay.getControlPauseReason()).toBeNull();
+
+    reportDesktopUserActivity(userId);
+    expect(relay.getControlPauseReason()).toBe('desktop_control_paused_for_user_activity');
+
+    const startedAt = Date.now();
+    await expect(relay('desktop_keyboard_press', { key: 'enter' }))
+      .rejects.toThrow(/desktop control is paused/i);
+    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(sent).toHaveLength(1);
   });
 });

@@ -213,22 +213,22 @@ export function OrgHub() {
   };
 
   return (
-    <div className="lumi-work-surface lumi-surface flex h-full overflow-hidden rounded-none border-0 bg-black/20">
+    <div data-organization-wallpaper-surface className="lumi-work-surface lumi-surface flex h-full overflow-hidden rounded-none border-0 bg-black/20">
       {/* Sidebar */}
-      <div className="lumi-org-sidebar flex w-16 shrink-0 flex-col border-r border-white/[0.08] bg-black/25 sm:w-60">
+      <div data-wallpaper-tool="organization-navigation" className="lumi-org-sidebar flex w-16 shrink-0 flex-col border-r border-white/[0.08] bg-black/25 sm:w-60">
         <div className="space-y-3 border-b border-white/[0.08] p-2 sm:p-4">
           <h3 className="flex items-center justify-center gap-2 text-sm font-black uppercase tracking-[0.12em] text-white/85 sm:justify-start">
             <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-blue-300/15 bg-blue-400/10 text-blue-200">
               <Building2 size={16} />
             </span>
-            <span className="hidden min-w-0 truncate sm:block">{t.orgWorkSpace}</span>
+            <span className="lumi-org-nav-copy hidden min-w-0 truncate sm:block">{t.orgWorkSpace}</span>
           </h3>
           {orgConnection?.orgName && (
-            <p className="hidden truncate text-xs text-white/55 sm:block">{orgConnection.orgName}</p>
+            <p className="lumi-org-nav-copy lumi-org-nav-name hidden truncate text-xs text-white/55 sm:block">{orgConnection.orgName}</p>
           )}
           {/* Role badge */}
           <span title={roleInfo.label} className={`mx-auto flex w-fit items-center gap-1 rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] sm:mx-0 sm:py-0.5 ${roleInfo.color}`}>
-            {roleInfo.icon} <span className="hidden sm:inline">{roleInfo.label}</span>
+            {roleInfo.icon} <span className="lumi-org-nav-copy hidden sm:inline">{roleInfo.label}</span>
           </span>
           <button
             onClick={handleDomainToggle}
@@ -242,7 +242,7 @@ export function OrgHub() {
             }`}
           >
             {switchBusy ? <Loader2 size={12} className="animate-spin" /> : workDomain === 'work' ? <Briefcase size={12} /> : <User size={12} />}
-            <span className="hidden sm:inline">{switchBusy ? (t.switching || uiMessage('org-hub.switching.c197a0b742')) : displayedDomain}</span>
+            <span className="lumi-org-nav-copy hidden sm:inline">{switchBusy ? (t.switching || uiMessage('org-hub.switching.c197a0b742')) : displayedDomain}</span>
           </button>
         </div>
 
@@ -260,11 +260,11 @@ export function OrgHub() {
               }`}
             >
               <span className="shrink-0">{item.icon}</span>
-              <span className="hidden min-w-0 truncate sm:block">{item.label}</span>
+              <span className="lumi-org-nav-copy hidden min-w-0 truncate sm:block">{item.label}</span>
             </button>
           ))}
           <div className="my-2 border-t border-white/[0.08]" />
-          <p className="hidden px-3 pb-1 text-[10px] font-black uppercase tracking-[0.14em] text-white/30 sm:block">
+          <p className="lumi-org-nav-copy hidden px-3 pb-1 text-[10px] font-black uppercase tracking-[0.14em] text-white/30 sm:block">
             {workspaceCopy.standaloneLegalTools}
           </p>
           {legalNavItems.map(item => {
@@ -282,7 +282,7 @@ export function OrgHub() {
               }`}
             >
               <span className="shrink-0">{item.icon}</span>
-              <span className="hidden min-w-0 truncate sm:block">{item.label}</span>
+              <span className="lumi-org-nav-copy hidden min-w-0 truncate sm:block">{item.label}</span>
             </button>
             );
           })}
@@ -290,8 +290,8 @@ export function OrgHub() {
       </div>
 
       {/* Content */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-white/[0.08] bg-black/30 px-3 py-3 backdrop-blur-xl sm:gap-4 sm:px-5">
+      <div data-wallpaper-tool="organization-workspace" className="lumi-org-workspace flex min-w-0 flex-1 flex-col">
+        <div data-wallpaper-tool="organization-context" className="lumi-org-context-bar sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-white/[0.08] bg-black/30 px-3 py-3 backdrop-blur-xl sm:gap-4 sm:px-5">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-white/85">
               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-blue-300/15 bg-blue-400/10 text-blue-200">{currentItem.icon}</span>
@@ -305,7 +305,7 @@ export function OrgHub() {
             {roleInfo.icon}<span className="hidden sm:inline">{roleInfo.label}</span>
           </span>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
+        <div className="lumi-org-content-scroll min-h-0 flex-1 overflow-y-auto custom-scrollbar">
           <Suspense fallback={<OrgViewFallback />}>
             {renderView()}
           </Suspense>

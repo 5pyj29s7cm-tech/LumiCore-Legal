@@ -1,3 +1,5 @@
+import os from 'node:os';
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -13,6 +15,7 @@ vi.mock('../server/llm/providers', async () => {
 });
 
 import { buildConfirmedStepContinuationMessages, runWithTools } from '../server/llm/adapter';
+import { clearWorkflows, getRecentWorkflows } from '../server/skills/worklog';
 import { encodeToolResult } from '../server/tools/result_envelope';
 import { ToolRegistry } from '../server/tools/registry';
 import type { ToolExecutionRecord } from '../server/tools/types';
@@ -58,9 +61,55 @@ function registerReadOnlyProbe(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearWorkflows();
 });
 
 describe('LLM tool-loop recovery and terminal truth', () => {
+  it('records the original user request instead of a server recovery prompt', async () => {
+    const registry = new ToolRegistry();
+    registerReadOnlyProbe(registry, 'workflow_recovery_probe', async () => encodeToolResult(
+      'the requested state was verified',
+      { ok: true, status: 'verified' },
+    ));
+    mocks.makeLLMCall
+      .mockResolvedValueOnce({
+        text: 'checking the requested state',
+        toolCalls: [{ id: 'workflow-probe-1', name: 'workflow_recovery_probe', arguments: {} }],
+      })
+      .mockResolvedValueOnce({ text: 'The requested state is verified.' });
+
+    const originalRequest = 'Check the current application state.';
+    await runWithTools(
+      [
+        { role: 'user', content: originalRequest },
+        {
+          role: 'user',
+          content: 'Internal execution recovery. Continue the bounded original task from preserved receipts.',
+        },
+      ],
+      registry,
+      { provider: 'deepseek', model: 'test-model', userId: 'workflow-recovery-user' },
+      undefined,
+      2,
+      ...getters,
+      undefined,
+      {
+        userId: 'workflow-recovery-user',
+        source: 'chat_guard_recovery',
+        actionIntent: originalRequest,
+        routedTaskText: originalRequest,
+      },
+    );
+
+    const workflows = getRecentWorkflows('workflow-recovery-user');
+    expect(workflows).toHaveLength(1);
+    expect(workflows[0]).toMatchObject({
+      userIntent: originalRequest,
+      conversationExcerpt: originalRequest,
+    });
+    expect(JSON.stringify(workflows[0])).not.toContain('Internal execution recovery');
+  });
+
   it('attributes a confirmation continuation to the accepted confirmation row, not the old goal', () => {
     const messages = buildConfirmedStepContinuationMessages(
       'Delete the exact reviewed cache entry, then verify it is gone.',
@@ -798,6 +847,98 @@ describe('LLM tool-loop recovery and terminal truth', () => {
       message.role === 'system'
       && message.content.includes('Do not stop with an explanation of the failure')
       && message.content.includes('declared fallback or verification capability')
+    ))).toBe(true);
+  });
+
+  it('stops after verified current-document evidence instead of recovering an old discovery failure', async () => {
+    const registry = new ToolRegistry();
+    const desktopDirectory = path.join(os.homedir(), 'Desktop');
+    const documentsDirectory = path.join(os.homedir(), 'Documents');
+    const exactPath = path.join(desktopDirectory, 'Lumi_\u8def\u6f14.pptx');
+    registerReadOnlyProbe(registry, 'search_files', async () => encodeToolResult(
+      JSON.stringify({ files: [] }),
+      { ok: true, status: 'verified' },
+    ));
+    registerReadOnlyProbe(registry, 'desktop_running_processes', async () => encodeToolResult(
+      JSON.stringify({
+        processes: [{ name: 'wpp.exe', window_titles: ['Lumi_\u8def\u6f14.pptx - WPS Office'] }],
+      }),
+      {
+        ok: true,
+        status: 'verified',
+        processes: [{ name: 'wpp.exe', window_titles: ['Lumi_\u8def\u6f14.pptx - WPS Office'] }],
+      },
+    ));
+    registerReadOnlyProbe(registry, 'desktop_list_files', async () => encodeToolResult(
+      JSON.stringify({ files: [{ path: exactPath }] }),
+      { ok: true, status: 'verified', files: [{ path: exactPath }] },
+    ));
+    registerReadOnlyProbe(registry, 'extract_document_text', async () => encodeToolResult(
+      JSON.stringify({ ok: true, content: 'Lumi Core \u805a\u7126\u4e2a\u4eba\u8fde\u7eed\u6027\u3001\u6388\u6743\u4e0e\u53ef\u9a8c\u8bc1\u884c\u52a8\u3002' }),
+      { ok: true, status: 'verified' },
+    ));
+
+    mocks.makeLLMCall
+      .mockResolvedValueOnce({
+        text: 'guessing before observing the document window',
+        toolCalls: [{
+          id: 'premature-search',
+          name: 'search_files',
+          arguments: { path: documentsDirectory, pattern: 'Lumi_\u8def\u6f14.pptx' },
+        }],
+      })
+      .mockResolvedValueOnce({
+        text: 'observing WPS windows',
+        toolCalls: [{ id: 'wps-window', name: 'desktop_running_processes', arguments: {} }],
+      })
+      .mockResolvedValueOnce({
+        text: 'resolving the exact bounded path',
+        toolCalls: [{
+          id: 'desktop-files',
+          name: 'desktop_list_files',
+          arguments: { directory: desktopDirectory },
+        }],
+      })
+      .mockResolvedValueOnce({
+        text: 'reading the exact document',
+        toolCalls: [{
+          id: 'document-read',
+          name: 'extract_document_text',
+          arguments: { filePath: exactPath },
+        }],
+      })
+      .mockResolvedValueOnce({
+        text: '\u8fd9\u4efd\u8def\u6f14\u4e3b\u8981\u8bb2 Lumi Core \u7684\u4e2a\u4eba\u8fde\u7eed\u6027\u3001\u6388\u6743\u548c\u53ef\u9a8c\u8bc1\u884c\u52a8\u3002',
+        toolCalls: [],
+      })
+      .mockResolvedValue({ text: 'stale recovery should never run' });
+
+    const task = '\u5e2e\u6211\u5206\u6790\u4e00\u4e0b WPS \u5f53\u524d\u6253\u5f00\u7684\u6587\u4ef6\uff0c\u5148\u544a\u8bc9\u6211\u5b83\u4e3b\u8981\u8bb2\u4e86\u4ec0\u4e48\u3002';
+    const result = await runWithTools(
+      [{ role: 'user', content: task }],
+      registry,
+      { provider: 'deepseek', model: 'test-model' },
+      undefined,
+      7,
+      ...getters,
+      undefined,
+      {
+        source: 'chat',
+        routedTaskText: task,
+      },
+    );
+
+    expect(mocks.makeLLMCall).toHaveBeenCalledTimes(5);
+    expect(result.text).toContain('\u4e2a\u4eba\u8fde\u7eed\u6027');
+    expect(result.text).not.toContain('stale recovery');
+    expect(result.toolCalls.some(record => record.id === 'premature-search' && record.error)).toBe(true);
+    expect(result.toolCalls.some(record => record.id === 'document-read' && !record.error)).toBe(true);
+    const readPlanningMessages = mocks.makeLLMCall.mock.calls[3][0] as Array<{ role: string; content: string }>;
+    expect(readPlanningMessages.some(message => (
+      message.role === 'system'
+      && message.content.includes('Server-owned current-document target state')
+      && message.content.includes(JSON.stringify(exactPath).slice(1, -1))
+      && message.content.includes('"pathResolved":true')
     ))).toBe(true);
   });
 });

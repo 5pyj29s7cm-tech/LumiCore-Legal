@@ -1943,6 +1943,14 @@
     "en": "Output Structure",
     "zh": "输出结构"
   },
+  "design-hub.prompt-output-sections": {
+    "en": "Respond using the following sections:",
+    "zh": "请按以下模块输出："
+  },
+  "design-hub.prompt-user-requirement": {
+    "en": "User requirements:",
+    "zh": "用户需求："
+  },
   "design-hub.paste-ui-code-design-tokens.13a0ec90c5": {
     "en": "Paste UI code, design tokens, or spec notes.",
     "zh": "粘贴界面代码、设计 Token 或规范描述。"

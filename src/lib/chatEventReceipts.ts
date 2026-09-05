@@ -15,12 +15,24 @@ export type PersistedPendingChatExecution = {
   orgId?: string;
   conversationId?: string;
   startedAt: string;
+  mediaGeneration?: {
+    mode: 'image' | 'video';
+    operation?: 'text_to_image' | 'image_edit' | 'text_to_video' | 'image_to_video';
+    size: string;
+    count?: number;
+    duration?: number;
+    primaryImage?: string;
+    referenceImages?: string[];
+    referenceImage?: string;
+  };
 };
 
 export type PersistedPendingChatExecutionState = {
   version: 2;
   pending: PersistedPendingChatExecution[];
 };
+
+type PersistedMediaGeneration = NonNullable<PersistedPendingChatExecution['mediaGeneration']>;
 
 const MAX_PERSISTED_PENDING_CHAT_EXECUTIONS = 8;
 
@@ -30,6 +42,38 @@ function normalizePendingExecution(value: unknown): PersistedPendingChatExecutio
   const requestId = compact(candidate.requestId);
   const startedAt = compact(candidate.startedAt);
   if (!requestId || !startedAt) return null;
+  const rawMedia = candidate.mediaGeneration && typeof candidate.mediaGeneration === 'object'
+    ? candidate.mediaGeneration
+    : undefined;
+  const mode = rawMedia?.mode === 'image' || rawMedia?.mode === 'video' ? rawMedia.mode : undefined;
+  const size = compact(rawMedia?.size).slice(0, 40);
+  const rawOperation = compact(rawMedia?.operation);
+  const operation: PersistedMediaGeneration['operation'] = mode === 'image'
+    ? (rawOperation === 'image_edit' ? 'image_edit' : 'text_to_image')
+    : mode === 'video'
+      ? (rawOperation === 'image_to_video' ? 'image_to_video' : 'text_to_video')
+      : undefined;
+  const primaryImage = compact(rawMedia?.primaryImage).slice(0, 8192);
+  const referenceImages = Array.isArray(rawMedia?.referenceImages)
+    ? rawMedia.referenceImages.map(value => compact(value).slice(0, 8192)).filter(Boolean).slice(0, 1)
+    : [];
+  const referenceImage = compact(rawMedia?.referenceImage).slice(0, 8192);
+  const mediaGeneration = mode && size ? {
+    mode,
+    ...(operation ? { operation } : {}),
+    size,
+    ...(operation === 'text_to_image'
+      ? { count: Math.min(4, Math.max(1, Number(rawMedia?.count) || 1)) }
+      : operation === 'image_edit'
+        ? {
+            ...(primaryImage ? { primaryImage } : {}),
+            ...(referenceImages.length ? { referenceImages } : {}),
+          }
+        : {
+            duration: Math.min(120, Math.max(1, Number(rawMedia?.duration) || 6)),
+            ...(operation === 'image_to_video' && referenceImage ? { referenceImage } : {}),
+          }),
+  } : undefined;
   return {
     requestId,
     source: compact(candidate.source) || 'chat',
@@ -37,6 +81,7 @@ function normalizePendingExecution(value: unknown): PersistedPendingChatExecutio
     orgId: compact(candidate.orgId) || undefined,
     conversationId: compact(candidate.conversationId) || undefined,
     startedAt,
+    ...(mediaGeneration ? { mediaGeneration } : {}),
   };
 }
 

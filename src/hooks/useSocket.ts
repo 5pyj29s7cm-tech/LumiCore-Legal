@@ -10,11 +10,52 @@ import { desktopCommandRelayOutput } from '@/lib/desktopCommandReceipt';
 import { getNativeClientIdentity } from '@/services/nativeClientIdentity';
 
 const isTauri = isTauriRuntime();
-let registeredSocket: Socket | null = null;
-let deviceConnectHandler: (() => void) | null = null;
 let cursorGlowWatchdog: ReturnType<typeof setTimeout> | null = null;
-const activeDesktopExecutions = new Set<string>();
-const cancelledDesktopExecutions = new Set<string>();
+
+type DesktopExecPayload = {
+  correlationId: string;
+  name: string;
+  arguments: Record<string, any>;
+};
+
+type DesktopExecAcknowledgement = (result: {
+  accepted: boolean;
+  correlationId: string;
+}) => void;
+
+type SharedDesktopSocketRuntime = {
+  socket: Socket | null;
+  connectHandler: (() => void) | null;
+  offerHandler: ((data: DesktopExecPayload, acknowledge?: DesktopExecAcknowledgement) => void) | null;
+  execHandler: ((data: DesktopExecPayload) => void) | null;
+  cancelHandler: ((data: { correlationId?: string; name?: string }) => void) | null;
+  activeExecutions: Set<string>;
+  cancelledExecutions: Set<string>;
+};
+
+const SHARED_DESKTOP_SOCKET_RUNTIME_KEY = '__lumicoreSharedDesktopSocketRuntimeV1';
+
+function getSharedDesktopSocketRuntime(): SharedDesktopSocketRuntime {
+  const host = globalThis as typeof globalThis & {
+    [SHARED_DESKTOP_SOCKET_RUNTIME_KEY]?: SharedDesktopSocketRuntime;
+  };
+  if (!host[SHARED_DESKTOP_SOCKET_RUNTIME_KEY]) {
+    host[SHARED_DESKTOP_SOCKET_RUNTIME_KEY] = {
+      socket: null,
+      connectHandler: null,
+      offerHandler: null,
+      execHandler: null,
+      cancelHandler: null,
+      activeExecutions: new Set<string>(),
+      cancelledExecutions: new Set<string>(),
+    };
+  }
+  return host[SHARED_DESKTOP_SOCKET_RUNTIME_KEY];
+}
+
+const sharedDesktopSocketRuntime = getSharedDesktopSocketRuntime();
+const activeDesktopExecutions = sharedDesktopSocketRuntime.activeExecutions;
+const cancelledDesktopExecutions = sharedDesktopSocketRuntime.cancelledExecutions;
 
 function normalizeCursorGlowPoint(args: Record<string, any>) {
   const rawX = Number(args.x) || 0;
@@ -36,12 +77,24 @@ function normalizeCursorGlowPoint(args: Record<string, any>) {
 }
 
 function registerSharedSocketHandlers(socket: Socket) {
-  if (registeredSocket === socket) return;
-
-  if (registeredSocket) {
-    if (deviceConnectHandler) registeredSocket.off('connect', deviceConnectHandler);
-    registeredSocket.off('tool:desktop_exec', desktopExecHandler);
-    registeredSocket.off('tool:desktop_cancel', desktopCancelHandler);
+  // Keep the listener identity outside the Vite module instance. During HMR a
+  // new copy of this module can otherwise leave an old relay listener behind,
+  // or keep a listener that emits the result through a newer socket instance.
+  // Either case makes the server wait for a result that can never match the
+  // socket to which the command was delivered.
+  if (sharedDesktopSocketRuntime.socket) {
+    if (sharedDesktopSocketRuntime.connectHandler) {
+      sharedDesktopSocketRuntime.socket.off('connect', sharedDesktopSocketRuntime.connectHandler);
+    }
+    if (sharedDesktopSocketRuntime.offerHandler) {
+      sharedDesktopSocketRuntime.socket.off('tool:desktop_offer', sharedDesktopSocketRuntime.offerHandler);
+    }
+    if (sharedDesktopSocketRuntime.execHandler) {
+      sharedDesktopSocketRuntime.socket.off('tool:desktop_exec', sharedDesktopSocketRuntime.execHandler);
+    }
+    if (sharedDesktopSocketRuntime.cancelHandler) {
+      sharedDesktopSocketRuntime.socket.off('tool:desktop_cancel', sharedDesktopSocketRuntime.cancelHandler);
+    }
   }
 
   const registerDevice = async () => {
@@ -53,7 +106,7 @@ function registerSharedSocketHandlers(socket: Socket) {
         console.error('[Device] Native process identity unavailable; desktop registration stopped', error);
         return;
       }
-      if (!socket.connected) return;
+      if (sharedDesktopSocketRuntime.socket !== socket || !socket.connected) return;
     }
     socket.emit('device:register', {
       name: navigator.platform || 'Unknown Device',
@@ -71,13 +124,43 @@ function registerSharedSocketHandlers(socket: Socket) {
   };
 
   const onConnect = () => { void registerDevice(); };
+  const onDesktopOffer = (
+    data: DesktopExecPayload,
+    acknowledge?: DesktopExecAcknowledgement,
+  ) => {
+    const correlationId = String(data?.correlationId || '').trim();
+    const accepted = Boolean(
+      isTauri
+      && correlationId
+      && sharedDesktopSocketRuntime.socket === socket
+      && socket.connected
+      && !activeDesktopExecutions.has(correlationId)
+      && !cancelledDesktopExecutions.has(correlationId),
+    );
+    acknowledge?.({ accepted, correlationId });
+  };
+  const onDesktopExec = (data: DesktopExecPayload) => {
+    const correlationId = String(data?.correlationId || '').trim();
+    if (
+      !correlationId
+      || sharedDesktopSocketRuntime.socket !== socket
+      || !socket.connected
+      || activeDesktopExecutions.has(correlationId)
+      || cancelledDesktopExecutions.has(correlationId)
+    ) return;
+    void handleDesktopExec(socket, data);
+  };
   socket.on('connect', onConnect);
-  socket.on('tool:desktop_exec', desktopExecHandler);
+  socket.on('tool:desktop_offer', onDesktopOffer);
+  socket.on('tool:desktop_exec', onDesktopExec);
   socket.on('tool:desktop_cancel', desktopCancelHandler);
-  if (socket.connected) void registerDevice();
 
-  registeredSocket = socket;
-  deviceConnectHandler = onConnect;
+  sharedDesktopSocketRuntime.socket = socket;
+  sharedDesktopSocketRuntime.connectHandler = onConnect;
+  sharedDesktopSocketRuntime.offerHandler = onDesktopOffer;
+  sharedDesktopSocketRuntime.execHandler = onDesktopExec;
+  sharedDesktopSocketRuntime.cancelHandler = desktopCancelHandler;
+  if (socket.connected) void registerDevice();
 }
 
 function desktopCancelHandler(data: { correlationId?: string; name?: string }) {
@@ -92,20 +175,36 @@ function desktopCancelHandler(data: { correlationId?: string; name?: string }) {
   }
 }
 
-function desktopExecHandler(data: {
-  correlationId: string;
-  name: string;
-  arguments: Record<string, any>;
-}) {
-  const socket = socketService.getSocket();
-  if (socket) void handleDesktopExec(socket, data);
+function dispatchWallpaperModeAction(detail: {
+  enabled: boolean;
+  source: string;
+  presentation: 'desktop-control';
+  timeoutMs: number;
+}): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error('Wallpaper mode transition timed out'));
+    }, 10_000);
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      callback();
+    };
+    window.dispatchEvent(new CustomEvent('lumi:set-wallpaper-mode', {
+      detail: {
+        ...detail,
+        respond: (result: Record<string, unknown>) => settle(() => resolve(result)),
+        reject: (message: string) => settle(() => reject(new Error(message))),
+      },
+    }));
+  });
 }
 
-async function handleDesktopExec(socket: Socket, data: {
-  correlationId: string;
-  name: string;
-  arguments: Record<string, any>;
-}) {
+async function handleDesktopExec(socket: Socket, data: DesktopExecPayload) {
   const { correlationId, name, arguments: args } = data;
 
   if (name === 'client_action') {
@@ -412,14 +511,17 @@ async function handleDesktopExec(socket: Socket, data: {
           output = 'Wallpaper mode request ignored: only controlled desktop sessions may toggle it.';
           break;
         }
-        window.dispatchEvent(new CustomEvent('lumi:set-wallpaper-mode', {
-          detail: {
-            enabled: Boolean(args.enabled),
-            source,
-            timeoutMs: Number(args.timeoutMs || 190000),
-          },
-        }));
-        output = `Wallpaper mode ${args.enabled ? 'enabled' : 'disabled'} for ${source}`;
+        const state = await dispatchWallpaperModeAction({
+          enabled: Boolean(args.enabled),
+          source,
+          presentation: 'desktop-control',
+          timeoutMs: Number(args.timeoutMs || 190000),
+        });
+        output = JSON.stringify({
+          ...state,
+          source,
+          verified: true,
+        });
         break;
       }
       case 'desktop_cursor_glow_show': {

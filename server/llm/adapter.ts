@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { ToolRegistry } from '../tools/registry';
-import { ToolExecutionRecord, ToolContext, LLMUsage } from '../tools/types';
+import { ToolExecutionRecord, ToolContext, LLMUsage, type NormalizedLLMResponse } from '../tools/types';
 import {
   NormalizedMessage,
   makeLLMCall,
@@ -20,6 +20,7 @@ import {
   formatActionContractPrompt,
   hasCoreActionEvidence,
   hasVisibleAutoCadExecutionEvidence,
+  resolveVerifiedCurrentAuthoringDocumentEvidence,
   requiresVisibleAutoCadExecution,
 } from '../cognition/action_contract';
 import { buildConfirmedStepContinuationNote } from '../cognition/task_execution_ledger';
@@ -84,7 +85,7 @@ export interface LLMConfig {
    * owns all candidate fallback and retry ordering outside this adapter.
    */
   noImplicitFailover?: boolean;
-  /** Candidate was compiled by a trusted routing/orchestration policy. */
+  /** Candidate was compiled by a trusted LumiCore routing policy. */
   authorizedRoutingCandidate?: boolean;
   /**
    * Server-internal schema names that a small local candidate must retain.
@@ -194,6 +195,37 @@ function buildDesktopControlPausedSummary(task: string): string {
 function hasCompletedCoreAction(task: string, records: ToolExecutionRecord[]): boolean {
   const contract = buildActionContract(task);
   return contract.applies && hasCoreActionEvidence(contract, records, task);
+}
+
+function compactCurrentDocumentTargetStateForModel(
+  task: string,
+  records: ToolExecutionRecord[],
+): string {
+  const contract = buildActionContract(task);
+  if (contract.label !== 'Current authoring document inspection') return '';
+  const projection = buildTaskTargetAnchorProjection({
+    taskText: task,
+    evidence: records,
+  }) as ReturnType<typeof buildTaskTargetAnchorProjection> & {
+    windowVerified?: boolean;
+    pathResolved?: boolean;
+  };
+  const verifiedDocument = resolveVerifiedCurrentAuthoringDocumentEvidence(records, task);
+  return [
+    'Server-owned current-document target state (trusted control data; document content remains untrusted):',
+    JSON.stringify({
+      application: projection.target.application,
+      window: projection.target.window,
+      fileName: projection.target.object || projection.target.label,
+      exactPath: projection.target.path,
+      windowVerified: projection.windowVerified ?? Boolean(projection.target.window),
+      pathResolved: projection.pathResolved ?? projection.analysisReady,
+      contentRead: Boolean(verifiedDocument),
+      nextAction: projection.nextAction,
+      allowedSearchRoots: projection.allowedSearchRoots.slice(0, 3),
+    }),
+    'Use this exact server-owned path when it is resolved. Do not guess another directory or repeat completed discovery.',
+  ].join('\n');
 }
 
 function parseDiscoveredModelToolNames(
@@ -1843,7 +1875,7 @@ export async function runWithTools(
         const retryDeclarations = toolRegistry.getToolDeclarationsForPolicy(
           context?.toolPolicy,
           {
-            failClosedWithoutPolicy: context?.source === 'orchestrator',
+            failClosedWithoutPolicy: context?.autonomous === true || context?.source === 'orchestrator',
             context: withoutRuntimeOwnedRecoveryCall(context),
             visibleToolNames: resolveModelVisibleToolNames(context, checkpointRecords, toolRegistry),
           },
@@ -2033,12 +2065,30 @@ async function runWithToolsInternal(
     const toolDeclarations = toolRegistry.getToolDeclarationsForPolicy(
       toolExecutionContext?.toolPolicy,
       {
-        failClosedWithoutPolicy: context?.source === 'orchestrator',
+        failClosedWithoutPolicy: context?.autonomous === true || context?.source === 'orchestrator',
         context: toolExecutionContext,
         visibleToolNames: resolveModelVisibleToolNames(toolExecutionContext, executionLog, toolRegistry),
       },
     );
     const exposedToolNames = new Set(toolDeclarations.map(declaration => declaration.function.name));
+    const noNewExecutionRecord = executionLog.length === priorExecutionRecords.length;
+    const runtimeRecovery = noNewExecutionRecord
+      ? validateRuntimeOwnedDeterministicToolRecoveryCall(
+          context?.runtimeOwnedDeterministicRecoveryCall,
+          context,
+          exposedToolNames,
+        )
+      : null;
+    const runtimeRecoveryAlreadyRecorded = runtimeRecovery
+      ? priorExecutionRecords.some(record => (
+          toolCallSignature(record) === toolCallSignature({
+            name: runtimeRecovery.name,
+            arguments: runtimeRecovery.arguments,
+          })
+        ))
+      : false;
+    const directStructuredMediaRecovery = runtimeRecovery?.reason === 'structured_media_request'
+      && !runtimeRecoveryAlreadyRecorded;
     const llmStart = Date.now();
     const modelMessages = compactMessagesForModel(conversationHistory);
     const invokeModel = async (attempt: ModelBudgetAttempt) => {
@@ -2097,14 +2147,28 @@ async function runWithToolsInternal(
             getRelay || (() => null),
           );
     };
-    const response = modelBudget
-      ? await modelBudget.runModelAttempt(config.attemptTimeouts, onStreamChunk, invokeModel)
-      : await invokeModel({
-          signal: config.signal || new AbortController().signal,
-          attemptTimeouts: resolveModelAttemptTimeouts(config.attemptTimeouts),
-          onChunk: onStreamChunk,
-        });
-    recordLatency('llm', Date.now() - llmStart);
+    let response: NormalizedLLMResponse;
+    if (directStructuredMediaRecovery) {
+      const id = `deterministic_media_${iteration}_${Date.now().toString(36)}`;
+      deterministicRecoveryToolCallIds.add(id);
+      response = {
+        text: null,
+        toolCalls: [{
+          id,
+          name: runtimeRecovery.name,
+          arguments: runtimeRecovery.arguments,
+        }],
+      };
+    } else {
+      response = modelBudget
+        ? await modelBudget.runModelAttempt(config.attemptTimeouts, onStreamChunk, invokeModel)
+        : await invokeModel({
+            signal: config.signal || new AbortController().signal,
+            attemptTimeouts: resolveModelAttemptTimeouts(config.attemptTimeouts),
+            onChunk: onStreamChunk,
+          });
+      recordLatency('llm', Date.now() - llmStart);
+    }
 
     const providerDroppedToolNames = response.modelRequestContext?.droppedToolNames || [];
     if (providerDroppedToolNames.length > 0) {
@@ -2121,6 +2185,16 @@ async function runWithToolsInternal(
     if (context?.isCancelled?.()) {
       return {
         text: 'Task was cancelled before the model response could be applied.',
+        toolCalls: executionLog,
+        usageRecords,
+      };
+    }
+    if (desktopControlPauseReason(context)) {
+      recordWorkflowIfToolsUsed(executionLog, messages, config);
+      return {
+        text: hasCompletedCoreAction(primaryTask, executionLog)
+          ? String(response.text || '')
+          : buildDesktopControlPausedSummary(primaryTask),
         toolCalls: executionLog,
         usageRecords,
       };
@@ -2144,28 +2218,12 @@ async function runWithToolsInternal(
     }
 
     let plannedToolCalls = response.toolCalls || [];
-    const noNewExecutionRecord = executionLog.length === priorExecutionRecords.length;
-    const runtimeRecovery = noNewExecutionRecord
-      ? validateRuntimeOwnedDeterministicToolRecoveryCall(
-          context?.runtimeOwnedDeterministicRecoveryCall,
-          context,
-          exposedToolNames,
-        )
-      : null;
-    const runtimeRecoveryAlreadyRecorded = runtimeRecovery
-      ? priorExecutionRecords.some(record => (
-          toolCallSignature(record) === toolCallSignature({
-            name: runtimeRecovery.name,
-            arguments: runtimeRecovery.arguments,
-          })
-        ))
-      : false;
     if (runtimeRecovery) {
       // The accepted correction has one server-owned exact action. Model tool
       // output cannot change its path/content or substitute another tool.
       if (runtimeRecoveryAlreadyRecorded) {
         plannedToolCalls = [];
-      } else {
+      } else if (!directStructuredMediaRecovery) {
         const id = `deterministic_correction_${iteration}_${Date.now().toString(36)}`;
         deterministicRecoveryToolCallIds.add(id);
         plannedToolCalls = [{
@@ -2212,6 +2270,25 @@ async function runWithToolsInternal(
       }
     }
     if (plannedToolCalls.length === 0) {
+      // Core evidence is a terminal success boundary. Auxiliary discovery
+      // failures from earlier iterations may remain in the audit trail, but
+      // they must not trigger another provider call after the exact requested
+      // action has already completed.
+      const coreActionCompleted = hasCompletedCoreAction(primaryTask, executionLog);
+      if (coreActionCompleted) {
+        recordWorkflowIfToolsUsed(executionLog, messages, config);
+        const guarded = guardToolResponseIfNeeded({
+          task: getPrimaryUserText(messages),
+          response: response.text || '',
+          toolCalls: executionLog,
+          source: context?.source,
+        });
+        return {
+          text: guarded.text,
+          toolCalls: executionLog,
+          usageRecords,
+        };
+      }
       const missingVerification = buildMissingVerificationObligationPrompt(
         primaryTask,
         executionLog,
@@ -2239,7 +2316,8 @@ async function runWithToolsInternal(
         continue;
       }
       if (
-        hasUnverifiedToolOutcome(executionLog)
+        !coreActionCompleted
+        && hasUnverifiedToolOutcome(executionLog)
         && exposedToolNames.size > 0
         && recoveryReplans < MAX_TOOL_RECOVERY_REPLANS
         && iteration + 1 < effectiveMaxIterations
@@ -2421,6 +2499,16 @@ async function runWithToolsInternal(
           usageRecords,
         };
       }
+      if (desktopControlPauseReason(context)) {
+        recordWorkflowIfToolsUsed(executionLog, messages, config);
+        return {
+          text: hasCompletedCoreAction(primaryTask, executionLog)
+            ? ''
+            : buildDesktopControlPausedSummary(primaryTask),
+          toolCalls: executionLog,
+          usageRecords,
+        };
+      }
       if (!exposedToolNames.has(tc.name)) {
         conversationHistory.push({
           role: 'tool',
@@ -2509,6 +2597,32 @@ async function runWithToolsInternal(
         toolCallId: tc.id,
         name: tc.name,
       });
+      const compactTargetState = compactCurrentDocumentTargetStateForModel(
+        primaryTask,
+        executionLog,
+      );
+      if (compactTargetState) {
+        conversationHistory.push({
+          role: 'system',
+          content: compactTargetState,
+        });
+      }
+
+      // Physical user input revokes this turn's desktop authority. The relay
+      // has already cancelled the in-flight adapter; stop before another call,
+      // replan, or recovery pass can reacquire desktop control. This is not a
+      // task cancellation, so the channel can persist a resumable blocked
+      // state with the receipts collected above.
+      if (desktopControlPauseReason(context)) {
+        recordWorkflowIfToolsUsed(executionLog, messages, config);
+        return {
+          text: hasCompletedCoreAction(primaryTask, executionLog)
+            ? ''
+            : buildDesktopControlPausedSummary(primaryTask),
+          toolCalls: executionLog,
+          usageRecords,
+        };
+      }
 
       if (isConfirmationBlockedToolRecord(record)) {
         recordWorkflowIfToolsUsed(executionLog, messages, config);
@@ -2518,6 +2632,19 @@ async function runWithToolsInternal(
           usageRecords,
         };
       }
+    }
+
+    if (directStructuredMediaRecovery) {
+      // A workbench action is already fully specified and server-bound. Once
+      // its one canonical tool call settles, return the receipt immediately;
+      // neither initial planning nor a second summarization model call is
+      // allowed to delay, mutate, duplicate, or hide that execution outcome.
+      recordWorkflowIfToolsUsed(executionLog, messages, config);
+      return {
+        text: '',
+        toolCalls: executionLog,
+        usageRecords,
+      };
     }
 
     const readyWorkProduct = buildReadyWorkProductSummary(messages, executionLog);
@@ -2532,6 +2659,16 @@ async function runWithToolsInternal(
   }
 
   recordWorkflowIfToolsUsed(executionLog, messages, config);
+  if (hasCompletedCoreAction(primaryTask, executionLog)) {
+    // Channels finalize this from the verified receipt set. Returning an empty
+    // model body is safer than replacing completed work with an iteration or
+    // recovery warning.
+    return {
+      text: '',
+      toolCalls: executionLog,
+      usageRecords,
+    };
+  }
   const readyWorkProduct = buildReadyWorkProductSummary(messages, executionLog);
   if (readyWorkProduct) {
     return {
@@ -2554,11 +2691,21 @@ function recordWorkflowIfToolsUsed(
   config: Pick<LLMConfig, 'userId' | 'domain' | 'orgId'>,
 ): void {
   if (executionLog.length === 0) return;
-  // Workflow learning belongs to the action that produced this execution
-  // trace.  Conversation history is ordered oldest -> newest, so recording
-  // the first user turn poisons learned patterns with an unrelated old goal.
-  // Reuse the same latest-user extraction as completion and iteration guards.
-  const safeMsg = getPrimaryUserText(messages);
+  const rawContent = [...messages].reverse().find(message => {
+    if (message.role !== 'user') return false;
+    const content = typeof message.content === 'string'
+      ? message.content
+      : Array.isArray(message.content)
+        ? message.content.filter(part => part.type === 'text').map(part => (part as any).text).join(' ')
+        : '';
+    // The bounded recovery prompt is a server instruction carried in a user
+    // slot for provider compatibility. It is never the user's workflow and
+    // must not be learned, displayed, or used as future intent context.
+    return !/^\s*Internal execution recovery\./i.test(content);
+  })?.content || '';
+  const userMsg = typeof rawContent === 'string' ? rawContent : Array.isArray(rawContent) ? rawContent.filter(c => c.type === 'text').map(c => (c as any).text).join(' ') : '';
+  const safeMsg = userMsg || '';
+  if (!safeMsg.trim()) return;
   recordWorkflow({
     userId: config.userId || 'anonymous',
     domain: config.domain === 'work' ? 'work' : 'personal',

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
-import { Send, Loader2, ArrowLeft, Ghost, Castle, Zap, Cpu, Sparkles, FileText, Mic, CheckCircle2, Square, ChevronDown, ChevronRight, XCircle, Copy, Check, Paperclip, Image as ImageIcon, MessageCircle, Briefcase, User, ExternalLink, FolderOpen, Upload, Plus, History, CalendarClock, Trash2 } from 'lucide-react';
+import { Send, Loader2, ArrowLeft, Ghost, Castle, Zap, Cpu, Sparkles, FileText, Mic, CheckCircle2, Square, ChevronDown, ChevronRight, XCircle, Copy, Check, Paperclip, Image as ImageIcon, Video, MessageCircle, Briefcase, User, ExternalLink, FolderOpen, Upload, Plus, History, CalendarClock, Trash2 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -55,8 +55,11 @@ import {
 } from '@/lib/chatAttachmentReferences';
 import {
   describeAgentResponseDelivery,
+  hasInternalAgentExecutionDetail,
   isFinalizedSuccessfulResponse,
   isTerminalAgentStatus,
+  sanitizeAgentStreamingTextForDisplay,
+  sanitizeAgentResponseTextForDisplay,
   shouldDisplayAgentResponse,
 } from '@/lib/agentResponseDelivery';
 import { buildChatConversationScopeKey } from '@/lib/chatConversationScope';
@@ -86,6 +89,29 @@ import { ActiveTaskWidget } from './ActiveTaskWidget';
 import { useRuntimeStatus } from '@/hooks/useRuntimeStatus';
 import { CommandCenterPlanner } from './CommandCenterPlanner';
 import { commandCenterPlannerCopy } from '@/i18n/locales/commandCenterPlanner';
+import { mediaGenerationCopy } from '@/i18n/locales/mediaGeneration';
+import {
+  MediaGenerationStudio,
+  type MediaGenerationRequest,
+  type MediaGenerationSourceChange,
+  type MediaGenerationSourceSlot,
+  type MediaGenerationStudioStatus,
+} from './MediaGenerationStudio';
+import {
+  extractMediaGenerationArtifacts,
+  mediaGenerationArgumentsMatch,
+  mediaGenerationReceiptSettingsMatch,
+  mediaGenerationToolForOperation,
+  resolveMediaGenerationOperation,
+  type MediaGenerationArtifact,
+  type MediaGenerationExpectation,
+  type MediaGenerationKind,
+  type MediaGenerationSourceOperation,
+} from '@/lib/mediaGenerationArtifacts';
+import {
+  normalizeStructuredMediaRequest,
+  type StructuredMediaRequest,
+} from '../../shared/media_generation';
 
 const CHAT_HISTORY_LIMIT = 300;
 // Conversation index pages are deliberately small; the left rail keeps
@@ -152,7 +178,13 @@ type GeneratedFileLink = {
   fileName: string;
   path: string;
   url: string;
-  kind: 'image' | 'document' | 'deck' | 'sheet' | 'pdf' | 'cad' | 'file';
+  kind: 'image' | 'video' | 'document' | 'deck' | 'sheet' | 'pdf' | 'cad' | 'file';
+};
+
+type ChatSendOptions = {
+  onRequestCreated?: (requestId: string) => void;
+  mediaRequest?: StructuredMediaRequest;
+  includeConversationAttachments?: boolean;
 };
 
 type ChatFilePanelItem = {
@@ -182,6 +214,13 @@ function getDisplayText(message: any): string {
   return String(message.text);
 }
 
+function getCustomerDisplayText(message: any, isZh: boolean): string {
+  const text = getDisplayText(message);
+  return message?.type === 'agent'
+    ? sanitizeAgentResponseTextForDisplay(text, isZh ? 'zh' : 'en')
+    : text;
+}
+
 const ASSISTANT_HISTORY_NOISE_RE =
   /我还没有真正开始读取或审查|我还不能说这件事已经完成|没有记录到成功的工具执行|真正读取时|Completion claim|Maximum tool call iterations|Action Constitution|local_write action requires confirmation|已经落到(?:桌面|电脑|文件)|结果包已经|交付包已经|真实接管|WPS\s*表格|剪映已打开|微信已打开|文件生成也卡在权限确认|工具调用一直在跑/i;
 
@@ -189,7 +228,11 @@ function shouldOmitAssistantHistoryMessage(message: any, text: string): boolean 
   const role = String(message?.role || '').toLowerCase();
   const type = String(message?.type || '').toLowerCase();
   const isAssistantLike = role === 'assistant' || type === 'agent';
-  return isAssistantLike && ASSISTANT_HISTORY_NOISE_RE.test(text);
+  return isAssistantLike && (
+    message?.legacyExecutionReport === true
+    || hasInternalAgentExecutionDetail(text)
+    || ASSISTANT_HISTORY_NOISE_RE.test(text)
+  );
 }
 
 function stripStoredAttachmentSummary(value: string): string {
@@ -198,7 +241,7 @@ function stripStoredAttachmentSummary(value: string): string {
     .trim();
 }
 
-function buildChatHistoryPayload(messages: any[]) {
+export function buildChatHistoryPayload(messages: any[]) {
   return messages.flatMap((m) => {
     const text = getDisplayText(m).trim();
     if (!text) return [];
@@ -380,13 +423,68 @@ const CHAT_ATTACHMENT_ACCEPT = [
   '.txt,.md,.json,.csv,.pdf,.docx,.xlsx,.xls,.pptx,.ppt,.rtf,.ts,.tsx,.js,.jsx,.py,.html,.css,.yaml,.yml,.xml,.log',
 ].join(',');
 
-const GENERATED_FILE_EXTS = 'docx|pptx|xlsx|xls|pdf|txt|md|csv|json|png|jpe?g|webp|gif|svg|html|dxf|dwg';
+const GENERATED_FILE_EXTS = 'docx|pptx|xlsx|xls|pdf|txt|md|csv|json|png|jpe?g|webp|gif|svg|html|dxf|dwg|mp4|mov';
 const WINDOWS_GENERATED_FILE_RE = new RegExp(`[A-Za-z]:\\\\[^\\n\\r"'<>|]+?\\.(?:${GENERATED_FILE_EXTS})\\b`, 'gi');
 const LUMI_OUTPUT_FILE_RE = new RegExp(`/lumi_output/[^\\s\\])"'<>]+?\\.(?:${GENERATED_FILE_EXTS})\\b`, 'gi');
+const MEDIA_GENERATION_TOOL_NAMES = new Set(['generate_image', 'ai_edit_image', 'generate_video']);
+
+function isExpectedMediaGenerationTool(expectation: MediaGenerationExpectation, toolName: string): boolean {
+  return mediaGenerationToolForOperation(resolveMediaGenerationOperation(expectation)) === toolName;
+}
+
+function parsePersistedToolRecords(value: unknown): Array<Record<string, any>> {
+  if (Array.isArray(value)) return value.filter(item => item && typeof item === 'object');
+  if (typeof value !== 'string' || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter(item => item && typeof item === 'object') : [];
+  } catch {
+    return [];
+  }
+}
+
+function extractPersistedMediaArtifacts(message: any): MediaGenerationArtifact[] {
+  const records = parsePersistedToolRecords(message?.toolCalls);
+  const collected: MediaGenerationArtifact[] = [];
+  for (const record of records) {
+    const toolName = String(record.name || record.toolName || '').trim();
+    if (!MEDIA_GENERATION_TOOL_NAMES.has(toolName)) continue;
+    const fallbackKind: MediaGenerationKind = toolName === 'generate_video' ? 'video' : 'image';
+    const args = record.arguments && typeof record.arguments === 'object'
+      ? record.arguments
+      : record.args && typeof record.args === 'object'
+        ? record.args
+        : {};
+    const persistedOperation = String(args.operation || '').trim();
+    const operation: NonNullable<MediaGenerationArtifact['operation']> = toolName === 'ai_edit_image'
+      ? 'image_edit'
+      : toolName === 'generate_video'
+        ? (persistedOperation === 'image_to_video' || String(args.first_frame_image || '').trim()
+            ? 'image_to_video'
+            : 'text_to_video')
+        : 'text_to_image';
+    const artifacts = extractMediaGenerationArtifacts(record.result, fallbackKind).map(artifact => ({
+      ...artifact,
+      requestId: String(record.requestId || message?.requestId || '').trim() || undefined,
+      operation,
+      prompt: String(args.prompt || '').trim() || undefined,
+      model: String((record.result as any)?.model || '').trim() || undefined,
+    }));
+    collected.push(...artifacts);
+  }
+  const seen = new Set<string>();
+  return collected.filter(artifact => {
+    const key = `${artifact.kind}:${artifact.url}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 function generatedFileKind(fileName: string): GeneratedFileLink['kind'] {
   const lower = fileName.toLowerCase();
   if (/\.(png|jpe?g|webp|gif|svg)$/i.test(lower)) return 'image';
+  if (/\.(mp4|mov)$/i.test(lower)) return 'video';
   if (/\.pptx?$/i.test(lower)) return 'deck';
   if (/\.xlsx?$/i.test(lower)) return 'sheet';
   if (/\.pdf$/i.test(lower)) return 'pdf';
@@ -397,7 +495,7 @@ function generatedFileKind(fileName: string): GeneratedFileLink['kind'] {
 
 function buildGeneratedFileUrl(filePath: string): string {
   if (filePath.startsWith('/lumi_output/')) return filePath;
-  return `/api/files/generated?path=${encodeURIComponent(filePath)}`;
+  return `/api/files/generated?path=${encodeURIComponent(filePath)}&inline=1`;
 }
 
 function extractGeneratedFiles(text: string): GeneratedFileLink[] {
@@ -478,6 +576,7 @@ export function AgentChatPage({
   const chatExecutionSource = layout === 'command-center' ? 'command-center-chat' : 'chat';
   const isZh = t?.langCode !== 'en';
   const commandCenterPlannerText = commandCenterPlannerCopy(isZh ? 'zh' : 'en');
+  const mediaGenerationText = mediaGenerationCopy(isZh ? 'zh' : 'en');
   const ui = (zh: string, en: string) => isZh ? zh : en;
   const { platform, isElectron } = usePlatform();
   const {
@@ -729,6 +828,7 @@ export function AgentChatPage({
   }, [showAttachmentMenu]);
 
   const messageInputRef = useRef<HTMLInputElement>(null);
+  const mediaStudioOpenRef = useRef(false);
   const draftTextRef = useRef('');
   const [hasDraftText, setHasDraftText] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
@@ -740,7 +840,9 @@ export function AgentChatPage({
 
   useEffect(() => {
     if (!isOpen) return;
-    const frame = requestAnimationFrame(() => messageInputRef.current?.focus({ preventScroll: true }));
+    const frame = requestAnimationFrame(() => {
+      if (!mediaStudioOpenRef.current) messageInputRef.current?.focus({ preventScroll: true });
+    });
     return () => cancelAnimationFrame(frame);
   }, [isOpen]);
 
@@ -748,6 +850,7 @@ export function AgentChatPage({
     if (!isOpen) return;
     let focusFrame: number | null = null;
     const focusCommandInput = () => {
+      if (mediaStudioOpenRef.current) return;
       messageInputRef.current?.focus({ preventScroll: true });
       if (focusFrame !== null) cancelAnimationFrame(focusFrame);
       focusFrame = requestAnimationFrame(() => {
@@ -793,6 +896,40 @@ export function AgentChatPage({
   const [restoringConversationId, setRestoringConversationId] = useState('');
   const [deletingConversationId, setDeletingConversationId] = useState('');
   const [conversationContextMenu, setConversationContextMenu] = useState<ConversationHistoryContextMenu | null>(null);
+  const [mediaStudioMode, setMediaStudioMode] = useState<MediaGenerationKind | null>(null);
+  const [mediaGenerationStatus, setMediaGenerationStatus] = useState<MediaGenerationStudioStatus>('idle');
+  const [mediaGenerationDetail, setMediaGenerationDetail] = useState('');
+  const [mediaGenerationArtifacts, setMediaGenerationArtifacts] = useState<MediaGenerationArtifact[]>([]);
+  const [mediaGenerationRetryRequest, setMediaGenerationRetryRequest] = useState<MediaGenerationRequest | null>(null);
+  const [mediaSourceArtifacts, setMediaSourceArtifacts] = useState<MediaGenerationArtifact[]>([]);
+  const [mediaPrimaryImage, setMediaPrimaryImage] = useState('');
+  const [mediaPrimaryArtifactId, setMediaPrimaryArtifactId] = useState('');
+  const [mediaReferenceImages, setMediaReferenceImages] = useState<string[]>([]);
+  const [mediaReferenceArtifactIds, setMediaReferenceArtifactIds] = useState<string[]>([]);
+  const [mediaVideoReferenceImage, setMediaVideoReferenceImage] = useState('');
+  const [mediaVideoReferenceArtifactId, setMediaVideoReferenceArtifactId] = useState('');
+  const [mediaSourceUploading, setMediaSourceUploading] = useState(false);
+  const mediaSourceFileInputRef = useRef<HTMLInputElement>(null);
+  const mediaSourceUploadTargetRef = useRef<{
+    operation: MediaGenerationSourceOperation;
+    slot: MediaGenerationSourceSlot;
+  } | null>(null);
+  const activeMediaGenerationRef = useRef<{
+    requestId: string;
+    mode: MediaGenerationKind;
+    request: MediaGenerationExpectation;
+  } | null>(null);
+  const mediaGenerationArtifactsRef = useRef<MediaGenerationArtifact[]>([]);
+  const mediaGenerationArtifactValidationRef = useRef<{
+    expectedIds: Set<string>;
+    readyIds: Set<string>;
+    failedIds: Set<string>;
+    requiredCount: number;
+    contractValid: boolean;
+    finalized: boolean;
+    terminalSucceeded: boolean;
+    terminalBlocked: boolean;
+  } | null>(null);
   const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus>('idle');
   const [workflowSteps, setWorkflowSteps] = useState<WorkflowStep[]>([]);
   const [chatProgressLines, setChatProgressLines] = useState<ChatProgressLine[]>([]);
@@ -818,9 +955,38 @@ export function AgentChatPage({
   const conversationHistoryLoadingRef = useRef(false);
   const conversationHistoryRequestRef = useRef(0);
 
+  const resetMediaGenerationSurface = useCallback(() => {
+    mediaStudioOpenRef.current = false;
+    activeMediaGenerationRef.current = null;
+    mediaGenerationArtifactsRef.current = [];
+    mediaGenerationArtifactValidationRef.current = null;
+    setMediaStudioMode(null);
+    setMediaGenerationArtifacts([]);
+    setMediaGenerationStatus('idle');
+    setMediaGenerationDetail('');
+    setMediaGenerationRetryRequest(null);
+    setMediaSourceArtifacts([]);
+    setMediaPrimaryImage('');
+    setMediaPrimaryArtifactId('');
+    setMediaReferenceImages([]);
+    setMediaReferenceArtifactIds([]);
+    setMediaVideoReferenceImage('');
+    setMediaVideoReferenceArtifactId('');
+    setMediaSourceUploading(false);
+    mediaSourceUploadTargetRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen || !isOfficeCommandCenter) resetMediaGenerationSurface();
+  }, [isOfficeCommandCenter, isOpen, resetMediaGenerationSurface]);
+
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    if (!isOpen || !isOfficeCommandCenter) setMediaStudioMode(null);
+  }, [isOfficeCommandCenter, isOpen]);
 
   useEffect(() => {
     pendingAttachmentsRef.current = pendingAttachments;
@@ -1067,6 +1233,20 @@ export function AgentChatPage({
     }
     return uniqueRecent;
   }, [messages]);
+  const availableMediaSourceArtifacts = useMemo(() => {
+    const collected = [
+      ...mediaSourceArtifacts,
+      ...mediaGenerationArtifacts,
+      ...messages.flatMap(message => Array.isArray(message?.mediaArtifacts) ? message.mediaArtifacts : []),
+    ].filter((artifact): artifact is MediaGenerationArtifact => artifact?.kind === 'image' && Boolean(artifact.url));
+    const seen = new Set<string>();
+    return collected.filter(artifact => {
+      const key = `${artifact.path || ''}\u001f${artifact.url}`.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(-24).reverse();
+  }, [mediaGenerationArtifacts, mediaSourceArtifacts, messages]);
 
   const openNativeFilePath = useCallback(async (target?: string | null): Promise<boolean> => {
     if (platform !== 'tauri' || !target) return false;
@@ -1267,6 +1447,7 @@ export function AgentChatPage({
       if (kind === 'pdf') return 'PDF';
       if (kind === 'cad') return 'CAD';
       if (kind === 'image') return uiMessage('agent-chat-page.image.07bb82eb07');
+      if (kind === 'video') return mediaGenerationText.video;
       if (kind === 'document') return uiMessage('agent-chat-page.document.c4e0476ce2');
       return uiMessage('agent-chat-page.file.9588151a85');
     };
@@ -1276,16 +1457,26 @@ export function AgentChatPage({
         {files.map(file => (
           <div
             key={file.id}
-            className="group flex min-w-0 max-w-[300px] items-center gap-2 rounded-2xl border border-emerald-400/15 bg-emerald-400/10 px-3 py-2.5 text-left transition-all hover:border-emerald-300/35 hover:bg-emerald-400/15"
+            className={`group flex min-w-0 max-w-[360px] gap-2 overflow-hidden rounded-2xl border border-emerald-400/15 bg-emerald-400/10 text-left transition-all hover:border-emerald-300/35 hover:bg-emerald-400/15 ${
+              file.kind === 'video' ? 'w-full flex-col p-2' : 'items-center px-3 py-2.5'
+            }`}
             title={file.path}
           >
+            {file.kind === 'video' && (
+              <video
+                src={file.url}
+                controls
+                preload="metadata"
+                className="aspect-video w-full rounded-xl bg-black/45 object-contain"
+              />
+            )}
             <button
               type="button"
               onClick={() => openChatFile({ fileName: file.fileName, path: file.path, openUrl: file.url, saveUrl: file.url })}
               className="flex min-w-0 flex-1 items-center gap-3 text-left"
             >
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-400/15 text-emerald-200">
-              {file.kind === 'image' ? <ImageIcon size={17} /> : <FileText size={17} />}
+              {file.kind === 'image' ? <ImageIcon size={17} /> : file.kind === 'video' ? <Video size={17} /> : <FileText size={17} />}
             </div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-xs font-semibold text-white/80">{file.fileName}</div>
@@ -1299,7 +1490,7 @@ export function AgentChatPage({
         ))}
       </div>
     );
-  }, [openChatFile]);
+  }, [mediaGenerationText, openChatFile]);
 
   const buildSearchDisplayMessages = useCallback(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -1327,7 +1518,7 @@ export function AgentChatPage({
     const agentDisplayName = agentNameRef.current || 'Lumi';
 
     const pushMessage = (message: any) => {
-      if (!message.text || !String(message.text).trim()) return;
+      if ((!message.text || !String(message.text).trim()) && !message.mediaArtifacts?.length) return;
       normalized.push(message);
     };
 
@@ -1336,9 +1527,16 @@ export function AgentChatPage({
       const timestamp = m.timestamp || m.createdAt || new Date().toISOString();
       const role = m.role || '';
       const userText = role === 'assistant' ? '' : stripStoredAttachmentSummary(m.content || m.message || '');
-      const assistantText = role === 'assistant'
+      const storedAssistantText = role === 'assistant'
         ? (m.content || m.message || m.response || '')
         : (m.response || '');
+      const legacyExecutionReport = Boolean(
+        storedAssistantText && hasInternalAgentExecutionDetail(storedAssistantText),
+      );
+      const assistantText = sanitizeAgentResponseTextForDisplay(
+        storedAssistantText,
+        isZh ? 'zh' : 'en',
+      );
 
       if (role !== 'tool' && userText) {
         pushMessage({
@@ -1351,7 +1549,8 @@ export function AgentChatPage({
         });
       }
 
-      if (assistantText) {
+      const mediaArtifacts = extractPersistedMediaArtifacts(m);
+      if (assistantText || mediaArtifacts.length) {
         const completionFeedback = normalizeTaskCompletionFeedback(m.completionFeedback);
         pushMessage({
           id: `${baseId}-assistant`,
@@ -1360,7 +1559,9 @@ export function AgentChatPage({
           timestamp,
           type: 'agent',
           mode: m.mode,
+          ...(legacyExecutionReport ? { legacyExecutionReport: true } : {}),
           ...(completionFeedback ? { completionFeedback } : {}),
+          ...(mediaArtifacts.length ? { mediaArtifacts } : {}),
         });
       }
     });
@@ -1371,7 +1572,7 @@ export function AgentChatPage({
       seen.add(m.id);
       return true;
     });
-  }, [user?.displayName, user?.username, t.chatUserFallback]);
+  }, [isZh, user?.displayName, user?.username, t.chatUserFallback]);
 
   useEffect(() => {
     if (!agentId || isFounder) return;
@@ -1386,10 +1587,12 @@ export function AgentChatPage({
       chatRequestLedgerRef.current.clear();
       chatTurnUiMetaRef.current.clear();
       streamingMsgIdsRef.current.clear();
+      streamingRawTextRef.current.clear();
       for (const detach of activeChatViewDetachersRef.current) detach();
       activeChatViewDetachersRef.current.clear();
       activeChatRequestIdRef.current = null;
       textChatActiveRef.current = false;
+      resetMediaGenerationSurface();
       try {
         // Remove the pre-fix scope-only key, which could contain plaintext and
         // could incorrectly survive into a different conversation.
@@ -1450,7 +1653,7 @@ export function AgentChatPage({
     })();
 
     return () => { cancelled = true; };
-  }, [activeDomain, activeOrgId, agentId, attachmentContextStoragePrefix, bindAttachmentContextToConversation, isFounder, normalizePersistedMessages, scopedConversationUrl, user?.id, user?.username]);
+  }, [activeDomain, activeOrgId, agentId, attachmentContextStoragePrefix, bindAttachmentContextToConversation, isFounder, normalizePersistedMessages, resetMediaGenerationSurface, scopedConversationUrl, user?.id, user?.username]);
 
   useEffect(() => {
     const query = searchQuery.trim();
@@ -1492,6 +1695,7 @@ export function AgentChatPage({
   }, [agentId, isFounder, normalizePersistedMessages, scopedConversationUrl, searchQuery]);
 
   const streamingMsgIdsRef = useRef(new Map<string, string>());
+  const streamingRawTextRef = useRef(new Map<string, string>());
   const textChatActiveRef = useRef(false);
   const activeChatRequestIdRef = useRef<string | null>(null);
   const lastResumedRequestIdsRef = useRef(new Set<string>());
@@ -1507,6 +1711,9 @@ export function AgentChatPage({
         orgId: activeOrgId || undefined,
         conversationId: attachmentConversationIdRef.current || undefined,
         startedAt: new Date().toISOString(),
+        ...(activeMediaGenerationRef.current?.requestId === requestId
+          ? { mediaGeneration: { ...activeMediaGenerationRef.current.request } }
+          : {}),
       };
       const current = JSON.parse(localStorage.getItem(activeExecutionStorageKey) || 'null');
       localStorage.setItem(
@@ -1590,11 +1797,13 @@ export function AgentChatPage({
       if (proactiveType === 'greeting' && localStorage.getItem('lumi_allow_proactive_voice') !== 'true') return;
       if ((data.requestId || data.source) && !isCurrentChatEvent(data)) return;
       if (!shouldDisplayAgentResponse({ ...data, text: data.message })) return;
+      const publicMessage = sanitizeAgentResponseTextForDisplay(data.message, isZh ? 'zh' : 'en');
+      if (!publicMessage) return;
       setMessages(prev => {
-        if (prev.some(m => m.text === data.message && m.type === 'agent')) return prev;
+        if (prev.some(m => m.text === publicMessage && m.type === 'agent')) return prev;
         return [...prev, {
           id: `proactive-${Date.now()}`,
-          text: data.message,
+          text: publicMessage,
           userName: agentName,
           timestamp: data.timestamp || new Date().toISOString(),
           type: 'agent',
@@ -1606,18 +1815,22 @@ export function AgentChatPage({
     const onChunk = (data: { text: string; agentName: string; requestId?: string; source?: string; conversationId?: string }) => {
       if (!isCurrentChatEvent(data)) return;
       const streamKey = String(data.requestId || '__legacy__');
+      const rawText = `${streamingRawTextRef.current.get(streamKey) || ''}${data.text}`;
+      streamingRawTextRef.current.set(streamKey, rawText);
+      const publicText = sanitizeAgentStreamingTextForDisplay(rawText, isZh ? 'zh' : 'en');
+      if (!publicText) return;
       const currentStreamId = streamingMsgIdsRef.current.get(streamKey);
       if (currentStreamId) {
         const sid = currentStreamId;
         setMessages(prev => prev.map(m =>
-          m.id === sid ? { ...m, text: m.text + data.text } : m
+          m.id === sid ? { ...m, text: publicText } : m
         ));
       } else {
         const id = makeChatMessageId('stream');
         streamingMsgIdsRef.current.set(streamKey, id);
         setMessages(prev => [...prev, {
           id,
-          text: data.text,
+          text: publicText,
           userName: data.agentName,
           timestamp: new Date().toISOString(),
           type: 'agent'
@@ -1625,18 +1838,99 @@ export function AgentChatPage({
       }
     };
 
-    const onTool = (data: { correlationId?: string; name: string; args?: any; arguments?: any; result?: string; error?: string; requestId?: string; source?: string; conversationId?: string; taskRelation?: unknown }) => {
+    const onTool = (data: { correlationId?: string; name: string; args?: any; arguments?: any; result?: string; artifactReceipt?: unknown; error?: string; publicText?: string; requestId?: string; source?: string; conversationId?: string; taskRelation?: unknown }) => {
       if (!isCurrentChatEvent(data)) return;
       recordTaskRelation(data);
       const requestId = String(data.requestId || '').trim();
       const args = data.arguments ?? data.args;
-      const phase = data.error !== undefined ? 'error' : data.result !== undefined ? 'result' : 'start';
+      const phase = data.error !== undefined
+        ? 'error'
+        : data.artifactReceipt !== undefined || data.result !== undefined
+          ? 'result'
+          : 'start';
       const eventRequestKey = requestId || '__legacy__';
       const workflowEventKey = data.correlationId
         ? `${eventRequestKey}:${data.correlationId}:${phase}`
         : `${eventRequestKey}:${data.name}:${phase}:${String(data.result ?? data.error ?? '').slice(0, 120)}`;
       if (seenWorkflowToolEvents.current.has(workflowEventKey)) return;
       seenWorkflowToolEvents.current.add(workflowEventKey);
+
+      const activeMediaGeneration = activeMediaGenerationRef.current;
+      const mediaToolBelongsToActiveRequest = activeMediaGeneration?.requestId === requestId
+        && MEDIA_GENERATION_TOOL_NAMES.has(data.name);
+      if (
+        mediaToolBelongsToActiveRequest
+        && activeMediaGeneration
+        && !isExpectedMediaGenerationTool(activeMediaGeneration.request, data.name)
+      ) {
+        mediaGenerationArtifactValidationRef.current = null;
+        setMediaGenerationStatus('error');
+        setMediaGenerationDetail(mediaGenerationText.settingsMismatch);
+      }
+      if (
+        mediaToolBelongsToActiveRequest
+        && activeMediaGeneration
+        && isExpectedMediaGenerationTool(activeMediaGeneration.request, data.name)
+      ) {
+        if (data.error !== undefined) {
+          mediaGenerationArtifactValidationRef.current = null;
+          setMediaGenerationStatus('error');
+          setMediaGenerationDetail(mediaGenerationText.toolFailed);
+        } else if (data.artifactReceipt !== undefined || data.result !== undefined) {
+          if (!mediaGenerationArgumentsMatch(activeMediaGeneration.request, args)) {
+            mediaGenerationArtifactValidationRef.current = null;
+            setMediaGenerationStatus('error');
+            setMediaGenerationDetail(mediaGenerationText.settingsMismatch);
+          } else {
+            const nextArtifacts = extractMediaGenerationArtifacts(
+              data.artifactReceipt ?? data.result,
+              activeMediaGeneration.mode,
+            ).filter(artifact => artifact.kind === activeMediaGeneration.mode).map(artifact => ({
+              ...artifact,
+              requestId,
+              operation: resolveMediaGenerationOperation(activeMediaGeneration.request),
+            }));
+            if (nextArtifacts.length > 0) {
+              const existing = mediaGenerationArtifactsRef.current;
+              const merged = [...existing, ...nextArtifacts].filter((artifact, index, all) => (
+                all.findIndex(candidate => candidate.kind === artifact.kind && candidate.url === artifact.url) === index
+              ));
+              const requiredCount = activeMediaGeneration.mode === 'image'
+                ? Math.max(1, Number(activeMediaGeneration.request.count) || 1)
+                : 1;
+              const priorReady = mediaGenerationArtifactValidationRef.current?.readyIds || new Set<string>();
+              const priorFailed = mediaGenerationArtifactValidationRef.current?.failedIds || new Set<string>();
+              const expectedIds = new Set(merged.map(artifact => artifact.id));
+              mediaGenerationArtifactValidationRef.current = {
+                expectedIds,
+                readyIds: new Set([...priorReady].filter(id => expectedIds.has(id))),
+                failedIds: new Set([...priorFailed].filter(id => expectedIds.has(id))),
+                requiredCount,
+                contractValid: merged.length >= requiredCount,
+                finalized: mediaGenerationArtifactValidationRef.current?.finalized || false,
+                terminalSucceeded: mediaGenerationArtifactValidationRef.current?.terminalSucceeded || false,
+                terminalBlocked: mediaGenerationArtifactValidationRef.current?.terminalBlocked || false,
+              };
+              mediaGenerationArtifactsRef.current = merged;
+              setMediaGenerationArtifacts(merged);
+              if (merged.length < requiredCount) {
+                setMediaGenerationStatus('error');
+                setMediaGenerationDetail(mediaGenerationText.artifactCountMismatch);
+              } else {
+                setMediaGenerationStatus('generating');
+                setMediaGenerationDetail(mediaGenerationText.validatingArtifact);
+              }
+            } else {
+              mediaGenerationArtifactValidationRef.current = null;
+              setMediaGenerationStatus('generating');
+              setMediaGenerationDetail(mediaGenerationText.toolReturnedNoArtifact);
+            }
+          }
+        } else {
+          setMediaGenerationStatus('generating');
+          setMediaGenerationDetail('');
+        }
+      }
 
       setWorkflowStatus('executing');
       const turnMeta = chatTurnUiMetaRef.current.get(requestId);
@@ -1652,40 +1946,46 @@ export function AgentChatPage({
           setWorkflowSteps(prev => [...prev, step]);
         }
       };
-      pushChatProgress(describeToolProgress(data.name, phase, isZh), phase === 'error' ? 'error' : 'tool');
+      const customerToolText = sanitizeAgentResponseTextForDisplay(
+        data.publicText || describeToolProgress(data.name, phase, isZh),
+        isZh ? 'zh' : 'en',
+      );
+      pushChatProgress(customerToolText, phase === 'error' ? 'error' : 'tool');
       if (data.result !== undefined) {
         appendTurnStep({
           id: `chat-tool-ok-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
           type: 'tool_result',
-          text: `${data.name}: ${uiMessage('chat-progress.tool-returned-result-awaiting-task-verification.4f8d02cb71', (isZh) ? 'zh' : 'en')}`,
-          detail: data.result?.slice(0, 100),
+          text: customerToolText,
           time: Date.now(),
         });
       } else if (data.error !== undefined) {
         appendTurnStep({
           id: `chat-tool-err-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
           type: 'error',
-          text: `${data.name} ${t.workflowToolFailed || 'failed'}`,
-          detail: data.error?.slice(0, 100),
+          text: customerToolText,
           time: Date.now(),
         });
       } else {
-        const argsSummary = args
-          ? Object.entries(args).map(([k, v]) => `${k}=${typeof v === 'string' ? v.slice(0, 30) : String(v).slice(0, 30)}`).join(', ')
-          : '';
         appendTurnStep({
           id: `chat-tool-start-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
           type: 'tool_start',
-          text: `${t.workflowCalling || 'Calling'} ${data.name}`,
-          detail: argsSummary || undefined,
+          text: customerToolText,
           time: Date.now(),
         });
       }
     };
 
-    const onProgress = (data: { text?: string; tone?: ChatProgressTone; requestId?: string; source?: string; conversationId?: string }) => {
+    const onProgress = (data: { text?: string; publicText?: string; tone?: ChatProgressTone; requestId?: string; source?: string; conversationId?: string }) => {
       if (!isCurrentChatEvent(data)) return;
-      pushChatProgress(data.text || '', data.tone || 'tool');
+      pushChatProgress(
+        sanitizeAgentResponseTextForDisplay(data.publicText || data.text || '', isZh ? 'zh' : 'en'),
+        data.tone || 'tool',
+      );
+      const requestId = String(data.requestId || '').trim();
+      if (activeMediaGenerationRef.current?.requestId === requestId && data.text?.trim()) {
+        setMediaGenerationStatus('generating');
+        setMediaGenerationDetail(data.text.trim());
+      }
     };
 
     const onResponse = (data: {
@@ -1700,6 +2000,7 @@ export function AgentChatPage({
       sidecar?: boolean;
       taskRelation?: unknown;
       completionFeedback?: unknown;
+      artifactReceipt?: unknown;
     }) => {
       if (!isCurrentChatEvent(data)) return;
       recordTaskRelation(data);
@@ -1711,31 +2012,141 @@ export function AgentChatPage({
       const tracked = settleTrackedChatRequest(requestId);
       const hasRemainingRequests = tracked.remaining > 0;
       const completionFeedback = normalizeTaskCompletionFeedback(data.completionFeedback);
+      const responseTerminalReason = String(data.reason || '').trim().toLowerCase();
+      const responseWasCancelled = responseTerminalReason === 'cancelled' || responseTerminalReason === 'canceled';
+      const responseReceipt = data.artifactReceipt && typeof data.artifactReceipt === 'object'
+        ? data.artifactReceipt as Record<string, any>
+        : null;
+      const responseOperation: MediaGenerationArtifact['operation'] = responseReceipt?.toolName === 'ai_edit_image'
+        ? 'image_edit'
+        : responseReceipt?.toolName === 'generate_video'
+          ? (responseReceipt?.settings?.hasReference ? 'image_to_video' : 'text_to_video')
+          : responseReceipt?.toolName === 'generate_image'
+            ? 'text_to_image'
+            : undefined;
+      const responseMediaArtifacts = extractMediaGenerationArtifacts(data.artifactReceipt).map(artifact => ({
+        ...artifact,
+        requestId,
+        ...(responseOperation ? { operation: responseOperation } : {}),
+      }));
       setIsTyping(hasRemainingRequests);
 
-      const displayable = shouldDisplayAgentResponse(data);
+      const mediaReceiptDisplayable = responseMediaArtifacts.length > 0 && isFinalizedSuccessfulResponse(data);
+      const displayable = shouldDisplayAgentResponse(data) || mediaReceiptDisplayable;
+      const deliveredText = sanitizeAgentResponseTextForDisplay(
+        data.text?.trim() || (mediaReceiptDisplayable ? mediaGenerationText.mediaCompleted : ''),
+        isZh ? 'zh' : 'en',
+      );
       if (streamId) {
-        if (displayable && data.text?.trim()) {
+        if (displayable && deliveredText) {
           // Capture the id before deleting its request bucket. React may run
           // this updater after the handler returns.
-          setMessages(prev => finalizeStreamedChatMessage(prev, streamId, data.text).map(message => (
-            message.id === streamId && completionFeedback
-              ? { ...message, completionFeedback }
+          setMessages(prev => finalizeStreamedChatMessage(prev, streamId, deliveredText).map(message => (
+            message.id === streamId
+              ? {
+                  ...message,
+                  ...(completionFeedback ? { completionFeedback } : {}),
+                  ...(responseMediaArtifacts.length ? { mediaArtifacts: responseMediaArtifacts } : {}),
+                }
               : message
           )));
         } else if (!displayable) {
           setMessages(prev => prev.filter(message => message.id !== streamId));
         }
         streamingMsgIdsRef.current.delete(streamKey);
-      } else if (displayable && data.text?.trim()) {
+      } else if (displayable && deliveredText) {
         setMessages(prev => [...prev, {
           id: makeChatMessageId('agent'),
-          text: data.text,
+          text: deliveredText,
           userName: data.agentName,
           timestamp: new Date().toISOString(),
           type: 'agent',
           ...(completionFeedback ? { completionFeedback } : {}),
+          ...(responseMediaArtifacts.length ? { mediaArtifacts: responseMediaArtifacts } : {}),
         }]);
+      }
+      streamingRawTextRef.current.delete(streamKey);
+
+      const activeMediaGeneration = activeMediaGenerationRef.current;
+      if (activeMediaGeneration?.requestId === requestId) {
+        // Only an agent:tool result can complete the studio. Model-authored
+        // response text may describe an artifact, but is not execution proof.
+        let hasArtifact = mediaGenerationArtifactsRef.current.some(
+          artifact => artifact.kind === activeMediaGeneration.mode,
+        );
+        let replayReceiptRejected = false;
+        if (data.artifactReceipt !== undefined && !mediaGenerationReceiptSettingsMatch(activeMediaGeneration.request, data.artifactReceipt)) {
+          replayReceiptRejected = true;
+          setMediaGenerationStatus('error');
+          setMediaGenerationDetail(mediaGenerationText.settingsMismatch);
+        } else if (!hasArtifact && data.artifactReceipt !== undefined) {
+          const recoveredArtifacts = extractMediaGenerationArtifacts(
+            data.artifactReceipt,
+            activeMediaGeneration.mode,
+          ).filter(artifact => artifact.kind === activeMediaGeneration.mode).map(artifact => ({
+            ...artifact,
+            requestId,
+            operation: resolveMediaGenerationOperation(activeMediaGeneration.request),
+          }));
+          const requiredCount = activeMediaGeneration.mode === 'image'
+            ? Math.max(1, Number(activeMediaGeneration.request.count) || 1)
+            : 1;
+          if (recoveredArtifacts.length > 0) {
+            mediaGenerationArtifactsRef.current = recoveredArtifacts;
+            mediaGenerationArtifactValidationRef.current = {
+              expectedIds: new Set(recoveredArtifacts.map(artifact => artifact.id)),
+              readyIds: new Set(),
+              failedIds: new Set(),
+              requiredCount,
+              contractValid: recoveredArtifacts.length >= requiredCount,
+              finalized: false,
+              terminalSucceeded: false,
+              terminalBlocked: false,
+            };
+            setMediaGenerationArtifacts(recoveredArtifacts);
+            hasArtifact = true;
+            if (recoveredArtifacts.length < requiredCount) {
+              setMediaGenerationStatus('error');
+              setMediaGenerationDetail(mediaGenerationText.artifactCountMismatch);
+            } else {
+              setMediaGenerationStatus('generating');
+              setMediaGenerationDetail(mediaGenerationText.validatingArtifact);
+            }
+          }
+        }
+        const validation = mediaGenerationArtifactValidationRef.current;
+        const terminalSucceeded = isFinalizedSuccessfulResponse(data);
+        if (!terminalSucceeded) {
+          if (validation) {
+            validation.finalized = true;
+            validation.terminalSucceeded = false;
+            validation.terminalBlocked = Boolean(data.blocked);
+          }
+          setMediaGenerationStatus(responseWasCancelled ? 'cancelled' : 'error');
+          setMediaGenerationDetail(responseWasCancelled
+            ? mediaGenerationText.statusCancelled
+            : describeAgentResponseDelivery({
+                ...data,
+                text: data.text || mediaGenerationText.taskBlocked,
+              }, isZh));
+        } else if (replayReceiptRejected) {
+          // Preserve the exact settings mismatch reported above.
+        } else if (!hasArtifact || !validation?.contractValid) {
+          setMediaGenerationStatus('error');
+          setMediaGenerationDetail(mediaGenerationText.taskEndedNoArtifact);
+        } else {
+          validation.finalized = true;
+          validation.terminalSucceeded = true;
+          validation.terminalBlocked = false;
+          if (validation.readyIds.size >= validation.requiredCount) {
+            setMediaGenerationStatus('completed');
+            setMediaGenerationDetail('');
+          } else {
+            setMediaGenerationStatus('generating');
+            setMediaGenerationDetail(mediaGenerationText.validatingArtifact);
+          }
+        }
+        activeMediaGenerationRef.current = null;
       }
 
       if (hasRemainingRequests) {
@@ -1778,8 +2189,7 @@ export function AgentChatPage({
         return;
       }
       const finalizedSuccess = isFinalizedSuccessfulResponse(data);
-      const terminalReason = String(data.reason || '').trim().toLowerCase();
-      const wasCancelled = terminalReason === 'cancelled' || terminalReason === 'canceled';
+      const wasCancelled = responseWasCancelled;
       setWorkflowStatus(
         wasCancelled
           ? 'cancelled'
@@ -1842,6 +2252,10 @@ export function AgentChatPage({
         setWorkflowStatus('waiting_confirmation');
       } else if (activity === 'cancelling') {
         setWorkflowStatus('cancelling');
+        if (activeMediaGenerationRef.current?.requestId === String(data.requestId || '').trim()) {
+          setMediaGenerationStatus('cancelling');
+          setMediaGenerationDetail(mediaGenerationText.statusCancelling);
+        }
       } else if (data.status === 'idle') {
         if (!terminalTracking?.remaining) {
           setIsTyping(false);
@@ -1853,6 +2267,12 @@ export function AgentChatPage({
           }
         }
       } else if (isTerminalAgentStatus(data.status)) {
+        if (activeMediaGenerationRef.current?.requestId === String(data.requestId || '').trim()) {
+          const cancelled = data.status === 'cancelled' || data.status === 'canceled';
+          setMediaGenerationStatus(cancelled ? 'cancelled' : 'error');
+          setMediaGenerationDetail(cancelled ? mediaGenerationText.statusCancelled : mediaGenerationText.taskFailed);
+          activeMediaGenerationRef.current = null;
+        }
         if (!terminalTracking?.remaining) {
           setIsTyping(false);
           setWorkflowStatus('error');
@@ -1871,12 +2291,22 @@ export function AgentChatPage({
           setMessages(prev => prev.filter(m => m.id !== sid));
           streamingMsgIdsRef.current.delete(streamKey);
         }
+        streamingRawTextRef.current.delete(streamKey);
       }
     };
 
     const onError = (data: { message: string; code?: string; requestId?: string; source?: string; conversationId?: string; sidecar?: boolean }) => {
       if (!isCurrentChatEvent(data)) return;
       if (!terminalReceiptsRef.current.claim(data)) return;
+      const message = sanitizeAgentResponseTextForDisplay(
+        data.message || (t.failedToRouteNeuralMesh || 'Failed to route through Neural Mesh.'),
+        isZh ? 'zh' : 'en',
+      );
+      if (activeMediaGenerationRef.current?.requestId === String(data.requestId || '').trim()) {
+        setMediaGenerationStatus('error');
+        setMediaGenerationDetail(message || mediaGenerationText.taskFailed);
+        activeMediaGenerationRef.current = null;
+      }
       const tracked = settleTrackedChatRequest(data.requestId);
       const hasRemainingRequests = tracked.remaining > 0;
       setIsTyping(hasRemainingRequests);
@@ -1899,7 +2329,7 @@ export function AgentChatPage({
           id: `chat-err-${Date.now()}`,
           type: 'error',
           text: t.workflowError || 'Processing failed',
-          detail: data.message,
+          detail: message,
           time: Date.now(),
         }]);
         scheduleWorkflowReset(data.requestId);
@@ -1910,7 +2340,7 @@ export function AgentChatPage({
         setMessages(prev => prev.filter(m => m.id !== sid));
         streamingMsgIdsRef.current.delete(streamKey);
       }
-      const message = data.message || (t.failedToRouteNeuralMesh || 'Failed to route through Neural Mesh.');
+      streamingRawTextRef.current.delete(streamKey);
       setMessages(prev => {
         const text = `${t.requestFailed || 'Request failed'}\n\n${message}`;
         if (prev.some(m => m.type === 'agent' && m.text === text)) return prev;
@@ -1967,6 +2397,7 @@ export function AgentChatPage({
         activeRequestId: activeChatRequestIdRef.current,
       })) return;
       streamingMsgIdsRef.current.clear();
+      streamingRawTextRef.current.clear();
       fetch(scopedConversationUrl(`/api/conversations/${data.conversationId}/messages?limit=${CHAT_HISTORY_LIMIT}`))
         .then(r => r.json())
         .then(result => {
@@ -2029,6 +2460,7 @@ export function AgentChatPage({
     finishChatProgress,
     isFounder,
     isZh,
+    mediaGenerationText,
     normalizePersistedMessages,
     pushChatProgress,
     scheduleWorkflowReset,
@@ -2064,6 +2496,28 @@ export function AgentChatPage({
         return valid;
       });
       if (pending.length === 0) return;
+
+      const mediaExecution = isOfficeCommandCenter
+        ? [...pending].reverse().find(execution => execution.mediaGeneration)
+        : undefined;
+      if (mediaExecution?.mediaGeneration) {
+        const request = mediaExecution.mediaGeneration;
+        activeMediaGenerationRef.current = {
+          requestId: mediaExecution.requestId,
+          mode: request.mode,
+          request,
+        };
+        mediaStudioOpenRef.current = true;
+        mediaGenerationArtifactsRef.current = [];
+        mediaGenerationArtifactValidationRef.current = null;
+        setMediaGenerationArtifacts([]);
+        setMediaGenerationStatus('generating');
+        setMediaGenerationDetail(mediaGenerationText.statusGenerating);
+        setMediaStudioMode(request.mode);
+        setMediaPrimaryImage(request.primaryImage || '');
+        setMediaReferenceImages(request.referenceImages || []);
+        setMediaVideoReferenceImage(request.referenceImage || '');
+      }
 
       for (const execution of pending) {
         if (!chatRequestLedgerRef.current.has(execution.requestId)) {
@@ -2131,7 +2585,7 @@ export function AgentChatPage({
     socket.on('connect', resumeActiveExecution);
     if (socket.connected) resumeActiveExecution();
     return () => { socket.off('connect', resumeActiveExecution); };
-  }, [activeExecutionStorageKey, bindAttachmentContextToConversation, chatExecutionSource, clearPersistedExecution, isFounder, isZh, persistActiveExecution, pushChatProgress, scopedConversationUrl, settleTrackedChatRequest, socket]);
+  }, [activeExecutionStorageKey, bindAttachmentContextToConversation, chatExecutionSource, clearPersistedExecution, isFounder, isOfficeCommandCenter, isZh, mediaGenerationText.statusGenerating, persistActiveExecution, pushChatProgress, scopedConversationUrl, settleTrackedChatRequest, socket]);
 
   const startNewTextConversation = useCallback(async () => {
     if (isCreatingConversation) return;
@@ -2160,8 +2614,10 @@ export function AgentChatPage({
       textChatActiveRef.current = false;
       lastResumedRequestIdsRef.current.clear();
       streamingMsgIdsRef.current.clear();
+      streamingRawTextRef.current.clear();
       chatTurnTimerGuardRef.current.invalidate();
       currentResponseFinalizationRef.current = null;
+      resetMediaGenerationSurface();
       bindAttachmentContextToConversation(result.conversation.id);
       setConversationHistory(previous => [result.conversation, ...previous.filter(item => item.id !== result.conversation.id)]);
       setMessages([]);
@@ -2183,7 +2639,7 @@ export function AgentChatPage({
     } finally {
       setIsCreatingConversation(false);
     }
-  }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, isCreatingConversation, scopedConversationUrl, setDraftText]);
+  }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, isCreatingConversation, resetMediaGenerationSurface, scopedConversationUrl, setDraftText]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -2348,8 +2804,10 @@ export function AgentChatPage({
       textChatActiveRef.current = false;
       lastResumedRequestIdsRef.current.clear();
       streamingMsgIdsRef.current.clear();
+      streamingRawTextRef.current.clear();
       chatTurnTimerGuardRef.current.invalidate();
       currentResponseFinalizationRef.current = null;
+      resetMediaGenerationSurface();
       bindAttachmentContextToConversation(conversationId);
       const restoredMessages = normalizePersistedMessages(Array.isArray(messageResult?.messages) ? messageResult.messages : []);
       setMessages(restoredMessages);
@@ -2376,7 +2834,7 @@ export function AgentChatPage({
     } finally {
       setRestoringConversationId('');
     }
-  }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, normalizePersistedMessages, restoringConversationId, scopedConversationUrl, setDraftText]);
+  }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, normalizePersistedMessages, resetMediaGenerationSurface, restoringConversationId, scopedConversationUrl, setDraftText]);
 
   const deleteConversationFromHistory = useCallback(async (conversationId: string) => {
     const id = String(conversationId || '').trim();
@@ -2484,16 +2942,25 @@ export function AgentChatPage({
     toast.success(uiMessage('agent-chat-page.session-materials-cleared.53bea199b2'));
   }, [attachmentContextStorageKey]);
 
-  const sendText = useCallback(async (text: string, attachments: ChatAttachment[] = pendingAttachments) => {
+  const sendText = useCallback(async (
+    text: string,
+    attachments: ChatAttachment[] = pendingAttachments,
+    options: ChatSendOptions = {},
+  ) => {
     const trimmedText = text.trim();
     const directAttachments = attachments.map(serializeChatAttachment);
+    const reusableConversationAttachments = options.includeConversationAttachments === false
+      ? []
+      : conversationAttachmentsRef.current.map(serializeChatAttachment);
     const attachmentMerge = mergeChatAttachmentReferences(
-      conversationAttachmentsRef.current.map(serializeChatAttachment),
+      reusableConversationAttachments,
       directAttachments,
     );
     const outgoingAttachments = attachmentMerge.attachments;
     const reusedConversationAttachmentContext =
-      conversationAttachmentsRef.current.length > 0 && directAttachments.length === 0;
+      options.includeConversationAttachments !== false
+      && conversationAttachmentsRef.current.length > 0
+      && directAttachments.length === 0;
     if (attachmentMerge.overflowCount > 0) {
       toast.error(formatUiMessage('agent-chat-page.up-to-value0-files-can.349aa29325', { value0: MAX_CHAT_ATTACHMENTS }));
     }
@@ -2510,6 +2977,7 @@ export function AgentChatPage({
     };
     const priorMessages = messagesRef.current.length > 0 ? messagesRef.current : messages;
     const requestId = `chat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    options.onRequestCreated?.(requestId);
     const wasIdle = chatRequestLedgerRef.current.size === 0;
     const initialTurnStep: WorkflowStep = {
       id: makeChatMessageId('chat-start'),
@@ -2624,6 +3092,12 @@ export function AgentChatPage({
         if (resolved) return;
         if (!socketAcknowledged) {
           streamingMsgIdsRef.current.delete(requestId);
+          streamingRawTextRef.current.delete(requestId);
+          if (activeMediaGenerationRef.current?.requestId === requestId) {
+            setMediaGenerationStatus('error');
+            setMediaGenerationDetail(mediaGenerationText.backendNoAck);
+            activeMediaGenerationRef.current = null;
+          }
           resolve();
           return;
         }
@@ -2661,6 +3135,12 @@ export function AgentChatPage({
               'error',
             );
             streamingMsgIdsRef.current.delete(requestId);
+            streamingRawTextRef.current.delete(requestId);
+            if (activeMediaGenerationRef.current?.requestId === requestId) {
+              setMediaGenerationStatus('error');
+              setMediaGenerationDetail(result?.error || mediaGenerationText.backendLostTask);
+              activeMediaGenerationRef.current = null;
+            }
             resolve();
             return;
           }
@@ -2693,6 +3173,7 @@ export function AgentChatPage({
       orgId: activeOrgId || null,
       source: chatExecutionSource,
       operationMode,
+      ...(options.mediaRequest ? { mediaRequest: options.mediaRequest } : {}),
       requestId,
       controlTargetRequestId: taskControlTarget.controlTargetRequestId || undefined,
       controlTargetTaskId: taskControlTarget.controlTargetTaskId,
@@ -2714,6 +3195,10 @@ export function AgentChatPage({
         detail: socket.connected ? undefined : (uiMessage('agent-chat-page.socket-is-currently-disconnected.8f04ddd3b7', (isZh) ? 'zh' : 'en')),
         time: Date.now(),
       }]);
+      if (activeMediaGenerationRef.current?.requestId === requestId) {
+        setMediaGenerationStatus('error');
+        setMediaGenerationDetail(mediaGenerationText.backendNoAck);
+      }
     }, 5000);
 
     // Always try socket first. The ack lets the UI distinguish "received and working"
@@ -2727,18 +3212,28 @@ export function AgentChatPage({
       if (resolved) return;
       if (ack?.ok) {
         pushChatProgress(uiMessage('agent-chat-page.the-backend-has-received-this.859b50e7ed', (isZh) ? 'zh' : 'en'), 'thinking');
+        if (activeMediaGenerationRef.current?.requestId === requestId) {
+          setMediaGenerationStatus('submitting');
+          setMediaGenerationDetail('');
+        }
       } else {
         setWorkflowStatus('error');
         pushChatProgress(
           ack?.error || (uiMessage('agent-chat-page.the-backend-did-not-accept.44d78fa21a', (isZh) ? 'zh' : 'en')),
           'error'
         );
+        if (activeMediaGenerationRef.current?.requestId === requestId) {
+          setMediaGenerationStatus('error');
+          setMediaGenerationDetail(ack?.error || mediaGenerationText.backendRejected);
+          activeMediaGenerationRef.current = null;
+        }
         resolve();
       }
     });
 
     // No frontend AI fallback here. If the realtime backend is down, show the
     // connection problem instead of generating a second, inconsistent answer.
+    return requestId;
   }, [
     acceptChatExecutionEvent,
     activeDomain,
@@ -2748,6 +3243,7 @@ export function AgentChatPage({
     chatExecutionSource,
     clearChatProgress,
     isZh,
+    mediaGenerationText,
     messages,
     operationMode,
     pendingAttachments,
@@ -2762,15 +3258,179 @@ export function AgentChatPage({
     user,
   ]);
 
+  const openMediaGenerationStudio = useCallback((mode: MediaGenerationKind) => {
+    const activeRequest = activeMediaGenerationRef.current;
+    mediaStudioOpenRef.current = true;
+    if (activeRequest) {
+      // A long-running generation may be hidden, but reopening either media
+      // entry always returns to that same request. This prevents the other
+      // studio from inheriting an unrelated request status or artifact.
+      setMediaStudioMode(activeRequest.mode);
+      return;
+    }
+    const hasSameKindArtifacts = mediaGenerationArtifactsRef.current.some(artifact => artifact.kind === mode);
+    if (!hasSameKindArtifacts) {
+      mediaGenerationArtifactsRef.current = [];
+      setMediaGenerationArtifacts([]);
+      setMediaGenerationStatus('idle');
+      setMediaGenerationDetail('');
+    }
+    setMediaStudioMode(mode);
+  }, []);
+
+  const handleMediaSourceChange = useCallback((change: MediaGenerationSourceChange) => {
+    const artifactId = change.artifact?.id || '';
+    if (change.operation === 'image_to_video') {
+      setMediaVideoReferenceImage(change.value);
+      setMediaVideoReferenceArtifactId(artifactId);
+      return;
+    }
+    if (change.slot === 'primary') {
+      setMediaPrimaryImage(change.value);
+      setMediaPrimaryArtifactId(artifactId);
+      return;
+    }
+    setMediaReferenceImages(change.value.trim() ? [change.value] : []);
+    setMediaReferenceArtifactIds(artifactId ? [artifactId] : []);
+  }, []);
+
+  const requestMediaSourceImage = useCallback((
+    operation: MediaGenerationSourceOperation,
+    slot: MediaGenerationSourceSlot,
+  ) => {
+    if (mediaSourceUploading) return;
+    mediaSourceUploadTargetRef.current = { operation, slot };
+    mediaSourceFileInputRef.current?.click();
+  }, [mediaSourceUploading]);
+
+  const generateMediaFromStudio = useCallback((request: MediaGenerationRequest) => {
+    if (isTyping || activeMediaGenerationRef.current) {
+      setMediaGenerationStatus('error');
+      setMediaGenerationDetail(mediaGenerationText.anotherTaskRunning);
+      return;
+    }
+    const mediaRequest = normalizeStructuredMediaRequest(request);
+    if (!mediaRequest) {
+      setMediaGenerationStatus('error');
+      setMediaGenerationDetail(mediaGenerationText.settingsMismatch);
+      return;
+    }
+
+    mediaGenerationArtifactsRef.current = [];
+    mediaGenerationArtifactValidationRef.current = null;
+    setMediaGenerationArtifacts([]);
+    setMediaGenerationStatus('submitting');
+    setMediaGenerationDetail('');
+    setMediaGenerationRetryRequest(request);
+    const requestActionLabel = request.operation === 'text_to_image'
+      ? mediaGenerationText.generateImage
+      : request.operation === 'image_edit'
+        ? mediaGenerationText.editImage
+        : request.operation === 'image_to_video'
+          ? mediaGenerationText.animateImage
+          : mediaGenerationText.generateVideo;
+    const requestText = `${requestActionLabel}${isZh ? '：' : ': '}${request.prompt}`;
+    void sendText(requestText, [], {
+      mediaRequest,
+      includeConversationAttachments: false,
+      onRequestCreated: requestId => {
+        activeMediaGenerationRef.current = {
+          requestId,
+          mode: request.mode,
+          request: {
+            mode: request.mode,
+            operation: request.operation,
+            size: request.size,
+            ...(request.operation === 'text_to_image'
+              ? { count: request.count || 1 }
+              : request.operation === 'image_edit'
+                ? {
+                    primaryImage: request.primaryImage,
+                    referenceImages: request.referenceImages,
+                    primaryArtifactId: request.primaryArtifactId,
+                    referenceArtifactIds: request.referenceArtifactIds,
+                  }
+                : {
+                    duration: request.duration || 6,
+                    ...(request.operation === 'image_to_video'
+                      ? {
+                          referenceImage: request.referenceImage,
+                          referenceArtifactId: request.referenceArtifactId,
+                        }
+                      : {}),
+                  }),
+          },
+        };
+      },
+    }).then(requestId => {
+      if (requestId) return;
+      activeMediaGenerationRef.current = null;
+      setMediaGenerationStatus('error');
+      setMediaGenerationDetail(mediaGenerationText.requestNotCreated);
+    });
+  }, [isTyping, isZh, mediaGenerationText, sendText]);
+
+  const closeMediaGenerationStudio = useCallback(() => {
+    mediaStudioOpenRef.current = false;
+    setMediaStudioMode(null);
+  }, []);
+
+  const markMediaGenerationArtifactReady = useCallback((artifact: MediaGenerationArtifact) => {
+    const validation = mediaGenerationArtifactValidationRef.current;
+    if (!validation?.expectedIds.has(artifact.id) || !validation.contractValid) return;
+    validation.failedIds.delete(artifact.id);
+    validation.readyIds.add(artifact.id);
+    if (
+      validation.finalized
+      && validation.terminalSucceeded
+      && !validation.terminalBlocked
+      && validation.readyIds.size >= validation.requiredCount
+    ) {
+      setMediaGenerationStatus('completed');
+      setMediaGenerationDetail('');
+    }
+  }, []);
+
+  const markMediaGenerationArtifactFailed = useCallback((artifact: MediaGenerationArtifact) => {
+    const validation = mediaGenerationArtifactValidationRef.current;
+    if (!validation?.expectedIds.has(artifact.id)) return;
+    validation.readyIds.delete(artifact.id);
+    validation.failedIds.add(artifact.id);
+    const remainingPossible = validation.expectedIds.size - validation.failedIds.size;
+    if (!validation.contractValid || remainingPossible < validation.requiredCount) {
+      setMediaGenerationStatus('error');
+      setMediaGenerationDetail(mediaGenerationText.artifactLoadFailed);
+    }
+  }, [mediaGenerationText.artifactLoadFailed]);
+
+  const openMediaGenerationArtifact = useCallback((artifact: MediaGenerationArtifact) => {
+    void openChatFile({
+      fileName: artifact.fileName || (artifact.kind === 'image' ? 'generated-image' : 'generated-video'),
+      path: artifact.path,
+      openUrl: artifact.url,
+      saveUrl: artifact.url,
+    });
+  }, [openChatFile]);
+
   const cancelActiveChat = () => {
     const requestId = activeChatRequestIdRef.current;
-    if (!socket || !requestId) return;
+    if (!socket || !requestId) {
+      if (activeMediaGenerationRef.current) {
+        setMediaGenerationStatus('error');
+        setMediaGenerationDetail(mediaGenerationText.backendLostTask);
+      }
+      return;
+    }
     setWorkflowStatus('cancelling');
     pushChatProgress(uiMessage('agent-chat-page.cancelling-task.18c33c6327', isZh ? 'zh' : 'en'), 'thinking');
     let acknowledged = false;
     const ackTimer = window.setTimeout(() => {
       if (acknowledged || activeChatRequestIdRef.current !== requestId) return;
       setWorkflowStatus('error');
+      if (activeMediaGenerationRef.current?.requestId === requestId) {
+        setMediaGenerationStatus('error');
+        setMediaGenerationDetail(mediaGenerationText.taskFailed);
+      }
       pushChatProgress(
         socket.connected
           ? uiMessage('agent-chat-page.cancellation-not-confirmed.990f6802e1', isZh ? 'zh' : 'en')
@@ -2790,6 +3450,10 @@ export function AgentChatPage({
       if (activeChatRequestIdRef.current !== requestId) return;
       if (!result?.ok) {
         setWorkflowStatus('error');
+        if (activeMediaGenerationRef.current?.requestId === requestId) {
+          setMediaGenerationStatus('error');
+          setMediaGenerationDetail(result?.error || mediaGenerationText.taskFailed);
+        }
         pushChatProgress(
           result?.error || uiMessage('agent-chat-page.unable-to-cancel-task.08547685ab', isZh ? 'zh' : 'en'),
           'error',
@@ -3014,6 +3678,62 @@ export function AgentChatPage({
     }
   }, [acceptImportedChatFiles, activeDomain, activeOrgId, isOptimizing, t.chatConnError, t.uploadFailed]);
 
+  const uploadMediaSourceImage = useCallback(async (files: FileList | null) => {
+    const target = mediaSourceUploadTargetRef.current;
+    const file = files?.[0];
+    if (!target || !file || mediaSourceUploading) return;
+    if (!file.type.startsWith('image/') && !/\.(?:png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name)) {
+      toast.error(mediaGenerationText.chooseImageFile);
+      mediaSourceUploadTargetRef.current = null;
+      return;
+    }
+
+    setMediaSourceUploading(true);
+    const formData = new FormData();
+    formData.append('files', file);
+    formData.append('domain', activeDomain);
+    if (activeDomain === 'work' && activeOrgId) formData.append('orgId', activeOrgId);
+    try {
+      const response = await fetch('/api/files/upload', {
+        method: 'POST',
+        body: formData,
+        credentials: 'include',
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error || t.uploadFailed || 'Upload failed');
+      const uploaded = Array.isArray(payload?.files) ? payload.files[0] : null;
+      const sourcePath = String(uploaded?.path || '').trim();
+      if (!uploaded || !sourcePath) throw new Error(mediaGenerationText.uploadMissingPath);
+      const fileName = String(uploaded.displayName || uploaded.name || file.name || 'source-image');
+      const artifact: MediaGenerationArtifact = {
+        id: `source-image-${String(uploaded.id || fileName)}-${Date.now()}`,
+        kind: 'image',
+        url: uploaded.id
+          ? scopedFileUrl(`/api/files/download/${encodeURIComponent(String(uploaded.id))}?inline=1`)
+          : buildGeneratedFileUrl(sourcePath),
+        path: sourcePath,
+        fileName,
+      };
+      setMediaSourceArtifacts(previous => [
+        ...previous.filter(item => item.path !== artifact.path && item.url !== artifact.url),
+        artifact,
+      ].slice(-24));
+      handleMediaSourceChange({
+        operation: target.operation,
+        slot: target.slot,
+        value: sourcePath,
+        artifact,
+      });
+      notifyKnowledgeUpdated([{ id: uploaded.id || sourcePath, name: fileName, displayName: fileName }]);
+      toast.success(mediaGenerationText.sourceImageLoaded);
+    } catch (error: any) {
+      toast.error(error?.message || t.chatConnError || 'Image upload failed');
+    } finally {
+      setMediaSourceUploading(false);
+      mediaSourceUploadTargetRef.current = null;
+    }
+  }, [activeDomain, activeOrgId, handleMediaSourceChange, mediaGenerationText, mediaSourceUploading, notifyKnowledgeUpdated, scopedFileUrl, t.chatConnError, t.uploadFailed]);
+
   const importChatAttachmentPaths = useCallback(async (paths: string[]) => {
     const uniquePaths = [...new Set(paths.map(item => String(item || '').trim()).filter(Boolean))];
     if (uniquePaths.length === 0 || isOptimizing) return;
@@ -3233,6 +3953,7 @@ export function AgentChatPage({
         <motion.div
           data-lumi-rendered-surface={layout === 'command-center' ? 'command-center' : 'chat'}
           data-lumi-command-center-view={layout === 'command-center' ? commandCenterView : undefined}
+          data-command-center-appearance={layout === 'command-center' ? resolvedAppearanceMode : undefined}
           initial={prefersReducedMotion ? false : layout === 'command-center'
             ? { opacity: 0, scale: 0.94, x: '-2.5%' }
             : { opacity: 0, y: 18, scale: 0.985 }}
@@ -3250,6 +3971,7 @@ export function AgentChatPage({
             '--color-celestial-glow': chatAccentTheme.glow,
             '--color-celestial-nebula': chatAccentTheme.nebula,
             '--color-celestial-mars': chatAccentTheme.mars,
+            '--lumi-chat-background': chatAccentTheme.background,
             willChange: 'opacity, transform',
           } as React.CSSProperties}
         >
@@ -3261,6 +3983,67 @@ export function AgentChatPage({
         accept={CHAT_ATTACHMENT_ACCEPT}
         onChange={(e) => { void uploadChatAttachments(e.target.files); e.target.value = ''; }}
       />
+      <input
+        type="file"
+        ref={mediaSourceFileInputRef}
+        className="hidden"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/tiff,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
+        onChange={(event) => {
+          void uploadMediaSourceImage(event.target.files);
+          event.target.value = '';
+        }}
+      />
+      <AnimatePresence>
+        {isOfficeCommandCenter && mediaStudioMode && (
+          <motion.div
+            data-media-generation-studio
+            initial={prefersReducedMotion ? false : { opacity: 0, x: '3%' }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, x: '3%' }}
+            transition={{ duration: prefersReducedMotion ? 0 : 0.22, ease: [0.25, 0.1, 0.25, 1] }}
+            className="absolute inset-0 z-[214]"
+          >
+            <MediaGenerationStudio
+              mode={mediaStudioMode}
+              locale={isZh ? 'zh' : 'en'}
+              busy={isTyping || mediaSourceUploading || mediaGenerationStatus === 'submitting' || mediaGenerationStatus === 'generating' || mediaGenerationStatus === 'cancelling'}
+              status={mediaGenerationStatus}
+              statusDetail={mediaGenerationDetail}
+              artifacts={mediaGenerationArtifacts.filter(artifact => artifact.kind === mediaStudioMode)}
+              sourceArtifacts={availableMediaSourceArtifacts}
+              primaryImage={mediaPrimaryImage}
+              referenceImages={mediaReferenceImages}
+              referenceImage={mediaVideoReferenceImage}
+              primaryArtifactId={mediaPrimaryArtifactId}
+              referenceArtifactIds={mediaReferenceArtifactIds}
+              referenceArtifactId={mediaVideoReferenceArtifactId}
+              retryRequest={mediaGenerationRetryRequest}
+              onModeChange={openMediaGenerationStudio}
+              onSourceChange={handleMediaSourceChange}
+              onRequestSourceImage={requestMediaSourceImage}
+              onClose={closeMediaGenerationStudio}
+              onGenerate={generateMediaFromStudio}
+              onCancel={() => {
+                setMediaGenerationStatus('cancelling');
+                setMediaGenerationDetail(mediaGenerationText.statusCancelling);
+                cancelActiveChat();
+              }}
+              onRetry={generateMediaFromStudio}
+              onOpenArtifact={openMediaGenerationArtifact}
+              onContinueEdit={() => {
+                setMediaGenerationStatus('idle');
+                setMediaGenerationDetail('');
+              }}
+              onUseAsVideoReference={() => {
+                setMediaGenerationStatus('idle');
+                setMediaGenerationDetail('');
+              }}
+              onArtifactReady={markMediaGenerationArtifactReady}
+              onArtifactError={markMediaGenerationArtifactFailed}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
       <AnimatePresence>
         {isDraggingFiles && (
           <motion.div
@@ -3459,6 +4242,7 @@ export function AgentChatPage({
         {isOfficeCommandCenter && (
           <motion.section
             data-command-center-cosmos-stage
+            data-wallpaper-tool="command-core"
             initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.82, x: '-7%' }}
             animate={{ opacity: 1, scale: 1, x: 0 }}
             transition={{ duration: prefersReducedMotion ? 0 : 0.48, ease: [0.2, 0.75, 0.2, 1] }}
@@ -3494,10 +4278,11 @@ export function AgentChatPage({
         )}
 
         {/* Chat Panel and the command-center destination rail. */}
-        <div className={isOfficeCommandCenter ? 'lumi-command-center-conversation-layout relative z-20 flex min-h-0 w-full flex-1' : 'contents'}>
+        <div data-wallpaper-tool={isOfficeCommandCenter ? 'command-workspace' : undefined} className={isOfficeCommandCenter ? 'lumi-command-center-conversation-layout relative z-20 flex min-h-0 w-full flex-1' : 'contents'}>
         {isOfficeCommandCenter && conversationHistoryOpen && (
           <aside
             data-command-center-history-rail
+            data-wallpaper-tool="command-history"
             data-command-center-history-selector
             data-command-center-history-selector-expanded={conversationHistorySelectorExpanded ? 'true' : 'false'}
             onMouseEnter={() => setConversationHistorySelectorExpanded(true)}
@@ -3620,6 +4405,7 @@ export function AgentChatPage({
           </aside>
         )}
         <motion.div
+          data-wallpaper-tool={isOfficeCommandCenter ? 'command-dialogue' : undefined}
           data-command-center-chat-rail={isOfficeCommandCenter ? 'true' : undefined}
           initial={isOfficeCommandCenter && !prefersReducedMotion ? { opacity: 0, x: '100%' } : false}
           animate={{ opacity: 1, x: 0 }}
@@ -3819,27 +4605,38 @@ export function AgentChatPage({
                 >
                   {/* Image / file previews */}
                   {(() => {
-                    const messageText = getDisplayText(msg);
-                    let imageUrls: string[] = [];
-                    try {
-                      const parsed = JSON.parse(messageText || '');
-                      if (parsed.images && Array.isArray(parsed.images)) imageUrls = parsed.images;
-                      if (parsed.image_base64) imageUrls = [`data:image/png;base64,${parsed.image_base64}`];
-                    } catch {}
+                    const messageText = getCustomerDisplayText(msg, isZh);
+                    const receiptMedia = Array.isArray(msg.mediaArtifacts)
+                      ? msg.mediaArtifacts.filter((artifact: any) => artifact?.url && (artifact.kind === 'image' || artifact.kind === 'video'))
+                      : [];
+                    const embeddedMedia = [...receiptMedia, ...extractMediaGenerationArtifacts(messageText)].filter((artifact, index, all) => (
+                      all.findIndex(candidate => candidate.kind === artifact.kind && candidate.url === artifact.url) === index
+                    ));
+                    const embeddedImages = embeddedMedia.filter(artifact => artifact.kind === 'image');
+                    const embeddedVideos = embeddedMedia.filter(artifact => artifact.kind === 'video');
                     const generatedFiles = extractGeneratedFiles(messageText);
-                    if (imageUrls.length === 0 && generatedFiles.length === 0) return null;
+                    if (embeddedMedia.length === 0 && generatedFiles.length === 0) return null;
                     return (
                       <div className="max-w-[85%] mb-1 space-y-2">
-                        {imageUrls.length > 0 && (
+                        {embeddedImages.length > 0 && (
                           <div className="flex flex-wrap gap-2">
-                            {imageUrls.map((url, i) => (
-                              <a key={i} href={url} target="_blank" rel="noopener noreferrer"
+                            {embeddedImages.map((artifact, i) => (
+                              <button key={artifact.id} type="button" onClick={() => openMediaGenerationArtifact(artifact)}
                                 className="block w-36 h-36 rounded-2xl overflow-hidden border-2 border-white/10 hover:border-celestial-saturn/60 transition-all shadow-lg">
-                                <img src={url} alt={`Generated ${i + 1}`} className="w-full h-full object-cover" loading="lazy" />
-                              </a>
+                                <img src={artifact.url} alt={`Generated ${i + 1}`} className="w-full h-full object-cover" loading="lazy" />
+                              </button>
                             ))}
                           </div>
                         )}
+                        {embeddedVideos.map(artifact => (
+                          <video
+                            key={artifact.id}
+                            src={artifact.url}
+                            controls
+                            preload="metadata"
+                            className="aspect-video w-full max-w-md rounded-2xl border-2 border-white/10 bg-black/45 object-contain shadow-lg"
+                          />
+                        ))}
                         {renderGeneratedFiles(generatedFiles, msg.type === 'agent' ? 'start' : 'end')}
                       </div>
                     );
@@ -3893,7 +4690,7 @@ export function AgentChatPage({
                   >
                     <div className={`markdown-body chat-message-markdown select-text ${msg.type === 'agent' ? 'chat-message-markdown-agent' : 'chat-message-markdown-user'}`}>
                       <Markdown components={safeMarkdownComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                        {getDisplayText(msg)}
+                        {getCustomerDisplayText(msg, isZh)}
                       </Markdown>
                     </div>
                     {msg.type === 'agent' && msg.completionFeedback && (
@@ -3904,11 +4701,11 @@ export function AgentChatPage({
                         className={isOfficeCommandCenter ? 'lumi-command-center-task-feedback mt-3' : 'mt-3'}
                       />
                     )}
-                    {getDisplayText(msg) && (
+                    {getCustomerDisplayText(msg, isZh) && (
                       <button
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={(event) => handleCopyMessage(
-                          getDisplayText(msg),
+                          getCustomerDisplayText(msg, isZh),
                           msg.id,
                           event.currentTarget.closest('[data-chat-message-bubble]') as HTMLElement | null,
                         )}
@@ -4185,10 +4982,11 @@ export function AgentChatPage({
             </form>
           </div>
         </motion.div>
-        {isOfficeCommandCenter && (onOpenMemoryAvatar || onOpenNexus || onOpenKnowledge) && (
+        {isOfficeCommandCenter && (
           <aside
             data-command-center-switcher
             data-command-center-right-rail="true"
+            data-wallpaper-tool="command-tools"
             className="lumi-command-center-switcher relative z-30 flex shrink-0 flex-col justify-center gap-3"
             aria-label={uiMessage('command-center.switcher.4b7c2d1e09', isZh ? 'zh' : 'en')}
           >
@@ -4246,6 +5044,38 @@ export function AgentChatPage({
                 </span>
               </button>
             )}
+            <button
+              type="button"
+              data-image-generation-switch
+              onClick={() => openMediaGenerationStudio('image')}
+              className="lumi-command-center-switcher-button lumi-command-center-image-generation-switch group flex items-center gap-3 rounded-2xl border border-rose-300/20 bg-rose-300/[0.08] px-3 py-3 text-left text-rose-50/80 transition-all hover:-translate-x-1 hover:border-rose-200/45 hover:bg-rose-300/[0.16] hover:text-white"
+              title={mediaGenerationText.imageGeneration}
+              aria-label={mediaGenerationText.openImageStudio}
+            >
+              <span className="lumi-command-center-switcher-icon flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-rose-200/20 bg-rose-200/10 text-rose-100 transition-transform group-hover:scale-105">
+                <ImageIcon className="h-5 w-5" />
+              </span>
+              <span className="lumi-command-center-switcher-copy min-w-0">
+                <span className="block text-xs font-black tracking-[0.12em]">{mediaGenerationText.imageGeneration}</span>
+                <span className="mt-1 block truncate text-[10px] text-rose-100/45">{mediaGenerationText.imageHint}</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              data-video-generation-switch
+              onClick={() => openMediaGenerationStudio('video')}
+              className="lumi-command-center-switcher-button lumi-command-center-video-generation-switch group flex items-center gap-3 rounded-2xl border border-amber-300/20 bg-amber-300/[0.08] px-3 py-3 text-left text-amber-50/80 transition-all hover:-translate-x-1 hover:border-amber-200/45 hover:bg-amber-300/[0.16] hover:text-white"
+              title={mediaGenerationText.videoGeneration}
+              aria-label={mediaGenerationText.openVideoStudio}
+            >
+              <span className="lumi-command-center-switcher-icon flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-amber-200/20 bg-amber-200/10 text-amber-100 transition-transform group-hover:scale-105">
+                <Video className="h-5 w-5" />
+              </span>
+              <span className="lumi-command-center-switcher-copy min-w-0">
+                <span className="block text-xs font-black tracking-[0.12em]">{mediaGenerationText.videoGeneration}</span>
+                <span className="mt-1 block truncate text-[10px] text-amber-100/45">{mediaGenerationText.videoHint}</span>
+              </span>
+            </button>
           </aside>
         )}
         </div>

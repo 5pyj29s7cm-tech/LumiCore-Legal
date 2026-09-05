@@ -693,9 +693,9 @@ export function LegalHub({
 
   return (
     <>
-      <div className="flex h-full">
-      <div className="flex min-w-0 flex-1 flex-col bg-black/10">
-        <div className="border-b border-white/[0.08] bg-black/25 px-5 py-3">
+      <div data-organization-wallpaper-module="legal" className="lumi-org-module-shell lumi-legal-workbench flex h-full">
+      <div data-wallpaper-tool="organization-module-workspace" className="lumi-org-module-workspace lumi-legal-workspace flex min-w-0 flex-1 flex-col bg-black/10">
+        <div data-wallpaper-tool="organization-module-context" className="lumi-legal-context border-b border-white/[0.08] bg-black/25 px-5 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.14em] text-amber-200/70">
@@ -752,7 +752,7 @@ export function LegalHub({
             </div>
           </div>
         )}
-        <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
+        <div className="lumi-org-module-scroll lumi-legal-content custom-scrollbar min-h-0 flex-1 overflow-y-auto">
           <LegalUsageModeProvider mode={isWorkflowView ? 'case' : 'standalone'}>
             {renderView()}
           </LegalUsageModeProvider>
@@ -825,7 +825,7 @@ function LegalCaseCreateDialog({
   ];
 
   return (
-    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+    <div data-wallpaper-modal="legal-case-create" className="lumi-legal-modal fixed inset-0 z-[300] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
       <button type="button" className="absolute inset-0" onClick={onClose} aria-label={uiMessage('legal-hub.close-new-case.cc85fb0c91')} />
       <form
         role="dialog"
@@ -911,7 +911,7 @@ function LegalCaseDeleteDialog({
   ui: (zh: string, en: string) => string;
 }) {
   return (
-    <div className="fixed inset-0 z-[310] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+    <div data-wallpaper-modal="legal-case-delete" className="lumi-legal-modal fixed inset-0 z-[310] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
       <button type="button" className="absolute inset-0" onClick={onClose} aria-label={uiMessage('legal-hub.close-delete-confirmation.ccd3d3d67d')} />
       <div role="dialog" aria-modal="true" aria-labelledby="legal-delete-case-title" className="relative z-10 w-full max-w-md rounded-lg border border-rose-400/18 bg-[#11151b] p-5 shadow-2xl">
         <div className="flex items-start gap-3">
