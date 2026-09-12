@@ -3,7 +3,7 @@ import {
   makeLLMCallDirect,
   makeLLMCallStreamingDirect,
   StreamCallback,
-  type ModelAttemptTimeouts,
+  type LLMCallConfig,
 } from './providers';
 import { NormalizedLLMResponse } from '../tools/types';
 import {
@@ -15,45 +15,26 @@ import {
   type ModelRouteAttempt,
   type ModelRoutingTrace,
 } from './model_routing_receipts';
-import type { UserLLMFallbackCandidate, UserLLMSelectionMode } from './user_preferences';
 import {
   isRegisteredOpenAICompatibleProvider,
   isRegisteredProviderLocal,
 } from '../extensions/registry';
 import { isCircuitClosed } from '../cloud/circuit_breaker';
 import { recentProviderProbeFailure } from './provider_health';
+import { buildModelExecutionAwareness } from '../cognition/vision_routing';
 import {
   normalizeProviderOutboundMessagesEvidence,
   type ProviderOutboundMessagesEvidence,
 } from './outbound_message_evidence';
 
-export interface DispatchConfig {
+export interface DispatchConfig extends LLMCallConfig {
   /** Explicit cloud fallback selected by the user. Never `auto`. */
   provider: string;
   model: string;
   /** Preferred local model for automatic local-first routing. */
   localModel?: string;
-  maxTokens?: number;
-  userId?: string;
-  domain?: string;
-  orgId?: string;
-  signal?: AbortSignal;
-  attemptTimeouts?: Partial<ModelAttemptTimeouts>;
-  inputTokenBudget?: number;
-  /** Server-selected schemas that every routed provider candidate must retain. */
-  protectedToolNames?: string[];
-  allowCloudFallback?: boolean;
-  selectionMode?: UserLLMSelectionMode;
-  fallbackCandidates?: UserLLMFallbackCandidate[];
   requestedProvider?: string;
   requestedModel?: string;
-  /** Explicit escape hatch for deployments whose relay SSE contract is verified. */
-  relayStreaming?: boolean;
-  /** Local-only declaration names that preflight must retain or fail closed. */
-  localRequiredToolNames?: string[];
-  /** Buffer one streaming candidate until terminal success so a failed
-   * action-planning candidate can be replaced without mixed visible output. */
-  bufferStreamUntilCandidateSuccess?: boolean;
 }
 
 export interface LLMGetters {
@@ -78,20 +59,30 @@ export interface DispatchedLLMResponse extends NormalizedLLMResponse {
   routing: ModelRoutingTrace;
 }
 
+function messagesForCandidate(
+  messages: NormalizedMessage[],
+  config: DispatchConfig,
+  candidate: { provider: string; model: string },
+): NormalizedMessage[] {
+  const firstConversationMessage = messages.findIndex(message => message.role !== 'system');
+  const insertAt = firstConversationMessage < 0 ? messages.length : firstConversationMessage;
+  // Each attempt receives a fresh note; neither the shared transcript nor the
+  // configured preference is mutated when a later candidate takes over.
+  return [
+    ...messages.slice(0, insertAt),
+    { role: 'system', content: buildModelExecutionAwareness({
+      provider: config.requestedProvider || config.provider,
+      model: config.requestedModel || config.model,
+    }, candidate) },
+    ...messages.slice(insertAt),
+  ];
+}
+
 function callArguments(config: DispatchConfig, provider: string, model: string) {
   return {
+    ...config,
     provider: provider as any,
     model,
-    maxTokens: config.maxTokens,
-    userId: config.userId,
-    domain: config.domain,
-    orgId: config.orgId,
-    signal: config.signal,
-    attemptTimeouts: config.attemptTimeouts,
-    inputTokenBudget: config.inputTokenBudget,
-    protectedToolNames: config.protectedToolNames,
-    localRequiredToolNames: config.localRequiredToolNames,
-    relayStreaming: config.relayStreaming,
     selectionMode: 'pinned' as const,
     fallbackCandidates: [],
     allowCloudFallback: false,
@@ -274,7 +265,7 @@ async function tryLocal(
     const startedAt = Date.now();
     try {
       const result = await makeLLMCallDirect(
-        messages,
+        messagesForCandidate(messages, config, candidate),
         toolDeclarations,
         callArguments(config, candidate.provider, candidate.model),
         ...getterArguments(getters),
@@ -437,7 +428,7 @@ async function dispatchOrderedCall(
     const startedAt = Date.now();
     try {
       const result = await makeLLMCallDirect(
-        messages,
+        messagesForCandidate(messages, config, candidate),
         toolDeclarations,
         callArguments(config, candidate.provider, candidate.model),
         ...getterArguments(getters),
@@ -548,7 +539,7 @@ export async function dispatchLLMCall(
     const startedAt = Date.now();
     try {
       const cloudResult = await makeLLMCallDirect(
-        messages,
+        messagesForCandidate(messages, config, fallback),
         toolDeclarations,
         callArguments(config, fallback.provider, fallback.model),
         ...getterArguments(getters),
@@ -826,7 +817,7 @@ async function attemptStreamingCandidate(
   visibility: CandidateVisibility,
 ): Promise<NormalizedLLMResponse> {
   const result = await makeLLMCallStreamingDirect(
-    messages,
+    messagesForCandidate(messages, config, candidate),
     toolDeclarations,
     callArguments(config, candidate.provider, candidate.model),
     visibility.accept,

@@ -68,11 +68,12 @@ function compact(value: unknown, limit = 200): string {
 }
 
 export function modelRoutingErrorReason(error: unknown): string {
+  if ((error as any)?.code === 'MODEL_TOOL_ARGUMENTS_INVALID') return 'invalid_tool_arguments';
   const message = compact((error as any)?.message || error, 500).toLowerCase();
   if (!message) return 'unknown_error';
   if (/abort|cancel/.test(message)) return 'cancelled';
   if (/circuit/.test(message)) return 'circuit_open';
-  if (/insufficient balance|payment required|quota|rate.?limit|too many requests|\b429\b|\b402\b/.test(message)) return 'quota_or_billing';
+  if (/insufficient balance|payment required|overdue|account is in good standing|quota|use free tier only|rate.?limit|too many requests|\b429\b|\b402\b/.test(message)) return 'quota_or_billing';
   if (/unauthorized|authentication|invalid api key|\b401\b|\b403\b/.test(message)) return 'provider_auth_failed';
   if (/timeout|timed out/.test(message)) return 'timeout';
   if (/not reachable|connection|fetch failed|econnrefused|socket/.test(message)) return 'provider_unreachable';

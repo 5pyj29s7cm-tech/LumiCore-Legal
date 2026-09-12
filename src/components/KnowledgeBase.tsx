@@ -18,6 +18,7 @@ interface KnowledgeBaseProps {
   isOpen: boolean;
   onClose: () => void;
   domain?: 'personal' | 'work';
+  scopeKey?: string;
 }
 
 interface ObsidianVault {
@@ -70,7 +71,13 @@ function repairKnowledgeFilename(value: string | undefined): string {
   return [...candidates].sort((a, b) => scoreFilenameText(b) - scoreFilenameText(a))[0] || original;
 }
 
-export function KnowledgeBase({ t, isOpen, onClose, domain = 'personal' }: KnowledgeBaseProps) {
+export function KnowledgeBase(props: KnowledgeBaseProps) {
+  // Lists, editor state and in-flight completions belong to one owner. A new
+  // scope gets a new view; late old reads cannot write into that view.
+  return <KnowledgeBaseScope key={props.scopeKey || props.domain || 'personal'} {...props} />;
+}
+
+function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: KnowledgeBaseProps) {
   const socket = useSocket();
   const isZh = t?.langCode !== 'en';
 
@@ -356,9 +363,15 @@ export function KnowledgeBase({ t, isOpen, onClose, domain = 'personal' }: Knowl
   };
 
   const handleToggleProtect = async (id: string) => {
+    const memory = memories.find(item => item.id === id);
+    if (!memory) return;
     try {
-      const res = await fetch(scopedMemoryUrl(`/api/memory/${id}/protect`), { method: 'PUT' });
+      const res = await fetch(scopedMemoryUrl(`/api/memory/${id}/protect`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ protected: memory.tier !== 'core_identity' }),
+      });
       const d = await res.json();
+      if (!res.ok || d.success !== true) throw new Error('Protection was not saved');
       toast.success(d.protected ? (t.kbProtected || 'Protected') : (t.kbUnprotected || 'Unprotected'));
       fetchAll();
     } catch { toast.error(t.kbProtectFailed || 'Protect failed'); }

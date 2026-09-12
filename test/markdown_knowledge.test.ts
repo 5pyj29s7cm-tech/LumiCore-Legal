@@ -167,6 +167,13 @@ describe('RAG markdown source metadata', () => {
     });
     expect(renamed.ok).toBe(true);
     const afterRename = readDB().memories.filter((memory: any) => memory.userId === userId);
+    const { isKnowledgeMemorySourceCurrent, formatKnowledgeCitation } = await import('../server/agents/rag');
+    expect(afterRename.length).toBeGreaterThan(0);
+    for (const memory of afterRename) {
+      expect(isKnowledgeMemorySourceCurrent(memory)).toBe(true);
+      expect(memory.knowledgeProvenance.sourcePath).toBe(memory.sourceInteractionId);
+      expect(formatKnowledgeCitation(memory)).toContain(renamedName);
+    }
     expect(afterRename.some((memory: any) => String(memory.sourceInteractionId || '').endsWith(originalName))).toBe(false);
     expect(afterRename.some((memory: any) => (
       String(memory.sourceInteractionId || '').endsWith(renamedName)
@@ -186,7 +193,7 @@ describe('RAG markdown source metadata', () => {
   it('connects and syncs an Obsidian vault into Lumi knowledge', async () => {
     const { readDB } = await import('../db_layer');
     const vaultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lumi_obsidian_vault_'));
-    const cookie = `token=${jwt.sign({ uid: 'obsidian-user', username: 'obsidian-user' }, JWT_SECRET)}`;
+    const cookie = `token=${jwt.sign({ uid: 'obsidian-user', username: 'obsidian-user', role: 'admin' }, JWT_SECRET)}`;
 
     try {
       fs.mkdirSync(path.join(vaultDir, '.obsidian'), { recursive: true });

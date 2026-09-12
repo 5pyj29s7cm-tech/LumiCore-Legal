@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'crypto';
 import { flushDBOrThrow, readDB, writeDB } from '../../db_layer';
+import type { OrganizationMembershipAuthorization } from '../org/membership_authorization';
 import type { ToolExecutionRecord } from '../tools/types';
 import {
   getCanonicalToolExecutionInputDigests,
@@ -136,6 +137,8 @@ export interface WorkflowReceiptSnapshot {
   recordId?: string;
   status: 'verified' | 'unverified' | 'failed' | 'unknown_outcome';
   result?: unknown;
+  /** False when persistence redaction/truncation changed the returned value. */
+  resultReusable?: boolean;
   receipt?: unknown;
   reason?: string;
   argumentsDigest?: string;
@@ -151,6 +154,10 @@ export interface WorkflowRun {
   definitionHash: string;
   userId: string;
   scope: WorkflowScope;
+  /** Frozen with the run; never reconstructed from a replacement membership. */
+  membershipAuthorization?: OrganizationMembershipAuthorization;
+  /** Survives lease release so a finishing old worker cannot stop a new generation. */
+  lastWorkerLeaseId?: string;
   status: WorkflowRunStatus;
   revision: number;
   planRevision: number;
@@ -308,6 +315,8 @@ function boundedRedactedWorkflowValue(value: unknown, path: string, maxChars = 4
 }
 
 function valueAtPath(value: unknown, path: string): unknown {
+  if (!path) return value;
+  if (path.split('.').some(segment => ['__proto__', 'prototype', 'constructor'].includes(segment))) throw new WorkflowStateError('Unsafe workflow reference path.');
   return path.split('.').filter(Boolean).reduce<unknown>((current, segment) => {
     if (!current || typeof current !== 'object') return undefined;
     return (current as Record<string, unknown>)[segment];
@@ -315,11 +324,22 @@ function valueAtPath(value: unknown, path: string): unknown {
 }
 
 /** Resolve persisted references from ephemeral run inputs without writing the secret back to the ledger. */
-export function resolveWorkflowValue(template: unknown, ephemeralInputs: Record<string, unknown>, depth = 0): unknown {
+export function resolveWorkflowValue(template: unknown, ephemeralInputs: Record<string, unknown>, depth = 0, run?: WorkflowRun): unknown {
   if (depth > 8) throw new WorkflowStateError('Workflow argument template is nested too deeply.');
-  if (Array.isArray(template)) return template.map(item => resolveWorkflowValue(item, ephemeralInputs, depth + 1));
+  rejectStringEncodedReference(template);
+  if (Array.isArray(template)) return template.map(item => resolveWorkflowValue(item, ephemeralInputs, depth + 1, run));
   if (!template || typeof template !== 'object') return template;
   const record = template as Record<string, unknown>;
+  if ('$stepOutputRef' in record) {
+    const reference = parseStepOutputReference(record);
+    if (!run) throw new WorkflowStateError('A step output reference requires the current workflow run.');
+    const receipt = [...run.receipts].reverse().find(item => item.stepId === reference.stepId
+      && item.idempotencyKey === workflowStepExecutionKey(run, reference.stepId) && item.status === 'verified');
+    if (!receipt || receipt.resultReusable !== true) throw new WorkflowStateError(`Workflow output '${reference.stepId}' has no complete verified result in this run.`);
+    const result = valueAtPath(receipt.result, reference.path);
+    if (result === undefined) throw new WorkflowStateError(`Workflow output '${record.$stepOutputRef}' is missing.`);
+    return clone(result);
+  }
   const reference = typeof record.$secretRef === 'string'
     ? record.$secretRef
     : typeof record.$inputRef === 'string'
@@ -334,8 +354,30 @@ export function resolveWorkflowValue(template: unknown, ephemeralInputs: Record<
     return resolved;
   }
   return Object.fromEntries(
-    Object.entries(record).map(([key, item]) => [key, resolveWorkflowValue(item, ephemeralInputs, depth + 1)]),
+    Object.entries(record).map(([key, item]) => [key, resolveWorkflowValue(item, ephemeralInputs, depth + 1, run)]),
   );
+}
+
+function parseStepOutputReference(record: Record<string, unknown>): { stepId: string; path: string } {
+  if (Object.keys(record).length !== 1 || typeof record.$stepOutputRef !== 'string'
+    || !/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/.test(record.$stepOutputRef)) throw new WorkflowStateError('A step output reference must be exactly { $stepOutputRef: "stepId.optional.path" }.');
+  const parts = record.$stepOutputRef.split('.');
+  if (parts.some(part => ['__proto__', 'prototype', 'constructor'].includes(part))) throw new WorkflowStateError('Unsafe workflow reference path.');
+  return { stepId: parts[0], path: parts.slice(1).join('.') };
+}
+
+function rejectStringEncodedReference(value: unknown): void {
+  if (typeof value === 'string' && /^\s*\{\s*["']?\$(?:inputRef|stepOutputRef|secretRef)["']?\s*:/u.test(value)) {
+    throw new WorkflowStateError('Workflow references must be JSON objects, not strings containing reference syntax. Use {"$inputRef":"inputs.name"} or {"$stepOutputRef":"step_1"} as the argument value.');
+  }
+}
+
+function stepOutputDependencies(value: unknown, depth = 0): string[] {
+  if (depth > 8) throw new WorkflowStateError('Workflow reference is nested too deeply.');
+  rejectStringEncodedReference(value);
+  if (!value || typeof value !== 'object') return [];
+  if ('$stepOutputRef' in value) return [parseStepOutputReference(value as Record<string, unknown>).stepId];
+  return Object.values(value).flatMap(item => stepOutputDependencies(item, depth + 1));
 }
 
 function normalizeStep(step: WorkflowStepDefinition, index: number): WorkflowStepDefinition {
@@ -343,6 +385,8 @@ function normalizeStep(step: WorkflowStepDefinition, index: number): WorkflowSte
   const capabilityId = String(step.capabilityId || '').trim();
   if (!stepId) throw new WorkflowStateError(`Workflow step ${index + 1} is missing stepId.`);
   if (!capabilityId) throw new WorkflowStateError(`Workflow step ${stepId} is missing capabilityId.`);
+  // Validate before redaction can turn a malformed literal into an input placeholder.
+  stepOutputDependencies(step.argumentsTemplate);
   return {
     ...clone(step),
     stepId,
@@ -352,7 +396,7 @@ function normalizeStep(step: WorkflowStepDefinition, index: number): WorkflowSte
   };
 }
 
-function validateSteps(steps: WorkflowStepDefinition[]): WorkflowStepDefinition[] {
+export function validateWorkflowSteps(steps: WorkflowStepDefinition[]): WorkflowStepDefinition[] {
   if (!Array.isArray(steps) || steps.length === 0) throw new WorkflowStateError('A workflow requires at least one step.');
   const normalized = steps.map(normalizeStep);
   const ids = new Set<string>();
@@ -367,6 +411,13 @@ function validateSteps(steps: WorkflowStepDefinition[]): WorkflowStepDefinition[
     }
   }
   topologicallyOrderWorkflowSteps(normalized);
+  const ancestors = (step: WorkflowStepDefinition): Set<string> => new Set((step.dependsOn || []).flatMap(id => [id, ...ancestors(normalized.find(item => item.stepId === id)!)]));
+  for (const step of normalized) {
+    const allowed = ancestors(step);
+    for (const reference of stepOutputDependencies(step.argumentsTemplate)) {
+      if (!allowed.has(reference)) throw new WorkflowStateError(`Workflow step '${step.stepId}' may reference only an earlier declared dependency, not '${reference}'.`);
+    }
+  }
   return normalized;
 }
 
@@ -623,6 +674,7 @@ function canonicalReceiptSnapshot(
     recordId: record.id,
     status: verified ? 'verified' : unknownOutcome ? 'unknown_outcome' : record.error ? 'failed' : 'unverified',
     result: parsedResult,
+    resultReusable: JSON.stringify(redactWorkflowValue(parsedResult)) === JSON.stringify(parsedResult),
     receipt: record.receipt,
     reason: record.error || record.terminalVerification?.reason || record.envelope.verification.reason,
     argumentsDigest: inputDigests.argumentsDigest,
@@ -681,7 +733,7 @@ export function createWorkflowDefinitionDraft(input: {
     triggerPolicy,
     inputSchema: redactWorkflowValue(input.inputSchema || {}, 'definition.inputSchema') as Record<string, unknown>,
     outputSchema: redactWorkflowValue(input.outputSchema || {}, 'definition.outputSchema') as Record<string, unknown>,
-    steps: validateSteps(input.steps),
+    steps: validateWorkflowSteps(input.steps),
     provenance: {
       ...clone(input.provenance),
       sourceRefs: [...new Set((input.provenance.sourceRefs || []).map(String))].slice(0, 40),
@@ -761,6 +813,7 @@ export function createWorkflowRun(input: {
   userId: string;
   variables?: Record<string, unknown>;
   actor?: string;
+  membershipAuthorization?: OrganizationMembershipAuthorization;
 }): WorkflowRun {
   const store = loadStore();
   const definition = store.definitions.find(item => (
@@ -779,6 +832,7 @@ export function createWorkflowRun(input: {
     definitionHash: definition.hash,
     userId: definition.userId,
     scope: clone(definition.scope),
+    membershipAuthorization: input.membershipAuthorization ? clone(input.membershipAuthorization) : undefined,
     status: 'queued',
     revision: 0,
     planRevision: 1,
@@ -809,6 +863,22 @@ export function getWorkflowRun(runId: string, userId: string): WorkflowRun | nul
   return run ? clone(run) : null;
 }
 
+/** Authorization loss stops future work without erasing an in-flight outcome. */
+export function stopUnauthorizedWorkflowRun(runId: string, userId: string): WorkflowRun | null {
+  const current = getWorkflowRun(runId, userId);
+  if (!current || current.status === 'cancelled') return current;
+  return mutateRun(runId, current.revision, userId, 'authorization', 'authorization_revoked', run => {
+    run.cancelRequestedAt ||= nowIso();
+    run.blockedReason = 'Original workflow authorization is no longer valid. Remaining work was cancelled.';
+    run.confirmation = undefined;
+    if (run.pendingExecution?.phase === 'adapter_started' || run.reconciliationRequired) return;
+    run.pendingExecution = undefined;
+    run.status = 'cancelled';
+    run.completedAt = nowIso();
+    run.lease = undefined;
+  });
+}
+
 /** Prevent a replacement invocation from bypassing unfinished or unknown work. */
 export function findBlockingWorkflowRun(workflowId: string, userId: string): WorkflowRun | null {
   const candidates = loadStore().runs
@@ -837,6 +907,7 @@ export function claimWorkflowRun(input: {
     const leaseMs = Math.max(5_000, Math.min(input.leaseMs || 60_000, 10 * 60_000));
     run.status = 'running';
     run.lease = { leaseId: randomUUID(), owner: input.owner, expiresAt: new Date(Date.now() + leaseMs).toISOString() };
+    run.lastWorkerLeaseId = run.lease.leaseId;
     return { leaseId: run.lease.leaseId, expiresAt: run.lease.expiresAt };
   });
 }
@@ -1280,7 +1351,7 @@ export function editWorkflowRunPlan(input: {
     if (run.blockedKind === 'legacy_review_required' || run.blockedKind === 'capability_contract_changed') {
       throw new WorkflowStateError('Review and cancel this incompatible workflow run before creating a new reviewed version.');
     }
-    const nextPlan = validateSteps(input.steps);
+    const nextPlan = validateWorkflowSteps(input.steps);
     const previousById = new Map(run.planSnapshot.map(step => [step.stepId, step]));
     const nextById = new Map(nextPlan.map(step => [step.stepId, step]));
     const verifiedStepIds = new Set(run.receipts.filter(receipt => receipt.status === 'verified').map(receipt => receipt.stepId));
@@ -1599,6 +1670,13 @@ export function stopWorkflowRuntimeMaintenanceForTest(): void {
   clearInterval(workflowMaintenanceTimer);
   workflowMaintenanceTimer = null;
   workflowMaintenanceRunning = false;
+}
+
+/** Stop future sweeps and retain the running lease until the current save finishes. */
+export async function stopWorkflowRuntimeMaintenance(): Promise<void> {
+  if (workflowMaintenanceTimer) clearInterval(workflowMaintenanceTimer);
+  workflowMaintenanceTimer = null;
+  while (workflowMaintenanceRunning) await new Promise(resolve => setTimeout(resolve, 20));
 }
 
 /** Await SQLite durability before exposing a workflow state transition. */

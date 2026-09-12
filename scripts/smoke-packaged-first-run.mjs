@@ -5,6 +5,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import sqlite3 from 'sqlite3';
 import {
   bootstrapDesktopTestSession,
   DESKTOP_SESSION_HEADER,
@@ -126,12 +127,148 @@ async function tail(filePath, lines = 80) {
   }
 }
 
+async function verifyPackagedShutdown(baseUrl, dataRoot, headers, child) {
+  const marker = `shutdown-smoke-${Date.now()}`;
+  await fetchJson(`${baseUrl}/preferences/pet`, {
+    method: 'PUT', headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pet: { id: marker }, accessories: [] }), timeoutMs: 8000,
+  });
+  // Quit immediately after the ordinary write acknowledgement, without a
+  // caller-side sleep that could accidentally mask the coalesced-write window.
+  const receipt = await fetchJson(`${baseUrl}/runtime/shutdown`, {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expectedPid: child.pid }), timeoutMs: 45000,
+  });
+  if (receipt.ok !== true || receipt.status !== 'saved' || receipt.pid !== child.pid) {
+    throw new Error('Packaged shutdown did not return its owned-process save receipt.');
+  }
+  await waitFor('packaged backend graceful exit', 8000, 50, async () => child.exitCode !== null || child.signalCode !== null);
+  if (child.exitCode !== 0 || child.signalCode !== null) throw new Error('Packaged backend did not exit normally after saving.');
+  const database = await new Promise((resolve, reject) => {
+    const handle = new sqlite3.Database(path.join(dataRoot, 'data', 'lumi.db'), sqlite3.OPEN_READONLY,
+      error => error ? reject(error) : resolve(handle));
+  });
+  try {
+    const rows = await new Promise((resolve, reject) => database.all(
+      "SELECT value FROM settings WHERE key LIKE 'pet_prefs_%'", [],
+      (error, values) => error ? reject(error) : resolve(values),
+    ));
+    if (!rows.some(row => JSON.parse(row.value).pet?.id === marker)) {
+      throw new Error('The last acknowledged setting was not present on disk after graceful exit.');
+    }
+  } finally {
+    await new Promise((resolve, reject) => database.close(error => error ? reject(error) : resolve()));
+  }
+  return { savedReceipt: true, normalExit: true, lastSettingPersisted: true };
+}
+
+async function verifyPackagedJavaScriptWorker(nodePath, workerPath) {
+  // Run with the shipped Node, not the smoke runner's Node or a source-loader.
+  // Both this parent and the child runner have hard deadlines: even a broken
+  // worker termination must not strand the packaged smoke process.
+  const runner = String.raw`
+    const { Worker } = require('node:worker_threads');
+    const workerPath = process.argv[1];
+    const outerDeadline = setTimeout(() => process.exit(2), 12000);
+    function calculate(code, timeoutMs) {
+      return new Promise((resolve, reject) => {
+        const worker = new Worker(workerPath, {
+          workerData: { code, deadline: Date.now() + timeoutMs, maxOutputBytes: 128 * 1024 },
+          execArgv: [], env: {}, stdout: true, stderr: true,
+          resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16, stackSizeMb: 2 },
+        });
+        let finishing = false;
+        const finish = (error, result) => {
+          if (finishing) return;
+          finishing = true;
+          clearTimeout(timer);
+          worker.terminate().then(() => error ? reject(error) : resolve(result),
+            () => reject(new Error('worker shutdown failed')));
+        };
+        const timer = setTimeout(() => finish(new Error('worker reply timed out')), timeoutMs + 1000);
+        worker.once('message', value => {
+          if (typeof value !== 'string' || Buffer.byteLength(value) > 130 * 1024) {
+            finish(new Error('invalid worker response')); return;
+          }
+          try { finish(null, JSON.parse(value)); }
+          catch { finish(new Error('invalid worker JSON')); }
+        });
+        worker.once('error', () => finish(new Error('worker failed')));
+        worker.once('exit', () => finish(new Error('worker exited without a response')));
+        let diagnosticBytes = 0;
+        for (const stream of [worker.stdout, worker.stderr]) stream.on('data', chunk => {
+          diagnosticBytes += chunk.length;
+          if (diagnosticBytes > 128 * 1024) finish(new Error('worker diagnostic limit exceeded'));
+        });
+      });
+    }
+    (async () => {
+      const promise = await calculate('Promise.resolve(6).then(value => value * 7)', 4000);
+      if (promise.ok !== true || promise.status !== 'completed' || promise.output !== 42) throw new Error('promise calculation failed');
+      // Query only whether the guest can resolve process; never read a host
+      // property, environment value, path, credential, or user file.
+      const isolation = await calculate("(() => { try { return typeof console.log.constructor('return process')() === 'undefined' ? 'blocked' : 'accessible'; } catch { return 'blocked'; } })()", 4000);
+      if (isolation.ok !== true || isolation.output !== 'blocked') throw new Error('host process boundary failed');
+      const started = Date.now();
+      const loop = await calculate('for (;;) {}', 250);
+      if (loop.ok !== false || loop.status !== 'failed' || !/timed out|interrupted/i.test(String(loop.error)) || Date.now() - started > 2000) throw new Error('loop deadline failed');
+      clearTimeout(outerDeadline);
+      process.stdout.write(JSON.stringify({ promise42: true, hostProcessBlocked: true, loopBounded: true }));
+    })().catch(() => {
+      clearTimeout(outerDeadline);
+      process.stderr.write('Packaged JavaScript sandbox probe failed.');
+      process.exitCode = 1;
+    });
+  `;
+  return new Promise((resolve, reject) => {
+    const child = spawn(nodePath, ['--eval', runner, workerPath], {
+      cwd: path.dirname(workerPath), env: {}, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    });
+    let output = '';
+    let bytes = 0;
+    let failure;
+    let completed = false;
+    const finish = error => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(deadline);
+      clearTimeout(killDeadline);
+      if (error) { reject(error); return; }
+      try {
+        const result = JSON.parse(output);
+        if (result.promise42 !== true || result.hostProcessBlocked !== true || result.loopBounded !== true) throw new Error();
+        resolve(result);
+      } catch { reject(new Error('Packaged JavaScript sandbox returned an invalid receipt.')); }
+    };
+    let killDeadline;
+    const stop = reason => {
+      if (failure || completed) return;
+      failure = new Error(reason);
+      child.kill('SIGKILL');
+      killDeadline = setTimeout(() => {
+        child.stdout.destroy(); child.stderr.destroy(); child.unref();
+        finish(failure);
+      }, 1000);
+    };
+    const deadline = setTimeout(() => stop('Packaged JavaScript sandbox probe exceeded its total deadline.'), 15000);
+    child.stdout.on('data', chunk => {
+      bytes += chunk.length;
+      if (bytes > 4096) { stop('Packaged JavaScript sandbox probe exceeded its output limit.'); return; }
+      output += chunk.toString('utf8');
+    });
+    child.stderr.on('data', chunk => { bytes += chunk.length; if (bytes > 4096) stop('Packaged JavaScript sandbox probe exceeded its output limit.'); });
+    child.once('error', () => finish(new Error('Packaged Node could not start the JavaScript sandbox probe.')));
+    child.once('close', code => finish(failure || (code === 0 ? null : new Error('Packaged JavaScript sandbox probe failed.'))));
+  });
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const distServer = args.distServer;
   const nodePath = path.join(distServer, nodeBinaryName());
   const entryPath = path.join(distServer, 'entry.cjs');
   const serverBundle = path.join(distServer, 'server.mjs');
+  const javascriptWorker = path.join(distServer, 'javascript-sandbox-worker.cjs');
   const runtimeMetaPath = path.join(distServer, 'runtime-meta.json');
   const bundledSkillsDir = path.join(distServer, 'server', 'skills', 'bundled');
   const mcpFactoryConfig = path.join(distServer, 'server', 'mcp', 'config.example.json');
@@ -146,6 +283,7 @@ async function main() {
   await assertPath(nodePath, 'packaged Node runtime');
   await assertPath(entryPath, 'packaged entry.cjs');
   await assertPath(serverBundle, 'packaged server.mjs');
+  await assertPath(javascriptWorker, 'packaged JavaScript sandbox worker');
   await assertPath(runtimeMetaPath, 'packaged runtime metadata');
   await assertPath(bundledSkillsDir, 'bundled skills directory');
   await assertPath(mcpFactoryConfig, 'factory MCP config');
@@ -192,6 +330,9 @@ async function main() {
     HOST: '127.0.0.1',
     LUMI_DESKTOP: '1',
     LUMI_DATA_DIR: dataRoot,
+    // Startup probes must never contact a developer's already-running models.
+    OLLAMA_BASE_URL: `${baseUrl}/__smoke_no_model__`,
+    LMSTUDIO_BASE_URL: `${baseUrl}/__smoke_no_model__`,
     LUMI_LOG_FILE: path.join(dataRoot, 'logs', 'server.log'),
     USERPROFILE: homeDir,
     HOME: homeDir,
@@ -212,6 +353,7 @@ async function main() {
   });
 
   try {
+    const javascriptSandbox = await verifyPackagedJavaScriptWorker(nodePath, javascriptWorker);
     let health = await waitFor('packaged backend health endpoint', args.timeoutMs, 500, async () => {
       if (childExited) throw new Error('backend process exited before becoming healthy');
       return fetchJson(`${baseUrl}/health`, { timeoutMs: 2000 });
@@ -238,6 +380,51 @@ async function main() {
       Authorization: `Bearer ${bootstrap.token}`,
       [DESKTOP_SESSION_HEADER]: bootstrap.desktopSessionProof,
     };
+
+    const privacy = await fetchJson(`${baseUrl}/privacy`, { headers: authHeaders, timeoutMs: 8000 });
+    const expectedPrivacy = env.LUMI_PRIVACY === 'strict' ? 'strict' : 'standard';
+    if (privacy.mode !== expectedPrivacy || privacy.configuredMode !== expectedPrivacy
+      || privacy.restartRequired || privacy.locked !== (expectedPrivacy === 'strict') || !privacy.canManage) {
+      throw new Error('Packaged privacy settings did not match the isolated startup policy.');
+    }
+    if (!privacy.locked) {
+      const saveMode = mode => fetchJson(`${baseUrl}/privacy`, {
+        method: 'PUT', headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }), timeoutMs: 8000,
+      });
+      const pending = await saveMode('strict');
+      if (pending.mode !== 'standard' || pending.configuredMode !== 'strict' || !pending.restartRequired) {
+        throw new Error('Saving privacy mode did not retain the active policy until restart.');
+      }
+      const restored = await saveMode('standard');
+      if (restored.mode !== 'standard' || restored.configuredMode !== 'standard' || restored.restartRequired) {
+        throw new Error('Privacy smoke could not restore its isolated default preference.');
+      }
+    }
+    console.log(`[packaged-smoke] Privacy: ${privacy.mode}; locked=${privacy.locked}; persistence checked=${!privacy.locked}`);
+
+    if (privacy.mode === 'strict') {
+      const acquire = await fetch(`${baseUrl}/marketplace/skills/acquire`, {
+        method: 'POST', headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skillId: args.skillId, installSource: 'bundled' }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (acquire.status !== 403 || (await acquire.json()).code !== 'PRIVACY_STRICT_BLOCKED') {
+        throw new Error('Strict mode must reject skill installation before starting its runtime.');
+      }
+      const chat = await fetch(`${baseUrl}/chat`, {
+        method: 'POST', headers: { ...authHeaders, 'Content-Type': 'application/json', 'X-API-Key': 'synthetic-smoke-key' },
+        body: JSON.stringify({ provider: 'openai', message: 'synthetic privacy probe' }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (chat.status !== 403 || (await chat.json()).code !== 'CHAT_PRIVACY_RESTRICTED') {
+        throw new Error('Strict mode did not block the direct cloud chat path.');
+      }
+      const shutdown = await verifyPackagedShutdown(baseUrl, dataRoot, authHeaders, child);
+      console.log(JSON.stringify({ ok: true, port, runtime: runtimeMeta.buildId, privacy: 'strict', socketHandshake: true, shutdown, javascriptSandbox,
+        skillInstallationBlocked: true, cloudChatBlocked: true, cleanup: args.keep ? 'kept' : 'removed' }, null, 2));
+      return;
+    }
 
     const marketplace = await fetchJson(`${baseUrl}/marketplace/skills?lang=zh`, { timeoutMs: 8000 });
     const bundledSkillCount = (await fs.readdir(bundledSkillsDir, { withFileTypes: true }))
@@ -305,8 +492,11 @@ async function main() {
       }
     }
 
+    const shutdown = await verifyPackagedShutdown(baseUrl, dataRoot, authHeaders, child);
     const summary = {
       ok: true,
+      shutdown,
+      javascriptSandbox,
       distServer,
       port,
       runtime: {
@@ -336,20 +526,24 @@ async function main() {
     console.error(await tail(errLog));
     process.exitCode = 1;
   } finally {
-    child.kill('SIGTERM');
-    await new Promise(resolve => {
-      const timer = setTimeout(() => {
-        if (!child.killed) child.kill('SIGKILL');
-        resolve();
-      }, 5000);
-      child.once('exit', () => {
-        clearTimeout(timer);
-        resolve();
+    if (!childExited) {
+      child.kill('SIGTERM');
+      await new Promise(resolve => {
+        const timer = setTimeout(() => {
+          if (!childExited) child.kill('SIGKILL');
+          resolve();
+        }, 5000);
+        child.once('exit', () => {
+          clearTimeout(timer);
+          resolve();
+        });
       });
-    });
+    }
     await out.close();
     await err.close();
     if (!args.keep && process.exitCode !== 1) {
+      const allowedParent = path.resolve(root, '.codex-run');
+      if (path.dirname(path.resolve(runRoot)) !== allowedParent) throw new Error('Unsafe smoke cleanup directory.');
       await fs.rm(runRoot, { recursive: true, force: true });
     } else {
       console.log(`[packaged-smoke] Kept temp profile: ${runRoot}`);

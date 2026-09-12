@@ -7,12 +7,14 @@ import {
   initDatabase,
   readDB,
   writeDB,
+  runSQL,
 } from '../db_layer';
 import {
   configureExtensionRuntimeForTests,
   extensionCredentialNamespace,
   extensionManifestSigningPayload,
   getExactRegisteredExtensionToolNames,
+  getRegisteredOpenAIClient,
   hydrateActiveExtensions,
   isRegisteredOpenAICompatibleProvider,
   listExtensionRuntimeSnapshots,
@@ -733,12 +735,14 @@ describe('signed extension and Provider registry', () => {
     }
   });
 
-  it('allows only a signed loopback Provider in strict privacy mode', async () => {
+  it('allows an installed signed loopback Provider but blocks installation tools in strict privacy mode', async () => {
     const priorPrivacy = process.env.LUMI_PRIVACY;
-    process.env.LUMI_PRIVACY = 'strict';
     try {
+      process.env.LUMI_PRIVACY = 'standard';
       const remote = signedManifest();
       await install(remote);
+      process.env.LUMI_PRIVACY = 'strict';
+      await expect(install(remote)).rejects.toThrow(/Automatic tool execution/);
       await expect(makeLLMCall(
         [{ role: 'user', content: 'strict remote' }], [],
         { provider: remote.id, model: 'signed-model', userId: USER_ID, selectionMode: 'pinned' },
@@ -755,7 +759,9 @@ describe('signed extension and Provider registry', () => {
         origin: 'http://127.0.0.1:19090',
         localNetwork: true,
       });
+      process.env.LUMI_PRIVACY = 'standard';
       await install(local);
+      process.env.LUMI_PRIVACY = 'strict';
       const result = await makeLLMCall(
         [{ role: 'user', content: 'strict local' }], [],
         { provider: local.id, model: 'signed-model', userId: USER_ID, selectionMode: 'pinned' },
@@ -839,6 +845,84 @@ describe('signed extension and Provider registry', () => {
     expect(registry.get(`${v2.id}_observe`)?.description).toContain('@2.0.0');
   });
 
+  it('default rollback skips a newer failed installation and restores the previously active version', async () => {
+    const keys = keyPair();
+    const v1 = signedManifest({ keys, version: '1.0.0' });
+    const v2 = signedManifest({ keys, version: '2.0.0' });
+    const v3 = signedManifest({ keys, version: '3.0.0' });
+    await install(v1);
+    await install(v2);
+    configureRuntime({ fetch: async () => jsonResponse({ error: 'synthetic outage' }, 503) });
+    expect(await install(v3)).toMatchObject({ ok: false, status: 'compatibility_failed' });
+    configureRuntime();
+    const result = JSON.parse(await registry.execute('extension_registry_rollback', { extensionId: v1.id },
+      trustedLocalAdminContext({ userConfirmed: true, taskId: 'default-rollback-past-failure' })));
+    expect(result).toMatchObject({ ok: true, revision: { version: '1.0.0' } });
+    expect(registry.get(`${v1.id}_observe`)?.description).toContain('@1.0.0');
+  });
+
+  it('does not treat an unsuccessful first upgrade as an available default rollback', async () => {
+    const keys = keyPair();
+    const v1 = signedManifest({ keys, version: '1.0.0' });
+    await install(v1);
+    configureRuntime({ fetch: async () => jsonResponse({ error: 'synthetic outage' }, 503) });
+    expect(await install(signedManifest({ keys, version: '2.0.0' }))).toMatchObject({ ok: false, status: 'compatibility_failed' });
+    configureRuntime();
+    await expect(registry.execute('extension_registry_rollback', { extensionId: v1.id },
+      trustedLocalAdminContext({ userConfirmed: true, taskId: 'no-prior-active-version' }))).rejects.toThrow(/No prior extension revision/);
+    expect(registry.get(`${v1.id}_observe`)?.description).toContain('@1.0.0');
+  });
+
+  it('rejects a queued old handler after upgrade while keeping new tools and provider callable', async () => {
+    const keys = keyPair();
+    const v1 = signedManifest({ keys, version: '1.0.0', includeCommitTool: true });
+    const v2 = signedManifest({ keys, version: '2.0.0', includeCommitTool: true });
+    await install(v1);
+    let releaseConfirmation!: (approved: boolean) => void;
+    let confirmationRequested!: () => void;
+    const waiting = new Promise<void>(resolve => { confirmationRequested = resolve; });
+    const pending = registry.execute(`${v1.id}_commit`, { value: 'old-pending-value' }, trustedLocalAdminContext({
+      taskId: 'old-extension-waiting-for-confirmation',
+      requestConfirmation: () => {
+        confirmationRequested();
+        return new Promise<boolean>(resolve => { releaseConfirmation = resolve; });
+      },
+    }));
+    // Attach the rejection assertion before resolving the paused call.
+    const rejection = expect(pending).rejects.toThrow(/not the current active runtime/);
+    await waiting;
+    await install(v2);
+    const client = getRegisteredOpenAIClient(v2.id, USER_ID)!;
+    const callsBefore = runtimeState.calls.length;
+    releaseConfirmation(true);
+    await rejection;
+    expect(runtimeState.calls).toHaveLength(callsBefore);
+    expect(getRegisteredOpenAIClient(v2.id, USER_ID)).toBe(client);
+    expect(isRegisteredOpenAICompatibleProvider(v2.id, USER_ID)).toBe(true);
+    expect(registry.get(`${v2.id}_observe`)?.description).toContain('@2.0.0');
+    const response = await client.chat.completions.create({ model: 'signed-model', messages: [{ role: 'user', content: 'synthetic probe' }] });
+    expect(response.choices[0].message.content).toBe('signed:signed-model');
+    const observed = JSON.parse(await registry.execute(`${v2.id}_observe`, { query: 'new version' }, trustedLocalAdminContext({
+      userConfirmed: true, taskId: 'new-extension-observation',
+    })));
+    expect(observed).toMatchObject({ ok: true, extensionVersion: '2.0.0' });
+  });
+
+  it('rejects an old cached provider client without invalidating its replacement', async () => {
+    const keys = keyPair();
+    const v1 = signedManifest({ keys, version: '1.0.0' });
+    const v2 = signedManifest({ keys, version: '2.0.0' });
+    await install(v1);
+    const oldClient = getRegisteredOpenAIClient(v1.id, USER_ID)!;
+    await install(v2);
+    const currentClient = getRegisteredOpenAIClient(v2.id, USER_ID)!;
+    const callsBefore = runtimeState.calls.length;
+    await expect(oldClient.chat.completions.create({ model: 'signed-model', messages: [{ role: 'user', content: 'old probe' }] })).rejects.toThrow();
+    expect(runtimeState.calls).toHaveLength(callsBefore);
+    expect(getRegisteredOpenAIClient(v2.id, USER_ID)).toBe(currentClient);
+    expect(isRegisteredOpenAICompatibleProvider(v2.id, USER_ID)).toBe(true);
+  });
+
   it('restores the previous active revision when activation persistence fails', async () => {
     const keys = keyPair();
     const v1 = signedManifest({ keys, version: '1.0.0' });
@@ -849,6 +933,36 @@ describe('signed extension and Provider registry', () => {
     expect(failed).toMatchObject({ ok: false, status: 'rolled_back', rollback: 'previous_revision_restored' });
     expect(registry.get(`${v1.id}_observe`)?.description).toContain('@1.0.0');
     expect(JSON.parse(listExtensions({ userId: USER_ID })).extensions.find((item: any) => item.version === '1.0.0').status).toBe('active');
+    expect(failed).toMatchObject({ verified: false, persistence: 'pending' });
+    configureRuntime();
+    const observed = JSON.parse(await registry.execute(`${v1.id}_observe`, { query: 'after rollback' }, {
+      userId: USER_ID, taskId: 'rollback-call', requestId: 'rollback-call', userConfirmed: true,
+    }));
+    expect(observed).toMatchObject({ ok: true, extensionVersion: '1.0.0', value: 'after rollback' });
+    expect(registry.get(`${v1.id}_observe`)).toBeDefined();
+  });
+
+  it('restores callable handlers after real SQLite activation failure and preserves them through reopening', async () => {
+    const keys = keyPair();
+    const v1 = signedManifest({ keys, version: '1.0.0' });
+    const v2 = signedManifest({ keys, version: '2.0.0' });
+    await install(v1);
+    await flushDBOrThrow();
+    await runSQL('PRAGMA query_only=ON');
+    try {
+      const failed = await install(v2);
+      expect(failed).toMatchObject({ status: 'rolled_back', rollback: 'previous_revision_restored', verified: false, persistence: 'pending' });
+    } finally { await runSQL('PRAGMA query_only=OFF'); }
+    await flushDBOrThrow();
+    const execute = async (taskId: string, target = registry) => JSON.parse(await target.execute(`${v1.id}_observe`, { query: 'saved old revision' }, {
+      userId: USER_ID, userConfirmed: true, taskId, requestId: taskId,
+    }));
+    expect(await execute('sqlite-restored-call')).toMatchObject({ ok: true, extensionVersion: '1.0.0' });
+    await flushDBOrThrow();
+    resetExtensionRegistryForTests(); await closeDatabase(); await initDatabase(); configureRuntime();
+    const restarted = new ToolRegistry(); registerExtensionRegistryTools(restarted);
+    expect(await hydrateActiveExtensions(restarted)).toMatchObject({ activated: 1, failed: 0 });
+    expect(await execute('sqlite-reopened-call', restarted)).toMatchObject({ ok: true, extensionVersion: '1.0.0' });
   });
 
   it('restores an active extension when disable persistence fails', async () => {

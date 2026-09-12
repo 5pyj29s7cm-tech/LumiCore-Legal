@@ -4,6 +4,7 @@
 
 import { execFileSync, spawn } from 'child_process';
 import { STTResult } from '../types';
+import { isStrictPrivacy } from '../../config/privacy';
 import { getSttArtifactRoot, getWhisperModelDir } from '../artifact_paths';
 import fs from 'fs';
 import path from 'path';
@@ -28,6 +29,7 @@ const LEGACY_MANAGED_PYTHON = path.join(
 );
 
 let pythonCandidates: string[] | null = null;
+let offlineAvailability: { checkedAt: number; available: boolean } | null = null;
 
 function splitConfiguredPython(value?: string): string[] {
   return String(value || '')
@@ -68,6 +70,12 @@ function getPythonEnv(): NodeJS.ProcessEnv {
     PYTHONUNBUFFERED: '1',
     LUMI_STT_DATA_DIR: STT_ARTIFACT_ROOT,
     WHISPER_MODEL_DIR: getWhisperModelDir(),
+    ...(isStrictPrivacy() ? {
+      LUMI_PRIVACY: 'strict',
+      HF_HUB_OFFLINE: '1',
+      TRANSFORMERS_OFFLINE: '1',
+      HF_HUB_DISABLE_TELEMETRY: '1',
+    } : {}),
   };
 }
 
@@ -142,11 +150,25 @@ function ensureManagedPython(): string | null {
 
 export function isLocalWhisperAvailable(): boolean {
   if (!fs.existsSync(SCRIPT_PATH)) return false;
+  if (isStrictPrivacy()) {
+    if (offlineAvailability && Date.now() - offlineAvailability.checkedAt < 10_000) return offlineAvailability.available;
+    const available = findPythonCandidates().some(python => {
+      try {
+        execFileSync(python, [SCRIPT_PATH, '--check-available'], {
+          stdio: 'pipe', timeout: 5_000, windowsHide: true, env: getPythonEnv(),
+        });
+        return true;
+      } catch { return false; }
+    });
+    offlineAvailability = { checkedAt: Date.now(), available };
+    return available;
+  }
   if (findPythonCandidates().length > 0) return true;
   return Boolean(findBootstrapPython());
 }
 
 interface LocalWhisperOptions {
+  signal?: AbortSignal;
   fileName?: string;
   onProgress?: (message: string) => void;
 }
@@ -199,7 +221,9 @@ function runPythonTranscriber(
   language: string,
   timeoutMs: number,
   onProgress?: (message: string) => void,
+  signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string }> {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(python, [SCRIPT_PATH, audioPath, language || 'zh'], {
       env: getPythonEnv(),
@@ -210,13 +234,28 @@ function runPythonTranscriber(
     let stderr = '';
     let stderrTail = '';
     let settled = false;
+    let stopReason: Error | undefined;
     let lastHeartbeat = Date.now();
     const maxBuffer = 10 * 1024 * 1024;
 
     const cleanup = () => {
       if (timeout) clearTimeout(timeout);
       if (heartbeat) clearInterval(heartbeat);
+      signal?.removeEventListener('abort', abort);
     };
+    const stop = (reason: Error) => {
+      if (settled || stopReason) return;
+      stopReason = reason;
+      // Do not settle or remove the audio file until this owned process closes.
+      if (process.platform === 'win32' && child.pid) {
+        const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, shell: false, stdio: 'ignore' });
+        killer.on('error', () => { try { child.kill(); } catch {} });
+        killer.on('close', code => { if (code !== 0) { try { child.kill(); } catch {} } });
+      } else {
+        try { child.kill('SIGKILL'); } catch {}
+      }
+    };
+    const abort = () => stop(signal?.reason instanceof Error ? signal.reason : new DOMException('Audio transcription cancelled.', 'AbortError'));
     const finishError = (err: any) => {
       if (settled) return;
       settled = true;
@@ -226,8 +265,7 @@ function runPythonTranscriber(
       reject(err);
     };
     const timeout = setTimeout(() => {
-      try { child.kill(); } catch {}
-      finishError(new Error(`Local Whisper timed out after ${Math.round(timeoutMs / 1000)}s`));
+      stop(new Error(`Local Whisper timed out after ${Math.round(timeoutMs / 1000)}s`));
     }, timeoutMs);
     const heartbeat = setInterval(() => {
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - lastHeartbeat) / 1000));
@@ -237,8 +275,7 @@ function runPythonTranscriber(
     child.stdout?.on('data', chunk => {
       stdout += bufferText(chunk);
       if (stdout.length > maxBuffer) {
-        try { child.kill(); } catch {}
-        finishError(new Error('Local Whisper output exceeded the maximum buffer'));
+        stop(new Error('Local Whisper output exceeded the maximum buffer'));
       }
     });
 
@@ -263,6 +300,10 @@ function runPythonTranscriber(
       if (settled) return;
       settled = true;
       cleanup();
+      if (stopReason) {
+        reject(stopReason);
+        return;
+      }
       const tailProgress = progressFromPythonLine(stderrTail);
       if (tailProgress) onProgress?.(tailProgress);
       if (code !== 0) {
@@ -274,12 +315,18 @@ function runPythonTranscriber(
       }
       resolve({ stdout, stderr });
     });
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
   });
 }
 
 export async function transcribe(audioBuffer: Buffer, language: string = 'zh', options: LocalWhisperOptions = {}): Promise<STTResult> {
+  options.signal?.throwIfAborted();
+  if (isStrictPrivacy() && !isLocalWhisperAvailable()) {
+    throw new Error('[Privacy] Strict mode requires an installed local Whisper runtime and cached model.');
+  }
   options.onProgress?.('准备本地 Whisper 转写环境');
-  ensureManagedPython();
+  if (!isStrictPrivacy()) ensureManagedPython();
   const pythons = findPythonCandidates();
   if (pythons.length === 0) throw new Error('Python not found. Local STT requires Python 3.10+.');
 
@@ -295,13 +342,16 @@ export async function transcribe(audioBuffer: Buffer, language: string = 'zh', o
   const failures: string[] = [];
   try {
     for (const python of pythons) {
+      options.signal?.throwIfAborted();
       try {
         options.onProgress?.(`启动本地 Python 转写进程：${path.basename(python)}`);
-        const result = await runPythonTranscriber(python, audioPath, language || 'zh', getLocalWhisperTimeoutMs(), options.onProgress);
+        const result = await runPythonTranscriber(python, audioPath, language || 'zh', getLocalWhisperTimeoutMs(), options.onProgress, options.signal);
+        options.signal?.throwIfAborted();
         const text = String(result.stdout || '').trim();
         if (!text) throw new Error('Local Whisper returned an empty transcript');
         return { text, isFinal: true, model: parseUsedModel(String(result.stderr || '')) };
       } catch (err: any) {
+        options.signal?.throwIfAborted();
         failures.push(`${python}: ${formatPythonFailure(err)}`);
       }
     }

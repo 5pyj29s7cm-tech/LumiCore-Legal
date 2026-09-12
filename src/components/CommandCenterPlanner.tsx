@@ -42,6 +42,7 @@ type CommandCenterPlan = {
   lastRuntimeTaskId: string;
   lastRunAt?: string;
   updatedAt: string;
+  authorizationBlockedReason?: 'membership_missing' | 'membership_changed' | '';
 };
 
 type RuntimeTask = {
@@ -298,8 +299,9 @@ export function CommandCenterPlanner({
       <div>
         <div className="text-sm font-black text-white/90">{copy.headerTitle}</div>
         <div className="mt-1 text-[10px] leading-4 text-white/35">{copy.headerDetail}</div>
+        <div className="mt-1 text-[10px] leading-4 text-white/35">{copy.scheduleControlDetail}</div>
       </div>
-      <button type="button" onClick={() => setShowCreate(value => !value)} className="flex h-8 items-center gap-1.5 rounded-xl border border-cyan-300/20 bg-cyan-300/[0.08] px-2.5 text-[10px] font-bold text-cyan-100/80 hover:bg-cyan-300/[0.13]">
+      <button type="button" onClick={() => setShowCreate(value => !value)} className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl border border-cyan-300/20 bg-cyan-300/[0.08] px-2.5 text-[10px] font-bold text-cyan-100/80 hover:bg-cyan-300/[0.13]">
         <Plus size={13} />{copy.newPlan}
       </button>
     </div>
@@ -355,7 +357,7 @@ export function CommandCenterPlanner({
           : copy.neverRun;
         const runInFlight = runningPlanIds.includes(plan.id);
         const activeRun = Boolean(task && ['queued', 'running', 'pausing', 'paused', 'cancelling'].includes(task.status));
-        const runDisabled = runInFlight || activeRun || plan.status === 'completed';
+        const runDisabled = runInFlight || activeRun || plan.status === 'completed' || Boolean(plan.authorizationBlockedReason);
         return <article key={plan.id} className="rounded-2xl border border-white/[0.075] bg-[#09111a]/82 p-3 transition-colors hover:border-cyan-300/16">
           <div className="flex items-start gap-3">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-cyan-300/14 bg-cyan-300/[0.07] text-cyan-100/65"><Icon size={15} /></div>
@@ -365,7 +367,7 @@ export function CommandCenterPlanner({
                   <div className="truncate text-xs font-bold text-white/82">{plan.title}</div>
                   <div className="mt-1 line-clamp-2 text-[10px] leading-4 text-white/36">{plan.instruction}</div>
                 </div>
-                <span className={`shrink-0 rounded-full px-2 py-1 text-[8px] font-black uppercase ${plan.status === 'active' ? 'bg-cyan-300/[0.11] text-cyan-100/80' : plan.status === 'completed' ? 'bg-emerald-300/[0.10] text-emerald-100/75' : 'bg-white/[0.05] text-white/35'}`}>{copy.planStatus}: {customerVisibleTaskStatus(plan.status, isZh ? 'zh' : 'en')}</span>
+                <span className={`shrink-0 rounded-full px-2 py-1 text-[8px] font-black uppercase ${plan.status === 'active' ? 'bg-cyan-300/[0.11] text-cyan-100/80' : plan.status === 'completed' ? 'bg-emerald-300/[0.10] text-emerald-100/75' : 'bg-white/[0.05] text-white/35'}`}>{copy.planStatus}: {({ active: copy.planActive, paused: copy.planPaused, completed: copy.planCompleted })[plan.status]}</span>
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-2 text-[9px] text-white/28">
                 <span>{kindLabel(plan.kind)}</span><span>·</span><span>{planScheduleLabel(plan)}</span>
@@ -375,6 +377,10 @@ export function CommandCenterPlanner({
                 <span className="font-black text-white/28">{copy.lastRun}: </span>
                 <span className={lastRunStatus === 'failed' || lastRunStatus === 'blocked' ? 'text-rose-100/65' : ['queued', 'running', 'pausing', 'cancelling'].includes(lastRunStatus) ? 'text-cyan-100/65' : 'text-white/42'}>{lastRunLabel}</span>
               </div>
+              {plan.authorizationBlockedReason && plan.status !== 'completed' ? <div data-command-center-authorization-blocker className="mt-2 text-xs leading-5 text-amber-100/80">
+                <p>{copy.authorizationRequired}</p>
+                <button type="button" onClick={() => void updatePlan(plan, { reauthorize: true, status: 'active' }).catch(() => setError(feedbackCopy.controlError))} className="mt-1 rounded-lg border border-amber-200/25 px-2 py-1 font-semibold">{copy.reauthorize}</button>
+              </div> : null}
             </div>
           </div>
           {task && (

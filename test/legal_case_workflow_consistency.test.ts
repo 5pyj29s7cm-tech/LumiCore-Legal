@@ -28,7 +28,8 @@ describe('legal case workflow consistency', () => {
     expect(workflow.steps.find(step => step.key === 'identity')?.state).toBe('done');
     expect(workflow.steps.find(step => step.key === 'facts')?.state).toBe('done');
     expect(workflow.steps.find(step => step.key === 'evidence')?.state).toBe('done');
-    expect(workflow.steps.find(step => step.key === 'reasoning')?.state).toBe('done');
+    expect(workflow.steps.find(step => step.key === 'reasoning')?.state).toBe('ready');
+    expect(workflow.steps.find(step => step.key === 'reasoning')?.summary).toBe('尚未形成完整法律分析底稿');
     expect(workflow.steps.find(step => step.key === 'current-law')?.state).toBe('done');
     expect(workflow.steps.find(step => step.key === 'drafts')?.state).toBe('done');
     expect(workflow.steps.find(step => step.key === 'delivery')?.state).toBe('done');

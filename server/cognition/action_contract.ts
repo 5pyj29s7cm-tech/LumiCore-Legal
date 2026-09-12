@@ -1,6 +1,14 @@
+import { withoutNegatedLookupClauses } from './normalized_action_intent';
 import type { CapabilityLane, CapabilityOperation, ToolExecutionRecord } from '../tools/types';
+import { classifySkillAuthoringIntent, skillAuthoringTools } from '../skills/authoring_intent';
+import { verifiedSkillAuthoringReceipt } from '../skills/authoring_receipt';
+import { artifactRecordMatchesTurn, isArtifactProducerRecord, resolveArtifactDelivery } from '../tools/artifact_evidence';
 import { LEGAL_ENTRY_PREFERRED_TOOLS, isLegalEntryTurn, isRemoteLegalMessageTurn } from './legal_entry';
-import { isInformationOnlyQuestion } from './tool_intent';
+import { hasExplicitNoToolInstruction, hasRequestedArtifactMutation, isInformationOnlyQuestion } from './tool_intent';
+import type { AcceptedTaskTarget } from '../conversation/task_target_anchor';
+import { preservedSourceOutputScope } from './artifact_write_scope';
+import { isVideoPlaybackRequest } from './media_intent';
+import { parsePlaybackGoal, validatePlaybackVerification } from './playback_verification';
 import {
   buildDesktopObservationPlan,
   evaluateDesktopObservationEvidence,
@@ -18,6 +26,7 @@ import {
   isExplicitArtifactCreationText,
   isExternalCommitConfirmationOnlyRequest,
   normalizeActionIntent,
+  withoutChatReplyDestination,
 } from './normalized_action_intent';
 import { isReadOnlyKnowledgeBaseInspectionRequest } from './knowledge_intent';
 import { isLegalCaseReadOnlyStatusRequest } from './legal_case_status';
@@ -29,6 +38,7 @@ import {
 } from '../tools/receipt_payload';
 
 export type LumiActionContractKind =
+  | 'skill_authoring'
   | 'none'
   | 'messaging_read'
   | 'messaging_send'
@@ -338,6 +348,7 @@ export function requiresVisualModelAvailabilityCheck(input: string): boolean {
  * is only preparation, and a generic key dispatch is not playback state. */
 export function requiresMediaPlaybackAction(input: string): boolean {
   const text = compact(extractPrimaryTaskText(input));
+  if (isVideoPlaybackRequest(text)) return true;
   if (!text || /(?:AutoCAD|\bCAD\b|\u56de\u653e\u56fe\u7eb8|\u7ed8\u56fe\u56de\u653e)/iu.test(text)) return false;
   const mediaSurface = /(?:\u7f51\u6613\u4e91(?:\u97f3\u4e50)?|QQ\s*\u97f3\u4e50|\u9177\u72d7(?:\u97f3\u4e50)?|\u97f3\u4e50|\u6b4c\u66f2|\u6b4c\u5355)|\b(?:NetEase|CloudMusic|Spotify|Apple\s+Music|music|song|playlist|music\s+player)\b/iu.test(text);
   // Natural follow-ups commonly omit \u201c\u9996\u201d: \u201c\u76f4\u63a5\u653e\u5f53\u524d\u7684\u97f3\u4e50\u201d still asks for
@@ -351,7 +362,8 @@ export function extractExplicitArtifactTextRequirements(input: string): string[]
   const text = String(input || '');
   const requirements: string[] = [];
   const patterns = [
-    /(?:明确写出|原样写入|精确写入|必须(?:包含|写入))\s*[：:]?\s*[“"]([^”"\r\n]{1,200})[”"]/gu,
+    // i18n-allow: Chinese exact user-supplied content recognition, not UI copy.
+    /(?:明确写出|原样写入|精确写入|(?:只|仅)写入|内容(?:为|是)|必须(?:包含|写入))\s*[：:]?\s*[“"]([^”"\r\n]{1,200})[”"]/gu,
     /第(?:[一二三四五六七八九十百\d]+)行\s*[：:]?\s*[“"]([^”"\r\n]{1,1000})[”"]/gu,
     /\b(?:exactly\s+(?:include|write)|must\s+(?:include|contain))\s*[：:]?\s*[“"]([^”"\r\n]{1,200})[”"]/giu,
   ];
@@ -841,22 +853,9 @@ function isDesktopLaunchVerificationOnly(
 }
 
 export function requiresArtifactPostWriteReadback(input: string): boolean {
+  // i18n-allow: explicit post-write verification input recognition.
+  if (/(?:写完|保存完|创建完|生成完)(?:后|之后)?\s*(?:再|然后|并)?\s*(?:回读|重读|重新读取)/u.test(String(input || ''))) return true;
   return /(?:\u5199\u5165|\u4fdd\u5b58|\u521b\u5efa|\u65b0\u5efa|\u751f\u6210).{0,48}(?:\u540e|\u4e4b\u540e|\u2192|->|\u7136\u540e|\u63a5\u7740|\u518d|\u5e76).{0,48}(?:\u91cd\u8bfb|\u56de\u8bfb|\u91cd\u65b0\u8bfb\u53d6|\u518d\u8bfb)|(?:\u91cd\u8bfb|\u56de\u8bfb|\u91cd\u65b0\u8bfb\u53d6|\u518d\u8bfb).{0,32}(?:\u6838\u9a8c|\u9a8c\u8bc1|\u68c0\u67e5|\u62a5\u544a)|\bafter\s+(?:writing|saving|creating)\b[\s\S]{0,420}\b(?:read|verify|check)\b|\b(?:write|save|create)\b[\s\S]{0,220}\b(?:then|afterwards|next)\b[\s\S]{0,220}\b(?:read|verify|check)\b/iu.test(String(input || ''));
-}
-
-function artifactTargetFromRecord(record: ToolExecutionRecord): string {
-  const args = record.arguments || {};
-  const direct = String(
-    args.path || args.filePath || args.outputPath || args.targetPath || args.destination || '',
-  ).trim();
-  if (direct) return direct;
-  const text = String(record.result || '');
-  return text.match(/([A-Za-z]:[\\/][^\r\n"<>|*?]+\.(?:txt|md|csv|json|docx?|xlsx?|pptx?|pdf))/i)?.[1]?.trim() || '';
-}
-
-function sameArtifactTarget(left: string, right: string): boolean {
-  const normalize = (value: string) => String(value || '').replace(/\//g, '\\').toLowerCase();
-  return Boolean(left && right && normalize(left) === normalize(right));
 }
 
 export function hasRequestedArtifactPostWriteReadback(
@@ -864,25 +863,7 @@ export function hasRequestedArtifactPostWriteReadback(
   taskText = '',
 ): boolean {
   if (!requiresArtifactPostWriteReadback(taskText)) return true;
-  let writeIndex = -1;
-  for (let index = records.length - 1; index >= 0; index -= 1) {
-    const record = records[index];
-    if (
-      !record.error
-      && /^(?:write_file|desktop_write_text_file|create_docx|create_xlsx|create_ppt|create_pdf)$/i.test(String(record.name || ''))
-    ) {
-      writeIndex = index;
-      break;
-    }
-  }
-  if (writeIndex < 0) return false;
-  const target = artifactTargetFromRecord(records[writeIndex]);
-  if (!target) return false;
-  return records.slice(writeIndex + 1).some(record => (
-    !record.error
-    && /^(?:read_file|read_docx|read_pdf|pdf_to_text|extract_document_text)$/i.test(String(record.name || ''))
-    && sameArtifactTarget(target, artifactTargetFromRecord(record))
-  ));
+  return Boolean(resolveArtifactDelivery(records)?.readback);
 }
 
 function buildCustomerOperationsContract(): LumiActionContract {
@@ -1006,6 +987,7 @@ export function buildActionContract(input: string): LumiActionContract {
   const rawInput = String(input || '');
   const normalizedIntent = normalizeActionIntent(rawInput);
   const primaryTaskText = extractPrimaryTaskText(rawInput);
+  if (hasExplicitNoToolInstruction(primaryTaskText || rawInput)) return NONE_CONTRACT;
   if (primaryTaskText && primaryTaskText.trim() !== rawInput.trim()) {
     const primaryContract = buildActionContract(primaryTaskText);
     if (
@@ -1019,8 +1001,21 @@ export function buildActionContract(input: string): LumiActionContract {
     ) return primaryContract;
   }
 
-  const text = compact(rawInput);
+  const text = compact(withoutNegatedLookupClauses(rawInput));
   if (!text) return NONE_CONTRACT;
+  const authoringIntent = classifySkillAuthoringIntent(rawInput);
+  if (['generate', 'save', 'install', 'publish'].includes(authoringIntent)
+    || authoringIntent === 'use' && /工作流|流程|\bworkflow\b/iu.test(rawInput)) { // i18n-allow: workflow execution intent recognition.
+    return withDefaults({
+      kind: 'skill_authoring', label: 'Skill/workflow authoring',
+      coreAction: `Complete the requested ${authoringIntent} lifecycle phase.`,
+      preparationIsNotCompletion: ['describing a skill', 'executing the example task instead of saving its capability'],
+      requiredEvidence: ['a verified current-turn receipt for the requested lifecycle phase'],
+      preferredTools: skillAuthoringTools(authoringIntent), verificationTools: [],
+      nextStep: 'Use the authoring receipt to report the exact draft, registration, or publication state; do not repeat successful creation.',
+      caution: 'A reviewed draft is not installed or executed. Registration does not prove a business task succeeded.',
+    });
+  }
   // A named persistent takeover-task query belongs to the takeover ledger,
   // not the active runtime-work ledger. Its deterministic quick command emits
   // a verified work_takeover_task_list receipt, so do not demand the unrelated
@@ -1256,10 +1251,11 @@ export function buildActionContract(input: string): LumiActionContract {
     });
   }
 
+  const messageSourceText = withoutChatReplyDestination(text);
   if (
     !readOnlyArtifactInspection &&
-    matches(text, /wechat|weixin|\u5fae\u4fe1|\u804a\u5929|\u804a\u5929\u8bb0\u5f55|\u804a\u5929\u5185\u5bb9|\u6d88\u606f|message|chat/i) &&
-    matches(text, /\u770b\u770b|\u67e5\u770b|\u770b\u4e00\u4e0b|\u8bfb\u53d6|\u8bfb|\u6700\u8fd1|\u804a\u5929\u5185\u5bb9|\u804a\u5929\u8bb0\u5f55|\u603b\u7ed3|read|view|inspect|recent|history/i) &&
+    matches(messageSourceText, /wechat|weixin|\u5fae\u4fe1|\u804a\u5929|\u804a\u5929\u8bb0\u5f55|\u804a\u5929\u5185\u5bb9|\u6d88\u606f|message|chat/i) &&
+    matches(messageSourceText, /\u770b\u770b|\u67e5\u770b|\u770b\u4e00\u4e0b|\u8bfb\u53d6|\u8bfb|\u6700\u8fd1|\u804a\u5929\u5185\u5bb9|\u804a\u5929\u8bb0\u5f55|\u603b\u7ed3|read|view|inspect|recent|history/i) &&
     !directedMessageSend &&
     !matches(text, /\u53d1\u9001|\u53d1\u7ed9|\u76f4\u63a5\u53d1|\u4f60\u6765\u53d1|\bsend\b/i)
   ) {
@@ -1802,6 +1798,8 @@ function hasMatchingBrowserOpenEvidence(record: ToolExecutionRecord, requestedTa
 
 export function requestedMediaPlayerTarget(taskText: string): string {
   const text = compact(extractPrimaryTaskText(taskText));
+  const videoPlayer = text.match(/(?:爱奇艺|优酷|腾讯视频|哔哩哔哩|芒果TV)|\b(?:iqiyi|youku|youtube|netflix|bilibili)\b/iu)?.[0]; // i18n-allow: Named video application recognition.
+  if (videoPlayer) return videoPlayer;
   const named = text.match(/(?:\u7f51\u6613\u4e91(?:\u97f3\u4e50)?|QQ\s*\u97f3\u4e50|\u9177\u72d7(?:\u97f3\u4e50)?|Spotify|Apple\s+Music|NetEase(?:\s+Cloud\s+Music)?|CloudMusic)/iu)?.[0];
   return compact(named || extractDesktopLaunchTarget(text) || extractSimpleDesktopOpenTarget(text));
 }
@@ -1900,10 +1898,144 @@ export function hasVisualModelAvailabilityEvidence(
   });
 }
 
-function containsVerifiedPlayingState(record: ToolExecutionRecord): boolean {
-  const text = terminalPayloadText(record);
-  if (!text) return false;
-  return /(?:"(?:isPlaying|playing|playbackStarted)"\s*:\s*true|"(?:playbackState|playerState|state|status)"\s*:\s*"(?:playing|started)"|\u6b63\u5728\u64ad\u653e|\u64ad\u653e\u4e2d|\u5df2\u5f00\u59cb\u64ad\u653e|\bnow\s+playing\b|\bplayback\s+(?:started|is\s+playing)\b)/iu.test(text);
+function playbackEpisode(value: unknown): string {
+  const text = String(value ?? '').trim().toLowerCase();
+  const raw = text.match(/第\s*([\d一二三四五六七八九十百零〇两]+)\s*集|\bepisode\s+([\d]+|one|two|three|four|five|six|seven|eight|nine|ten)\b/iu)?.slice(1).find(Boolean) || text; // i18n-allow: Episode identity recognition.
+  if (/^\d+$/.test(raw)) return String(Number(raw));
+  const english = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+  if (english.includes(raw)) return String(english.indexOf(raw) + 1);
+  const digits = '零一二三四五六七八九'; // i18n-allow: Numeric input normalization.
+  const normalized = raw.replace(/〇/g, '零').replace(/两/g, '二'); // i18n-allow: Numeric input normalization.
+  if (normalized.length === 1 && digits.includes(normalized)) return String(digits.indexOf(normalized));
+  const tens = normalized.match(/^([一二三四五六七八九]?)十([一二三四五六七八九]?)$/u); // i18n-allow: Episode number recognition.
+  return tens ? String((tens[1] ? digits.indexOf(tens[1]) : 1) * 10 + (tens[2] ? digits.indexOf(tens[2]) : 0)) : '';
+}
+
+function requestedPlaybackContent(taskText: string) {
+  return parsePlaybackGoal(taskText);
+}
+
+interface ObservedPlaybackState { playing: boolean; title: string; season: string; episode: string }
+
+// i18n-allow: Recognize observations of the playing content, never a play button or search result.
+const PLAYING_OBSERVATION_RE = /正在播放|播放中|(?:已经|已)开始播放|已打开并开始播放|\b(?:now\s+playing|playback\s+(?:started|is\s+playing))\b/iu;
+// i18n-allow: These labels describe candidate results, not the current media.
+const PLAYBACK_SEARCH_RE = /搜索|联想|推荐|search|suggestion/iu;
+
+function playbackObservationText(record: ToolExecutionRecord): string {
+  const payload = parseRecordJson(record);
+  if (!payload) return terminalPayloadText(record).replace(/[*`]/g, '');
+  if (record.name === 'computer_use') {
+    return payload.ok === true && payload.status === 'verified'
+      && payload.completionVerified === true && payload.observations === 2
+      && payload.applicationMatched === true && typeof payload.message === 'string'
+      ? payload.message.replace(/[*`]/g, '') : '';
+  }
+  // OCR can return a JSON-formatted model description. Do not treat a raw
+  // screenshot, arbitrary accessibility tree or tool arguments as analysis.
+  if (!/^(?:ocr_screen|ocr_region|computer_vision)$/i.test(record.name)
+    || payload.format === 'screenshot_base64' || payload.error) return '';
+  return [payload.description, payload.text, payload.analysis]
+    .find(value => typeof value === 'string')?.replace(/[*`]/g, '') || '';
+}
+
+function playbackObservationClauses(record: ToolExecutionRecord): string[] {
+  return playbackObservationText(record).split(/[。！？!?\n]/u).map(value => value.trim()).filter(Boolean);
+}
+
+function observedPlaybackState(record: ToolExecutionRecord): ObservedPlaybackState | null {
+  const payload = parseRecordJson(record);
+  if (payload) {
+    const state = payload.playback && typeof payload.playback === 'object' ? payload.playback : payload;
+    const flags = [state.isPlaying, state.playing, state.playbackStarted];
+    const statuses = [state.playbackState, state.playerState, state.state, state.status].map(value => String(value || '').toLowerCase());
+    const negative = flags.includes(false) || state.isAd === true || state.isAdvertisement === true
+      || /^(?:ad|advertisement|preroll|pre-roll)$/i.test(String(state.phase || state.contentType || ''))
+      || statuses.some(value => /^(?:paused|stopped|idle|not_playing|not_started|failed|error|cancelled|blocked)$/.test(value));
+    const positive = flags.includes(true) || statuses.some(value => /^(?:playing|started)$/.test(value));
+    if (negative || positive) {
+      const current = state.currentTrack || state.nowPlaying || state.currentMedia;
+      // Only current-media fields paired with a playing state qualify. A
+      // searchQuery, result list, arbitrary window tree, or tool args do not.
+      const directMediaAction = /(?:^|_)(?:media|music|audio)(?:_|.*_)(?:play|resume|control)(?:_|$)/i.test(record.name);
+      const title = compact(typeof current === 'string' ? current : current?.title || current?.name
+        || state.currentTitle || state.trackTitle || state.songTitle || (directMediaAction ? state.title : ''));
+      return { playing: positive && !negative, title,
+        season: playbackEpisode(current?.season ?? state.season ?? state.seasonNumber) || parsePlaybackGoal(title).season,
+        episode: playbackEpisode(current?.episode ?? state.episode ?? state.episodeNumber) || playbackEpisode(title) };
+    }
+  }
+  // i18n-allow: A finished advertisement is historical context, not a current ad phase.
+  const text = playbackObservationText(record).replace(/(?:片前|贴片)?广告(?:已经|已)(?:结束|播放完毕)/gu, '');
+  // i18n-allow: Negative/current playback state, not a play/pause button label.
+  const negative = /(?:尚未|并未|没有|还没|未|不是|并非).{0,10}(?:开始|正在|已经)?播放|(?:当前|现在|目前|处于|已经|已).{0,12}(?:暂停|停止播放)|(?:尚未|并未|没有|未).{0,8}切换|\b(?:not\s+(?:yet\s+)?playing|not\s+started|has\s+not\s+(?:started|switched)|is\s+paused|playback\s+(?:paused|stopped))\b/iu.test(text)
+    // i18n-allow: An advertisement or a prediction is not observed programme playback.
+    || /(?:片前|贴片)广告|(?:当前|现在|正在|仍在).{0,12}广告|广告.{0,12}(?:播放中|剩余|倒计时)|\b(?:pre[- ]?roll|playing\s+(?:an?\s+)?ad(?:vertisement)?|ad\s+break)\b|(?:可能|似乎|应该|即将|将会|等待).{0,8}(?:正在)?播放|\b(?:may|might|will|should)\s+(?:be\s+)?play/iu.test(text);
+  // i18n-allow: A playing-state assertion, not a question or a search match.
+  const positive = PLAYING_OBSERVATION_RE.test(text);
+  if (!negative && !positive) return null;
+  // Keep the title bound to the current playback statement. Merely finding
+  // the requested title in a search result elsewhere is never enough.
+  // i18n-allow: Current-title statement extraction.
+  const currentClause = playbackObservationClauses(record).filter(value => PLAYING_OBSERVATION_RE.test(value)).at(-1) || '';
+  if (PLAYBACK_SEARCH_RE.test(currentClause)) return negative ? { playing: false, title: '', season: '', episode: '' } : null;
+  const currentContent = currentClause.match(/(?:正在播放|播放中|(?:已经|已)开始播放|\bnow\s+playing)[：:是为\s-]*(?:(?:歌曲|曲目|视频|正片)[：:是为\s]*)?(.+)/iu)?.[1] || ''; // i18n-allow: Current-content label recognition.
+  const precedingTitle = !currentContent || /^[，,；;（(]/u.test(currentContent)
+    ? currentClause.split(PLAYING_OBSERVATION_RE)[0].match(/[《“"]([^》”"\n]+)[》”"]/u)?.[1] || '' : '';
+  const title = PLAYBACK_SEARCH_RE.test(currentClause) ? ''
+    : precedingTitle || currentContent.match(/^[《“"]([^》”"\n]+)[》”"]/u)?.[1]
+      || currentContent.split(/[，,；;（(]/u)[0].trim();
+  const episode = currentClause.match(/第\s*[\d一二三四五六七八九十百零〇两]+\s*集|\bepisode\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/iu)?.[0]; // i18n-allow: Episode tied to active playback.
+  return { playing: positive && !negative, title, season: parsePlaybackGoal(currentClause).season,
+    episode: playbackEpisode(episode) || playbackEpisode(title) };
+}
+
+function playbackPlayerMatch(record: ToolExecutionRecord, target: string): boolean | null {
+  if (!target) return true;
+  const aliases = requestedDesktopTargetAliases(target);
+  const matches = (value: unknown) => {
+    const normalized = normalizeDesktopTarget(String(value || ''));
+    return aliases.some(alias => alias.length >= 2 && (normalized === alias || normalized.includes(alias)));
+  };
+  const payload = parseRecordJson(record);
+  if (payload) {
+    const current = payload.actualTarget || payload.observedTarget || payload.postState || payload;
+    const sources = [current, current.tree, payload.playback].filter(value => value && typeof value === 'object');
+    const names = sources.flatMap(value => [value.player, value.application, value.app, value.appName, value.applicationName]).filter(value => typeof value === 'string' && value.trim());
+    const processes = sources.flatMap(value => [value.processName, value.process_name]).filter(value => typeof value === 'string' && value.trim());
+    const identities = names.length ? names : processes;
+    if (identities.length) return identities.every(matches);
+    if (sources.some(value => matches(value.windowTitle || value.title))) return true;
+  }
+  if (!payload || playbackObservationText(record)) {
+    // A textual observation can identify the player in the same current-state
+    // sentence. A separate mention of the target app elsewhere cannot do so.
+    const clauses = playbackObservationClauses(record);
+    let index = clauses.length - 1;
+    while (index >= 0 && !PLAYING_OBSERVATION_RE.test(clauses[index])) index--;
+    if (index < 0 || PLAYBACK_SEARCH_RE.test(clauses[index])) return null;
+    const current = clauses[index];
+    // A neighbouring identity statement belongs to the same screenshot, but
+    // an explicit different player in the playing statement takes priority.
+    // i18n-allow: Known player identity, not arbitrary mentions of a song.
+    const namedPlayer = /(?:爱奇艺|优酷|腾讯视频|哔哩哔哩|芒果TV|网易云(?:音乐)?|QQ\s*音乐|酷狗(?:音乐)?)|\b(?:iqiyi|youku|youtube|netflix|bilibili|Spotify|Apple\s+Music|NetEase(?:\s+Cloud\s+Music)?|CloudMusic)\b/giu;
+    const currentNames = current.match(namedPlayer) || [];
+    if (currentNames.length) return currentNames.every(matches);
+    const adjacent = clauses.slice(Math.max(0, index - 1), index + 2).filter(value => !PLAYBACK_SEARCH_RE.test(value));
+    const names = adjacent.flatMap(value => value.match(namedPlayer) || []);
+    if (names.length) return names.every(matches);
+    if (matches(current)) return true;
+  }
+  return null;
+}
+
+function playbackTitleMatches(observed: string, requested: string): boolean {
+  if (!requested) return true;
+  // Permit a separately delimited artist/episode suffix, never another title
+  // containing the requested string (for example the DJ remix/search result).
+  const title = observed.split(/\s+[-–—|]\s+|\s*第\s*[\d一二三四五六七八九十百]+\s*[季集]|\s+(?:season|episode)\s+/iu)[0]; // i18n-allow: Artist/episode metadata delimiter.
+  const normalize = (value: string) => value.normalize('NFKC').toLowerCase().replace(/[\s《》“”"'.,，。!！?？:：]/gu, '');
+  return Boolean(title) && normalize(title) === normalize(requested);
 }
 
 function isPlaybackActuation(record: ToolExecutionRecord): boolean {
@@ -1920,26 +2052,91 @@ function isPlaybackActuation(record: ToolExecutionRecord): boolean {
 export function hasMediaPlaybackEvidence(
   records: ToolExecutionRecord[] = [],
   taskText = '',
+  currentTurn?: { requestId?: string; taskId?: string },
 ): boolean {
-  const successful = records.map((record, index) => ({ record, index }))
-    .filter(({ record }) => expandSuccessfulRecords([record]).length > 0);
-  const explicitPlayback = successful.some(({ record }) => (
-    /(?:^|_)(?:media|music|audio)(?:_|.*_)(?:play|resume|control)(?:_|$)/i.test(String(record.name || ''))
-    && containsVerifiedPlayingState(record)
-  ));
-  if (explicitPlayback) return true;
-  if (!hasRequestedDesktopOpenEvidence(records, taskText, requestedMediaPlayerTarget(taskText))) return false;
-  for (const { record, index } of successful) {
-    if (!isPlaybackActuation(record)) continue;
-    if (containsVerifiedPlayingState(record)) return true;
-    const observedPlaying = successful.some(candidate => (
-      candidate.index > index
-      && /^(?:desktop_ui_snapshot|ocr_screen|ocr_region|desktop_capture_screen|computer_vision|desktop_active_window)$/i.test(String(candidate.record.name || ''))
-      && containsVerifiedPlayingState(candidate.record)
-    ));
-    if (observedPlaying) return true;
+  const scoped = Boolean(currentTurn?.requestId || currentTurn?.taskId);
+  const successful = records.filter(record => {
+    if (scoped) {
+      if ((record as ToolExecutionRecord & { receiptScopeConflict?: boolean }).receiptScopeConflict === true) return false;
+      const requestIds = [record.requestId, record.envelope?.requestId].filter(Boolean);
+      const turnIds = [record.turnId, record.envelope?.turnId].filter(Boolean);
+      const taskIds = [record.taskId, record.envelope?.taskId].filter(Boolean);
+      // Scope the entire state machine, including its legacy actuation path.
+      // A previous request's playing state cannot settle this request's
+      // uncertain completion candidate or supply its player/input evidence.
+      if (currentTurn?.requestId && (requestIds.length === 0
+        || [...requestIds, ...turnIds].some(value => value !== currentTurn.requestId))) return false;
+      if (currentTurn?.taskId && (taskIds.length === 0
+        || taskIds.some(value => value !== currentTurn.taskId))) return false;
+    }
+    const payload = record.name === 'computer_use' ? parseRecordJson(record) : null;
+    return expandSuccessfulRecords([record]).length > 0
+      || Boolean(payload && Object.prototype.hasOwnProperty.call(payload, 'playbackVerification'));
+  });
+  const requested = requestedPlaybackContent(taskText);
+  let target = requestedMediaPlayerTarget(taskText);
+  if (/^(?:音乐|歌曲?|播放器|视频|music|song|player|video)$/iu.test(target)) target = ''; // i18n-allow: Generic player labels.
+  let playerMatched = !target;
+  let actuated = false;
+  let verified = false;
+  for (const record of successful) {
+    const payload = parseRecordJson(record);
+    if (record.name === 'computer_use' && payload && Object.prototype.hasOwnProperty.call(payload, 'playbackVerification')) {
+      // A structured attempt owns its outcome. Invalid evidence cannot fall
+      // back to a model's free-text "done" claim or a previous success.
+      const executedTask = String(record.arguments?.task || record.arguments?.prompt || '');
+      verified = Boolean(expandSuccessfulRecords([record]).length > 0
+        && currentTurn?.requestId && currentTurn?.taskId && requiresMediaPlaybackAction(executedTask)
+        && payload.ok === true && payload.status === 'verified' && payload.completionVerified === true
+        && payload.observations === 2 && payload.applicationMatched === true
+        && validatePlaybackVerification(payload.playbackVerification, taskText)
+        && validatePlaybackVerification(payload.playbackVerification, executedTask));
+      if (!verified) { playerMatched = false; actuated = false; }
+      continue;
+    }
+    const observation = /^(?:desktop_open|browser_open_task|desktop_ui_snapshot|ocr_screen|ocr_region|desktop_capture_screen|computer_vision|desktop_active_window|get_active_window_info|computer_use)$/i.test(record.name);
+    const action = isPlaybackActuation(record);
+    if (!observation && !action) continue;
+    const currentObservation = observation && Boolean(currentTurn?.requestId);
+    if (record.name === 'computer_use') {
+      const executedTask = String(record.arguments?.task || record.arguments?.prompt || '');
+      const executedContent = requestedPlaybackContent(executedTask);
+      const executedPlayer = requestedMediaPlayerTarget(executedTask);
+      const applicationIdentity = String(parseRecordJson(record)?.applicationIdentity || '').trim();
+      const matchesTarget = (value: string) => matchesRequestedDesktopTarget(value, requestedDesktopTargetAliases(target));
+      if (!currentObservation || !playbackObservationText(record) || !requiresMediaPlaybackAction(executedTask)
+        || !playbackTitleMatches(executedContent.title, requested.title)
+        || (requested.season && requested.season !== executedContent.season)
+        || (requested.episode && requested.episode !== executedContent.episode)
+        || (target && executedPlayer && !matchesTarget(executedPlayer))
+        || (target && applicationIdentity && !/^(?:chrome-browser|edge-browser|firefox-browser|desktop-browser)$/.test(applicationIdentity)
+          && !matchesTarget(applicationIdentity))) continue;
+    }
+    const match = playbackPlayerMatch(record, target);
+    if (match !== null) {
+      playerMatched = match;
+      if (!match) { actuated = false; verified = false; }
+    }
+    if (action && playerMatched) { actuated = true; verified = false; }
+    const state = observedPlaybackState(record);
+    if (!state) continue;
+    // A failed later observation does not erase a verified action; a successful
+    // later observation explicitly showing another title/paused state does.
+    if (!state.playing) { verified = false; continue; }
+    verified = false;
+    // Current, target-bound observation may confirm autoplay/Enter/coordinate
+    // selection. Requiring another play/pause action could stop valid playback.
+    if ((!actuated && !currentObservation) || !playerMatched) continue;
+    if (!actuated && match !== true) continue;
+    // A bare root=active state may inherit the immediately established player
+    // identity for generic playback, but a named song/episode needs a current
+    // player identity in the same receipt, not an old open result.
+    if ((requested.title || requested.episode) && match !== true) continue;
+    verified = playbackTitleMatches(state.title, requested.title)
+      && (!requested.season || state.season === requested.season)
+      && (!requested.episode || state.episode === requested.episode);
   }
-  return false;
+  return verified;
 }
 
 const CURRENT_APP_FOREGROUND_TOOL_RE =
@@ -2732,11 +2929,12 @@ function requestsExactReadOnlyArtifactInspection(taskText: string): boolean {
   // Keep this branch deliberately narrower than generic artifact work. A
   // create/write/edit request may inspect the source first, but that read is
   // preparation rather than completion of the requested mutation.
-  const wantsSemanticRead = /(?:\u8bfb\u53d6|\u9605\u8bfb|\u67e5\u770b|\u68c0\u67e5|\u68c0\u89c6|\u5206\u6790|\u603b\u7ed3|\u5ba1\u9605|\u5185\u5bb9|\u91cc\u9762|\u6587\u4ef6\u4e2d)|\b(?:read|inspect|examine|analy[sz]e|review|summari[sz]e|contents?|inside|marker)\b/iu.test(primary);
+  // i18n-allow: file analysis includes calculations over the accepted source.
+  const wantsSemanticRead = /(?:计算|核算|汇总|算出|口算|重新算|\u8bfb\u53d6|\u9605\u8bfb|\u67e5\u770b|\u68c0\u67e5|\u68c0\u89c6|\u5206\u6790|\u603b\u7ed3|\u5ba1\u9605|\u5185\u5bb9|\u91cc\u9762|\u6587\u4ef6\u4e2d)|\b(?:read|calculate|recalculate|compute|inspect|examine|analy[sz]e|review|summari[sz]e|contents?|inside|marker)\b/iu.test(primary);
   if (!wantsSemanticRead) return false;
   const hasFileSubject = /(?:\u6587\u4ef6|\u6587\u6863|\u6587\u672c|\u8def\u5f84)|\b(?:file|document|filepath|path)\b|\.(?:txt|md|csv|json|docx?|xlsx?|pptx?|pdf|rtf)\b/iu.test(primary);
   if (!hasFileSubject) return false;
-  const wantsMutation = /(?:\u521b\u5efa|\u65b0\u5efa|\u5199\u5165|\u7f16\u8f91|\u4fee\u6539|\u66f4\u65b0|\u8ffd\u52a0|\u66ff\u6362|\u5220\u9664|\u91cd\u547d\u540d|\u79fb\u52a8|\u590d\u5236|\u4fdd\u5b58|\u5bfc\u51fa|\u751f\u6210|\u8986\u76d6)|\b(?:creat(?:e|es|ed|ing)|writ(?:e|es|ing|ten)|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|updat(?:e|es|ed|ing)|append(?:s|ed|ing)?|replac(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|remov(?:e|es|ed|ing)|renam(?:e|es|ed|ing)|mov(?:e|es|ed|ing)|copy|copies|copied|copying|sav(?:e|es|ed|ing)|export(?:s|ed|ing)?|generat(?:e|es|ed|ing)|overwrit(?:e|es|ing|ten))\b/iu.test(primary);
+  const wantsMutation = hasRequestedArtifactMutation(primary);
   return !wantsMutation;
 }
 
@@ -2767,6 +2965,7 @@ function taskTextAnchorsExactDocumentTarget(taskText: string, target: string): b
 export function documentReadMatchesRequestedTarget(
   record: ToolExecutionRecord,
   taskText: string,
+  acceptedTaskTarget?: AcceptedTaskTarget,
 ): boolean {
   // Target correlation is independent from content retention. Large structured
   // reads may be compacted before a later finalization pass, but their exact
@@ -2779,7 +2978,10 @@ export function documentReadMatchesRequestedTarget(
     || record.terminalVerification?.status === 'failed'
   ) return false;
   const target = exactDocumentReadTarget(record);
-  const primaryTask = compact(extractPrimaryTaskText(taskText));
+  const requestedTask = compact(extractPrimaryTaskText(taskText));
+  // The save-as destination belongs to output verification. It must not
+  // replace an explicitly preserved source or its server-owned continuation.
+  const primaryTask = preservedSourceOutputScope(requestedTask)?.sourceText || requestedTask;
   if (!target || !primaryTask) return false;
 
   // When the user supplied an absolute document path, basename equality is
@@ -2789,6 +2991,11 @@ export function documentReadMatchesRequestedTarget(
   ) || [];
   if (absoluteTargets.length > 0) {
     return absoluteTargets.some(candidate => sameExactDocumentTarget(candidate, target));
+  }
+
+  if (acceptedTaskTarget?.target.path) {
+    return acceptedTaskTarget.target.status !== 'rejected'
+      && sameExactDocumentTarget(acceptedTaskTarget.target.path, target);
   }
 
   const targetName = documentBasename(target);
@@ -2822,15 +3029,16 @@ export function documentReadMatchesRequestedTarget(
 function hasVerifiedExactReadOnlyArtifactEvidence(
   records: ToolExecutionRecord[],
   taskText: string,
+  acceptedTaskTarget?: AcceptedTaskTarget,
 ): boolean {
   if (!requestsExactReadOnlyArtifactInspection(taskText)) return false;
   return records.some(record => {
     if (
-      record.name !== 'read_file'
+      !CURRENT_DOCUMENT_READER_RE.test(record.name)
       || record.terminalVerification?.status !== 'verified'
       || !isSuccessfulExactDocumentRead(record)
     ) return false;
-    return documentReadMatchesRequestedTarget(record, taskText);
+    return documentReadMatchesRequestedTarget(record, taskText, acceptedTaskTarget);
   });
 }
 
@@ -3088,8 +3296,11 @@ export function hasCoreActionEvidence(
   records: ToolExecutionRecord[] = [],
   taskText = '',
   taskCapsule?: TaskCapsuleV1 | null,
+  currentTurn?: { requestId?: string; taskId?: string },
+  acceptedTaskTarget?: AcceptedTaskTarget,
 ): boolean {
   if (!contract.applies) return true;
+  if (contract.kind === 'skill_authoring') return Boolean(verifiedSkillAuthoringReceipt(taskText, records, currentTurn));
   const successful = expandSuccessfulRecords(records);
   const recoverableObservedOpen = contract.kind === 'desktop_operation'
     ? (() => {
@@ -3188,12 +3399,15 @@ export function hasCoreActionEvidence(
       || hasVerifiedManifestCapabilityEvidence(contract, successful);
   }
   if (contract.kind === 'artifact_work') {
+    const resolvedTarget = acceptedTaskTarget || (taskCapsule?.target.path && taskCapsule.target.status !== 'rejected'
+      && (!currentTurn?.taskId || taskCapsule.taskId === currentTurn.taskId)
+      ? { target: taskCapsule.target, source: 'task' as const, sourceId: taskCapsule.taskId } : undefined);
     if (requestsExactReadOnlyArtifactInspection(taskText)) {
-      return hasVerifiedExactReadOnlyArtifactEvidence(successful, taskText);
+      return hasVerifiedExactReadOnlyArtifactEvidence(successful, taskText, resolvedTarget);
     }
-    if (!hasRequestedArtifactPostWriteReadback(records, taskText)) return false;
-    return successful.some(record => /write_file|create_|desktop_path_info|work_product_verify/i.test(record.name))
-      || hasVerifiedManifestCapabilityEvidence(contract, successful);
+    const current = successful.filter(record => artifactRecordMatchesTurn(record, currentTurn || {}));
+    if (!hasRequestedArtifactPostWriteReadback(current, taskText)) return false;
+    return current.some(isArtifactProducerRecord);
   }
   if (contract.kind === 'external_ai_request') {
     const hasSubmission = successful.some(record => {
@@ -3264,7 +3478,7 @@ export function hasCoreActionEvidence(
       return hasVisualModelAvailabilityEvidence(records);
     }
     if (requiresMediaPlaybackAction(taskText)) {
-      return hasMediaPlaybackEvidence(records, taskText);
+      return hasMediaPlaybackEvidence(records, taskText, currentTurn);
     }
     const windowAction = requestedDesktopWindowAction(taskText);
     if (windowAction) {

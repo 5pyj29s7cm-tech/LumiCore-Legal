@@ -13,11 +13,25 @@ export const LUMI_OFFICIAL_PROVIDER_ID = 'relay' as const;
  * credentials are still entered and stored on the server, never in the
  * browser bundle or local storage.
  */
-export const LUMI_OFFICIAL_BASE_URL = 'https://zhuan.huaczy.com/v1' as const;
+export const LUMI_OFFICIAL_BASE_URL = 'https://lumi.xingcyj.com/v1' as const;
+
+/** Upgrade the retired official endpoint while preserving custom gateways. */
+export function normalizeLumiOfficialBaseUrl(value: unknown): string {
+  const raw = String(value || '').trim().replace(/\/+$/, '');
+  try {
+    const url = new URL(raw);
+    if (url.origin === 'https://zhuan.huaczy.com' && !url.username && !url.password
+      && !url.search && !url.hash && ['/', '/v1'].includes(url.pathname)) {
+      return LUMI_OFFICIAL_BASE_URL;
+    }
+  } catch { /* Empty and custom inputs retain existing validation behavior. */ }
+  return raw;
+}
+
 
 /** Public API documentation and account pages shown in Settings. */
-export const LUMI_OFFICIAL_DOCS_URL = 'https://zhuan.huaczy.com/console/help' as const;
-export const LUMI_OFFICIAL_RECHARGE_URL = 'https://zhuan.huaczy.com/console/recharge' as const;
+export const LUMI_OFFICIAL_DOCS_URL = 'https://lumi.xingcyj.com/docs' as const;
+export const LUMI_OFFICIAL_RECHARGE_URL = 'https://lumi.xingcyj.com/console/recharge' as const;
 
 export const LUMI_MODEL_ROLE_IDS = [
   'reasoning',
@@ -37,7 +51,7 @@ export type LumiModelRoleId = typeof LUMI_MODEL_ROLE_IDS[number];
 
 /** Safe model-id defaults used when a user has not chosen a role-specific id. */
 export const LUMI_OFFICIAL_DEFAULT_MODELS: Readonly<Record<LumiModelRoleId, string>> = {
-  reasoning: 'aliyun/qwen-plus',
+  reasoning: 'aliyun/deepseek-v4-flash',
   vision: 'aliyun/qwen2.5-vl-72b',
   world: 'aliyun/qwen3-vl-flash',
   image_generation: 'aliyun/qwen-image',
@@ -49,6 +63,17 @@ export const LUMI_OFFICIAL_DEFAULT_MODELS: Readonly<Record<LumiModelRoleId, stri
   speech_recognition: 'aliyun/qwen-audio-3.0-asr-flash-streaming',
   speech_synthesis: 'aliyun/cosyvoice-v3-flash',
 };
+
+/** Versioned migration of defaults emitted by older official configurations. */
+export const LUMI_OFFICIAL_REASONING_DEFAULTS_VERSION = 1;
+
+/** Only use for legacy/default values, never for a newly explicit model choice. */
+export function migrateLumiOfficialReasoningDefault(value: unknown): string {
+  const model = normalizeLumiOfficialModel('reasoning', value);
+  return model === 'aliyun/qwen-plus' || model === 'qwen-plus'
+    ? LUMI_OFFICIAL_DEFAULT_MODELS.reasoning
+    : model;
+}
 
 /**
  * Model ids emitted by older builds as generic provider placeholders. They

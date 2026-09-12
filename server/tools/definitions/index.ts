@@ -51,13 +51,7 @@ import { PRODUCT_VARIANT } from '../../../shared/product_variant';
 
 export function registerAllTools(
   registry: ToolRegistry,
-  llmGetters?: {
-    getDeepSeek: () => any;
-    getGemini: () => any;
-    getOpenAI?: () => any;
-    getAnthropic?: () => any;
-    getQwen?: () => any;
-  },
+  llmGetters?: NonNullable<Parameters<typeof setSkillLLMGetters>[0]>,
 ): void {
   registerFileOpsTools(registry);
   registerSystemOpsTools(registry);
@@ -121,13 +115,7 @@ export function registerAllTools(
  */
 export function registerProductVariantTools(
   registry: ToolRegistry,
-  llmGetters?: {
-    getDeepSeek: () => any;
-    getGemini: () => any;
-    getOpenAI?: () => any;
-    getAnthropic?: () => any;
-    getQwen?: () => any;
-  },
+  llmGetters?: NonNullable<Parameters<typeof setSkillLLMGetters>[0]>,
 ): void {
   const productLine = PRODUCT_VARIANT.productLine;
   if (!['design', 'legal', 'finance'].includes(productLine)) {

@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import { isDelegatedActionEvidenceArchive } from '../cognition/task_execution_ledger';
+import { projectAutonomousTaskFinalization } from '../autonomy/task_finalization';
 import type {
   ConversationActionReceiptRow,
   ConversationActionTaskRow,
@@ -200,7 +202,8 @@ export function buildStructuredRuntimeStatus(
   const orgId = input.domain === 'work' ? compact(input.orgId, 180) : '';
   const actionTasks = (Array.isArray(db?.conversationActionTasks) ? db.conversationActionTasks : [])
     .filter((task: ConversationActionTaskRow) => (
-      task.userId === input.userId
+      !isDelegatedActionEvidenceArchive(task)
+      && task.userId === input.userId
       && (task.domain || 'personal') === input.domain
       && (input.domain !== 'work' || task.orgId === orgId)
     )) as ConversationActionTaskRow[];
@@ -217,6 +220,7 @@ export function buildStructuredRuntimeStatus(
   const autonomous = input.domain === 'personal'
     ? (Array.isArray(db?.autonomousTasks) ? db.autonomousTasks : [])
       .filter((task: any) => task.userId === input.userId)
+      .map(projectAutonomousTaskFinalization)
       .map((task: any) => ({
         taskId: compact(task.id, 180),
         runtime: 'autonomous' as const,

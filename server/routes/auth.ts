@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import rateLimit from "express-rate-limit";
-import { readDB, writeDB } from "../../db_layer";
+import { readDB, writeDB, flushDBOrThrow } from "../../db_layer";
 import { syncUserToSupabase } from "../config/supabase";
 import { getMember, listUserOrgs } from "../org/db";
 import { saveVoiceprint, replaceVoiceprints, saveFace, getVoiceprints, getFaces, deleteVoiceprint, deleteFace } from "../biometrics/store";
@@ -16,6 +16,7 @@ import {
   issueDesktopSessionProof,
 } from "../config/desktop_bootstrap";
 import { normalizeNativeClientIdentity } from '../devices/native_identity';
+import { decodeUserSessionToken, requireAuth, requireUserSession } from '../middleware/auth';
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -42,18 +43,23 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
   router.post("/auth/register", authLimiter, async (req, res) => {
     try {
     const { username, password, phone } = req.body;
-    if (!username || !password || !phone) {
+    if (typeof username !== 'string' || !username.trim() || typeof password !== 'string' || !password || typeof phone !== 'string' || !phone.trim()) {
       return res.status(400).json({ error: "Username, password and phone are required" });
     }
 
-    const db = readDB();
-    if (db.users.find((u: any) => u.username === username)) {
+    if (readDB().users.find((u: any) => u.username === username)) {
       return res.status(400).json({ error: "User already exists" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    // Hashing yields. Re-read and recheck at the actual write boundary so this
+    // account mutation cannot restore an older settings/users snapshot.
+    const db = readDB();
+    if (db.users.some((user: any) => user.username === username)) {
+      return res.status(400).json({ error: "User already exists" });
+    }
     const newUser = {
-      uid: Math.random().toString(36).substring(2, 15),
+      uid: crypto.randomUUID(),
       username,
       password: hashedPassword,
       phone,
@@ -62,8 +68,8 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
       createdAt: new Date().toISOString()
     };
 
-    db.users.push(newUser);
-    writeDB(db);
+    writeDB({ ...db, users: [...db.users, newUser] });
+    await flushDBOrThrow();
 
     // Fire-and-forget: sync to Supabase for SaaS
     syncUserToSupabase(newUser.uid, username, hashedPassword);
@@ -82,20 +88,25 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
   router.post("/auth/login", authLimiter, async (req, res) => {
     try {
     const { username, password } = req.body;
+    if (typeof username !== 'string' || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
     const db = readDB();
     const user = db.users.find((u: any) => u.username === username);
     if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
-    const passwordMatch = await bcrypt.compare(password, user.password);
+    const storedPassword = user.password;
+    const passwordMatch = await bcrypt.compare(password, storedPassword);
 
-    if (passwordMatch) {
+    const currentUser = readDB().users.find((item: any) => item.uid === user.uid);
+    if (passwordMatch && currentUser && currentUser.password === storedPassword) {
       // Fire-and-forget: sync to Supabase for SaaS
-      syncUserToSupabase(user.uid, username, user.password);
+      syncUserToSupabase(currentUser.uid, currentUser.username, currentUser.password);
 
-      const tokenPayload: any = { uid: user.uid, username, role: user.role };
+      const tokenPayload: any = { uid: currentUser.uid, username: currentUser.username, role: currentUser.role };
       const token = jwt.sign(tokenPayload, jwtSecret, { expiresIn: "24h" });
       res.cookie("token", token, getCookieOptions());
-      const { password: _, ...userWithoutPassword } = user;
+      const { password: _, ...userWithoutPassword } = currentUser;
       return res.json({ success: true, user: userWithoutPassword, token });
     }
     res.status(401).json({ error: "Invalid credentials" });
@@ -105,7 +116,7 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
     }
   });
 
-  router.get("/auth/me", (req, res) => {
+  router.get("/auth/me", requireAuth, (req, res) => {
     let token = req.cookies.token;
     // Fallback: WebView2 may not send httpOnly cookies, check Authorization header
     if (!token) {
@@ -158,8 +169,8 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
       : '';
     if (bearer) {
       try {
-        const decoded = jwt.verify(bearer, jwtSecret) as any;
-        admin = db.users.find((user: any) => user.uid === decoded.uid) || null;
+        const decoded = decodeUserSessionToken(bearer, jwtSecret);
+        admin = decoded ? db.users.find((user: any) => user.uid === decoded.uid) || null : null;
       } catch {}
     }
     if (!admin) {
@@ -177,19 +188,32 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
       // is never returned and is unrelated to any fixed environment password.
       const randomCredential = crypto.randomBytes(48).toString('base64url');
       const hashedPassword = await bcrypt.hash(randomCredential, 10);
-      admin = {
-        uid: Math.random().toString(36).substring(2, 15),
-        username: "admin",
-        password: hashedPassword,
-        phone: "+00000000000",
-        role: "admin",
-        balance: 999.0,
-        createdAt: new Date().toISOString(),
-        localDesktopIdentity: true,
-      };
-      db.users.push(admin);
-      writeDB(db);
+      const current = readDB();
+      admin = current.users.find((user: any) => user.username === 'admin' && user.role === 'admin');
+      if (!admin && current.users.some((user: any) => user.username === 'admin')) {
+        return res.status(409).json({
+          error: 'The reserved local administrator name belongs to a non-administrator account',
+          code: 'LOCAL_ADMIN_IDENTITY_CONFLICT',
+        });
+      }
+      if (!admin) {
+        admin = {
+          uid: crypto.randomUUID(),
+          username: "admin",
+          password: hashedPassword,
+          phone: "+00000000000",
+          role: "admin",
+          balance: 999.0,
+          createdAt: new Date().toISOString(),
+          localDesktopIdentity: true,
+        };
+        writeDB({ ...current, users: [...current.users, admin] });
+      }
     }
+
+    await flushDBOrThrow();
+    admin = readDB().users.find((user: any) => user.uid === admin.uid);
+    if (!admin) return res.status(409).json({ error: 'Local identity changed while preparing the session. Please try again.' });
 
     const tokenPayload: any = { uid: admin.uid, username: admin.username, role: admin.role };
     const token = jwt.sign(
@@ -215,15 +239,12 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
     }
   });
 
-  router.post("/auth/change-password", async (req, res) => {
+  router.post("/auth/change-password", requireAuth, async (req, res) => {
     try {
-    const token = req.cookies.token;
-    if (!token) return res.status(401).json({ error: "Unauthorized" });
-
-    const decoded: any = jwt.verify(token, jwtSecret);
+    const decoded = req.user!;
     const { currentPassword, newPassword } = req.body;
 
-    if (!currentPassword || !newPassword) {
+    if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || !newPassword) {
       return res.status(400).json({ error: "Current and new passwords are required" });
     }
 
@@ -241,8 +262,17 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
       return res.status(400).json({ error: "Incorrect current password" });
     }
 
-    db.users[userIndex].password = await bcrypt.hash(newPassword, 10);
-    writeDB(db);
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    const current = readDB();
+    const currentUser = current.users.find((user: any) => user.uid === decoded.uid);
+    if (!currentUser) return res.status(404).json({ error: 'User not found' });
+    if (currentUser.password !== storedPassword) {
+      return res.status(409).json({ error: 'Password changed while this request was being processed. Please try again.' });
+    }
+    writeDB({ ...current, users: current.users.map((user: any) => (
+      user.uid === decoded.uid ? { ...user, password: hashedPassword } : user
+    )) });
+    await flushDBOrThrow();
 
     res.json({ success: true });
     } catch (err: any) {
@@ -252,15 +282,11 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
   });
 
   // Switch into organization context — returns a new JWT with orgId + orgRole
-  router.post("/auth/switch-org", (req, res) => {
-    let token = req.cookies.token;
-    if (!token && req.headers.authorization?.startsWith('Bearer ')) {
-      token = req.headers.authorization.slice(7);
-    }
-    if (!token) return res.status(401).json({ error: "Not authenticated" });
-
+  // Validate membership in the target org below, so a former member can still
+  // leave the old org context and return to their personal workspace.
+  router.post("/auth/switch-org", requireUserSession, (req, res) => {
     try {
-      const decoded: any = jwt.verify(token, jwtSecret);
+      const decoded = req.user!;
       const { orgId } = req.body;
 
       // Allow clearing org context (return to personal mode)
@@ -306,7 +332,7 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
   // ── Biometric enrollment ──
 
   // Enroll a voiceprint: receives MFCC features extracted in-browser
-  router.put("/auth/biometric/voiceprint/enroll", async (req, res) => {
+  router.put("/auth/biometric/voiceprint/enroll", requireAuth, async (req, res) => {
     let token = req.cookies.token;
     if (!token && req.headers.authorization?.startsWith('Bearer ')) token = req.headers.authorization.slice(7);
     if (!token) return res.status(401).json({ error: "Not authenticated" });
@@ -375,7 +401,7 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
   });
 
   // Verify a recent speech window against enrolled voiceprints.
-  router.post("/auth/biometric/voiceprint/verify", async (req, res) => {
+  router.post("/auth/biometric/voiceprint/verify", requireAuth, async (req, res) => {
     let token = req.cookies.token;
     if (!token && req.headers.authorization?.startsWith('Bearer ')) token = req.headers.authorization.slice(7);
     if (!token) return res.status(401).json({ error: "Not authenticated" });
@@ -412,7 +438,7 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
   });
 
   // Enroll a face: receives embedding extracted in-browser via MediaPipe
-  router.put("/auth/biometric/face/enroll", (req, res) => {
+  router.put("/auth/biometric/face/enroll", requireAuth, (req, res) => {
     let token = req.cookies.token;
     if (!token && req.headers.authorization?.startsWith('Bearer ')) token = req.headers.authorization.slice(7);
     if (!token) return res.status(401).json({ error: "Not authenticated" });
@@ -440,7 +466,7 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
   });
 
   // List enrolled biometrics for current user
-  router.get("/auth/biometric/list", (req, res) => {
+  router.get("/auth/biometric/list", requireAuth, (req, res) => {
     let token = req.cookies.token;
     if (!token && req.headers.authorization?.startsWith('Bearer ')) token = req.headers.authorization.slice(7);
     if (!token) return res.status(401).json({ error: "Not authenticated" });
@@ -473,7 +499,7 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
   });
 
   // Delete a biometric item
-  router.delete("/auth/biometric/:type/:id", (req, res) => {
+  router.delete("/auth/biometric/:type/:id", requireAuth, (req, res) => {
     let token = req.cookies.token;
     if (!token && req.headers.authorization?.startsWith('Bearer ')) token = req.headers.authorization.slice(7);
     if (!token) return res.status(401).json({ error: "Not authenticated" });
@@ -503,7 +529,7 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
   // Face/voice signals currently support presence and command gating, not
   // cryptographic authentication. Keep old clients from silently impersonating
   // another local user until an explicit biometric challenge is implemented.
-  router.post("/auth/switch-user", (req, res) => {
+  router.post("/auth/switch-user", requireAuth, (req, res) => {
     let token = req.cookies.token;
     if (!token && req.headers.authorization?.startsWith('Bearer ')) token = req.headers.authorization.slice(7);
     if (!token) return res.status(401).json({ error: "Not authenticated" });
@@ -520,7 +546,7 @@ export function mountAuthRoutes(router: Router, jwtSecret: string, getCookieOpti
   });
 
   // List user's organization memberships (for org switcher UI)
-  router.get("/auth/orgs", (req, res) => {
+  router.get("/auth/orgs", requireAuth, (req, res) => {
     let token = req.cookies.token;
     if (!token && req.headers.authorization?.startsWith('Bearer ')) {
       token = req.headers.authorization.slice(7);

@@ -31,6 +31,85 @@ describe('active task message relation', () => {
     expect(classifyActiveTaskMessage('继续执行', activeState)).toBe('continue');
   });
 
+  it('keeps a global runtime-work query independent from the adjacent action', () => {
+    for (const state of [activeState, null]) {
+      expect(resolveActiveTaskMessageRelation('\u4f60\u73b0\u5728\u6709\u5728\u6267\u884c\u7684\u4efb\u52a1\u5417', state, {
+        activeRequestId: state ? 'request-7' : undefined,
+      })).toMatchObject({
+        relation: 'queue',
+        taskRelation: 'new',
+        feedback: 'new_task',
+        binding: 'new_task',
+        operation: 'enqueue',
+        reason: 'independent_instruction',
+      });
+    }
+  });
+
+  it('binds an actionable client-navigation correction to the same unfinished task', () => {
+    const correction = '\u6211\u8bf4\u7684\u662f\u6253\u5f00\u804a\u5929\u754c\u9762';
+    const clientTask: ConversationActionContinuationState = {
+      ...activeState,
+      taskId: 'task-client-mode',
+      status: 'blocked',
+      goal: '\u6253\u5f00\u5ba2\u6237\u7aef\u9875\u9762',
+      latestInstruction: '\u6253\u5f00\u5ba2\u6237\u7aef\u8bbe\u7f6e',
+      latestBlocker: 'client_action receipt missing',
+      activeRequestId: 'request-client-mode',
+      revision: 4,
+      unfinished: true,
+    };
+
+    expect(normalizeActionIntent(correction)).toMatchObject({
+      kind: 'client_navigation',
+      target: 'chat',
+      clientAction: 'open_chat',
+      relation: 'correction',
+    });
+    expect(resolveActiveTaskMessageRelation(correction, clientTask, {
+      activeRequestId: 'request-client-mode',
+    })).toMatchObject({
+      relation: 'continue',
+      taskRelation: 'correct',
+      feedback: 'correction',
+      binding: 'active_task',
+      operation: 'replan',
+      taskId: 'task-client-mode',
+      revision: 4,
+      targetRequestId: 'request-client-mode',
+      preservesRootGoal: true,
+    });
+  });
+
+  it('starts actionable corrections without a task as new work and detaches unrelated work', () => {
+    const correction = '\u6211\u8bf4\u7684\u662f\u6253\u5f00\u804a\u5929\u754c\u9762';
+    expect(resolveActiveTaskMessageRelation(correction, null)).toMatchObject({
+      relation: 'queue',
+      taskRelation: 'new',
+      feedback: 'new_task',
+      binding: 'new_task',
+      operation: 'enqueue',
+      preservesRootGoal: false,
+    });
+
+    const clientTask: ConversationActionContinuationState = {
+      ...activeState,
+      taskId: 'task-client-mode',
+      status: 'blocked',
+      goal: '\u6253\u5f00\u5ba2\u6237\u7aef\u9875\u9762',
+      latestInstruction: '\u6253\u5f00\u5ba2\u6237\u7aef\u8bbe\u7f6e',
+      unfinished: true,
+    };
+    expect(resolveActiveTaskMessageRelation('\u4eca\u5929\u5929\u6c14\u600e\u4e48\u6837', clientTask)).toMatchObject({
+      relation: 'queue',
+      taskRelation: 'new',
+      feedback: 'new_task',
+      binding: 'new_task',
+      operation: 'enqueue',
+      preservesRootGoal: false,
+    });
+  });
+
   it('cancels only an explicit cancellation or replacement', () => {
     expect(classifyActiveTaskMessage('取消当前任务', activeState)).toBe('cancel');
     expect(classifyActiveTaskMessage('Cancel this task. Do not write any file.', activeState)).toBe('cancel');
@@ -399,3 +478,4 @@ describe('active task message relation', () => {
     expect(context).toContain('LumiCore may report terminal completion only after checking the whole goal');
   });
 });
+import { normalizeActionIntent } from '../server/cognition/normalized_action_intent';

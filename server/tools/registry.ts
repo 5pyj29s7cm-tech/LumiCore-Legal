@@ -1,3 +1,5 @@
+import { isStrictPrivacy, requireNotStrict } from '../config/privacy';
+import { isDefiniteOfficialImageRejection } from '../llm/official_api';
 import {
   CapabilityAdapterContract,
   CapabilityLane,
@@ -243,7 +245,7 @@ function stableValue(value: unknown): unknown {
   ]));
 }
 
-function executionIdempotencyKey(name: string, args: Record<string, any>, context?: ToolContext): string {
+export function executionIdempotencyKey(name: string, args: Record<string, any>, context?: ToolContext): string {
   if (context?.idempotencyKey) return context.idempotencyKey;
   return crypto.createHash('sha256').update(JSON.stringify(stableValue({
     userId: context?.userId || '',
@@ -908,6 +910,7 @@ export class ToolRegistry {
     type: 'function';
     function: { name: string; description: string; parameters: Record<string, any> };
   }> {
+    if (isStrictPrivacy()) return [];
     return this.list().filter(tool => isToolVisibleToModelContext(tool, options?.context)).map(t => ({
       type: 'function' as const,
       function: {
@@ -972,6 +975,7 @@ export class ToolRegistry {
 
   /** Resolve effective security level for a tool given a personality's policy */
   resolveSecurity(toolName: string, policy?: ToolPolicy): EffectiveSecurity {
+    if (isStrictPrivacy()) return { level: 'forbidden', reason: 'Strict privacy pauses automatic tool execution' };
     const tool = this.get(toolName);
     const builtIn: SecurityLevel = tool?.securityLevel || 'confirm';
     const semanticToolName = String(tool?.semanticToolName || toolName);
@@ -1018,6 +1022,9 @@ export class ToolRegistry {
   }
 
   async execute(name: string, args: Record<string, any>, context?: ToolContext): Promise<string> {
+    // Tools can invoke browsers, MCP servers and child processes. Side-effect
+    // labels alone cannot prove that their execution stays on this computer.
+    requireNotStrict('Automatic tool execution');
     const finishMetric = beginToolMetric(name);
     const tool = this.get(name);
     if (!tool) {
@@ -1541,7 +1548,7 @@ export class ToolRegistry {
       } catch (error: any) {
         if (error?.externalCommitUnknown === true) throw error;
         if (externalCommit) {
-          if (!handlerEntered) {
+          if (!handlerEntered || (['generate_image', 'ai_edit_image'].includes(name) && isDefiniteOfficialImageRejection(error))) {
             await settleExternalCommitAttempt({
               idempotencyKey,
               claimToken,

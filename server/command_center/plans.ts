@@ -1,6 +1,11 @@
 import crypto from 'node:crypto';
 import { readDB, writeDB } from '../../db_layer';
 import {
+  captureOrganizationMembershipAuthorization,
+  isOrganizationMembershipAuthorizationCurrent,
+  type OrganizationMembershipAuthorization,
+} from '../org/membership_authorization';
+import {
   enqueue,
   getTaskHistory,
   getTaskQueue,
@@ -30,6 +35,8 @@ export interface CommandCenterPlan {
   lastRuntimeTaskId: string;
   createdAt: string;
   updatedAt: string;
+  membershipAuthorization?: OrganizationMembershipAuthorization;
+  authorizationBlockedReason?: 'membership_missing' | 'membership_changed' | '';
 }
 
 export interface CommandCenterPlanInput {
@@ -71,6 +78,37 @@ function defaultCadence(kind: CommandCenterPlanKind): CommandCenterPlanCadence {
   if (kind === 'daily_task') return 'daily';
   if (kind === 'periodic_report') return 'weekly';
   return 'weekly';
+}
+
+function authorizationBlocker(plan: CommandCenterPlan): CommandCenterPlan['authorizationBlockedReason'] {
+  if (plan.domain !== 'work') return '';
+  if (plan.authorizationBlockedReason) return plan.authorizationBlockedReason;
+  if (!plan.membershipAuthorization) return 'membership_missing';
+  return isOrganizationMembershipAuthorizationCurrent(plan.membershipAuthorization, plan.orgId, plan.userId)
+    ? '' : 'membership_changed';
+}
+
+function publicPlan(plan: CommandCenterPlan): CommandCenterPlan {
+  const reason = authorizationBlocker(plan);
+  return { ...plan, authorizationBlockedReason: reason,
+    ...(reason ? { status: plan.status === 'completed' ? 'completed' as const : 'paused' as const, nextRunAt: '' } : {}) };
+}
+
+function pauseUnauthorizedPlan(plan: CommandCenterPlan, at: Date): boolean {
+  const reason = authorizationBlocker(plan);
+  if (!reason) return false;
+  plan.authorizationBlockedReason = reason;
+  if (plan.status !== 'completed') plan.status = 'paused';
+  plan.nextRunAt = '';
+  plan.updatedAt = at.toISOString();
+  return true;
+}
+
+export class CommandCenterPlanAuthorizationError extends Error {
+  constructor(public readonly reason: CommandCenterPlan['authorizationBlockedReason']) {
+    super('This plan needs explicit organization authorization before it can run. Review and authorize it again.');
+    this.name = 'CommandCenterPlanAuthorizationError';
+  }
 }
 
 export function nextCommandCenterPlanRun(
@@ -132,7 +170,7 @@ export function listCommandCenterPlans(input: {
   return plans(readDB())
     .filter(plan => plan.userId === input.userId && plan.domain === input.domain && plan.orgId === input.orgId)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    .map(plan => ({ ...plan }));
+    .map(publicPlan);
 }
 
 export function createCommandCenterPlan(scope: {
@@ -155,6 +193,9 @@ export function createCommandCenterPlan(scope: {
     lastRuntimeTaskId: '',
     createdAt: timestamp,
     updatedAt: timestamp,
+    membershipAuthorization: scope.domain === 'work'
+      ? captureOrganizationMembershipAuthorization(scope.orgId, scope.userId) : undefined,
+    authorizationBlockedReason: '',
   };
   plan.nextRunAt = nextCommandCenterPlanRun(plan, now);
   plans(db).push(plan);
@@ -167,7 +208,7 @@ export function updateCommandCenterPlan(input: {
   userId: string;
   domain: 'personal' | 'work';
   orgId: string;
-  patch: CommandCenterPlanInput & { status?: unknown };
+  patch: CommandCenterPlanInput & { status?: unknown; reauthorize?: unknown };
 }, now = new Date()): CommandCenterPlan | null {
   const db = readDB();
   const plan = plans(db).find(candidate => candidate.id === input.id
@@ -175,11 +216,31 @@ export function updateCommandCenterPlan(input: {
     && candidate.domain === input.domain
     && candidate.orgId === input.orgId);
   if (!plan) return null;
-  Object.assign(plan, normalizedInput(input.patch, plan));
+  const normalized = normalizedInput(input.patch, plan);
+  const scheduleChanged = normalized.cadence !== plan.cadence
+    || (normalized.cadence !== 'none' && normalized.timeOfDay !== plan.timeOfDay)
+    || (normalized.cadence === 'weekly' && normalized.dayOfWeek !== plan.dayOfWeek)
+    || (normalized.cadence === 'monthly' && normalized.dayOfMonth !== plan.dayOfMonth);
+  const previousStatus = plan.status;
+  // A new membership identity is accepted only by an explicit authenticated user action.
+  const renewedAuthorization = input.patch.reauthorize === true && plan.domain === 'work'
+    ? captureOrganizationMembershipAuthorization(plan.orgId, plan.userId) : undefined;
+  Object.assign(plan, normalized);
+  if (renewedAuthorization) {
+    plan.membershipAuthorization = renewedAuthorization;
+    plan.authorizationBlockedReason = '';
+  }
   const status = String(input.patch.status || '');
   if (status === 'active' || status === 'paused' || status === 'completed') plan.status = status;
   plan.updatedAt = now.toISOString();
-  plan.nextRunAt = plan.status === 'active' ? nextCommandCenterPlanRun(plan, now) : '';
+  if (!pauseUnauthorizedPlan(plan, now)) {
+    // Metadata-only edits retain even an overdue slot. Explicit schedule edits or
+    // reactivation start from the edit time; previously queued runs are unchanged.
+    if (plan.status !== 'active') plan.nextRunAt = '';
+    else if (scheduleChanged || previousStatus !== 'active' || renewedAuthorization) {
+      plan.nextRunAt = nextCommandCenterPlanRun(plan, now);
+    }
+  }
   writeDB(db);
   return { ...plan };
 }
@@ -225,7 +286,7 @@ function activeManualRun(plan: CommandCenterPlan): AutonomousTask | null {
     if (!byId.has(task.id)) byId.set(task.id, task);
   }
   const candidates = Array.from(byId.values()).filter(task => {
-    if (!ACTIVE_RUNTIME_STATUSES.has(task.status) || !String(task.idempotencyKey || '').startsWith(prefix)) {
+    if ((!ACTIVE_RUNTIME_STATUSES.has(task.status) && !task.finalizationPending) || !String(task.idempotencyKey || '').startsWith(prefix)) {
       return false;
     }
     const domain = task.domain === 'work' ? 'work' : 'personal';
@@ -247,6 +308,12 @@ export function runCommandCenterPlan(input: {
     && candidate.domain === input.domain
     && candidate.orgId === input.orgId);
   if (!plan) return null;
+  if (pauseUnauthorizedPlan(plan, at)) {
+    writeDB(db);
+    if (input.manual) throw new CommandCenterPlanAuthorizationError(plan.authorizationBlockedReason);
+    return null;
+  }
+  const membershipAuthorization = plan.membershipAuthorization;
   if (input.manual) {
     const active = activeManualRun(plan);
     if (active) {
@@ -270,6 +337,7 @@ export function runCommandCenterPlan(input: {
     orgId: plan.orgId,
     conversationId: plan.conversationId || `command-center-plan:${plan.id}`,
     planId: plan.id,
+    membershipAuthorization,
     priority: plan.kind === 'daily_task' ? 7 : 6,
     mode: 'analysis',
     idempotencyKey: `command-center-plan:${plan.id}:${slot}`,
@@ -286,6 +354,11 @@ export function runCommandCenterPlan(input: {
 }
 export function dispatchDueCommandCenterPlans(at = new Date()): number {
   const db = readDB();
+  let authorizationChanged = false;
+  for (const plan of plans(db)) {
+    if (plan.status === 'active' && pauseUnauthorizedPlan(plan, at)) authorizationChanged = true;
+  }
+  if (authorizationChanged) writeDB(db);
   const due = plans(db)
     .filter(plan => plan.status === 'active' && plan.nextRunAt && new Date(plan.nextRunAt).getTime() <= at.getTime())
     .map(plan => ({ id: plan.id, userId: plan.userId, domain: plan.domain, orgId: plan.orgId }));

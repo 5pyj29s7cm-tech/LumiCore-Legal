@@ -63,7 +63,7 @@ describe('finalized output paths', () => {
     expect(task).toContain('shouldDeferModelOutputUntilFinalized');
     expect(task).toContain('createPreFinalizationTextGate');
     expect(task).toContain('const taskTextGate = createPreFinalizationTextGate()');
-    expect(task).toContain('if (!taskLease.signal.aborted && !deferTaskModelOutput)');
+    expect(task).toContain('if (!authority.isCancelled() && !deferTaskModelOutput)');
     expect(task).toContain('const safeText = taskTextGate.push(chunk)');
     expect(task).toContain('taskTextGate.finish()');
     expect(task).toMatch(/(?:const|let) finalTaskToolRecords = attachDesktopReceipt\(result\.toolCalls\)/);
@@ -214,15 +214,23 @@ describe('finalized output paths', () => {
     const terminalBoundaryStart = voice.indexOf('const commitVoiceTerminal = async');
     const terminalBoundaryEnd = voice.indexOf('const maxIterations =', terminalBoundaryStart);
     const terminalBoundary = voice.slice(terminalBoundaryStart, terminalBoundaryEnd);
-    const singleModelStart = voice.indexOf('const streamResult = await makeLLMCallStreaming(');
-    const finalizerStart = voice.indexOf('let finalResponse: ReturnType<typeof finalizeLumiResponse>', singleModelStart);
+    // Include the stream callback as well as both shared entry points. Starting
+    // at only the runWithTools call would miss speech queued from onChunk.
+    const modelCandidateStart = voice.indexOf('const modelConfig: LLMConfig = {');
+    const sharedTurnStart = voice.indexOf('const result = toolSessionActive', modelCandidateStart);
+    const sharedToolStart = voice.indexOf('await runWithTools(', sharedTurnStart);
+    const sharedConversationStart = voice.indexOf('await runConversationTurn({', sharedTurnStart);
+    const finalizerStart = voice.indexOf('let finalResponse: ReturnType<typeof finalizeLumiResponse>', sharedTurnStart);
     const finalCommitStart = voice.indexOf('mainTerminalCommitted = await commitVoiceTerminal({', finalizerStart);
-    const modelCandidatePath = voice.slice(singleModelStart, finalizerStart);
+    const modelCandidatePath = voice.slice(modelCandidateStart, finalizerStart);
     const finalCommitPath = voice.slice(finalCommitStart, finalCommitStart + 1_000);
 
     expect(terminalBoundaryStart).toBeGreaterThan(0);
-    expect(singleModelStart).toBeGreaterThan(0);
-    expect(finalizerStart).toBeGreaterThan(singleModelStart);
+    expect(modelCandidateStart).toBeGreaterThan(0);
+    expect(sharedTurnStart).toBeGreaterThan(modelCandidateStart);
+    expect(sharedToolStart).toBeGreaterThan(sharedTurnStart);
+    expect(sharedConversationStart).toBeGreaterThan(sharedToolStart);
+    expect(finalizerStart).toBeGreaterThan(sharedConversationStart);
     expect(finalCommitStart).toBeGreaterThan(finalizerStart);
     expect(terminalBoundary.indexOf('recordChatExecutionTerminalEventDurably(')).toBeGreaterThan(0);
     expect(terminalBoundary.indexOf('publishCommitted:')).toBeGreaterThan(
@@ -233,6 +241,9 @@ describe('finalized output paths', () => {
     );
     expect(modelCandidatePath).not.toContain('flushSentence(');
     expect(modelCandidatePath).not.toContain('queueFinalizedSpeech(');
+    expect(modelCandidatePath).toContain('const onChunk = (chunk: string) => {');
+    expect(modelCandidatePath).toContain("responseText = result.text || '';");
+    expect(modelCandidatePath).toContain('completionGuard = result.completionGuard;');
     expect(finalCommitPath).toContain('speechText: responseText');
     expect(voice.slice(finalizerStart, finalCommitStart + 1_000)).not.toContain('modelGateSnapshot');
   });
@@ -321,12 +332,34 @@ describe('finalized output paths', () => {
     expect(autonomous).toContain('if (!outcome.verified || !terminalAcceptance?.accepted)');
     expect(autonomous).toContain('verified: true');
     expect(autonomous).not.toContain('Completed with ${toolCallCount} tool calls.');
-    const linkedPlanStart = autonomous.indexOf('function markLinkedPlanCompleted');
-    const linkedPlanEnd = autonomous.indexOf('function markLinkedPlanFailed', linkedPlanStart);
-    const linkedPlanPath = autonomous.slice(linkedPlanStart, linkedPlanEnd);
-    expect(linkedPlanPath).toContain("plan.steps.find(item => item.status === 'in_progress')");
+    const planner = source('server/autonomy/planner.ts');
+    const linkedPlanStart = planner.indexOf('export function stageAutonomousPlanCompletion(');
+    const linkedPlanEnd = planner.indexOf('function normalizeScope(', linkedPlanStart);
+    expect(linkedPlanStart).toBeGreaterThanOrEqual(0);
+    expect(linkedPlanEnd).toBeGreaterThan(linkedPlanStart);
+    const linkedPlanPath = planner.slice(linkedPlanStart, linkedPlanEnd);
+    expect(linkedPlanPath).toContain("plan.steps.find(candidate => candidate.status === 'in_progress')");
+    expect(linkedPlanPath).toContain("plan.steps.find(candidate => candidate.status === 'pending')");
+    expect(linkedPlanPath.match(/\bstep\.status\s*=\s*'done'/g)).toHaveLength(1);
     expect(linkedPlanPath).not.toContain('for (const step of plan.steps)');
-    expect(linkedPlanPath).not.toContain("status: 'completed'");
+    expect(linkedPlanPath).toContain("if (plan.steps.every(candidate => candidate.status === 'done' || candidate.status === 'skipped'))");
+    expect(linkedPlanPath.indexOf("plan.status = 'completed'")).toBeGreaterThan(linkedPlanPath.indexOf('if (plan.steps.every('));
+    const hideUnsavedPlan = linkedPlanPath.indexOf('pendingAutonomousPlanCompletions.set(taskId, pending)');
+    expect(hideUnsavedPlan).toBeGreaterThanOrEqual(0);
+    expect(linkedPlanPath.indexOf('writeDB(db)')).toBeGreaterThan(hideUnsavedPlan);
+    expect(planner).toContain('.map(projectPlanCompletion)');
+    expect(planner).toContain('return plan ? projectPlanCompletion(plan) : null');
+    expect(autonomous).toContain('stageAutonomousPlanCompletion(task.id, task.planId, planScopeForTask(task), clipPlanResult(summary))');
+    const planSaveStart = autonomous.indexOf('async function flushAutonomousTaskFinalizations(');
+    const planSaveEnd = autonomous.indexOf('export async function retryAutonomousTaskFinalizations(', planSaveStart);
+    expect(planSaveStart).toBeGreaterThanOrEqual(0);
+    expect(planSaveEnd).toBeGreaterThan(planSaveStart);
+    const planSavePath = autonomous.slice(planSaveStart, planSaveEnd);
+    const saveBarrier = planSavePath.indexOf('await persistAutonomousTaskQueue()');
+    const exposeSavedPlan = planSavePath.indexOf('completion.confirmPlanSaved?.()');
+    expect(saveBarrier).toBeGreaterThanOrEqual(0);
+    expect(exposeSavedPlan).toBeGreaterThan(saveBarrier);
+    expect(planSavePath.indexOf('io.to(completion.room).emit(')).toBeGreaterThan(exposeSavedPlan);
     expect(ambient).toContain('isVerifiedAutonomousHistoryItem(t)');
     expect(feed).toContain('isVerifiedAutonomousCompletionPayload(data)');
 

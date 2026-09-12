@@ -1,9 +1,11 @@
 import OpenAI from "openai";
+import { localPrivacyFetch } from '../config/privacy';
 import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { getKey } from "../config/keys";
 import { getLocalModelConfig, isTextGenerationModel, refreshLocalModelConfig } from "../llm/local_models";
-import { relayConfigured, relayOpenAIBaseUrl } from "../relay/config";
+import { relayApiKey, relayConfigured, relayOpenAIBaseUrl } from "../relay/config";
+import { normalizeOfficialOpenAIErrorResponse } from '../llm/official_api';
 
 let openai: OpenAI | null = null;
 let openaiSignature = '';
@@ -152,6 +154,7 @@ function getOllama() {
   if (!ollama || ollamaSignature !== signature) {
     ollama = new OpenAI({
       apiKey: 'ollama',
+      fetch: localPrivacyFetch,
       baseURL: `${config.baseUrl}/v1`,
     });
     ollamaSignature = signature;
@@ -172,6 +175,7 @@ function getLmStudio() {
   if (!lmstudio || lmstudioSignature !== signature) {
     lmstudio = new OpenAI({
       apiKey: 'lm-studio',
+      fetch: localPrivacyFetch,
       baseURL: `${config.baseUrl}/v1`,
     });
     lmstudioSignature = signature;
@@ -236,7 +240,7 @@ function getGlm() {
 }
 
 function getRelay() {
-  const key = process.env.RELAY_API_KEY || getKey('RELAY_API_KEY');
+  const key = relayApiKey();
   // A relay is not usable with a key alone.  Do not construct a client for
   // the old example endpoint: role pages would report the provider as
   // selected, then the first real request would be sent to a placeholder
@@ -251,6 +255,10 @@ function getRelay() {
     relay = new OpenAI({
       apiKey: key!,
       baseURL: baseUrl,
+      // Retry/failover is owned by the common provider layer and its deadline.
+      // An SDK retry inside that attempt must not silently multiply requests.
+      maxRetries: 0,
+      fetch: async (input, init) => normalizeOfficialOpenAIErrorResponse(await fetch(input, init), key),
     });
     relaySignature = signature;
   }

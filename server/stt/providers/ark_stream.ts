@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { requireNotStrict } from '../../config/privacy';
 import { gzipSync, gunzipSync } from 'zlib';
 import { WebSocket } from 'ws';
 import { STTResult, StreamingSTTSession } from '../types';
@@ -287,6 +288,7 @@ export function createStream(
   language: string = 'zh-CN',
   interimResults: boolean = true,
 ): ArkStreamSession {
+  requireNotStrict('Doubao streaming speech recognition');
   if (!isCircuitClosed(PROVIDER)) {
     throw new Error('[CircuitBreaker] Doubao STT is temporarily unavailable (circuit open). The circuit will probe automatically after cooldown.');
   }
@@ -350,11 +352,13 @@ export function createStream(
   }
 
   ws.on('open', () => {
+    if (closed) { try { ws.close(); } catch {} return; }
     logger.info('[Doubao-ASR] WebSocket connected, sending full client request');
     ws.send(buildFullClientRequest(sequence, buildRequest(language)));
   });
 
   ws.on('message', (raw: WebSocket.RawData) => {
+    if (closed) return;
     try {
       const packet = parseResponse(Buffer.isBuffer(raw) ? raw : Buffer.from(raw as any));
       if (packet.code) {
@@ -406,6 +410,14 @@ export function createStream(
   });
 
   return {
+    abort() {
+      ending = true;
+      closed = true;
+      audioQueue.length = 0;
+      if (stablePartialTimer) clearTimeout(stablePartialTimer);
+      stablePartialTimer = null;
+      try { ws.terminate(); } catch { try { ws.close(); } catch {} }
+    },
     sendAudio(chunk: Buffer) {
       if (ending) return;
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -450,6 +462,7 @@ export interface DoubaoStreamingProbeResult {
 export async function probeDoubaoStreamingConnection(
   options: { timeoutMs?: number; language?: string } = {},
 ): Promise<DoubaoStreamingProbeResult> {
+  requireNotStrict('Doubao streaming connection test');
   const timeoutMs = Math.max(1_000, Math.min(30_000, options.timeoutMs || 8_000));
   const language = options.language || 'zh-CN';
   const endpoint = process.env.DOUBAO_ASR_WS_URL || DEFAULT_WS_URL;

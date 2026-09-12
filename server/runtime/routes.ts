@@ -25,6 +25,7 @@ import { mountCommandCenterPlanRoutes } from "../routes/command_center_plan_rout
 import { mountIndustryWorkflowRoutes } from "../routes/industry_workflow_routes";
 import { mountTaskRegressionEvidenceRoutes } from "../evidence/task_truth_snapshot_route";
 import { mountExternalCapabilityRoutes } from "../routes/external_capability_routes";
+import { mountPrivacyRoutes } from '../routes/privacy_routes';
 
 interface RouteContext {
   apiRouter: Router;
@@ -60,6 +61,7 @@ export function mountAllRoutes({ apiRouter, jwtSecret, llm, getCookieOptions, io
 
   // System routes (health, tools, llm, settings, stats, ecosystem, modules)
   mountSystemRoutes(apiRouter, jwtSecret, io, llm);
+  mountPrivacyRoutes(apiRouter);
 
   // AI Chat
   mountChatRoutes(apiRouter, jwtSecret, llmGetters);
@@ -97,7 +99,7 @@ export function mountAllRoutes({ apiRouter, jwtSecret, llm, getCookieOptions, io
   // System Exploration & Plans
   mountExploreRoutes(apiRouter);
   mountPlanRoutes(apiRouter);
-  mountCommandCenterPlanRoutes(apiRouter);
+  mountCommandCenterPlanRoutes(apiRouter, { io, getters: llmGetters });
   mountIndustryWorkflowRoutes(apiRouter);
 
   // Autonomy

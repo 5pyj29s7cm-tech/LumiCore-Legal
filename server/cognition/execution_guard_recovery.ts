@@ -1,4 +1,5 @@
 import type { ToolExecutionRecord } from '../tools/types';
+import type { CompletionGuardResult } from '../work_product/completion_guard';
 import { CN_EXECUTION_EVIDENCE_MESSAGES } from '../regions/packs/cn/execution_evidence_messages';
 import { formatCnToolFailureDetail } from '../regions/packs/cn/voice_fast_path_messages';
 import {
@@ -13,6 +14,7 @@ import {
 } from './normalized_action_intent';
 import { formatUserVisibleReplyForReadability } from './reply_style';
 import { containsInternalExecutionLanguage } from '../../shared/public_execution_language';
+import { DESKTOP_COMPLETION_REVIEW_REASON } from './desktop_completion_review';
 
 export type ExecutionGuardIntent = 'conversation' | 'status_query' | 'action_execution';
 
@@ -67,6 +69,7 @@ export interface ExecutionGuardRecoveryAttemptContext {
 export interface ExecutionGuardRecoveryAttemptResult {
   text?: string;
   toolRecords?: ToolExecutionRecord[];
+  completionGuard?: CompletionGuardResult;
 }
 
 export interface ExecutionGuardRecoveryRunInput<
@@ -87,6 +90,7 @@ export interface ExecutionGuardRecoveryRunInput<
   finalize: (
     responseText: string,
     toolRecords: ToolExecutionRecord[],
+    completionGuard?: CompletionGuardResult,
   ) => TFinalization;
   isAborted?: () => boolean;
   isPendingConfirmation?: () => boolean;
@@ -274,6 +278,9 @@ export function decideExecutionGuardRecovery(input: ExecutionGuardRecoveryInput)
       ? classifyExecutionGuardIntent(input.task, records)
       : 'action_execution');
   if (!input.blocked && !missingFreshConfirmation) return { recoverable: false, reason: 'response_not_blocked', intent };
+  if (input.reason === DESKTOP_COMPLETION_REVIEW_REASON) {
+    return { recoverable: false, reason: DESKTOP_COMPLETION_REVIEW_REASON, intent };
+  }
   if (intent === 'conversation') {
     return { recoverable: false, reason: 'conversation_requires_natural_clarification', intent };
   }
@@ -486,11 +493,13 @@ function publicBlockedReason(decision: ExecutionGuardRecoveryDecision): string {
   return PUBLIC_RECOVERY_FAILURE_REASON;
 }
 
-function publicDeliveryReason(reason: unknown, blocked: boolean): string {
+function publicDeliveryReason(reason: unknown, blocked: boolean, exactPendingProposal: boolean): string {
   const normalized = String(reason || '').trim();
   if (!normalized) return blocked ? PUBLIC_RECOVERY_FAILURE_REASON : '';
   if (CONFIRMATION_BLOCK.test(normalized) || normalized === 'waiting_confirmation') {
-    return 'waiting_confirmation';
+    // A verifier saying an outcome is "not confirmed" is not a user approval
+    // request. Only the transport's exact durable proposal may expose this state.
+    return exactPendingProposal ? 'waiting_confirmation' : PUBLIC_RECOVERY_FAILURE_REASON;
   }
   if (/^(?:cancelled|canceled|request_cancelled)$/i.test(normalized)) return 'request_cancelled';
   if (/uncertain_external_(?:outcome|commit)/i.test(normalized)) return 'uncertain_external_outcome';
@@ -524,6 +533,8 @@ export function sanitizeExecutionResponseForDelivery<
     : publicDeliveryReason(
         textLeaks ? PUBLIC_RECOVERY_FAILURE_REASON : delivery.reason,
         blocked,
+        Boolean(options.trustedConfirmationRequestText
+          && String(delivery.text || '').trim() === options.trustedConfirmationRequestText.trim()),
       );
   const fallbackText = textLeaks
       ? intent === 'conversation'
@@ -595,6 +606,7 @@ function sanitizeLeakingFinalization<
       ? publicBlockedReason(decision)
       : finalization.reason,
     informationalGuard ? false : finalization.blocked,
+    decision.reason === 'waiting_for_user_confirmation',
   );
   const reasonChanged = publicReason !== String(finalization.reason || '').trim();
   if (!forceFailureText && !leakingText && !leakingReason && !leakingNotification && !reasonChanged && finalization.notification === undefined) {
@@ -779,7 +791,7 @@ export async function recoverBlockedExecutionOnce<
     const candidateText = String(recovery.text || '').trim()
       ? String(recovery.text)
       : input.responseText;
-    let finalization = input.finalize(candidateText, toolRecords);
+    let finalization = input.finalize(candidateText, toolRecords, recovery.completionGuard);
     const pendingAfterRecovery = Boolean(
       input.pendingConfirmation || input.isPendingConfirmation?.(),
     );

@@ -1,6 +1,6 @@
 import { ParsedToolCall, NormalizedLLMResponse } from '../tools/types';
 import { withCloudResilience } from '../cloud/resilience';
-import { isProviderLocalOnly, isStrictPrivacy, requireLocalProvider } from '../config/privacy';
+import { isProviderLocalOnly, isStrictPrivacy, requireLocalProvider, requireLocalEndpoint } from '../config/privacy';
 import {
   getScopedPreferredLLM,
   type UserLLMFallbackCandidate,
@@ -9,7 +9,7 @@ import {
 import { compileReasoningFailoverCandidates } from './failover_policy';
 import { getUserPreferredVision } from './vision_preferences';
 import { getUserPreferredWorldModel } from './world_preferences';
-import { ensureLocalModelReady, runLocalModelInference, type LocalModelProvider } from './local_models';
+import { ensureLocalModelReady, getLocalModelConfig, runLocalModelInference, type LocalModelProvider } from './local_models';
 import { prepareLocalModelRequest } from './local_context_budget';
 import {
   modelRoutingErrorDigest,
@@ -39,7 +39,14 @@ export type MessageContent =
   | null
   | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } }>;
 
-export type LLMResponseFormat = 'json_object';
+export type LLMResponseFormat = 'json_object' | {
+  type: 'json_schema';
+  json_schema: { name: string; schema: Record<string, unknown>; strict?: boolean };
+};
+
+function responseFormatParameter(format?: LLMResponseFormat) {
+  return format === 'json_object' ? { type: 'json_object' as const } : format;
+}
 
 export type ReasoningProvider = string;
 
@@ -64,6 +71,8 @@ export interface LLMCallConfig {
   interactionId?: string;
   source?: string;
   responseFormat?: LLMResponseFormat;
+  /** Per-call opt-out for supported DeepSeek thinking APIs; never a saved preference. */
+  thinkingMode?: 'disabled';
   signal?: AbortSignal;
   /** Provider-independent lifecycle deadlines for one model attempt. */
   attemptTimeouts?: Partial<ModelAttemptTimeouts>;
@@ -388,6 +397,9 @@ function assertProviderAllowedByPrivacy(config: LLMCallConfig): void {
     throw new Error(`[Privacy] Local-only routing active. Cloud provider "${config.provider}" is blocked. Use ollama or lmstudio.`);
   }
   requireLocalProvider(config.provider);
+  if (isProviderLocalOnly(config.provider)) {
+    requireLocalEndpoint(getLocalModelConfig(config.provider as LocalModelProvider).baseUrl, 'Local language model');
+  }
 }
 
 function assertQwenAllowedByUserPrefs(config: { provider: string; model: string; userId?: string; domain?: string; orgId?: string; role?: 'reasoning' | 'vision' | 'world'; authorizedRoutingCandidate?: boolean }): void {
@@ -421,6 +433,9 @@ function autoDispatchPreference(config: LLMCallConfig) {
     ? getScopedPreferredLLM(config.userId, { domain: config.domain, orgId: config.orgId })
     : null;
   return {
+    // Routing changes candidates, not request-level safety/visibility contracts.
+    // Keep future tool, cancellation and output constraints on the same path.
+    ...config,
     provider: preferred?.autoFallbackProvider || 'deepseek',
     model: preferred?.autoFallbackModel || preferred?.models?.deepseek || 'deepseek-v4-flash',
     localModel: config.model || preferred?.model,
@@ -428,13 +443,6 @@ function autoDispatchPreference(config: LLMCallConfig) {
     requestedModel: config.model,
     selectionMode: 'auto' as const,
     fallbackCandidates: config.fallbackCandidates || preferred?.fallbackCandidates || [],
-    maxTokens: config.maxTokens,
-    userId: config.userId,
-    domain: config.domain,
-    orgId: config.orgId,
-    signal: config.signal,
-    attemptTimeouts: config.attemptTimeouts,
-    inputTokenBudget: config.inputTokenBudget,
     allowCloudFallback: config.allowCloudFallback !== false
       && preferred?.allowCloudFallback !== false
       && !isStrictPrivacy(),
@@ -643,7 +651,7 @@ type OpenAICompatibleRequest = {
   tool_choice?: string;
   max_tokens?: number;
   user?: string;
-  response_format?: { type: 'json_object' };
+  response_format?: ReturnType<typeof responseFormatParameter>;
 };
 
 function formatOpenAICompatibleRequest(
@@ -660,7 +668,7 @@ function formatOpenAICompatibleRequest(
     ...(hasTools ? { tools: params.toolDeclarations, tool_choice: 'auto' } : {}),
     ...(params.maxTokens ? { max_tokens: params.maxTokens } : {}),
     ...(params.userId ? { user: params.userId.replace(/[^a-zA-Z0-9_-]/g, '_') } : {}),
-    ...(params.responseFormat === 'json_object' ? { response_format: { type: 'json_object' as const } } : {}),
+    ...(params.responseFormat ? { response_format: responseFormatParameter(params.responseFormat) } : {}),
   };
 }
 
@@ -678,6 +686,35 @@ function extractUsage(rawResponse: any) {
   };
 }
 
+export class ModelToolArgumentsError extends Error {
+  readonly code = 'MODEL_TOOL_ARGUMENTS_INVALID';
+
+  constructor(reason: string) {
+    // Do not include model-supplied arguments: they may contain private data.
+    super(`Model returned invalid tool-call arguments: ${reason}`);
+    this.name = 'ModelToolArgumentsError';
+  }
+}
+
+function parseToolArguments(value: unknown): Record<string, any> {
+  let parsed: unknown;
+  try {
+    parsed = typeof value === 'string' ? JSON.parse(value || '{}') : (value ?? {});
+  } catch {
+    throw new ModelToolArgumentsError('incomplete or malformed JSON');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ModelToolArgumentsError('expected an object');
+  }
+  return parsed as Record<string, any>;
+}
+
+function assertToolResponseComplete(reason: unknown): void {
+  if (reason === 'length' || reason === 'max_tokens' || reason === 'content_filter') {
+    throw new ModelToolArgumentsError('response ended before the tool turn completed');
+  }
+}
+
 export function parseDeepSeekResponse(rawResponse: any): NormalizedLLMResponse {
   const message = rawResponse.choices?.[0]?.message;
   if (!message) return { text: null, toolCalls: null };
@@ -689,13 +726,12 @@ export function parseDeepSeekResponse(rawResponse: any): NormalizedLLMResponse {
   const usage = extractUsage(rawResponse);
 
   if (message.tool_calls && message.tool_calls.length > 0) {
-    const toolCalls: ParsedToolCall[] = message.tool_calls.map((tc: any) => {
-      let args: Record<string, any> = {};
-      try {
-        args = JSON.parse(tc.function?.arguments || '{}');
-      } catch { /* ignore parse errors */ }
-      return { id: tc.id, name: tc.function?.name || '', arguments: args };
-    });
+    assertToolResponseComplete(rawResponse.choices?.[0]?.finish_reason);
+    const toolCalls: ParsedToolCall[] = message.tool_calls.map((tc: any) => ({
+      id: tc.id,
+      name: tc.function?.name || '',
+      arguments: parseToolArguments(tc.function?.arguments),
+    }));
     return { text, toolCalls, reasoningContent, usage };
   }
 
@@ -914,7 +950,7 @@ export function formatQwenRequest(params: {
   tools?: ToolDeclaration[];
   tool_choice?: string;
   max_tokens?: number;
-  response_format?: { type: 'json_object' };
+  response_format?: ReturnType<typeof responseFormatParameter>;
 } {
   const openaiMessages = buildOpenAICompatibleMessages(params.messages);
 
@@ -925,7 +961,7 @@ export function formatQwenRequest(params: {
     messages: openaiMessages,
     ...(hasTools ? { tools: params.toolDeclarations, tool_choice: 'auto' } : {}),
     ...(params.maxTokens ? { max_tokens: params.maxTokens } : {}),
-    ...(params.responseFormat === 'json_object' ? { response_format: { type: 'json_object' as const } } : {}),
+    ...(params.responseFormat ? { response_format: responseFormatParameter(params.responseFormat) } : {}),
     // DashScope does not support the OpenAI `user` parameter — omit it
   };
 }
@@ -1001,10 +1037,11 @@ export function parseAnthropicResponse(rawResponse: any): NormalizedLLMResponse 
       textParts.push(block.text);
     }
     if (block.type === 'tool_use') {
+      assertToolResponseComplete(rawResponse.stop_reason);
       toolCalls.push({
         id: block.id,
         name: block.name,
-        arguments: block.input || {},
+        arguments: parseToolArguments(block.input),
       });
     }
   }
@@ -1366,6 +1403,10 @@ export async function makeLLMCallDirect(
       if (params.max_tokens !== undefined) params.max_completion_tokens = params.max_tokens;
       delete params.max_tokens;
     }
+    if (config.thinkingMode === 'disabled' && (config.provider === 'deepseek'
+      || (config.provider === 'relay' && /(?:^|\/)deepseek-/i.test(config.model)))) {
+      params.thinking = { type: 'disabled' };
+    }
 
     const outboundSourceSlot = providerSourceUserSlot(params.messages);
     const outboundEvidence = buildProviderOutboundMessagesEvidence({
@@ -1395,7 +1436,7 @@ export async function makeLLMCallDirect(
       let response: any;
       try {
         response = supervisedLocal
-          ? await runLocalModelInference(config.provider as LocalModelProvider, execute, { signal: config.signal })
+          ? await runLocalModelInference(config.provider as LocalModelProvider, execute, { signal: config.signal, model: config.model })
           : await execute();
       } catch (error) {
         if (extensionProvider) throw extensionProviderFailure(config.provider, error);
@@ -1939,6 +1980,10 @@ export async function makeLLMCallStreamingDirect(
       if (params.max_tokens !== undefined) params.max_completion_tokens = params.max_tokens;
       delete params.max_tokens;
     }
+    if (config.thinkingMode === 'disabled' && (config.provider === 'deepseek'
+      || (config.provider === 'relay' && /(?:^|\/)deepseek-/i.test(config.model)))) {
+      params.thinking = { type: 'disabled' };
+    }
     // The official relay currently fails its SSE endpoint after an empty
     // handshake frame.  Use the reliable JSON response by default; callers
     // may explicitly opt in after verifying a relay deployment's streaming
@@ -1974,6 +2019,7 @@ export async function makeLLMCallStreamingDirect(
       const toolCallAccumulators: Map<number, { id: string; name: string; args: string }> = new Map();
       const legacyProtocolFilter = createLegacyProtocolChunkFilter(onChunk);
       let streamUsage: any = undefined;
+      let finishReason: unknown;
       let iterator: AsyncIterator<any> | undefined;
 
       try {
@@ -1997,6 +2043,9 @@ export async function makeLLMCallStreamingDirect(
               (error as any).code = relayError.code;
             }
             throw error;
+          }
+          if (chunk.choices?.[0]?.finish_reason != null) {
+            finishReason = chunk.choices[0].finish_reason;
           }
           const delta = chunk.choices?.[0]?.delta;
           if (delta) {
@@ -2039,11 +2088,12 @@ export async function makeLLMCallStreamingDirect(
         const text = accumulatedText.length > 0 ? accumulatedText.join('') : null;
         const reasoningContent = accumulatedReasoning.length > 0 ? accumulatedReasoning.join('') : null;
         if (toolCallAccumulators.size > 0) {
-          const toolCalls: ParsedToolCall[] = [...toolCallAccumulators.values()].map(acc => {
-            let args: Record<string, any> = {};
-            try { args = JSON.parse(acc.args || '{}'); } catch { /* ignore parse errors */ }
-            return { id: acc.id, name: acc.name, arguments: args };
-          });
+          assertToolResponseComplete(finishReason);
+          const toolCalls: ParsedToolCall[] = [...toolCallAccumulators.values()].map(acc => ({
+            id: acc.id,
+            name: acc.name,
+            arguments: parseToolArguments(acc.args),
+          }));
           return { text, toolCalls, reasoningContent, usage };
         }
         const legacyToolCalls = parseLegacyXmlToolCalls(text, toolDeclarations);
@@ -2068,10 +2118,12 @@ export async function makeLLMCallStreamingDirect(
       const supervisor = new ModelAttemptSupervisor(operationSignal, config.attemptTimeouts);
       const nonStreamingParams = { ...params, stream: false };
       try {
-        const response = await supervisor.request(() => client.chat.completions.create(
+        // A non-stream request resolves only after the complete answer. The
+        // connection/stream-handshake deadline must not truncate generation.
+        const response = await supervisor.completion(Promise.resolve().then(() => client.chat.completions.create(
           nonStreamingParams,
           { signal: supervisor.signal },
-        ));
+        )));
         const parsed = parseOpenAICompatibleResponse(response, toolDeclarations);
         if (!String(parsed.text || '').trim() && !(parsed.toolCalls?.length)) {
           supervisor.assertSemanticContent();
@@ -2131,7 +2183,7 @@ export async function makeLLMCallStreamingDirect(
     return executeWithProviderOutboundEvidence(outboundEvidence, async () => {
       try {
         return supervisedLocal
-          ? await runLocalModelInference(config.provider as LocalModelProvider, executeStream, { signal: config.signal })
+          ? await runLocalModelInference(config.provider as LocalModelProvider, executeStream, { signal: config.signal, model: config.model })
           : await executeStream();
       } catch (error) {
         if (extensionProvider) throw extensionProviderFailure(config.provider, error);
@@ -2249,7 +2301,6 @@ export async function makeLLMCallStreamingDirect(
         const supervisor = new ModelAttemptSupervisor(operationSignal, config.attemptTimeouts);
         const textParts: string[] = [];
         const toolCalls: ParsedToolCall[] = [];
-        const toolUseAccumulators: Map<string, { id: string; name: string; args: Record<string, any> }> = new Map();
         let iterator: AsyncIterator<any> | undefined;
         try {
           const stream: any = await supervisor.request(() => client.messages.stream(
@@ -2261,43 +2312,45 @@ export async function makeLLMCallStreamingDirect(
             const next = await supervisor.next(iterator);
             if (next.done) break;
             const event = next.value;
-            if (event.type === 'text' && event.text) {
-              textParts.push(event.text);
-              if (String(event.text).trim()) supervisor.markSemanticContent();
-              onChunk(event.text);
+            // The SDK iterator yields raw stream events; `text` is a separate
+            // EventEmitter convenience callback, not an iterator event.
+            if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+              const text = String(event.delta.text || '');
+              textParts.push(text);
+              if (text.trim()) supervisor.markSemanticContent();
+              if (text) onChunk(text);
             }
             if (event.type === 'content_block_start' && (event as any).content_block?.type === 'tool_use') {
-              const block = (event as any).content_block;
-              toolUseAccumulators.set(block.id, { id: block.id, name: block.name, args: {} });
               supervisor.markSemanticContent();
             }
             if (event.type === 'content_block_delta' && (event as any).delta?.type === 'input_json_delta') {
-              const delta = (event as any).delta;
-              const acc = [...toolUseAccumulators.values()].find(a => !a.name || Object.keys(a.args).length === 0);
-              if (acc) {
-                try { acc.args = { ...acc.args, ...JSON.parse(delta.partial_json || '{}') }; } catch {}
-              }
-              if (delta.partial_json) supervisor.markSemanticContent();
+              if (event.delta.partial_json) supervisor.markSemanticContent();
             }
           }
 
           const finalMessage: any = await supervisor.completion<any>(stream.finalMessage());
-          if (toolUseAccumulators.size > 0) {
-            for (const acc of toolUseAccumulators.values()) {
-              toolCalls.push({ id: acc.id, name: acc.name, arguments: acc.args });
-            }
-          } else {
-            for (const block of finalMessage.content) {
-              if (block.type === 'tool_use') {
-                toolCalls.push({
-                  id: block.id,
-                  name: block.name,
-                  arguments: block.input || {},
-                });
-                supervisor.markSemanticContent();
-              }
+          // The SDK assembles JSON fragments by content-block index. Use its
+          // completed inputs so one tool can never consume another's fragment.
+          for (const block of finalMessage.content || []) {
+            if (block.type === 'tool_use') {
+              assertToolResponseComplete(finalMessage.stop_reason);
+              toolCalls.push({ id: block.id, name: block.name, arguments: parseToolArguments(block.input) });
+              supervisor.markSemanticContent();
             }
           }
+          const finalText = (finalMessage.content || [])
+            .filter((block: any) => block.type === 'text')
+            .map((block: any) => String(block.text || '')).join('');
+          const streamedText = textParts.join('');
+          if (finalText && finalText !== streamedText) {
+            if (!finalText.startsWith(streamedText)) {
+              throw new Error('Model final text does not match its streamed text');
+            }
+            const remainder = finalText.slice(streamedText.length);
+            textParts.push(remainder);
+            if (remainder) onChunk(remainder);
+          }
+          if (finalText.trim()) supervisor.markSemanticContent();
           supervisor.assertSemanticContent();
           return {
             text: textParts.length > 0 ? textParts.join('') : null,

@@ -1,4 +1,5 @@
 import { makeLLMCall } from '../llm/providers';
+import { runtimeBackgroundWork } from '../runtime/shutdown_work';
 import {
   beginConversationSummary,
   cancelConversationSummary,
@@ -38,6 +39,8 @@ export interface ConversationSummaryScheduleInput {
   source?: string;
   domain: string;
   orgId?: string;
+  /** Recheck the authority of the turn that scheduled this derived write. */
+  isAuthorized?: () => boolean;
   llmGetters?: ConversationSummaryLlmGetters;
   /** Test/alternate generator hook; production callers use the configured LLM. */
   generateSummary?: (transcript: string, messages: MessageRecord[]) => Promise<string>;
@@ -109,6 +112,9 @@ async function generateSummaryWithLlm(
 export function scheduleConversationSummary(
   input: ConversationSummaryScheduleInput,
 ): ConversationSummaryScheduleResult {
+  if (input.isAuthorized?.() === false) {
+    return { scheduled: false, summarizedThroughMessageCount: 0, reason: 'authorization revoked' };
+  }
   const check = checkAutoSummary(input.conversationId);
   if (!check.needed || check.recentMessages.length === 0) {
     return {
@@ -135,14 +141,15 @@ export function scheduleConversationSummary(
     };
   }
 
-  const completion = (async () => {
+  const completion = runtimeBackgroundWork.track((async () => {
     try {
+      if (input.isAuthorized?.() === false) throw new Error('Summary authorization revoked');
       const summary = String(
         input.generateSummary
           ? await input.generateSummary(transcript, check.recentMessages)
           : await generateSummaryWithLlm(input, transcript),
       ).trim();
-      if (!summary) {
+      if (!summary || input.isAuthorized?.() === false) {
         cancelConversationSummary(input.conversationId, check.summarizedThroughMessageCount);
         return false;
       }
@@ -160,7 +167,7 @@ export function scheduleConversationSummary(
       input.log?.warn?.(`[Conversation] Auto-summary failed for ${input.conversationId}`, error);
       return false;
     }
-  })();
+  })());
 
   return {
     scheduled: true,

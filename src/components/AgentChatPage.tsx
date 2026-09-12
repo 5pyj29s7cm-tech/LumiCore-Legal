@@ -1,4 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChatViewWorkRegistry } from '@/lib/chatViewWork';
+import { ChatAttachmentUploads, type ChatUploadFailure, type ChatUploadKind, type ChatUploadSource } from '@/lib/chatAttachmentUploads';
+import { ChatAttachmentUploadStatus } from './ChatAttachmentUploadStatus';
+import { chatAttachmentCopy } from '../i18n/locales/chatAttachments';
+import { FileResourceImage, FileResourceVideo } from './FileResourceMedia';
+import { saveFileResource } from '@/services/fileResource';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
 import { Send, Loader2, ArrowLeft, Ghost, Castle, Zap, Cpu, Sparkles, FileText, Mic, CheckCircle2, Square, ChevronDown, ChevronRight, XCircle, Copy, Check, Paperclip, Image as ImageIcon, Video, MessageCircle, Briefcase, User, ExternalLink, FolderOpen, Upload, Plus, History, CalendarClock, Trash2 } from 'lucide-react';
@@ -63,6 +69,7 @@ import {
   shouldDisplayAgentResponse,
 } from '@/lib/agentResponseDelivery';
 import { buildChatConversationScopeKey } from '@/lib/chatConversationScope';
+import { chatExecutionStorageKey, ownedPendingChatExecutions, type ChatRecoveryOwner } from '@/lib/chatExecutionRecovery';
 import {
   resolveChatExecutionEvent,
   shouldApplyInitialConversationMessages,
@@ -73,7 +80,6 @@ import {
   ChatRequestLedger,
   ChatTurnTimerGuard,
   finalizeStreamedChatMessage,
-  normalizePersistedPendingChatExecutions,
   removePersistedPendingChatExecution,
   upsertPersistedPendingChatExecution,
   type PersistedPendingChatExecution,
@@ -448,7 +454,7 @@ function extractPersistedMediaArtifacts(message: any): MediaGenerationArtifact[]
   const collected: MediaGenerationArtifact[] = [];
   for (const record of records) {
     const toolName = String(record.name || record.toolName || '').trim();
-    if (!MEDIA_GENERATION_TOOL_NAMES.has(toolName)) continue;
+    if (!MEDIA_GENERATION_TOOL_NAMES.has(toolName) && toolName !== 'get_image_generation_status') continue;
     const fallbackKind: MediaGenerationKind = toolName === 'generate_video' ? 'video' : 'image';
     const args = record.arguments && typeof record.arguments === 'object'
       ? record.arguments
@@ -570,11 +576,24 @@ export function AgentChatPage({
   voiceSession?: AgentChatVoiceSession;
 }) {
   const prefersReducedMotion = useReducedMotion();
-  const [messages, setMessages] = useState<any[]>([]);
+  const [messages, setMessageState] = useState<any[]>([]);
+  const messagesRef = useRef<any[]>([]);
+  const messagesRevisionRef = useRef(0);
+  const historyRefreshRevisionRef = useRef(0);
+  const chatViewWorkRef = useRef(new ChatViewWorkRegistry());
+  const chatUploadsRef = useRef(new ChatAttachmentUploads());
+  const setMessages = useCallback((update: React.SetStateAction<any[]>) => {
+    const next = typeof update === 'function' ? update(messagesRef.current) : update;
+    messagesRevisionRef.current += 1;
+    messagesRef.current = next;
+    setMessageState(next);
+  }, []);
+  useEffect(() => () => { chatViewWorkRef.current.invalidate(); chatUploadsRef.current.reset(); }, []);
   const isOfficeCommandCenter = layout === 'command-center' && commandCenterView === 'office';
   const isCommandCenterUtility = layout === 'command-center' && !isOfficeCommandCenter;
   const chatExecutionSource = layout === 'command-center' ? 'command-center-chat' : 'chat';
   const isZh = t?.langCode !== 'en';
+  const attachmentUploadText = chatAttachmentCopy(isZh);
   const commandCenterPlannerText = commandCenterPlannerCopy(isZh ? 'zh' : 'en');
   const mediaGenerationText = mediaGenerationCopy(isZh ? 'zh' : 'en');
   const ui = (zh: string, en: string) => isZh ? zh : en;
@@ -601,26 +620,6 @@ export function AgentChatPage({
     isElectron ? uiMessage('agent-chat-page.local-node.da9f577e7d') : uiMessage('agent-chat-page.browser-channel.61c3c86e02'),
   ];
   const operationModeMeta = (() => {
-    if (operationMode === 'chat') {
-      return {
-        label: t.modeChat || uiMessage('agent-chat-page.chat.1594b2f45c'),
-        detail: t.modeChatHint || uiMessage('agent-chat-page.conversation-only.33f7067683'),
-        badgeClass: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200',
-        subtleClass: 'border-emerald-400/15 bg-emerald-400/10 text-emerald-100/75',
-        dotClass: 'bg-emerald-300',
-        Icon: MessageCircle,
-      };
-    }
-    if (operationMode === 'autonomous') {
-      return {
-        label: t.modeAutonomy || t.modeAutoExecute || uiMessage('agent-chat-page.autonomy.6aea974e38'),
-        detail: t.modeAutonomyHint || t.modeAutoExecuteHint || uiMessage('agent-chat-page.24h-autonomous-work.81b1d75d6b'),
-        badgeClass: 'border-cyan-300/30 bg-cyan-400/12 text-cyan-100',
-        subtleClass: 'border-cyan-300/20 bg-cyan-400/10 text-cyan-100/80',
-        dotClass: 'bg-cyan-300 animate-pulse',
-        Icon: Zap,
-      };
-    }
     if (operationMode === 'meeting') {
       return {
         label: t.modeMeeting || uiMessage('agent-chat-page.meeting.e16a90b510'),
@@ -632,8 +631,8 @@ export function AgentChatPage({
       };
     }
     return {
-      label: t.modeAssistant || uiMessage('agent-chat-page.assistant.4a363bbe1a'),
-      detail: t.modeAssistantHint || uiMessage('agent-chat-page.foreground-full-access.a5a81a90e7'),
+      label: 'Lumi',
+      detail: 'Lumi',
       badgeClass: 'border-celestial-saturn/30 bg-celestial-saturn/12 text-celestial-saturn',
       subtleClass: 'border-celestial-saturn/20 bg-celestial-saturn/10 text-celestial-saturn/85',
       dotClass: 'bg-celestial-saturn',
@@ -643,6 +642,7 @@ export function AgentChatPage({
   const OperationModeIcon = operationModeMeta.Icon;
   const socket = socketService.connect();
   const { threads: focusThreads } = useFocusThreads({
+    userId: user?.uid,
     domain: activeDomain,
     orgId: activeOrgId,
     enabled: isOpen && Boolean(user),
@@ -653,6 +653,7 @@ export function AgentChatPage({
     error: runtimeStatusError,
     refresh: refreshRuntimeStatus,
   } = useRuntimeStatus({
+    userId: user?.uid,
     enabled: isOpen && isOfficeCommandCenter && Boolean(user),
     scopeKey: `${activeDomain}:${activeDomain === 'work' ? activeOrgId || '' : ''}`,
   });
@@ -716,7 +717,7 @@ export function AgentChatPage({
       type: 'user',
       source: 'voice',
     }]);
-  }, [user?.displayName, user?.username]);
+  }, [setMessages, user?.displayName, user?.username]);
 
   const localVoiceSession = useVoiceCall({
     socket,
@@ -765,7 +766,7 @@ export function AgentChatPage({
     };
     window.addEventListener(LUMI_VOICE_TRANSCRIPT_EVENT, onSharedTranscript);
     return () => window.removeEventListener(LUMI_VOICE_TRANSCRIPT_EVENT, onSharedTranscript);
-  }, [isOpen, user?.displayName, user?.username, usesSharedVoiceSession]);
+  }, [isOpen, setMessages, user?.displayName, user?.username, usesSharedVoiceSession]);
 
   useEffect(() => {
     listVoices().then(data => {
@@ -833,6 +834,7 @@ export function AgentChatPage({
   const [hasDraftText, setHasDraftText] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [attachmentUploadFailures, setAttachmentUploadFailures] = useState<ChatUploadFailure[]>([]);
   const [isListening, setIsListening] = useState(false);
   const [optimizationProgress, setOptimizationProgress] = useState(0);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
@@ -884,6 +886,10 @@ export function AgentChatPage({
   const [isSearchingHistory, setIsSearchingHistory] = useState(false);
   const [searchError, setSearchError] = useState('');
   const [isCreatingConversation, setIsCreatingConversation] = useState(false);
+  // Reserve the transcript synchronously: React state alone leaves a same-tick
+  // send/new/history shortcut able to submit against the previous conversation.
+  const conversationTransitionRef = useRef<symbol | null>(null);
+  const [conversationTransitionPending, setConversationTransitionPending] = useState(false);
   const [conversationHistoryOpen, setConversationHistoryOpen] = useState(true);
   // The history rail stays mounted at the left edge, but its selector deck
   // retracts until the user points at it or tabs into it.
@@ -942,7 +948,6 @@ export function AgentChatPage({
   const currentRequestHadToolRef = useRef(false);
   const currentRequestNeedsEvidenceRef = useRef(false);
   const currentResponseFinalizationRef = useRef<ChatResponseFinalization | null>(null);
-  const messagesRef = useRef<any[]>([]);
   const activeChatViewDetachersRef = useRef(new Set<() => void>());
   const terminalReceiptsRef = useRef(new ChatTerminalReceiptLedger());
   const chatRequestLedgerRef = useRef(new ChatRequestLedger());
@@ -979,10 +984,6 @@ export function AgentChatPage({
   useEffect(() => {
     if (!isOpen || !isOfficeCommandCenter) resetMediaGenerationSurface();
   }, [isOfficeCommandCenter, isOpen, resetMediaGenerationSurface]);
-
-  useEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
 
   useEffect(() => {
     if (!isOpen || !isOfficeCommandCenter) setMediaStudioMode(null);
@@ -1109,11 +1110,21 @@ export function AgentChatPage({
   const agentCategory = agent?.category || (t.friend || 'friend');
   const agentId = agent?.id || 'lumi';
   const attachmentContextStoragePrefix = `lumi_chat_attachment_context:${user?.id || user?.username || 'anonymous'}:${buildChatConversationScopeKey(agentId, activeDomain, activeOrgId)}`;
+  const invalidateChatViewWork = useCallback(() => {
+    chatViewWorkRef.current.invalidate();
+    chatUploadsRef.current.reset();
+    setAttachmentUploadFailures([]);
+    setIsOptimizing(false);
+    setOptimizationProgress(0);
+    setMediaSourceUploading(false);
+    mediaSourceUploadTargetRef.current = null;
+  }, []);
   const bindAttachmentContextToConversation = useCallback((
     conversationId: string,
     options: { carryCurrent?: boolean } = {},
   ) => {
     const nextConversationId = String(conversationId || '').trim();
+    if (attachmentConversationIdRef.current !== nextConversationId) invalidateChatViewWork();
     if (!nextConversationId) {
       attachmentConversationIdRef.current = '';
       setAttachmentContextStorageKey('');
@@ -1141,7 +1152,7 @@ export function AgentChatPage({
         localStorage.setItem(nextStorageKey, serializeChatAttachmentContext(nextAttachments));
       } catch {}
     }
-  }, [attachmentContextStoragePrefix]);
+  }, [attachmentContextStoragePrefix, invalidateChatViewWork]);
   useEffect(() => {
     const onConversationClosed = (event: Event) => {
       const closedConversationId = String((event as CustomEvent<{ conversationId?: string }>).detail?.conversationId || '');
@@ -1302,7 +1313,7 @@ export function AgentChatPage({
     const fallbackUrl = file.openUrl || file.saveUrl;
     if (fallbackUrl && typeof window !== 'undefined') {
       try {
-        window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+        await saveFileResource(fallbackUrl, file.fileName);
       } catch (err: any) {
         toast.error(err?.message || uiMessage('agent-chat-page.could-not-open-preview-link.99248ef9e6'));
       }
@@ -1463,7 +1474,7 @@ export function AgentChatPage({
             title={file.path}
           >
             {file.kind === 'video' && (
-              <video
+              <FileResourceVideo
                 src={file.url}
                 controls
                 preload="metadata"
@@ -1580,6 +1591,9 @@ export function AgentChatPage({
     // On agent/domain switch, reset and reload
     const conversationScopeKey = `${user?.id || user?.username || 'anonymous'}:${buildChatConversationScopeKey(agentId, activeDomain, activeOrgId)}`;
     if (conversationScopeKey !== lastConversationScopeRef.current) {
+      invalidateChatViewWork();
+      setIsCreatingConversation(false);
+      setRestoringConversationId('');
       lastConversationScopeRef.current = conversationScopeKey;
       initialLoadDoneRef.current = false;
       chatTurnTimerGuardRef.current.invalidate();
@@ -1611,6 +1625,9 @@ export function AgentChatPage({
 
     const initialConversationId = attachmentConversationIdRef.current;
     const initialMessageCount = messagesRef.current.length;
+    const transition = Symbol('initial-conversation');
+    conversationTransitionRef.current = transition;
+    setConversationTransitionPending(true);
     let cancelled = false;
 
     // Load the single active conversation messages. The request may resolve
@@ -1649,11 +1666,22 @@ export function AgentChatPage({
         const persistedMessages = normalizePersistedMessages(msgData.messages);
         messagesRef.current = persistedMessages;
         setMessages(persistedMessages);
-      } catch {}
+      } catch {} finally {
+        if (conversationTransitionRef.current === transition) {
+          conversationTransitionRef.current = null;
+          setConversationTransitionPending(false);
+        }
+      }
     })();
 
-    return () => { cancelled = true; };
-  }, [activeDomain, activeOrgId, agentId, attachmentContextStoragePrefix, bindAttachmentContextToConversation, isFounder, normalizePersistedMessages, resetMediaGenerationSurface, scopedConversationUrl, user?.id, user?.username]);
+    return () => {
+      cancelled = true;
+      if (conversationTransitionRef.current === transition) {
+        conversationTransitionRef.current = null;
+        setConversationTransitionPending(false);
+      }
+    };
+  }, [activeDomain, activeOrgId, agentId, attachmentContextStoragePrefix, bindAttachmentContextToConversation, invalidateChatViewWork, isFounder, normalizePersistedMessages, resetMediaGenerationSurface, scopedConversationUrl, setMessages, user?.id, user?.username]);
 
   useEffect(() => {
     const query = searchQuery.trim();
@@ -1701,10 +1729,16 @@ export function AgentChatPage({
   const lastResumedRequestIdsRef = useRef(new Set<string>());
   const initialLoadDoneRef = useRef(false);
   const lastConversationScopeRef = useRef<string>('');
-  const activeExecutionStorageKey = `lumi_active_chat_execution:${agentId}:${activeDomain}:${activeOrgId || ''}`;
+  const chatRecoveryUserId = String(user?.uid || '').trim();
+  const recoveryOwner = useMemo<ChatRecoveryOwner>(() => ({
+    userId: chatRecoveryUserId, agentId, domain: activeDomain, orgId: activeOrgId, source: chatExecutionSource,
+  }), [chatRecoveryUserId, agentId, activeDomain, activeOrgId, chatExecutionSource]);
+  const activeExecutionStorageKey = chatExecutionStorageKey(recoveryOwner);
   const persistActiveExecution = useCallback((requestId: string) => {
+    if (!activeExecutionStorageKey) return;
     try {
       const execution: PersistedPendingChatExecution = {
+        userId: chatRecoveryUserId,
         requestId,
         source: chatExecutionSource,
         domain: activeDomain,
@@ -1715,14 +1749,17 @@ export function AgentChatPage({
           ? { mediaGeneration: { ...activeMediaGenerationRef.current.request } }
           : {}),
       };
-      const current = JSON.parse(localStorage.getItem(activeExecutionStorageKey) || 'null');
+      const current = { version: 2, pending: ownedPendingChatExecutions(
+        JSON.parse(localStorage.getItem(activeExecutionStorageKey) || 'null'), recoveryOwner,
+      ) };
       localStorage.setItem(
         activeExecutionStorageKey,
         JSON.stringify(upsertPersistedPendingChatExecution(current, execution)),
       );
     } catch {}
-  }, [activeDomain, activeExecutionStorageKey, activeOrgId, chatExecutionSource]);
+  }, [activeDomain, activeExecutionStorageKey, activeOrgId, chatExecutionSource, chatRecoveryUserId, recoveryOwner]);
   const clearPersistedExecution = useCallback((requestId?: string) => {
+    if (!activeExecutionStorageKey) return;
     try {
       if (!requestId) return localStorage.removeItem(activeExecutionStorageKey);
       const current = JSON.parse(localStorage.getItem(activeExecutionStorageKey) || 'null');
@@ -2396,16 +2433,25 @@ export function AgentChatPage({
         currentSocketId: socket.id,
         activeRequestId: activeChatRequestIdRef.current,
       })) return;
-      streamingMsgIdsRef.current.clear();
-      streamingRawTextRef.current.clear();
-      fetch(scopedConversationUrl(`/api/conversations/${data.conversationId}/messages?limit=${CHAT_HISTORY_LIMIT}`))
+      const work = chatViewWorkRef.current.begin();
+      const messageRevision = messagesRevisionRef.current;
+      const refreshRevision = ++historyRefreshRevisionRef.current;
+      fetch(scopedConversationUrl(`/api/conversations/${data.conversationId}/messages?limit=${CHAT_HISTORY_LIMIT}`), { signal: work.signal })
         .then(r => r.json())
         .then(result => {
+          if (!work.isCurrent()
+            || data.conversationId !== attachmentConversationIdRef.current
+            || refreshRevision !== historyRefreshRevisionRef.current
+            || messageRevision !== messagesRevisionRef.current
+            || textChatActiveRef.current) return;
           if (result.messages && Array.isArray(result.messages)) {
+            streamingMsgIdsRef.current.clear();
+            streamingRawTextRef.current.clear();
             setMessages(normalizePersistedMessages(result.messages));
           }
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => work.finish());
     };
 
     const onDesktopControlState = (data: any) => {
@@ -2465,6 +2511,7 @@ export function AgentChatPage({
     pushChatProgress,
     scheduleWorkflowReset,
     scopedConversationUrl,
+    setMessages,
     settleTrackedChatRequest,
     socket,
     t.failedToRouteNeuralMesh,
@@ -2479,11 +2526,20 @@ export function AgentChatPage({
   useEffect(() => {
     if (isFounder || !socket) return;
 
+    let disposed = false;
+    let recoveryAttempt = 0;
     const resumeActiveExecution = async () => {
+      if (!activeExecutionStorageKey) return;
+      const attempt = ++recoveryAttempt;
+      let ownsView = chatViewWorkRef.current.capture();
+      const isCurrentRecovery = () => !disposed && attempt === recoveryAttempt && ownsView();
       let pending: PersistedPendingChatExecution[] = [];
       try {
-        pending = normalizePersistedPendingChatExecutions(
+        // Legacy keys have no verifiable user owner; only the v3 key is read.
+        localStorage.removeItem(`lumi_active_chat_execution:${agentId}:${activeDomain}:${activeOrgId || ''}`);
+        pending = ownedPendingChatExecutions(
           JSON.parse(localStorage.getItem(activeExecutionStorageKey) || 'null'),
+          recoveryOwner,
         );
       } catch {
         localStorage.removeItem(activeExecutionStorageKey);
@@ -2500,25 +2556,6 @@ export function AgentChatPage({
       const mediaExecution = isOfficeCommandCenter
         ? [...pending].reverse().find(execution => execution.mediaGeneration)
         : undefined;
-      if (mediaExecution?.mediaGeneration) {
-        const request = mediaExecution.mediaGeneration;
-        activeMediaGenerationRef.current = {
-          requestId: mediaExecution.requestId,
-          mode: request.mode,
-          request,
-        };
-        mediaStudioOpenRef.current = true;
-        mediaGenerationArtifactsRef.current = [];
-        mediaGenerationArtifactValidationRef.current = null;
-        setMediaGenerationArtifacts([]);
-        setMediaGenerationStatus('generating');
-        setMediaGenerationDetail(mediaGenerationText.statusGenerating);
-        setMediaStudioMode(request.mode);
-        setMediaPrimaryImage(request.primaryImage || '');
-        setMediaReferenceImages(request.referenceImages || []);
-        setMediaVideoReferenceImage(request.referenceImage || '');
-      }
-
       for (const execution of pending) {
         if (!chatRequestLedgerRef.current.has(execution.requestId)) {
           chatRequestLedgerRef.current.begin(execution.requestId);
@@ -2538,14 +2575,24 @@ export function AgentChatPage({
         try {
           const activeResponse = await fetch(scopedConversationUrl('/api/conversations/active'), { credentials: 'include' });
           const activeData = await activeResponse.json();
+          if (!isCurrentRecovery()) return;
           fallbackConversationId = String(activeData.activeConversation?.id || '').trim();
           if (fallbackConversationId && !attachmentConversationIdRef.current) {
             bindAttachmentContextToConversation(fallbackConversationId, { carryCurrent: true });
-            pending.forEach(execution => persistActiveExecution(execution.requestId));
+            // This recovery itself adopted the server's conversation; later
+            // user navigation must still invalidate its acknowledgement.
+            ownsView = chatViewWorkRef.current.capture();
+            const stored = JSON.parse(localStorage.getItem(activeExecutionStorageKey) || 'null');
+            let updated = { version: 2 as const, pending: ownedPendingChatExecutions(stored, recoveryOwner) };
+            for (const execution of pending) {
+              if (!execution.conversationId) updated = upsertPersistedPendingChatExecution(updated, { ...execution, conversationId: fallbackConversationId });
+            }
+            localStorage.setItem(activeExecutionStorageKey, JSON.stringify(updated));
           }
         } catch {}
       }
 
+      if (!isCurrentRecovery()) return;
       for (const execution of pending) {
         const recoveryConversationId = String(
           execution.conversationId || fallbackConversationId || '',
@@ -2557,9 +2604,10 @@ export function AgentChatPage({
           orgId: execution.orgId || null,
           conversationId: recoveryConversationId || undefined,
         }, (result?: { ok?: boolean; snapshot?: ChatExecutionSnapshot; error?: string }) => {
-          if (!chatRequestLedgerRef.current.has(execution.requestId)) return;
+          if (!isCurrentRecovery() || !chatRequestLedgerRef.current.has(execution.requestId)) return;
           const snapshot = result?.snapshot;
-          if (!result?.ok || !snapshot) {
+          if (!result?.ok || !snapshot || snapshot.requestId !== execution.requestId || snapshot.source !== execution.source) {
+            if (activeMediaGenerationRef.current?.requestId === execution.requestId) resetMediaGenerationSurface();
             const tracked = settleTrackedChatRequest(execution.requestId);
             setIsTyping(tracked.remaining > 0);
             if (tracked.remaining === 0) {
@@ -2571,7 +2619,22 @@ export function AgentChatPage({
             }
             return;
           }
-
+          // Restore local references only after this user's exact execution
+          // has been found by the authenticated backend.
+          if (mediaExecution?.requestId === execution.requestId && mediaExecution.mediaGeneration) {
+            const request = mediaExecution.mediaGeneration;
+            activeMediaGenerationRef.current = { requestId: execution.requestId, mode: request.mode, request };
+            mediaStudioOpenRef.current = true;
+            mediaGenerationArtifactsRef.current = [];
+            mediaGenerationArtifactValidationRef.current = null;
+            setMediaGenerationArtifacts([]);
+            setMediaGenerationStatus('generating');
+            setMediaGenerationDetail(mediaGenerationText.statusGenerating);
+            setMediaStudioMode(request.mode);
+            setMediaPrimaryImage(request.primaryImage || '');
+            setMediaReferenceImages(request.referenceImages || []);
+            setMediaVideoReferenceImage(request.referenceImage || '');
+          }
           if (snapshot.terminal) return; // The server replays the terminal event.
           if (snapshot.status === 'waiting_confirmation') setWorkflowStatus('waiting_confirmation');
           else if (snapshot.status === 'cancelling') setWorkflowStatus('cancelling');
@@ -2584,14 +2647,20 @@ export function AgentChatPage({
 
     socket.on('connect', resumeActiveExecution);
     if (socket.connected) resumeActiveExecution();
-    return () => { socket.off('connect', resumeActiveExecution); };
-  }, [activeExecutionStorageKey, bindAttachmentContextToConversation, chatExecutionSource, clearPersistedExecution, isFounder, isOfficeCommandCenter, isZh, mediaGenerationText.statusGenerating, persistActiveExecution, pushChatProgress, scopedConversationUrl, settleTrackedChatRequest, socket]);
+    return () => { disposed = true; socket.off('connect', resumeActiveExecution); };
+  }, [activeDomain, activeExecutionStorageKey, activeOrgId, agentId, bindAttachmentContextToConversation, chatExecutionSource, clearPersistedExecution, isFounder, isOfficeCommandCenter, isZh, mediaGenerationText.statusGenerating, pushChatProgress, recoveryOwner, resetMediaGenerationSurface, scopedConversationUrl, settleTrackedChatRequest, socket]);
 
   const startNewTextConversation = useCallback(async () => {
-    if (isCreatingConversation) return;
+    if (conversationTransitionRef.current || isCreatingConversation || restoringConversationId) return;
+    const transition = Symbol('new-conversation');
+    conversationTransitionRef.current = transition;
+    setConversationTransitionPending(true);
     setIsCreatingConversation(true);
+    invalidateChatViewWork();
+    const work = chatViewWorkRef.current.begin();
     try {
       const response = await fetch(scopedConversationUrl('/api/conversations/new'), {
+        signal: work.signal,
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -2601,6 +2670,7 @@ export function AgentChatPage({
       if (!response.ok || !result?.conversation?.id) {
         throw new Error(result?.error || 'Unable to create a new conversation');
       }
+      if (!work.isCurrent()) return;
 
       // Detach the text surface from the previous execution without cancelling
       // its durable task. Any late receipt remains attached to the archived
@@ -2624,7 +2694,6 @@ export function AgentChatPage({
       messagesRef.current = [];
       setPendingAttachments([]);
       pendingAttachmentsRef.current = [];
-      setDraftText('');
       setSearchQuery('');
       setSearchResults([]);
       setSearchError('');
@@ -2635,11 +2704,16 @@ export function AgentChatPage({
       seenWorkflowToolEvents.current.clear();
       requestAnimationFrame(() => messageInputRef.current?.focus());
     } catch (error: any) {
-      toast.error(error?.message || 'Unable to create a new conversation');
+      if (work.isCurrent()) toast.error(error?.message || 'Unable to create a new conversation');
     } finally {
-      setIsCreatingConversation(false);
+      work.finish();
+      if (conversationTransitionRef.current === transition) {
+        conversationTransitionRef.current = null;
+        setConversationTransitionPending(false);
+        setIsCreatingConversation(false);
+      }
     }
-  }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, isCreatingConversation, resetMediaGenerationSurface, scopedConversationUrl, setDraftText]);
+  }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, invalidateChatViewWork, isCreatingConversation, resetMediaGenerationSurface, restoringConversationId, scopedConversationUrl, setMessages]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -2770,13 +2844,19 @@ export function AgentChatPage({
   }, [conversationHistory]);
 
   const restoreTextConversation = useCallback(async (conversationId: string) => {
-    if (!conversationId || restoringConversationId) return;
+    if (!conversationId || conversationTransitionRef.current || restoringConversationId || isCreatingConversation) return;
     if (conversationId === attachmentConversationIdRef.current) {
       return;
     }
+    const transition = Symbol('restore-conversation');
+    conversationTransitionRef.current = transition;
+    setConversationTransitionPending(true);
     setRestoringConversationId(conversationId);
+    invalidateChatViewWork();
+    const work = chatViewWorkRef.current.begin();
     try {
       const activateResponse = await fetch(scopedConversationUrl(`/api/conversations/${encodeURIComponent(conversationId)}/activate`), {
+        signal: work.signal,
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -2786,12 +2866,14 @@ export function AgentChatPage({
       if (!activateResponse.ok || !activateResult?.conversation?.id) {
         throw new Error(activateResult?.error || 'Unable to open this conversation');
       }
+      if (!work.isCurrent()) return;
       const messageResponse = await fetch(
         scopedConversationUrl(`/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=${CHAT_HISTORY_LIMIT}`),
-        { credentials: 'include' },
+        { credentials: 'include', signal: work.signal },
       );
       const messageResult = await messageResponse.json().catch(() => ({}));
       if (!messageResponse.ok) throw new Error(messageResult?.error || 'Unable to load this conversation');
+      if (!work.isCurrent()) return;
 
       // Switching transcripts only detaches this chat surface. Durable tasks
       // keep running and remain visible exclusively in the task widget.
@@ -2814,7 +2896,6 @@ export function AgentChatPage({
       messagesRef.current = restoredMessages;
       setPendingAttachments([]);
       pendingAttachmentsRef.current = [];
-      setDraftText('');
       setSearchQuery('');
       setSearchResults([]);
       setSearchError('');
@@ -2830,11 +2911,16 @@ export function AgentChatPage({
       setConversationHistorySelectorExpanded(false);
       requestAnimationFrame(() => messageInputRef.current?.focus());
     } catch (error: any) {
-      toast.error(error?.message || 'Unable to open this conversation');
+      if (work.isCurrent()) toast.error(error?.message || 'Unable to open this conversation');
     } finally {
-      setRestoringConversationId('');
+      work.finish();
+      if (conversationTransitionRef.current === transition) {
+        conversationTransitionRef.current = null;
+        setConversationTransitionPending(false);
+        setRestoringConversationId('');
+      }
     }
-  }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, normalizePersistedMessages, resetMediaGenerationSurface, restoringConversationId, scopedConversationUrl, setDraftText]);
+  }, [activeDomain, agentId, bindAttachmentContextToConversation, clearChatProgress, clearPersistedExecution, invalidateChatViewWork, isCreatingConversation, normalizePersistedMessages, resetMediaGenerationSurface, restoringConversationId, scopedConversationUrl, setMessages]);
 
   const deleteConversationFromHistory = useCallback(async (conversationId: string) => {
     const id = String(conversationId || '').trim();
@@ -2947,6 +3033,13 @@ export function AgentChatPage({
     attachments: ChatAttachment[] = pendingAttachments,
     options: ChatSendOptions = {},
   ) => {
+    // All entry points (form, Enter, shell command, suggested text) use this
+    // synchronous barrier, including the interval before React re-renders.
+    if (conversationTransitionRef.current) return;
+    if (chatUploadsRef.current.busy || chatUploadsRef.current.canRetry) {
+      toast.info(chatUploadsRef.current.busy ? attachmentUploadText.processing : attachmentUploadText.failed);
+      return;
+    }
     const trimmedText = text.trim();
     const directAttachments = attachments.map(serializeChatAttachment);
     const reusableConversationAttachments = options.includeConversationAttachments === false
@@ -3236,6 +3329,7 @@ export function AgentChatPage({
     return requestId;
   }, [
     acceptChatExecutionEvent,
+    attachmentUploadText,
     activeDomain,
     activeOrgId,
     agentCategory,
@@ -3251,6 +3345,7 @@ export function AgentChatPage({
     pushChatProgress,
     rememberAttachmentContext,
     setDraftText,
+    setMessages,
     settleTrackedChatRequest,
     socket,
     t.chatUserFallback,
@@ -3372,6 +3467,8 @@ export function AgentChatPage({
 
   const closeMediaGenerationStudio = useCallback(() => {
     mediaStudioOpenRef.current = false;
+    mediaSourceUploadTargetRef.current = null;
+    setMediaSourceUploading(false);
     setMediaStudioMode(null);
   }, []);
 
@@ -3480,7 +3577,7 @@ export function AgentChatPage({
       });
       onPrefillConsumed?.();
     }
-  }, [agentName, onPrefillConsumed, prefillMessage, prefillSource]);
+  }, [agentName, onPrefillConsumed, prefillMessage, prefillSource, setMessages]);
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
@@ -3607,12 +3704,12 @@ export function AgentChatPage({
     })
   ), [scopedFileUrl]);
 
-  const acceptImportedChatFiles = useCallback((files: any[], skippedCount = 0) => {
+  const acceptImportedChatFiles = useCallback((files: any[], skippedCount: number, work: ReturnType<ChatViewWorkRegistry['begin']>) => {
+    if (!work.isCurrent()) return;
     const attachments = mapImportedFilesToAttachments(files);
     const mergeResult = appendPendingAttachments(attachments, { announce: false });
     const addedAttachments = mergeResult.added;
     setOptimizationProgress(100);
-    window.setTimeout(() => { setIsOptimizing(false); setOptimizationProgress(0); }, 500);
     const audioTranscripts = addedAttachments
       .filter(item => item.kind === 'audio' && item.transcript)
       .map(item => `${item.fileName}:\n${item.transcript}`);
@@ -3632,51 +3729,64 @@ export function AgentChatPage({
     notifyKnowledgeUpdated(attachments.map(item => ({ id: item.path || item.fileName, name: item.fileName, displayName: item.fileName })));
   }, [appendPendingAttachments, mapImportedFilesToAttachments, notifyKnowledgeUpdated, setDraftText]);
 
-  const uploadChatAttachments = useCallback(async (files: FileList | null) => {
-    if (!files || files.length === 0 || isOptimizing) return;
+  const runChatAttachmentUpload = useCallback(async (
+    kind: ChatUploadKind, sources: ChatUploadSource[], retry = false,
+  ) => {
+    if ((!retry && sources.length === 0) || chatUploadsRef.current.busy) return;
     const occupiedCount = mergeChatAttachmentReferences(
-      conversationAttachmentsRef.current,
-      pendingAttachmentsRef.current,
+      conversationAttachmentsRef.current, pendingAttachmentsRef.current,
     ).attachments.length;
     const remainingSlots = MAX_CHAT_ATTACHMENTS - occupiedCount;
     if (remainingSlots <= 0) {
       toast.error(formatUiMessage('agent-chat-page.up-to-value0-files-can.349aa29325', { value0: MAX_CHAT_ATTACHMENTS }));
       return;
     }
+    const attempt = chatUploadsRef.current.begin(kind, sources, remainingSlots, retry);
+    if (!attempt) return;
     setIsOptimizing(true);
+    setAttachmentUploadFailures([]);
     setOptimizationProgress(30);
-
-    const fileList = Array.from(files).slice(0, remainingSlots);
-    if (files.length > remainingSlots) {
+    const work = chatViewWorkRef.current.begin();
+    if (!retry && sources.length > attempt.items.length) {
       toast.error(formatUiMessage('agent-chat-page.up-to-value0-files-can.349aa29325', { value0: MAX_CHAT_ATTACHMENTS }));
     }
-    const formData = new FormData();
-    fileList.forEach(f => formData.append('files', f));
-
     try {
-      formData.append('domain', activeDomain);
-      if (activeDomain === 'work' && activeOrgId) formData.append('orgId', activeOrgId);
-
-      const res = await fetch('/api/files/upload', { method: 'POST', body: formData, credentials: 'include' });
-      if (res.ok) {
-        const d = await res.json();
-        acceptImportedChatFiles(d.files || []);
+      const uploadItemIds = attempt.items.map(item => item.id);
+      let response: Response;
+      if (attempt.batch.kind === 'files') {
+        const formData = new FormData();
+        attempt.items.forEach(item => formData.append('files', item.source as File));
+        formData.append('domain', activeDomain);
+        if (activeDomain === 'work' && activeOrgId) formData.append('orgId', activeOrgId);
+        formData.append('uploadBatchId', attempt.batch.id);
+        formData.append('uploadItemIds', JSON.stringify(uploadItemIds));
+        response = await fetch('/api/files/upload', { method: 'POST', body: formData, credentials: 'include', signal: work.signal });
       } else {
-        setIsOptimizing(false);
-        setOptimizationProgress(0);
-        try {
-          const err = await res.json();
-          toast.error(err.error || (t.uploadFailed || 'Upload failed'));
-        } catch {
-          toast.error(t.uploadFailed || 'Upload failed');
-        }
+        response = await fetch(scopedFileUrl('/api/files/import-paths'), {
+          signal: work.signal, method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json', 'X-Lumi-Desktop-Import': 'file-drop' },
+          body: JSON.stringify({ paths: attempt.items.map(item => item.source), uploadBatchId: attempt.batch.id, uploadItemIds }),
+        });
       }
-    } catch {
-      setIsOptimizing(false);
-      setOptimizationProgress(0);
-      toast.error(t.chatConnError || 'Connection error during upload');
+      const payload = await response.json().catch(() => ({}));
+      if (!work.isCurrent()) return;
+      const failures = chatUploadsRef.current.complete(attempt, payload, t.uploadFailed || attachmentUploadText.unknown);
+      setAttachmentUploadFailures(failures);
+      if (Array.isArray(payload.files) && payload.files.length > 0) acceptImportedChatFiles(payload.files, 0, work);
+      if (!response.ok && failures.length === 0) toast.error(payload.error || t.uploadFailed || attachmentUploadText.unknown);
+    } catch (error: any) {
+      if (!work.isCurrent()) return;
+      setAttachmentUploadFailures(chatUploadsRef.current.complete(attempt, null, error?.message || t.chatConnError || attachmentUploadText.unknown));
+    } finally {
+      chatUploadsRef.current.finish(attempt);
+      if (work.isCurrent()) { setIsOptimizing(false); setOptimizationProgress(0); }
+      work.finish();
     }
-  }, [acceptImportedChatFiles, activeDomain, activeOrgId, isOptimizing, t.chatConnError, t.uploadFailed]);
+  }, [acceptImportedChatFiles, activeDomain, activeOrgId, attachmentUploadText, scopedFileUrl, t.chatConnError, t.uploadFailed]);
+
+  const uploadChatAttachments = useCallback(async (files: FileList | null) => {
+    await runChatAttachmentUpload('files', Array.from(files || []));
+  }, [runChatAttachmentUpload]);
 
   const uploadMediaSourceImage = useCallback(async (files: FileList | null) => {
     const target = mediaSourceUploadTargetRef.current;
@@ -3689,17 +3799,20 @@ export function AgentChatPage({
     }
 
     setMediaSourceUploading(true);
+    const work = chatViewWorkRef.current.begin();
     const formData = new FormData();
     formData.append('files', file);
     formData.append('domain', activeDomain);
     if (activeDomain === 'work' && activeOrgId) formData.append('orgId', activeOrgId);
     try {
       const response = await fetch('/api/files/upload', {
+        signal: work.signal,
         method: 'POST',
         body: formData,
         credentials: 'include',
       });
       const payload = await response.json().catch(() => ({}));
+      if (!work.isCurrent() || mediaSourceUploadTargetRef.current !== target) return;
       if (!response.ok) throw new Error(payload?.error || t.uploadFailed || 'Upload failed');
       const uploaded = Array.isArray(payload?.files) ? payload.files[0] : null;
       const sourcePath = String(uploaded?.path || '').trim();
@@ -3727,44 +3840,20 @@ export function AgentChatPage({
       notifyKnowledgeUpdated([{ id: uploaded.id || sourcePath, name: fileName, displayName: fileName }]);
       toast.success(mediaGenerationText.sourceImageLoaded);
     } catch (error: any) {
-      toast.error(error?.message || t.chatConnError || 'Image upload failed');
+      if (work.isCurrent() && mediaSourceUploadTargetRef.current === target) toast.error(error?.message || t.chatConnError || 'Image upload failed');
     } finally {
-      setMediaSourceUploading(false);
-      mediaSourceUploadTargetRef.current = null;
+      if (work.isCurrent() && mediaSourceUploadTargetRef.current === target) {
+        setMediaSourceUploading(false);
+        mediaSourceUploadTargetRef.current = null;
+      }
+      work.finish();
     }
   }, [activeDomain, activeOrgId, handleMediaSourceChange, mediaGenerationText, mediaSourceUploading, notifyKnowledgeUpdated, scopedFileUrl, t.chatConnError, t.uploadFailed]);
 
   const importChatAttachmentPaths = useCallback(async (paths: string[]) => {
     const uniquePaths = [...new Set(paths.map(item => String(item || '').trim()).filter(Boolean))];
-    if (uniquePaths.length === 0 || isOptimizing) return;
-    const occupiedCount = mergeChatAttachmentReferences(
-      conversationAttachmentsRef.current,
-      pendingAttachmentsRef.current,
-    ).attachments.length;
-    const remainingSlots = MAX_CHAT_ATTACHMENTS - occupiedCount;
-    if (remainingSlots <= 0) {
-      toast.error(formatUiMessage('agent-chat-page.up-to-value0-files-can.349aa29325', { value0: MAX_CHAT_ATTACHMENTS }));
-      return;
-    }
-    setIsOptimizing(true);
-    setOptimizationProgress(30);
-    try {
-      const importPaths = uniquePaths.slice(0, remainingSlots);
-      const res = await fetch(scopedFileUrl('/api/files/import-paths'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Lumi-Desktop-Import': 'file-drop' },
-        body: JSON.stringify({ paths: importPaths }),
-        credentials: 'include',
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || t.uploadFailed || 'Upload failed');
-      acceptImportedChatFiles(data.files || [], (data.skipped || []).length + Math.max(0, uniquePaths.length - importPaths.length));
-    } catch (error: any) {
-      setIsOptimizing(false);
-      setOptimizationProgress(0);
-      toast.error(error?.message || t.chatConnError || 'Connection error during upload');
-    }
-  }, [acceptImportedChatFiles, isOptimizing, scopedFileUrl, t.chatConnError, t.uploadFailed]);
+    await runChatAttachmentUpload('paths', uniquePaths);
+  }, [runChatAttachmentUpload]);
 
   useEffect(() => {
     if (!isOpen || typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) return;
@@ -4307,7 +4396,7 @@ export function AgentChatPage({
                   type="button"
                   data-command-center-new-conversation
                   onClick={() => void startNewTextConversation()}
-                  disabled={isCreatingConversation}
+                  disabled={isCreatingConversation || Boolean(restoringConversationId)}
                   className="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-white/38 transition-colors hover:border-cyan-300/25 hover:bg-cyan-300/[0.08] hover:text-cyan-100 disabled:cursor-wait disabled:opacity-50"
                   title={t.newConversationHint || t.newConversation || 'New conversation'}
                   aria-label={t.newConversation || 'New conversation'}
@@ -4345,7 +4434,7 @@ export function AgentChatPage({
                             y: Math.min(event.clientY, Math.max(12, window.innerHeight - 86)),
                           });
                         }}
-                        disabled={Boolean(restoringConversationId)}
+                        disabled={Boolean(restoringConversationId) || isCreatingConversation}
                         data-command-center-history-item
                         className={`lumi-command-center-history-item group mb-1 w-full rounded-xl px-3 py-2.5 text-left transition-colors disabled:cursor-wait disabled:opacity-60 ${
                           current ? 'lumi-command-center-history-item--current bg-cyan-300/[0.10]' : 'hover:bg-white/[0.05]'
@@ -4623,13 +4712,13 @@ export function AgentChatPage({
                             {embeddedImages.map((artifact, i) => (
                               <button key={artifact.id} type="button" onClick={() => openMediaGenerationArtifact(artifact)}
                                 className="block w-36 h-36 rounded-2xl overflow-hidden border-2 border-white/10 hover:border-celestial-saturn/60 transition-all shadow-lg">
-                                <img src={artifact.url} alt={`Generated ${i + 1}`} className="w-full h-full object-cover" loading="lazy" />
+                                <FileResourceImage src={artifact.url} alt={`Generated ${i + 1}`} className="w-full h-full object-cover" loading="lazy" />
                               </button>
                             ))}
                           </div>
                         )}
                         {embeddedVideos.map(artifact => (
-                          <video
+                          <FileResourceVideo
                             key={artifact.id}
                             src={artifact.url}
                             controls
@@ -4648,7 +4737,7 @@ export function AgentChatPage({
                         const card = (
                           <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-black/25 px-3 py-2 text-xs text-white/65">
                             {item.kind === 'image' && item.downloadUrl ? (
-                              <img src={item.downloadUrl} alt={item.fileName} className="h-8 w-8 rounded-lg object-cover" loading="lazy" />
+                              <FileResourceImage src={item.downloadUrl} alt={item.fileName} className="h-8 w-8 rounded-lg object-cover" loading="lazy" />
                             ) : item.kind === 'image' ? (
                               <ImageIcon size={16} className="text-celestial-saturn" />
                             ) : item.kind === 'audio' ? (
@@ -4660,9 +4749,9 @@ export function AgentChatPage({
                           </div>
                         );
                         return item.downloadUrl ? (
-                          <a key={item.id} href={item.downloadUrl} target="_blank" rel="noopener noreferrer" className="transition-opacity hover:opacity-80">
+                          <button key={item.id} type="button" onClick={() => void openChatFile({ fileName: item.fileName, fileId: item.fileId, path: item.path, openUrl: item.downloadUrl })} className="transition-opacity hover:opacity-80">
                             {card}
-                          </a>
+                          </button>
                         ) : (
                           <div key={item.id}>{card}</div>
                         );
@@ -4807,7 +4896,7 @@ export function AgentChatPage({
                   <div key={item.id} className="flex max-w-full flex-col gap-1.5 rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/70">
                     <div className="flex min-w-0 items-center gap-2">
                       {item.kind === 'image' && item.downloadUrl ? (
-                        <img src={item.downloadUrl} alt={item.fileName} className="h-8 w-8 rounded-lg object-cover" />
+                        <FileResourceImage src={item.downloadUrl} alt={item.fileName} className="h-8 w-8 rounded-lg object-cover" />
                       ) : item.kind === 'image' ? (
                         <ImageIcon size={16} className="shrink-0 text-celestial-saturn" />
                       ) : item.kind === 'audio' ? (
@@ -4845,6 +4934,13 @@ export function AgentChatPage({
                 ))}
               </div>
             )}
+            <ChatAttachmentUploadStatus
+              busy={isOptimizing}
+              failures={attachmentUploadFailures}
+              isZh={isZh}
+              onRetry={() => { void runChatAttachmentUpload('files', [], true); }}
+              onDismiss={() => { chatUploadsRef.current.reset(); setAttachmentUploadFailures([]); }}
+            />
             {isOptimizing && (
               <div className="mb-3 h-1 w-full overflow-hidden rounded-full bg-white/5">
                 <motion.div
@@ -4969,7 +5065,7 @@ export function AgentChatPage({
               ) : (
                 <Button
                   type="submit"
-                  disabled={!hasDraftText && pendingAttachments.length === 0}
+                  disabled={conversationTransitionPending || isOptimizing || attachmentUploadFailures.length > 0 || (!hasDraftText && pendingAttachments.length === 0)}
                   className="lumi-chat-send bg-celestial-saturn text-black rounded-2xl px-6 hover:scale-105 transition-transform disabled:opacity-50 disabled:hover:scale-100"
                   style={{
                     backgroundColor: chatAccentTheme.saturn,

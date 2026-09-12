@@ -1,21 +1,28 @@
+import { isExplicitMemoryRequest, persistTurnMemory, scheduleTurnMemory } from '../memory/turn_memory';
 /**
  * agent:chat socket handler — the core conversational AI pipeline
  */
 import { Server, Socket } from "socket.io";
+import { TASK_TARGET_HISTORY_LIMIT } from '../conversation/task_target_anchor';
 import { flushDBOrThrow, readDB, writeDB } from "../../db_layer";
 import { pushNotification } from "../routes/notifications";
-import { NormalizedMessage, makeLLMCall, makeLLMCallStreaming, StreamCallback } from "../llm/providers";
+import { NormalizedMessage, makeLLMCall, StreamCallback } from "../llm/providers";
+import { runConversationTurn } from '../llm/conversation_turn';
 import { resolveModelRequestInputBudget } from "../llm/request_context_budget";
 import { LLMUsage, ToolExecutionRecord, type ToolContext } from "../tools/types";
 import { buildMediaArtifactReceipt, type MediaArtifactReceipt } from './media_artifact_receipt';
 import { projectCustomerVisibleExecutionEvent } from './public_agent_event_projection';
+import { runtimeBackgroundWork, runtimeShutdownCancellation } from '../runtime/shutdown_work';
+import { captureChatAuthorization } from './chat_authorization';
+import { captureConversationAuthorization, combineRequestAuthorizations, runAuthorizedEnrichment } from '../conversation/lifecycle';
+import { readScopedDeletionReceipt } from '../persistence/durable_scope_mutation';
 import {
   normalizeStructuredMediaRequest,
   structuredMediaRoutingEnvelope,
 } from '../../shared/media_generation';
 import { toolRegistry } from "../tools/registry";
 import { executeToolCall } from "../tools/execution_engine";
-import { buildConfirmedStepContinuationMessages, runWithTools } from "../llm/adapter";
+import { buildConfirmedStepContinuationMessages, runWithTools, type LLMResult } from "../llm/adapter";
 import {
   normalizeOperationMode,
 } from "../cognition/operation_modes";
@@ -32,7 +39,7 @@ import { trustedContinuationEvidenceTools } from "../cognition/tool_router";
 import { buildLumiExecutionPipeline } from "../cognition/execution_pipeline";
 import { buildDesktopExecutionStabilityPolicy } from "../cognition/desktop_execution_stability";
 import { createDesktopExecutionTracker, withDesktopExecutionReceipt } from "../desktop/execution_runtime";
-import { finalizeLumiResponse } from "../cognition/result_finalizer";
+import { finalizeLumiResponse, tryFinalizeVerifiedBoundedAction } from "../cognition/result_finalizer";
 import { buildForegroundTaskCompletionFeedback } from "../cognition/acceptance_evidence";
 import { normalizeCompletionFeedbackForPersistence } from "../conversation/completion_feedback";
 import {
@@ -58,12 +65,7 @@ import {
   shouldForwardPreFinalizationProgress,
 } from "../cognition/response_delivery";
 import { buildLumiRuntimeCapabilityContext } from "../cognition/capability_context";
-import {
-  getExplicitSentenceCountConstraint,
-  sentenceCountCorrectionInstruction,
-} from "../cognition/response_constraints";
 import { buildTextReplyStyleOverlay } from '../cognition/reply_style';
-import { CN_STREAM_INTERRUPTION_RECOVERY_INSTRUCTION } from "../i18n/response_recovery_messages";
 import { buildLumiOperatingKernelPrompt } from "../cognition/operating_kernel";
 import {
   persistLumiPostTurnLearning,
@@ -95,12 +97,13 @@ import {
   resolveAcceptedTurnConfirmation,
   runAfterAcceptedUserTurnAdmission,
 } from './action_turn_durability';
-import { queryMemories, queryMemoriesVector, addMemory, addReminder, extractMemories, CONVERSATIONAL_MEMORY_EVIDENCE } from "../memory";
+import { queryMemories, queryMemoriesVector, addMemory, CONVERSATIONAL_MEMORY_EVIDENCE } from "../memory";
 import { loadEmotionalState, saveEmotionalState, updateEmotionalState, updateEmotionalStateWithHIM, loadHIMState, saveHIMState, generateContextualGreeting, vectorMemoryBias } from "../personality/state";
 import { buildModeOverlay, generateSystemPrompt } from "../personality/engine";
 import { personalityRegistry } from "../personality";
-import { getMemoryAvatar } from '../memory_avatar/store';
-import { lightweightEvolve } from "../personality/evolution";
+import { getMemoryAvatar, buildMemoryAvatarContext } from '../memory_avatar/store';
+import { captureMemoryAvatarAuthorization } from '../memory_avatar/lifecycle';
+
 import {
   getOrCreateConversationForTurn,
   addMessage,
@@ -119,6 +122,7 @@ import {
   getConversationActionStatus,
   bindConversationActionExecutionTurn,
   cancelConversationActionExecution,
+  completeConversationActionFromUserObservation,
   createDurableForegroundReleaseGate,
   convergeConversationActionRequestLease,
   convergeConversationActionRequestLeaseDurably,
@@ -144,8 +148,9 @@ import {
 } from "../conversation/execution_facts";
 import { resolveExactConversationCorrection } from "../conversation/exact_correction";
 import { findLatestRepeatableAssistantReply } from '../conversation/assistant_restatement';
-import { ensureBranch } from "../memory/tree";
+
 import { retrieveChunks } from "../agents/rag";
+import { runRetrievalRequest } from "../llm/retrieval_request";
 import { getSensory } from "./shared";
 import { processInput, handleLLMFailure, extractSentiment, CognitiveContext } from "../cognition";
 import {
@@ -153,6 +158,7 @@ import {
   classifyConversationActionFollowupIntent,
   conversationActionRequiresFreshConfirmationReview,
   formatConversationActionTaskStatus,
+  isUserObservedTaskCompletion,
   pendingRuntimeCancellationRecheck,
   RECONFIRMATION_REQUIRED_BLOCKER,
 } from "../cognition/action_continuation";
@@ -176,6 +182,7 @@ import {
   buildDeterministicWorkTaskStatusCommand,
 } from "../cognition/quick_commands";
 import { classifyRuntimeWorkIntent } from '../cognition/runtime_work_intent';
+import { callIntentClassifier } from '../cognition/intent_classifier';
 import { recordTokenUsage } from "../llm/token_tracker";
 import { searchKnowledgeBase } from "../org/kb";
 import { buildProfessionOverlay } from "../autonomy/professions";
@@ -196,7 +203,7 @@ import { createDesktopRelay } from "./desktop_relay";
 import { normalizeVoiceHistoryRecord } from "./voice_history";
 import {
   buildSocketToolSecurityContext,
-  resolveSocketScope,
+  resolveAuthorizedSocketScope,
   scopedEmotionalStateKey,
 } from "./scope";
 import {
@@ -656,10 +663,11 @@ export function registerChatHandler(
     ack?: (payload: { ok: boolean; snapshot?: ReturnType<typeof getChatExecution>; error?: string }) => void,
   ) => {
     const uid = userIdFn(socket);
-    const requestScope = resolveSocketScope(socket, uid, {
-      domain: data.domain === 'work' ? 'work' : data.domain === 'personal' ? 'personal' : undefined,
-      orgId: data.orgId,
-    });
+    const requestScope = resolveAuthorizedSocketScope(socket, uid);
+    if (!requestScope) {
+      try { ack?.({ ok: false, error: 'Workspace access is unavailable.' }); } catch {}
+      return;
+    }
     const scope: ChatExecutionScope = {
       userId: uid,
       domain: requestScope.domain,
@@ -691,10 +699,14 @@ export function registerChatHandler(
     ack?: (payload: { ok: boolean; requestId?: string; status?: string; error?: string }) => void,
   ) => {
     const uid = userIdFn(socket);
-    const requestScope = resolveSocketScope(socket, uid, {
-      domain: data.domain === 'work' ? 'work' : data.domain === 'personal' ? 'personal' : undefined,
-      orgId: data.orgId,
-    });
+    // Revoked credentials may only stop their exact original request. They
+    // never become personal credentials and cannot read a recovery payload.
+    if (socket.data?.authenticatedUserId !== uid || !data.requestId) {
+      try { ack?.({ ok: false, error: 'An authenticated exact request is required.' }); } catch {}
+      return;
+    }
+    const originalOrgId = String(socket.data?.authenticatedOrgId || '').trim();
+    const requestScope = { domain: originalOrgId ? 'work' as const : 'personal' as const, orgId: originalOrgId };
     const scope: ChatExecutionScope = {
       userId: uid,
       domain: requestScope.domain,
@@ -792,15 +804,24 @@ export function registerChatHandler(
     const nativeRequestBinding = buildSocketNativeRequestBinding(socket);
     let pendingConfirmation: Awaited<ReturnType<typeof getPendingConfirmationDurably>> = null;
     let pendingConfirmationPrompt = '';
+    // Execution evidence belongs to the request, including when a later model
+    // call is cancelled. Keep it reachable by the outer terminal boundary.
+    const requestToolRecords: ToolExecutionRecord[] = [];
+    let requestTaskId: string | undefined;
+    let collectRequestTerminalRecords = () => requestToolRecords;
+    const rememberRequestToolRecord = (record: ToolExecutionRecord) => {
+      if (!record?.name) return;
+      if (record.id && requestToolRecords.some(item => item.id === record.id)) return;
+      requestToolRecords.push(record);
+    };
     console.log('[ChatHandler] uid:', uid, 'agentId:', requestedAgentId || 'lumi', 'source:', source);
 
-    // Work context comes from the authenticated socket token. Personal mode can be
-    // explicitly requested by the desktop UI to avoid a stale org token leaking into
-    // local personal conversations.
-    const socketScope = resolveSocketScope(socket, uid, {
-      domain: data.domain === 'work' ? 'work' : data.domain === 'personal' ? 'personal' : undefined,
-      orgId: data.orgId,
-    });
+    // UI scope hints cannot turn an invalid work credential into personal access.
+    const socketScope = resolveAuthorizedSocketScope(socket, uid);
+    if (!socketScope) {
+      try { ack?.({ ok: false, requestId, error: 'Workspace access is unavailable.' }); } catch {}
+      return;
+    }
     // Only a user-owned Memory Avatar may opt into the private persona lane.
     // Ordinary chat always remains the single LumiCore identity; arbitrary
     // client-supplied Agent IDs cannot create another conversation owner or
@@ -830,6 +851,27 @@ export function registerChatHandler(
     const resolvedOrgId = requestScope.orgId;
     const allowAdaptiveLearning = !isMemoryAvatar && shouldPersistPostTurnLearningSource(eventSource);
     const toolSecurityContext = buildSocketToolSecurityContext(socket, requestScope);
+    const ownerAuthorization = isMemoryAvatar
+      ? captureMemoryAvatarAuthorization(uid, conversationAgentId)
+      : captureChatAuthorization(uid, requestScope);
+    let selectedConversationId = '';
+    const conversationAuthorization = captureConversationAuthorization(
+      { userId: uid, agentId: conversationAgentId, ...requestScope }, () => selectedConversationId,
+    );
+    const turnAuthorization = combineRequestAuthorizations(ownerAuthorization, conversationAuthorization);
+    const runAuthorizedTools = (...args: Parameters<typeof runWithTools>) => {
+      turnAuthorization.assertCurrent();
+      return runWithTools(...args);
+    };
+    const callAuthorizedModel = (...args: Parameters<typeof makeLLMCall>) => {
+      turnAuthorization.assertCurrent();
+      return makeLLMCall(...args);
+    };
+    const rejectRevokedRequest = () => {
+      if (turnAuthorization.isCurrent()) return false;
+      try { ack?.({ ok: false, requestId, error: !conversationAuthorization.isCurrent() ? 'Conversation is no longer available. Start a new conversation.' : isMemoryAvatar ? 'Memory avatar or its sources changed. Start a new request.' : 'Organization access changed. Start a new request in an available workspace.' }); } catch {}
+      return true;
+    };
     const requestedConversationId = String(data.conversationId || '').trim();
     const persistedRequestTurn = getMessageByRequestId({
       userId: uid,
@@ -866,7 +908,7 @@ export function registerChatHandler(
       try { ack?.({ ok: false, requestId, error: 'Conversation is unavailable for this user, agent, or workspace' }); } catch {}
       return;
     }
-    let selectedConversationId = selectedConversation.id;
+    selectedConversationId = selectedConversation.id;
     try {
       await ensurePendingConfirmationPersistenceInitialized();
     } catch (error) {
@@ -874,6 +916,7 @@ export function registerChatHandler(
       try { ack?.({ ok: false, requestId, error: 'Secure confirmation storage is unavailable' }); } catch {}
       return;
     }
+    if (rejectRevokedRequest()) return;
     const pendingAssistantOfferTranscript = getMessages(selectedConversationId, 4);
     let pendingAssistantOfferContext = buildPendingAssistantOfferContextFromTranscript({
       messages: pendingAssistantOfferTranscript,
@@ -911,6 +954,7 @@ export function registerChatHandler(
       orgId: resolvedOrgId,
       source: eventSource,
       conversationId: selectedConversationId,
+      requireConversation: true,
     };
     let executionRoom = chatExecutionRoom(executionScope);
     let sessionKey = `${uid}:${resolvedDomain}:${resolvedOrgId || ''}:${eventSource}:${selectedConversationId}`;
@@ -994,7 +1038,21 @@ export function registerChatHandler(
         ...(resolvedTaskRelation ? { taskRelation: resolvedTaskRelation } : {}),
       };
     };
+    let authorizationNoticeSent = false;
     const publishRecordedAgent = (event: string, normalizedPayload: Record<string, any>) => {
+      if (!turnAuthorization.isCurrent()) {
+        // Keep the originating UI from hanging, without publishing the old
+        // workspace's text, tool output, task details, or completion claims.
+        if (!authorizationNoticeSent && (event === 'agent:response' || event === 'agent:error')) {
+          authorizationNoticeSent = true;
+          socket.emit('agent:response', {
+            text: CN_TASK_EXECUTION_MESSAGES.cancelled, agentName: 'Lumi',
+            source: eventSource, requestId, conversationId: selectedConversationId,
+            finalized: true, blocked: false, reason: 'cancelled',
+          });
+        }
+        return;
+      }
       if (event === 'agent:response') {
         // The originating native client must receive the terminal frame even
         // if its room membership changed during reconnect or conversation
@@ -1016,6 +1074,7 @@ export function registerChatHandler(
     };
     let actionLeaseHeartbeat: ReturnType<typeof startConversationActionExecutionHeartbeat> | null = null;
     const emitAgent = (event: string, payload: Record<string, any> = {}) => {
+      if (!conversationAuthorization.isCurrent()) return false;
       const normalizedPayload = normalizeAgentPayload(event, payload);
       // A late duplicate from the same handler is not a reconnect replay. The
       // explicit request/recovery entry points above own replay delivery; doing
@@ -1031,6 +1090,7 @@ export function registerChatHandler(
       publishAfter?: () => void;
       errorContext?: string;
     }): Promise<boolean> => {
+      if (!conversationAuthorization.isCurrent()) return false;
       if (actionLeaseHeartbeat?.isLeaseLost()) {
         await actionLeaseHeartbeat.leaseLoss;
         return false;
@@ -1093,6 +1153,7 @@ export function registerChatHandler(
       return committed;
     };
     const emitConversationUpdated = (payload: Record<string, any>) => {
+      if (!turnAuthorization.isCurrent()) return;
       io.to(executionRoom).emit('chat:conversation_updated', {
         ...payload,
         requestId,
@@ -1175,6 +1236,7 @@ export function registerChatHandler(
           existingExecution = getChatExecution(executionScope, requestId) || existingExecution;
         }
       }
+      if (rejectRevokedRequest()) return;
       try { ack?.({ ok: true, requestId, receivedAt: existingExecution.createdAt }); } catch {}
       if (existingExecution.terminalEvent) {
         socket.emit(existingExecution.terminalEvent.event, {
@@ -1602,6 +1664,19 @@ export function registerChatHandler(
         acknowledged = true;
       } catch {}
       emitAgent('agent:status', { status: 'cancelling', sidecar: true });
+      if (!turnAuthorization.isCurrent()) {
+        // This control already has a durable reservation and an acceptance
+        // acknowledgement. Settle it without touching its old target.
+        await commitDeterministicTerminal({
+          payload: {
+            text: CN_TASK_EXECUTION_MESSAGES.cancelled, agentName: 'Lumi',
+            sidecar: true, finalized: true, blocked: false, reason: 'cancelled',
+          },
+          persistAssistantMessage: () => addMessageIdempotent({ userId: uid, agentId: conversationAgentId, conversationId: selectedConversationId, role: 'assistant', content: CN_TASK_EXECUTION_MESSAGES.cancelled, domain: resolvedDomain, orgId: resolvedOrgId, source: eventSource, channel: 'chat', cognitiveIntent: 'task_cancel', requestId, skipActionContinuation: true }),
+          errorContext: 'Revoked cancellation control terminal',
+        });
+        return;
+      }
       const currentTarget = chatExecutionQueue.getByRequestId(sessionKey, cancellationTargetRequestId);
       if (!currentTarget) {
         await commitDeterministicTerminal({
@@ -1674,6 +1749,10 @@ export function registerChatHandler(
       { userText: visibleUserText, conversationId: selectedConversationId },
     );
     let conversation = conversationTurn.conversation;
+    const userObservedCompletionTaskId = attachments.length === 0
+      && isUserObservedTaskCompletion(visibleUserText, conversation.actionContinuationState)
+      ? conversation.actionContinuationState?.taskId
+      : undefined;
     if (conversation.id !== selectedConversationId) {
       selectedConversationId = conversation.id;
       pendingAssistantOfferContext = undefined;
@@ -1694,6 +1773,7 @@ export function registerChatHandler(
       pendingConfirmation = null;
       pendingConfirmationPrompt = '';
     }
+    if (rejectRevokedRequest()) return;
     const chatAdmission = await admitAcceptedUserTurnDurably({
       persistAcceptedUserTurn: () => addMessageIdempotent({
         userId: uid,
@@ -1761,16 +1841,26 @@ export function registerChatHandler(
     // the same task is active both wait for that task and wake concurrently,
     // allowing the later request to supersede the earlier queued request.
     const sessionLease = runAfterAcceptedUserTurnAdmission(chatAdmission, () => {
-      if (previousSession && activeMessageRelation === 'replace') {
+      if (previousSession && activeMessageRelation === 'replace' && turnAuthorization.isCurrent()) {
         void chatExecutionQueue.cancelAll(sessionKey);
       }
       beginQueuedChatExecution(executionScope, requestId);
       return chatExecutionQueue.reserve(sessionKey, requestId);
     });
     const abortController = sessionLease.controller;
+    const stopAuthorizationWatch = turnAuthorization.watch(abortController);
+    const isChatCancelled = () => !turnAuthorization.isCurrent() || abortController.signal.aborted;
+    const forwardToolProgress = (step: string) => {
+      if (!isChatCancelled() && shouldForwardPreFinalizationProgress(step)) {
+        emitAgent('agent:progress', { text: step, agentName: 'Lumi' });
+      }
+    };
+    const unregisterShutdownCancellation = runtimeShutdownCancellation.register(abortController);
     let releaseDesktopControlLease: (() => void) | null = null;
     let foregroundRequestIdentity: ChatForegroundRequestIdentity | null = null;
     const releaseChatTransportResources = (): void => {
+      stopAuthorizationWatch();
+      unregisterShutdownCancellation();
       actionLeaseHeartbeat?.stop();
       releaseDesktopControlLease?.();
       releaseDesktopControlLease = null;
@@ -1780,6 +1870,17 @@ export function registerChatHandler(
       converge: async reason => {
         // Pre-binding exits own no durable action-turn lease.
         if (!foregroundRequestIdentity) return true;
+        // An explicit deletion removes this request's transcript and action
+        // projection together. Once that deletion is durable there is no
+        // deleted lease to reconstruct or endlessly retry. Independently
+        // running native work retains its own execution/settlement fencing.
+        if (!conversationAuthorization.isCurrent() && readScopedDeletionReceipt(
+          { userId: uid, domain: resolvedDomain, orgId: resolvedOrgId },
+          'conversation', selectedConversationId,
+        )) {
+          await flushDBOrThrow();
+          return true;
+        }
         const releaseResult = await convergeChatForegroundRequestBeforeRelease({
           identity: foregroundRequestIdentity,
           aborted: abortController.signal.aborted,
@@ -1831,7 +1932,7 @@ export function registerChatHandler(
         ack?.({ ok: true, requestId, receivedAt: new Date().toISOString() });
         acknowledged = true;
       } catch {}
-      io.to(executionRoom).emit('agent:status', {
+      if (turnAuthorization.isCurrent()) io.to(executionRoom).emit('agent:status', {
         status: activeMessageRelation === 'replace' ? 'replacing' : 'queued',
         source: eventSource,
         requestId,
@@ -1889,7 +1990,7 @@ export function registerChatHandler(
       await releaseChatSession();
       return;
     }
-    if (superseded?.terminalEvent) {
+    if (superseded?.terminalEvent && turnAuthorization.isCurrent()) {
       io.to(executionRoom).emit(superseded.terminalEvent.event, superseded.terminalEvent.payload);
     }
     if (!acknowledged) {
@@ -1901,6 +2002,7 @@ export function registerChatHandler(
       // durable conversation and resolve the user's feedback against that
       // exact revision. Never merge a receive-time task id/revision over a
       // newer state: explicit controls are optimistic-concurrency fences.
+      turnAuthorization.assertCurrent();
       const refreshedConversation = getConversationForScope(
         conversation.id,
         uid,
@@ -1920,6 +2022,23 @@ export function registerChatHandler(
         return;
       }
       conversation = refreshedConversation;
+      // Explicit memory edits own a durable turn without entering task/tool planning.
+      if (!isMemoryAvatar && isExplicitMemoryRequest(visibleUserText)) {
+        const receipt = await persistTurnMemory({ userId: uid, domain: resolvedDomain, orgId: resolvedOrgId,
+          userText: visibleUserText, channel: 'chat', source: eventSource, requestId, conversationId: conversation.id,
+          agentId: conversationAgentId, authorization: turnAuthorization, signal: abortController.signal, llmGetters });
+        await commitDeterministicTerminal({
+          payload: { text: receipt.text, agentName: 'Lumi', finalized: true, blocked: receipt.status === 'failed',
+            reason: receipt.status === 'saved' ? 'memory_saved' : 'memory_not_saved' },
+          persistAssistantMessage: () => addMessageIdempotent({ userId: uid, agentId: conversationAgentId,
+            conversationId: conversation.id, role: 'assistant', content: receipt.text, domain: resolvedDomain,
+            orgId: resolvedOrgId, source: eventSource, channel: 'chat', cognitiveIntent: 'memory',
+            llmWasCalled: true, requestId, skipActionContinuation: true }),
+          errorContext: 'Explicit memory terminal',
+        });
+        await releaseChatSession();
+        return;
+      }
       resolvedTaskRelation = resolveActiveTaskMessageRelation(
         visibleUserText,
         conversation.actionContinuationState,
@@ -1932,7 +2051,10 @@ export function registerChatHandler(
         },
       );
       emitAgent('agent:task_relation', { relation: resolvedTaskRelation });
-      if (resolvedTaskRelation.binding === 'stale') {
+      if (resolvedTaskRelation.binding === 'stale' || (
+        userObservedCompletionTaskId
+        && conversation.actionContinuationState?.taskId !== userObservedCompletionTaskId
+      )) {
         await commitDeterministicTerminal({
           payload: {
             text: CN_TASK_EXECUTION_MESSAGES.staleControl,
@@ -1957,6 +2079,49 @@ export function registerChatHandler(
             skipActionContinuation: true,
           }),
           errorContext: 'Stale foreground task terminal',
+        });
+        await releaseChatSession();
+        return;
+      }
+
+      if (userObservedCompletionTaskId && isUserObservedTaskCompletion(visibleUserText, conversation.actionContinuationState)) {
+        const observedTask = conversation.actionContinuationState!;
+        await clearPendingConfirmationDurably(uid, buildTransportNeutralConfirmationScope({
+          domain: resolvedDomain,
+          orgId: resolvedOrgId,
+          conversationId: conversation.id,
+          taskId: observedTask.taskId,
+        }));
+        pendingConfirmation = null;
+        pendingConfirmationPrompt = '';
+        const responseText = formatConversationActionTaskStatus({
+          ...observedTask, status: 'completed', unfinished: false,
+          latestBlocker: '', completionSource: 'user_observation',
+        });
+        await commitDeterministicTerminal({
+          payload: {
+            text: responseText, agentName: 'Lumi', finalized: true,
+            blocked: false, reason: 'task_user_observation',
+          },
+          persistAssistantMessage: () => {
+            const completed = completeConversationActionFromUserObservation(
+              conversation.id, uid, visibleUserText,
+              { taskId: observedTask.taskId!, requestId, userMessageId: acceptedUserMessageId },
+            );
+            if (!completed) throw new Error('User observation no longer owns the pending task');
+            addMessageIdempotent({
+              userId: uid, agentId: conversationAgentId, conversationId: conversation.id,
+              role: 'assistant', content: responseText, domain: resolvedDomain, orgId: resolvedOrgId,
+              source: 'chat_task_user_observation', channel: 'chat',
+              cognitiveIntent: 'task_user_observation', llmWasCalled: false,
+              requestId, skipActionContinuation: true,
+            });
+          },
+          publishAfter: () => emitConversationUpdated({
+            conversationId: conversation.id, agentId: conversationAgentId,
+            source: 'chat_task_user_observation',
+          }),
+          errorContext: 'User-observed task completion terminal',
         });
         await releaseChatSession();
         return;
@@ -2196,7 +2361,7 @@ export function registerChatHandler(
               // not fresh mutation authority and never a cancel-all request.
               userConfirmed: true,
               executionSignal: abortController.signal,
-              isCancelled: () => abortController.signal.aborted,
+              isCancelled: isChatCancelled,
             },
           });
           const recheckLifecycle = {
@@ -2426,7 +2591,7 @@ export function registerChatHandler(
         : { typeWeights: {}, perspectiveWeights: {} };
 
       // Vector semantic search with keyword fallback
-      const relevantMemories = await queryMemoriesVector({
+      const relevantMemories = await runRetrievalRequest(signal => queryMemoriesVector({
         userId: uid,
         query: text,
         limit: isMemoryAvatar ? Math.min(20, Number(memoryAvatar?.personalityConfig?.memoryPolicy?.retrieveLimit) || 10) : 5,
@@ -2438,19 +2603,26 @@ export function registerChatHandler(
         orgId: resolvedOrgId,
         useVector: true,
         evidenceClasses: CONVERSATIONAL_MEMORY_EVIDENCE,
-      });
+        recordRetrieval: true,
+        signal,
+      }), abortController.signal);
+      turnAuthorization.assertCurrent();
       console.log('[ChatHandler] relevantMemories (vector):', relevantMemories.length);
 
       // RAG: retrieve relevant knowledge chunks from agent-scoped and Lumi knowledge.
-      let ragChunks: string[] = [];
+      let ragChunks: string[] = isMemoryAvatar
+        ? buildMemoryAvatarContext(uid, conversationAgentId, text)
+        : [];
       const ragAgentIds = isMemoryAvatar
         ? [conversationAgentId]
         : Array.from(new Set([conversationAgentId, 'lumi'].filter(Boolean)));
       for (const ragAgentId of ragAgentIds) {
-        const chunks = await retrieveChunks(uid, ragAgentId, text, 3, {
+        const chunks = await runRetrievalRequest(signal => retrieveChunks(uid, ragAgentId, text, 3, {
           domain: resolvedDomain,
           orgId: resolvedDomain === 'work' ? resolvedOrgId : '',
-        });
+          signal,
+        }), abortController.signal);
+        turnAuthorization.assertCurrent();
         for (const chunk of chunks) {
           const content = (chunk as any).content;
           if (content && !ragChunks.includes(content)) ragChunks.push(content);
@@ -2463,7 +2635,8 @@ export function registerChatHandler(
       let kbContext: string | undefined;
       if (resolvedDomain === 'work' && resolvedOrgId) {
         try {
-          const kbResults = await searchKnowledgeBase(resolvedOrgId, text, { limit: 3, userId: uid });
+          const kbResults = await runRetrievalRequest(signal => searchKnowledgeBase(resolvedOrgId, text, { limit: 3, userId: uid, signal }), abortController.signal);
+          turnAuthorization.assertCurrent();
           if (kbResults.length > 0) {
             kbContext = kbResults
               .map(r => `[${r.title}] ${r.chunk}`)
@@ -2471,6 +2644,7 @@ export function registerChatHandler(
             console.log('[ChatHandler] KB search results:', kbResults.length, 'articles found');
           }
         } catch (err: any) {
+          abortController.signal.throwIfAborted();
           console.warn('[ChatHandler] KB search failed:', err.message);
         }
       }
@@ -2584,7 +2758,7 @@ export function registerChatHandler(
       }
 
       const persistedConversationHistory = conversationId
-        ? getMessages(conversationId, 18).filter(record => !(
+        ? getMessages(conversationId, TASK_TARGET_HISTORY_LIMIT).filter(record => !(
             record.role === 'user'
             && (
               record.requestId === requestId
@@ -2716,6 +2890,7 @@ export function registerChatHandler(
       ].filter(Boolean).join('\n\n');
 
       const executionPipeline = buildLumiExecutionPipeline({
+        structuredMediaRequest,
         dispatch: {
           userId: uid,
           text: currentTurnDecisionText,
@@ -2734,6 +2909,7 @@ export function registerChatHandler(
         registry: toolRegistry,
         personalityToolPolicy: personality.toolPolicy,
         actionTaskState: conversation?.actionContinuationState,
+        persistedConversationHistory,
         pendingAssistantOfferContext,
         isSanctuary: isMemoryAvatar,
         traceText: currentTurnDecisionText,
@@ -2741,6 +2917,9 @@ export function registerChatHandler(
       });
       const turnDispatch = executionPipeline.turnIntent;
       const turnFlow = turnDispatch.flow;
+      const completionTaskText = executionPipeline.trustedActionContinuation
+        ? conversation?.actionContinuationState?.goal || executionTaskText
+        : executionTaskText;
       const turnSurface = turnDispatch.surface;
       if (toolSecurityContext.executionBoundary !== 'remote_restricted') {
         effectiveSystemPrompt += '\n\n' + turnDispatch.promptOverlay;
@@ -2842,6 +3021,7 @@ export function registerChatHandler(
           logLabel?: string;
         } = {},
       ) => {
+        if (!turnAuthorization.isCurrent()) return;
         persistLumiPostTurnLearning(
           {
             userId: uid,
@@ -2910,6 +3090,7 @@ export function registerChatHandler(
         return relation;
       };
       const publishDurableTaskRelation = (exactTaskId = resolvedTaskRelation?.taskId || '') => {
+        if (!turnAuthorization.isCurrent()) return;
         const relation = refreshDurableTaskRelation(exactTaskId);
         if (!relation) return;
         io.to(executionRoom).emit('agent:task_relation', {
@@ -3154,6 +3335,7 @@ export function registerChatHandler(
         lane: capabilitySelection.lane,
         preferredTools: capabilitySelection.preferredTools,
         pinnedTools: pinnedContinuationTools,
+        requiredTools: executionPipeline.modelToolProjection.requiredToolNames,
       });
       const toolSessionActive = !isMemoryAvatar && executionPipeline.executionRequested
         && modelToolProjection.toolNames.length > 0;
@@ -3272,6 +3454,7 @@ export function registerChatHandler(
         return;
       }
       const durableTaskId = actionTaskExecution.state?.taskId;
+      requestTaskId = durableTaskId;
       if (structuredMediaRequest && actionTaskExecution.state?.taskId) {
         const structuredMediaRecoveryCall = buildStructuredMediaDeterministicToolRecoveryCall(
           structuredMediaRequest,
@@ -3353,12 +3536,13 @@ export function registerChatHandler(
       const taskAwareRecords = (records: ToolExecutionRecord[]) => (
         coalesceToolExecutionRecords([...priorTaskRecords, ...records])
       );
+      collectRequestTerminalRecords = () => withDesktopExecutionReceipt(requestToolRecords, desktopExecutionTracker);
       if (toolSecurityContext.executionBoundary !== 'remote_restricted') {
         effectiveSystemPrompt += '\n\n' + formatClientSelfPromptForTurn(uid, visibleUserText, { domain: resolvedDomain, orgId: resolvedOrgId });
       }
       console.log('[ChatHandler] tool gate:', executionDecision.allowToolUse ? 'authorized' : 'off', 'session:', toolSessionActive ? 'active' : 'conversation', 'operationMode:', operationMode, 'effective:', effectiveOperationMode, 'surface:', turnFlow.surface, 'clientActionOnly:', clientActionOnlyTurn, 'selfRepair:', selfRepairTurn, 'capabilityLane:', capabilitySelection.lane, 'trace:', intentTrace.summary, 'route:', toolRoute ? `${toolRoute.toolNames.length}/${toolRoute.totalAvailable} ${toolRoute.categories.join(',') || 'fallback'}` : 'none');
-      socket.emit('agent:intent_trace', intentTrace);
-      if (toolRoute) {
+      if (turnAuthorization.isCurrent()) socket.emit('agent:intent_trace', intentTrace);
+      if (toolRoute && turnAuthorization.isCurrent()) {
         socket.emit('agent:tool_route', {
           categories: toolRoute.categories,
           reasons: toolRoute.reasons,
@@ -3455,9 +3639,10 @@ export function registerChatHandler(
             currentTurnExecutionRequested: executionPipeline.executionRequested,
             trustedActionContinuation: executionPipeline.trustedActionContinuation,
             routedTaskText: visibleUserText,
+            acceptedTaskTarget: turnFlow.acceptedTaskTarget,
             requestConfirmation: requestToolConfirmation,
             executionSignal: abortController.signal,
-            isCancelled: () => abortController.signal.aborted,
+            isCancelled: isChatCancelled,
           },
         });
         emitToolLifecycle({
@@ -3644,6 +3829,7 @@ export function registerChatHandler(
 
       const scheduleChatSummary = (targetConversationId: string) => {
         scheduleConversationSummary({
+          isAuthorized: turnAuthorization.isCurrent,
           userId: uid,
           provider: activeProvider,
           model: activeModel,
@@ -3701,12 +3887,14 @@ export function registerChatHandler(
             allowLocalFileWrites,
             localWriteIntentReason,
             executionSignal: abortController.signal,
-            isCancelled: () => abortController.signal.aborted,
+            isCancelled: isChatCancelled,
+            onProgress: forwardToolProgress,
             userConfirmed: true,
             actionIntent: confirmedTask,
             currentTurnExecutionRequested: executionPipeline.executionRequested,
             trustedActionContinuation: executionPipeline.trustedActionContinuation,
             routedTaskText: confirmedTask,
+            acceptedTaskTarget: turnFlow.acceptedTaskTarget,
             toolPolicy: modelCapabilityPolicy,
             modelToolProjection,
           },
@@ -3718,6 +3906,9 @@ export function registerChatHandler(
                 reason: 'The one-time confirmation expired before execution.',
               },
         });
+        confirmedRecord.executionOrigin = 'confirmed_action_resume';
+        rememberRequestToolRecord(confirmedRecord);
+        if (isChatCancelled()) throw new DOMException('Chat confirmation execution cancelled', 'AbortError');
         if (!isDirectDesktopTool(confirmedRecord.name)) {
           emitToolLifecycle({
             correlationId: confirmedRecord.id || `chat-confirmed-${Date.now()}`,
@@ -3733,20 +3924,32 @@ export function registerChatHandler(
         }
         let confirmationRecords: ToolExecutionRecord[] = [confirmedRecord];
         let confirmationLlmWasCalled = false;
-        let candidate = toolRecordSucceeded(confirmedRecord)
+        let confirmationCompletionGuard: LLMResult['completionGuard'];
+        const completedConfirmedAction = tryFinalizeVerifiedBoundedAction({
+          taskText: confirmedTask,
+          responseText: '',
+          toolRecords: taskAwareRecords([confirmedRecord]),
+          source: 'chat_confirmation',
+          flow: { ...turnFlow, routeText: confirmedTask },
+          taskId: durableTaskId,
+          requestId,
+        });
+        let candidate = completedConfirmedAction?.text || (toolRecordSucceeded(confirmedRecord)
           ? CN_VOICE_FAST_PATH_MESSAGES.confirmationExecuted
           : CN_VOICE_FAST_PATH_MESSAGES.confirmationFailed(
               confirmedRecord.error || confirmedRecord.result,
-            );
+            ));
         if (
+          !completedConfirmedAction
+          &&
           confirmedStepNeedsContinuation(
             confirmedTask,
             taskAwareRecords([confirmedRecord]),
           )
-          && !abortController.signal.aborted
+          && !isChatCancelled()
         ) {
           confirmationLlmWasCalled = true;
-          const continuation = await runWithTools(
+          const continuation = await runAuthorizedTools(
             [
               { role: 'system', content: effectiveSystemPrompt },
               ...buildConfirmedStepContinuationMessages(confirmedTask, confirmedRecord, {
@@ -3765,6 +3968,7 @@ export function registerChatHandler(
               ...reasoningRoutePolicy,
             },
             record => {
+              rememberRequestToolRecord(record);
               if (!record?.name || isDirectDesktopTool(record.name)) return;
               emitToolLifecycle({
                 correlationId: record.id || `chat-confirmation-resume-${Date.now()}`,
@@ -3798,15 +4002,17 @@ export function registerChatHandler(
               allowLocalFileWrites,
               localWriteIntentReason,
               executionSignal: abortController.signal,
-              isCancelled: () => abortController.signal.aborted,
+              isCancelled: isChatCancelled,
+              onProgress: forwardToolProgress,
               requestConfirmation: requestToolConfirmation,
               actionIntent: confirmedTask,
               currentTurnExecutionRequested: executionPipeline.executionRequested,
               trustedActionContinuation: executionPipeline.trustedActionContinuation,
               routedTaskText: confirmedTask,
+              acceptedTaskTarget: turnFlow.acceptedTaskTarget,
               toolPolicy: modelCapabilityPolicy,
               modelToolProjection,
-              priorToolRecords: [confirmedRecord],
+              priorToolRecords: taskAwareRecords([confirmedRecord]),
               desktopExecutionTracker,
             },
             llmGetters.getOllama,
@@ -3817,6 +4023,7 @@ export function registerChatHandler(
             llmGetters.getGlm,
             llmGetters.getRelay,
           );
+          if (isChatCancelled()) throw new DOMException('Chat confirmation continuation cancelled', 'AbortError');
           for (const usage of continuation.usageRecords) {
             recordTokenUsage(uid, usage.provider, usage.model, {
               promptTokens: usage.promptTokens,
@@ -3828,16 +4035,19 @@ export function registerChatHandler(
             (sum, usage) => sum + (usage.totalTokens || 0),
             0,
           );
-          socket.emit('token:usage_update', {
+          if (turnAuthorization.isCurrent()) socket.emit('token:usage_update', {
             userId: uid,
             provider: activeProvider,
             totalTokens: confirmationUsage,
             mode: 'chat',
             timestamp: new Date().toISOString(),
           });
-          confirmationRecords = continuation.toolCalls?.length
-            ? continuation.toolCalls
-            : [confirmedRecord];
+          confirmationRecords = coalesceToolExecutionRecords([
+            confirmedRecord,
+            ...requestToolRecords,
+            ...(continuation.toolCalls || []),
+          ]);
+          confirmationCompletionGuard = continuation.completionGuard;
           candidate = pendingConfirmationCreatedThisTurn
             ? CN_TASK_EXECUTION_MESSAGES.waitingConfirmation(confirmedTask)
             : continuation.text || candidate;
@@ -3856,6 +4066,7 @@ export function registerChatHandler(
           : finalizeLumiResponse({
               taskText: confirmedTask,
               responseText: candidate,
+              completionGuard: confirmationCompletionGuard,
               toolRecords: taskAwareRecords(confirmationRecords),
               source: 'chat_confirmation',
               flow: { ...turnFlow, routeText: confirmedTask },
@@ -4029,8 +4240,9 @@ export function registerChatHandler(
       }
 
       let responseText = '';
+      let completionGuard: LLMResult['completionGuard'];
       let llmWasCalled = false;
-      const allToolRecords: ToolExecutionRecord[] = [];
+      const allToolRecords = requestToolRecords;
       // Keep the same token-budgeted conversation that drove the normal turn
       // available to the one-shot execution recovery. Falling back to only the
       // latest task makes the recovery model forget constraints and prior user
@@ -4053,20 +4265,18 @@ export function registerChatHandler(
         llmModel: activeModel,
         isLLMAvailable: true,
       };
-      // LLM classifier for ambiguous intents — fast tiny call (50 tokens max)
+      // Optional classification gets one bounded attempt; the main reply keeps
+      // the user's full routing policy and cannot wait on classifier failover.
       const llmClassifier = async (prompt: string, userText: string): Promise<string> => {
         const messages: NormalizedMessage[] = [
           { role: 'system', content: prompt },
           { role: 'user', content: userText, sourceMessageId: acceptedUserMessageId },
         ];
-        const result = await makeLLMCall(
-          messages,
-          [],
+        const result = await callIntentClassifier(
           {
             provider: activeProvider,
             model: activeModel,
             userId: uid,
-            maxTokens: 60,
             domain: resolvedDomain,
             orgId: resolvedOrgId,
             signal: abortController.signal,
@@ -4077,13 +4287,22 @@ export function registerChatHandler(
             // discriminator used by request-only acceptance evidence.
             source: 'chat_intent_classifier',
           },
-          llmGetters.getDeepSeek, llmGetters.getGemini, llmGetters.getOpenAI, llmGetters.getAnthropic, llmGetters.getQwen,
-          llmGetters.getOllama, llmGetters.getLmStudio, llmGetters.getArk, llmGetters.getXiaomi, llmGetters.getKimi, llmGetters.getGlm, llmGetters.getRelay,
+          classifierConfig => callAuthorizedModel(
+            messages,
+            [],
+            classifierConfig,
+            llmGetters.getDeepSeek, llmGetters.getGemini, llmGetters.getOpenAI, llmGetters.getAnthropic, llmGetters.getQwen,
+            llmGetters.getOllama, llmGetters.getLmStudio, llmGetters.getArk, llmGetters.getXiaomi, llmGetters.getKimi, llmGetters.getGlm, llmGetters.getRelay,
+          ),
         );
-        return result.text || '{"category":"unknown","confidence":0.5,"entities":{}}';
+        return result.text;
       };
 
       const cognition = await processInput(text, cognitiveCtx, llmClassifier);
+      // Local classification fallback is allowed after its own short deadline,
+      // but must never swallow cancellation/revocation of the parent chat turn.
+      abortController.signal.throwIfAborted();
+      turnAuthorization.assertCurrent();
       console.log('[ChatHandler] cognition result:', cognition.intent.category, 'directToolExecuted:', cognition.directToolExecuted, 'responseText:', cognition.responseText?.slice(0, 100));
 
       // ── Sentiment analysis: detect emotional charge in user input ──
@@ -4144,10 +4363,8 @@ export function registerChatHandler(
 
         try {
           console.log('[ChatHandler] Calling Path C with provider:', activeProvider, 'model:', activeModel, 'tools:', toolSessionActive ? 'active' : 'conversation');
-          const streamChunks: string[] = [];
           const onChunk: StreamCallback = (chunk) => {
-            streamChunks.push(chunk);
-            if (!deferCompletionStream) {
+            if (!deferCompletionStream && !isExplicitMemoryRequest(text)) {
               const safeText = chatTextGate.push(chunk);
               if (safeText) {
                 emitAgent("agent:chunk", { text: safeText, agentName: personality.name });
@@ -4157,61 +4374,30 @@ export function registerChatHandler(
 
           // Sanctuary agents get zero tool access — they can only talk
           if (!toolSessionActive) {
-            const response = await makeLLMCallStreaming(
+            const response = await runConversationTurn({
               messages,
-              [],
-              { provider: activeProvider, model: activeModel, userId: uid, domain: resolvedDomain, orgId: resolvedOrgId, signal: abortController.signal, ...reasoningRoutePolicy },
+              config: { provider: activeProvider, model: activeModel, userId: uid, domain: resolvedDomain, orgId: resolvedOrgId, signal: abortController.signal, ...reasoningRoutePolicy },
               onChunk,
-              llmGetters.getDeepSeek, llmGetters.getGemini, llmGetters.getOpenAI, llmGetters.getAnthropic, llmGetters.getQwen,
-              llmGetters.getOllama, llmGetters.getLmStudio, llmGetters.getArk, llmGetters.getXiaomi, llmGetters.getKimi, llmGetters.getGlm, llmGetters.getRelay,
-            );
+              getters: llmGetters,
+              isCancelled: isChatCancelled,
+              assertCurrent: () => turnAuthorization.assertCurrent(),
+              taskText: text,
+            });
 
-            responseText = response.text || streamChunks.join('') || '';
+            responseText = response.text;
+            completionGuard = response.completionGuard;
             llmWasCalled = true;
-            if (response.usage) {
-              recordTokenUsage(uid, response.routing?.selectedProvider || activeProvider, response.routing?.selectedModel || activeModel, {
-                promptTokens: response.usage.promptTokens,
-                completionTokens: response.usage.completionTokens,
-                totalTokens: response.usage.totalTokens,
+            for (const usage of response.usageRecords) {
+              recordTokenUsage(uid, usage.provider, usage.model, {
+                promptTokens: usage.promptTokens,
+                completionTokens: usage.completionTokens,
+                totalTokens: usage.totalTokens,
               }, interactionId);
             }
-            const sentenceConstraint = getExplicitSentenceCountConstraint(text, responseText);
-            if (response.streamIncomplete || (sentenceConstraint && sentenceConstraint.actual !== sentenceConstraint.expected)) {
-              const recoveryInstruction = sentenceConstraint
-                ? sentenceCountCorrectionInstruction(sentenceConstraint.expected)
-                : CN_STREAM_INTERRUPTION_RECOVERY_INSTRUCTION;
-              const corrected = await makeLLMCallStreaming(
-                [
-                  ...messages,
-                  { role: 'assistant', content: responseText },
-                  { role: 'user', content: recoveryInstruction },
-                ],
-                [],
-                { provider: activeProvider, model: activeModel, userId: uid, domain: resolvedDomain, orgId: resolvedOrgId, signal: abortController.signal, ...reasoningRoutePolicy },
-                () => {},
-                llmGetters.getDeepSeek, llmGetters.getGemini, llmGetters.getOpenAI, llmGetters.getAnthropic, llmGetters.getQwen,
-                llmGetters.getOllama, llmGetters.getLmStudio, llmGetters.getArk, llmGetters.getXiaomi, llmGetters.getKimi, llmGetters.getGlm, llmGetters.getRelay,
-              );
-              const correctedText = String(corrected.text || '').trim();
-              const correctedConstraint = getExplicitSentenceCountConstraint(text, correctedText);
-              if (
-                correctedText
-                && (!sentenceConstraint || correctedConstraint?.actual === correctedConstraint.expected)
-              ) {
-                responseText = correctedText;
-              }
-              if (corrected.usage) {
-                recordTokenUsage(uid, corrected.routing?.selectedProvider || activeProvider, corrected.routing?.selectedModel || activeModel, {
-                  promptTokens: corrected.usage.promptTokens,
-                  completionTokens: corrected.usage.completionTokens,
-                  totalTokens: corrected.usage.totalTokens,
-                }, interactionId);
-              }
-            }
-            const totalUsage = response.usage?.totalTokens || 0;
-            socket.emit('token:usage_update', {
+            const totalUsage = response.usageRecords.reduce((sum, usage) => sum + (usage.totalTokens || 0), 0);
+            if (turnAuthorization.isCurrent()) socket.emit('token:usage_update', {
               userId: uid,
-              provider: response.routing?.selectedProvider || activeProvider,
+              provider: response.usageRecords.at(-1)?.provider || activeProvider,
               totalTokens: totalUsage,
               mode: 'chat',
               timestamp: new Date().toISOString(),
@@ -4221,7 +4407,7 @@ export function registerChatHandler(
 
           // Collect tool calls for persistence
 
-          const result = await runWithTools(
+          const result = await runAuthorizedTools(
             messages,
             toolRegistry,
             {
@@ -4268,7 +4454,7 @@ export function registerChatHandler(
               allowLocalFileWrites,
               localWriteIntentReason,
               executionSignal: abortController.signal,
-              isCancelled: () => abortController.signal.aborted,
+              isCancelled: isChatCancelled,
               onToolStart: (call) => {
                 if (isDirectDesktopTool(call.name)) return;
                 emitToolLifecycle({
@@ -4277,17 +4463,15 @@ export function registerChatHandler(
                   arguments: call.arguments,
                 });
               },
-              onProgress: (step: string) => {
-                if (shouldForwardPreFinalizationProgress(step)) {
-                  emitAgent("agent:progress", { text: step, agentName: "Lumi" });
-                }
-              },
+              onProgress: forwardToolProgress,
               toolPolicy: modelCapabilityPolicy,
               modelToolProjection,
               actionIntent: visibleUserText,
               currentTurnExecutionRequested: executionPipeline.executionRequested,
               trustedActionContinuation: executionPipeline.trustedActionContinuation,
               routedTaskText: turnFlow.routeText,
+              acceptedTaskTarget: turnFlow.acceptedTaskTarget,
+              priorToolRecords: priorTaskRecords,
               ...(runtimeOwnedDeterministicRecoveryCall ? { runtimeOwnedDeterministicRecoveryCall } : {}),
               desktopExecutionTracker,
               ...(toolSessionActive ? { requestConfirmation: requestToolConfirmation } : {}),
@@ -4302,6 +4486,7 @@ export function registerChatHandler(
           );
 
           responseText = result.text || '';
+          completionGuard = result.completionGuard;
           llmWasCalled = result.usageRecords.length > 0;
           // Record provider/model analytics. Product billing is not part of the local execution path.
           for (const u of result.usageRecords) {
@@ -4309,7 +4494,7 @@ export function registerChatHandler(
           }
           // Real-time token telemetry for the local dashboard.
           const totalUsage = result.usageRecords.reduce((s: number, r: any) => s + (r.totalTokens || 0), 0);
-          socket.emit('token:usage_update', {
+          if (turnAuthorization.isCurrent()) socket.emit('token:usage_update', {
             userId: uid,
             provider: activeProvider,
             totalTokens: totalUsage,
@@ -4318,7 +4503,7 @@ export function registerChatHandler(
           });
           }
         } catch (llmErr: any) {
-          if (abortController.signal.aborted || llmErr?.name === 'AbortError') {
+          if (isChatCancelled() || llmErr?.name === 'AbortError') {
             throw llmErr?.name === 'AbortError'
               ? llmErr
               : new DOMException('Chat execution cancelled', 'AbortError');
@@ -4332,7 +4517,7 @@ export function registerChatHandler(
         // The tool loop may cooperatively return a cancellation summary rather
         // than throw. Do not feed that through ordinary completion guards: the
         // outer cancellation boundary owns the only durable terminal outcome.
-        if (abortController.signal.aborted) {
+        if (isChatCancelled()) {
           throw new DOMException('Chat execution cancelled', 'AbortError');
         }
       }
@@ -4360,6 +4545,7 @@ export function registerChatHandler(
         : finalizeLumiResponse({
             taskText: executionTaskText,
             responseText,
+            completionGuard,
             toolRecords: finalTaskRecords,
             source: 'chat',
             flow: turnFlow,
@@ -4396,13 +4582,13 @@ export function registerChatHandler(
         // A physical-input pause revokes further desktop authority, but it is
         // not a user cancellation.  Treating the pause as AbortError made the
         // outer chat catch publish the misleading "task stopped" terminal.
-        isAborted: () => abortController.signal.aborted,
+        isAborted: isChatCancelled,
         isPendingConfirmation: () => Boolean(pendingConfirmationCreatedThisTurn),
         toolRecords: taskAwareRecords(allToolRecords),
         attempt: async ({ instruction, priorToolRecords, recordTool }) => {
           console.warn('[ChatHandler] Recovering blocked execution internally.');
           llmWasCalled = true;
-          const recovery = await runWithTools(
+          const recovery = await runAuthorizedTools(
             [
               ...normalTurnMessages,
               ...(String(responseText || '').trim()
@@ -4423,6 +4609,7 @@ export function registerChatHandler(
             record => {
               // Preserve terminal receipts independently from the provider
               // result; a late provider error must not erase tool evidence.
+              rememberRequestToolRecord(record);
               recordTool(record);
               if (isDirectDesktopTool(record.name)) return;
               const toolPayload = {
@@ -4461,7 +4648,8 @@ export function registerChatHandler(
               allowLocalFileWrites,
               localWriteIntentReason,
               executionSignal: abortController.signal,
-              isCancelled: () => abortController.signal.aborted,
+              isCancelled: isChatCancelled,
+              onProgress: forwardToolProgress,
               onToolStart: call => {
                 if (isDirectDesktopTool(call.name)) return;
                 emitToolLifecycle({
@@ -4476,6 +4664,7 @@ export function registerChatHandler(
               currentTurnExecutionRequested: executionPipeline.executionRequested,
               trustedActionContinuation: executionPipeline.trustedActionContinuation,
               routedTaskText: turnFlow.routeText,
+              acceptedTaskTarget: turnFlow.acceptedTaskTarget,
               ...(runtimeOwnedDeterministicRecoveryCall ? { runtimeOwnedDeterministicRecoveryCall } : {}),
               priorToolRecords,
               desktopExecutionTracker,
@@ -4498,13 +4687,14 @@ export function registerChatHandler(
           }
           return {
             text: recovery.text,
+            completionGuard: recovery.completionGuard,
             toolRecords: withDesktopExecutionReceipt(
               recovery.toolCalls || [],
               desktopExecutionTracker,
             ),
           };
         },
-        finalize: (candidateText, records) => {
+        finalize: (candidateText, records, recoveryCompletionGuard) => {
           const recoveredRecords = withDesktopExecutionReceipt(records, desktopExecutionTracker);
           const candidate = pendingConfirmationCreatedThisTurn
             ? {
@@ -4516,6 +4706,7 @@ export function registerChatHandler(
             : finalizeLumiResponse({
                 taskText: executionTaskText,
                 responseText: candidateText,
+                completionGuard: recoveryCompletionGuard,
                 toolRecords: recoveredRecords,
                 source: 'chat_guard_recovery',
                 flow: turnFlow,
@@ -4581,11 +4772,12 @@ export function registerChatHandler(
       const responseCompletionFeedback = durableTaskId
         ? buildForegroundTaskCompletionFeedback({
             taskId: durableTaskId,
-            taskLabel: executionTaskText,
+            taskLabel: completionTaskText,
             toolRecords: taskAwareRecords(allToolRecords),
             blocked: finalResponse.blocked,
             reason: finalResponse.reason,
-            status: pendingConfirmationCreatedThisTurn ? 'waiting_confirmation' : undefined,
+            status: pendingConfirmationCreatedThisTurn || finalResponse.reason === 'waiting_confirmation'
+              ? 'waiting_confirmation' : finalResponse.reason === 'workflow_running' ? 'executing' : undefined,
           })
         : undefined;
       const trustedConfirmationRequestText = pendingConfirmationCreatedThisTurn
@@ -4621,7 +4813,7 @@ export function registerChatHandler(
         completionFeedback: durableTaskId
           ? buildForegroundTaskCompletionFeedback({
               taskId: durableTaskId,
-              taskLabel: executionTaskText,
+              taskLabel: completionTaskText,
               toolRecords: taskAwareRecords(allToolRecords),
               status: 'persistence_unknown',
               reason: 'Terminal persistence outcome is unknown.',
@@ -4748,6 +4940,7 @@ export function registerChatHandler(
       actionLeaseHeartbeat?.stop();
 
       // Post-commit enrichment must never delay or precede the durable terminal.
+      if (!turnAuthorization.isCurrent()) return;
 
       if (conversationId) {
         // (conversation_updated NOW emitted AFTER agent:response — see below)
@@ -4771,127 +4964,16 @@ export function registerChatHandler(
 
       // Clean up abort session
       await releaseChatSession();
+      if (!turnAuthorization.isCurrent()) return;
 
-      // Auto-learn from corrections: when user corrects Lumi, extract high-confidence memories
-      const correctionPatterns = [/不是/, /不对/, /错了/, /wrong/i, /incorrect/i, /actually/i, /no,?\s/i, /你弄错了/, /不是这样的/];
-      const isCorrection = correctionPatterns.some(p => p.test(text));
-      if (allowAdaptiveLearning && resolvedDomain === 'personal' && isCorrection && responseText && !finalResponse.blocked) {
-        try {
-          const corrected = await extractMemories(
-            { userMessage: text, assistantResponse: responseText, existingMemories: relevantMemories.map(m => m.content), provider: activeProvider, model: activeModel, userId: uid, domain: resolvedDomain, orgId: resolvedOrgId, treeBranches: [] },
-            llmGetters.getDeepSeek, llmGetters.getGemini, llmGetters.getOpenAI, llmGetters.getAnthropic, llmGetters.getQwen,
-            llmGetters.getOllama, llmGetters.getLmStudio, llmGetters.getArk, llmGetters.getXiaomi, llmGetters.getKimi, llmGetters.getGlm, llmGetters.getRelay,
-          );
-          for (const mem of corrected.memories) {
-            addMemory({
-              userId: uid, type: mem.type, content: mem.content,
-              keywords: mem.keywords, confidence: Math.min((mem.confidence || 0.5) + 0.2, 1.0),
-              sourceInteractionId: interactionId, agentId: conversationAgentId,
-            } as any, { domain: resolvedDomain, orgId: resolvedOrgId, source: 'chat' });
-          }
-          console.log(`[ChatHandler] Correction learned: ${corrected.memories.length} memories with boosted confidence`);
-
-          // Real-time identity correction: when user contradicts a claim Lumi makes about the user
-          // (e.g. "我不做自动驾驶" → remove from coreMotivation immediately, no 7-day wait)
-          try {
-            const identityCheck = await makeLLMCall(
-              [
-                {
-                  role: 'system',
-                  content: `Detect identity corrections. Lumi's stable coreMotivation:\n"${personalityConfig.coreMotivation}"\nLumi's owner-specific growthState: ${JSON.stringify((personalityConfig as any).growthState || {})}\n\nUser said: "${text}"\nLumi said: "${responseText.slice(0, 300)}"\n\nIs the user denying something Lumi believes about them (interest, trait, name, profession)? If YES, return JSON: {"correctsIdentity": true, "removeInterest": "exact contradicted growth/core phrase to remove", "rewriteMotivation": "rewrite coreMotivation only if the false claim is inside coreMotivation, otherwise null"}. If NO, return {"correctsIdentity": false}.\nReturn ONLY JSON.`,
-                },
-              ],
-              [],
-              { provider: activeProvider, model: activeModel, userId: uid, domain: resolvedDomain, orgId: resolvedOrgId, maxTokens: 300, ...reasoningRoutePolicy },
-              llmGetters.getDeepSeek, llmGetters.getGemini, llmGetters.getOpenAI, llmGetters.getAnthropic, llmGetters.getQwen,
-              llmGetters.getOllama, llmGetters.getLmStudio, llmGetters.getArk, llmGetters.getXiaomi, llmGetters.getKimi, llmGetters.getGlm, llmGetters.getRelay,
-            );
-            const identityResult = JSON.parse((identityCheck.text || '').replace(/```json|```/g, '').trim() || '{}');
-            if (identityResult.correctsIdentity) {
-              const removed = await personalityRegistry.correctIdentity(personalityId, {
-                removeInterest: identityResult.removeInterest || undefined,
-                removeFromMotivation: identityResult.removeInterest || undefined,
-                newMotivation: identityResult.rewriteMotivation || undefined,
-              }, uid);
-              if (removed) {
-                console.log(`[ChatHandler] Identity corrected in real-time: removed "${identityResult.removeInterest}"`);
-              }
-            }
-          } catch (idErr: any) {
-            console.warn('[ChatHandler] Identity correction check failed:', idErr.message);
-          }
-        } catch (err: any) { console.warn('[ChatHandler] Correction extraction failed:', err.message); }
-      }
-
-      // Lightweight per-conversation evolution — micro-shifts after meaningful chats
-      // Fires if enough owner_trait memories have accumulated, no 7-day wait needed
-      if (allowAdaptiveLearning && resolvedDomain === 'personal' && responseText && !finalResponse.blocked && cognition.intent.category !== 'command' && !personalityRegistry.isEvolutionFrozen(personalityId, uid)) {
-        try {
-          const evolutionConfig = personalityRegistry.getEvolutionConfig(personalityId, uid);
-          const step = await lightweightEvolve(
-            personalityConfig as any,
-            uid,
-            evolutionConfig,
-            llmGetters.getDeepSeek,
-            llmGetters.getGemini,
-            llmGetters.getOpenAI,
-            llmGetters.getAnthropic,
-            llmGetters.getQwen,
-            undefined,
-            llmGetters.getOllama,
-            llmGetters.getLmStudio,
-            llmGetters.getArk,
-            llmGetters.getXiaomi,
-            llmGetters.getKimi,
-            llmGetters.getGlm,
-            llmGetters.getRelay,
-          );
-          if (step) {
-            personalityRegistry.applyEvolution(personalityId, step, { userId: uid });
-            console.log(`[ChatHandler] Lightweight evolution: v${step.version}, ${step.mutations.length} mutation(s)`);
-          }
-        } catch (evErr: any) {
-          console.warn('[ChatHandler] Lightweight evolution failed:', evErr.message);
-        }
-      }
-
-      // Async memory extraction — skip trivial/command messages to reduce noise
-      const skipExtractionCategories = ['command', 'file', 'unknown'];
-      if (allowAdaptiveLearning && text.length >= 10 && !finalResponse.blocked && !skipExtractionCategories.includes(cognition.intent.category)) {
-      const branchNodes = queryMemories({ userId: uid, nodeType: 'branch', limit: 50, domain: resolvedDomain, orgId: resolvedOrgId });
-      const treeBranches = branchNodes.map(b => b.content);
-      const locationTag = sensory.locationTag || undefined;
-      extractMemories(
-        { userMessage: text, assistantResponse: responseText, existingMemories: relevantMemories.map(m => m.content), provider: activeProvider, model: activeModel, userId: uid, domain: resolvedDomain, orgId: resolvedOrgId, treeBranches, locationTag },
-        llmGetters.getDeepSeek, llmGetters.getGemini, llmGetters.getOpenAI, llmGetters.getAnthropic, llmGetters.getQwen,
-        llmGetters.getOllama, llmGetters.getLmStudio, llmGetters.getArk, llmGetters.getXiaomi, llmGetters.getKimi, llmGetters.getGlm, llmGetters.getRelay,
-      ).then(extracted => {
-        for (const mem of extracted.memories) {
-          let parentId: string | null = null;
-          if ((mem as any).branchHint) {
-            const branch = ensureBranch(uid, (mem as any).branchHint, conversationAgentId, null, { domain: resolvedDomain, orgId: resolvedOrgId });
-            parentId = branch.id;
-          }
-          addMemory({
-            userId: uid, type: mem.type, content: mem.content,
-            keywords: mem.keywords, confidence: mem.confidence, sourceInteractionId: interactionId,
-            agentId: conversationAgentId,
-          } as any, { parentId, location: locationTag, domain: resolvedDomain, orgId: resolvedOrgId, source: 'chat' });
-        }
-        for (const rem of extracted.reminders) {
-          addReminder({
-            userId: uid,
-            content: rem.content,
-            dueAt: rem.dueAt,
-            sourceInteractionId: interactionId,
-            domain: resolvedDomain,
-            orgId: resolvedOrgId,
-          });
-        }
-      }).catch(err => console.error('[Memory] Extraction failed:', err));
-      }
+      if (allowAdaptiveLearning && !finalResponse.blocked) scheduleTurnMemory({
+        userId: uid, domain: resolvedDomain, orgId: resolvedOrgId, userText: text,
+        channel: 'chat', source: eventSource, requestId, conversationId,
+        agentId: conversationAgentId, authorization: turnAuthorization, llmGetters,
+      });
 
       // Update emotional state — reconnect if user was away for a while
+      if (!turnAuthorization.isCurrent()) return;
       const hoursSinceLast = emotionalState.lastInteractionAt
         ? (Date.now() - new Date(emotionalState.lastInteractionAt).getTime()) / (1000 * 60 * 60)
         : 24;
@@ -4913,7 +4995,7 @@ export function registerChatHandler(
       saveHIMState(emotionKey, newHim);
 
       // Emit a contextual greeting on reconnect.
-      if (!isMemoryAvatar && isReconnect && updatedState.intimacy > 0.2) {
+      if (!isMemoryAvatar && turnAuthorization.isCurrent() && isReconnect && updatedState.intimacy > 0.2) {
         const greeting = generateContextualGreeting(updatedState, uid);
         if (greeting) {
           const greetingTs = new Date().toISOString();
@@ -4947,14 +5029,16 @@ export function registerChatHandler(
       }
 
     } catch (error: any) {
-      if (abortController.signal.aborted || error?.name === 'AbortError') {
+      if (isChatCancelled() || error?.name === 'AbortError') {
         const cancelledText = CN_TASK_EXECUTION_MESSAGES.cancelled;
-        cancelConversationActionExecution(
-          selectedConversationId,
-          uid,
-          'Cancelled by the user.',
-          requestId,
-        );
+        const cancelledRecords = collectRequestTerminalRecords();
+        const cancelledFeedback = requestTaskId ? buildForegroundTaskCompletionFeedback({
+          taskId: requestTaskId,
+          taskLabel: visibleUserText,
+          toolRecords: cancelledRecords,
+          status: 'cancelled',
+          reason: 'Cancelled by the user; completed steps remain recorded.',
+        }) : undefined;
         await commitDeterministicTerminal({
           payload: {
             text: cancelledText,
@@ -4962,6 +5046,7 @@ export function registerChatHandler(
             finalized: true,
             blocked: false,
             reason: 'cancelled',
+            completionFeedback: cancelledFeedback,
           },
           persistAssistantMessage: () => addMessageIdempotent({
             userId: uid,
@@ -4976,7 +5061,14 @@ export function registerChatHandler(
             cognitiveIntent: 'task_cancelled',
             llmWasCalled: true,
             requestId,
-            skipActionContinuation: true,
+            toolCalls: cancelledRecords.length ? cancelledRecords : undefined,
+            completionFeedback: cancelledFeedback,
+            ...(requestTaskId ? { terminalTaskDisposition: {
+              outcome: 'cancelled' as const,
+              taskId: requestTaskId,
+              requestId,
+              reason: 'Cancelled by the user; completed steps remain recorded.',
+            } } : {}),
           }),
           publishAfter: () => emitConversationUpdated({
             conversationId: selectedConversationId,
@@ -4991,9 +5083,19 @@ export function registerChatHandler(
       const publicError = sanitizeChatAgentErrorPayload({
         code: chatPublicErrorCodeForException(error),
       });
-      const failureText = publicError.code === 'CHAT_MODEL_ROUTES_UNAVAILABLE'
+      const failureText = publicError.code === 'CHAT_PRIVACY_RESTRICTED'
+        ? CN_VOICE_WORK_MESSAGES.privacyRestricted
+        : publicError.code === 'CHAT_MODEL_ROUTES_UNAVAILABLE'
         ? CN_VOICE_WORK_MESSAGES.modelRoutesUnavailable
         : CN_VOICE_WORK_MESSAGES.processingFailed;
+      const failedRecords = collectRequestTerminalRecords();
+      const failedFeedback = requestTaskId ? buildForegroundTaskCompletionFeedback({
+        taskId: requestTaskId,
+        taskLabel: visibleUserText,
+        toolRecords: failedRecords,
+        blocked: true,
+        reason: String(publicError.reason || 'chat_execution_failed'),
+      }) : undefined;
       await commitDeterministicTerminal({
         payload: {
           text: failureText,
@@ -5001,6 +5103,7 @@ export function registerChatHandler(
           finalized: true,
           blocked: true,
           reason: String(publicError.reason || 'chat_execution_failed'),
+          completionFeedback: failedFeedback,
         },
         persistAssistantMessage: () => addMessageIdempotent({
           userId: uid,
@@ -5015,6 +5118,14 @@ export function registerChatHandler(
           cognitiveIntent: String(publicError.code || 'CHAT_EXECUTION_FAILED').toLowerCase(),
           llmWasCalled: false,
           requestId,
+          toolCalls: failedRecords.length ? failedRecords : undefined,
+          completionFeedback: failedFeedback,
+          ...(requestTaskId ? { terminalTaskDisposition: {
+            outcome: 'blocked' as const,
+            taskId: requestTaskId,
+            requestId,
+            reason: String(publicError.reason || 'chat_execution_failed'),
+          } } : {}),
         }),
         publishAfter: () => emitConversationUpdated({
           conversationId: selectedConversationId,

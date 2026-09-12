@@ -1,3 +1,4 @@
+import { unifiedCoreCopy } from '../i18n/locales/unifiedCore';
 import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -35,6 +36,7 @@ import { toast } from 'sonner';
 
 import { usePlatform } from '@/hooks/usePlatform';
 import { BiometricsEnrollPanel } from './biometrics/BiometricsEnrollPanel';
+import { PrivacyModeSettings } from './PrivacyModeSettings';
 import { useApp, type AppearanceMode, type OperationMode } from '@/contexts/AppContext';
 import { VoiceProviderSwitch } from './VoiceProviderSwitch';
 import { VoiceDeviceSelector } from './VoiceDeviceSelector';
@@ -63,6 +65,7 @@ import {
 } from '../i18n/regions/cn/legal';
 import {
   LUMI_OFFICIAL_BASE_URL,
+  normalizeLumiOfficialBaseUrl,
   LUMI_OFFICIAL_DEFAULT_MODELS,
   LUMI_OFFICIAL_DOCS_URL,
   LUMI_OFFICIAL_PROVIDER_ID as SHARED_LUMI_OFFICIAL_PROVIDER_ID,
@@ -139,7 +142,10 @@ function officialModelOptions(
 
 function readStoredRelayBaseUrl(): string {
   try {
-    return String(localStorage.getItem('lumi_relay_url') || '').trim();
+    const stored = String(localStorage.getItem('lumi_relay_url') || '').trim();
+    const normalized = normalizeLumiOfficialBaseUrl(stored);
+    if (stored !== normalized) localStorage.setItem('lumi_relay_url', normalized);
+    return normalized;
   } catch {
     return '';
   }
@@ -217,7 +223,7 @@ export function Settings({
   onSectionChange?: (section: string) => void;
 }) {
   const { platform, isElectron } = usePlatform();
-  const { operationMode, appearanceMode, resolvedAppearanceMode, setAppearanceMode, workDomain, switchDomain } = useApp();
+  const { user, logout, appearanceMode, resolvedAppearanceMode, setAppearanceMode, workDomain, switchDomain } = useApp();
   const [providerStatus, setProviderStatus] = useState<Record<string, ProviderRuntimeStatus>>({});
   const [modelConfigurationRevision, setModelConfigurationRevision] = useState(0);
   const visibleSection = activeSection === 'computer' || activeSection === 'messaging'
@@ -335,7 +341,7 @@ export function Settings({
           <div className="space-y-8">
             <SettingsSection title={t.agentFramework || uiMessage('settings.agent-framework-lumi-protocol.2d0970720d')} icon={<BrainCircuit size={18} className="text-celestial-saturn" />}>
               <div className="space-y-6">
-                <AutonomousSettingsPanel t={t} operationMode={operationMode} />
+                <AutonomousSettingsPanel t={t} />
               </div>
             </SettingsSection>
           </div>
@@ -374,6 +380,7 @@ export function Settings({
         return (
           <div className="space-y-8">
             <SettingsSection title={t.privacySecurity || uiMessage('settings.privacy-security.901389923c')} icon={<Shield size={18} className="text-celestial-mars" />}>
+              <PrivacyModeSettings locale={lang} workspace={workDomain} sessionId={user?.uid || 'signed-out'} />
               <SettingsItem label={t.localEncryption || uiMessage('settings.local-encryption.48aca1952b')} desc={t.localEncryptionDesc || uiMessage('settings.encrypt-all-agent-data-stored.d88a575c31')} storageKey="lumi_sec_local_encryption" t={t} />
               <SettingsItem label={t.anonymousMode || uiMessage('settings.anonymous-mode.2caa1cc9a5')} desc={t.anonymousModeDesc || uiMessage('settings.hide-your-node-id-from.1679578b38')} storageKey="lumi_sec_anonymous_mode" t={t} />
               <SettingsItem label={t.biometricLock || uiMessage('settings.biometric-lock.6e177df8a6')} desc={t.biometricLockDesc || uiMessage('settings.require-fingerprint-or-face-id.a9f1459524')} storageKey="lumi_sec_biometric_lock" t={t} />
@@ -446,16 +453,7 @@ export function Settings({
 
         <div className="px-2 pb-4 pt-2 border-t border-white/[0.08]">
           <button
-            onClick={async () => {
-              try {
-                await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
-                localStorage.removeItem('lumi_auth_token');
-                window.location.reload();
-              } catch {
-                localStorage.removeItem('lumi_auth_token');
-                window.location.reload();
-              }
-            }}
+            onClick={logout}
             className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-xs font-medium text-red-400/60 transition-all hover:bg-red-500/10 hover:text-red-300"
           >
             <LogOut size={14} />
@@ -929,22 +927,13 @@ function LLMProviderRow({ icon, label, providerId, models, placeholder, disabled
     }).catch(err => toast.error(err.message || t?.failedToSaveKey || uiMessage('settings.failed-to-save-key.58568a4911')));
   };
 
-  const handleModelChange = (nextModel: string) => {
+  const handleModelChange = async (nextModel: string) => {
+    const previousModel = model;
     setModel(nextModel);
     setTestState('idle');
     setTestMessage('');
-    const allModels = (() => {
-      try { return JSON.parse(localStorage.getItem('lumi_llm_models') || '{}'); } catch { return {}; }
-    })();
-    allModels[providerId] = nextModel;
-    localStorage.setItem('lumi_llm_models', JSON.stringify(allModels));
-    apiFetch('/api/preferences/llm', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ provider: aiConfig.provider, models: allModels }),
-    }).catch(() => {});
-    if (aiConfig.provider === providerId) updateAIConfig({ model: nextModel });
+    const saved = await updateAIConfig(aiConfig.provider === providerId ? { model: nextModel } : {}, { [providerId]: nextModel });
+    if (saved === false) setModel(previousModel);
   };
 
   const handleTest = async () => {
@@ -1074,7 +1063,7 @@ function VisionProviderRow({ icon, label, providerId, models, placeholder, disab
       setTestState('idle');
       setTestMessage('');
       if (visionConfig.provider === providerId) {
-        updateVisionConfig({ apiKey: keyValue.trim(), model });
+        void updateVisionConfig({ model });
       }
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -1096,25 +1085,13 @@ function VisionProviderRow({ icon, label, providerId, models, placeholder, disab
     }).catch(err => toast.error(err.message || t?.failedToRemoveKey || uiMessage('settings.failed-to-remove-key.065616ae8b')));
   };
 
-  const handleModelChange = (m: string) => {
+  const handleModelChange = async (m: string) => {
+    const previousModel = model;
     setModel(m);
     setTestState('idle');
     setTestMessage('');
-    const allModels = (() => {
-      try { return JSON.parse(localStorage.getItem('lumi_vision_models') || '{}'); } catch { return {}; }
-    })();
-    allModels[providerId] = m;
-    localStorage.setItem('lumi_vision_models', JSON.stringify(allModels));
-    if (visionConfig.provider === providerId) {
-      updateVisionConfig({ model: m });
-    } else {
-      fetch('/api/preferences/vision', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: visionConfig.provider, model: visionConfig.model, models: allModels }),
-        credentials: 'include',
-      }).catch(() => {});
-    }
+    const saved = await updateVisionConfig(visionConfig.provider === providerId ? { model: m } : {}, { [providerId]: m });
+    if (saved === false) setModel(previousModel);
   };
 
   const handleTest = async () => {
@@ -1250,25 +1227,13 @@ function VisionLocalProviderRow({ icon, label, providerId, endpoint, storageKey,
 
   const allModelOptions = Array.from(new Set([model, ...models, ...suggestions].filter(Boolean)));
 
-  const persistModel = (nextModel: string) => {
+  const persistModel = async (nextModel: string) => {
+    const previousModel = model;
     setModel(nextModel);
     setTestState('idle');
     setTestMessage('');
-    const allModels = (() => {
-      try { return JSON.parse(localStorage.getItem('lumi_vision_models') || '{}'); } catch { return {}; }
-    })();
-    allModels[providerId] = nextModel;
-    localStorage.setItem('lumi_vision_models', JSON.stringify(allModels));
-    if (visionConfig.provider === providerId) {
-      updateVisionConfig({ model: nextModel });
-    } else {
-      fetch('/api/preferences/vision', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: visionConfig.provider, model: visionConfig.model, models: allModels }),
-        credentials: 'include',
-      }).catch(() => {});
-    }
+    const saved = await updateVisionConfig(visionConfig.provider === providerId ? { model: nextModel } : {}, { [providerId]: nextModel });
+    if (saved === false) setModel(previousModel);
   };
 
   const handleDetect = async () => {
@@ -1420,16 +1385,13 @@ function VisionRelayProviderRow({ t }: { t?: any }) {
       .catch(() => {});
   }, []);
 
-  const persistModel = (nextModel: string) => {
+  const persistModel = async (nextModel: string) => {
+    const previousModel = model;
     setModel(nextModel);
     setTestState('idle');
     setTestMessage('');
-    const allModels = (() => {
-      try { return JSON.parse(localStorage.getItem('lumi_vision_models') || '{}'); } catch { return {}; }
-    })();
-    allModels.relay = nextModel;
-    localStorage.setItem('lumi_vision_models', JSON.stringify(allModels));
-    if (visionConfig.provider === 'relay') updateVisionConfig({ model: nextModel });
+    const saved = await updateVisionConfig(visionConfig.provider === 'relay' ? { model: nextModel } : {}, { ['relay']: nextModel });
+    if (saved === false) setModel(previousModel);
   };
 
   const handleSave = () => {
@@ -1651,7 +1613,6 @@ function VisionRoleSettings({ t }: { t: any }) {
       try { return JSON.parse(localStorage.getItem('lumi_vision_models') || '{}'); } catch { return {}; }
     })();
     savedModels[visionConfig.provider] = model;
-    localStorage.setItem('lumi_vision_models', JSON.stringify(savedModels));
     updateVisionConfig({ model });
   };
   return (
@@ -3149,7 +3110,7 @@ function ReasoningRoleSettings({ t, providerStatus }: { t: any; providerStatus: 
             }}
             className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white outline-none focus:border-celestial-saturn/45"
           >
-            <option value="pinned">Pinned — never substitute</option>
+            <option value="pinned">Primary model — configured backup on failure</option>
             <option value="ordered_fallback">Ordered fallback — user-defined order</option>
             <option value="auto">Automatic — local first with visible receipts</option>
           </select>
@@ -3185,7 +3146,7 @@ function ReasoningRoleSettings({ t, providerStatus }: { t: any; providerStatus: 
         )}
         <p className="text-xs text-white/40">
           {selectionMode === 'pinned'
-            ? 'Pinned mode fails explicitly if this exact provider/model is unavailable.'
+            ? 'Uses the selected provider/model first. If it fails, an available configured backup may take over; every attempt and the model actually used appear in routing receipts.'
             : 'Every attempt and the model actually used are written to the local routing receipt ledger.'}
         </p>
       </div>
@@ -3294,24 +3255,13 @@ function LocalLLMProviderRow({
   });
   const generationModels = models.filter(modelName => !/(?:embed|embedding|whisper|rerank|re-rank|bge[-_]|nomic[-_]?embed)/i.test(modelName));
 
-  const persistModel = (nextModel: string) => {
+  const persistModel = async (nextModel: string) => {
+    const previousModel = model;
     setModel(nextModel);
-    const allModels = (() => {
-      try { return JSON.parse(localStorage.getItem('lumi_llm_models') || '{}'); } catch { return {}; }
-    })();
-    allModels[providerId] = nextModel;
-    localStorage.setItem('lumi_llm_models', JSON.stringify(allModels));
-    if (aiConfig.provider === providerId) updateAIConfig({ model: nextModel });
-    else {
-      apiFetch('/api/preferences/llm', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ provider: aiConfig.provider, models: allModels }),
-      }).catch(() => {});
-    }
     setTestState('idle');
     setTestMessage('');
+    const saved = await updateAIConfig(aiConfig.provider === providerId ? { model: nextModel } : {}, { [providerId]: nextModel });
+    if (saved === false) setModel(previousModel);
   };
 
   useEffect(() => {
@@ -3833,7 +3783,9 @@ const DEFAULT_AUTONOMY_GATE: AutonomyGateConfig = {
   maxTokensPerHour: 30000,
 };
 
-function AutonomousSettingsPanel({ t, operationMode }: { t: any; operationMode: OperationMode }) {
+function AutonomousSettingsPanel({ t }: { t: any }) {
+  const coreCopy = unifiedCoreCopy(t?.langCode === 'en' ? 'en' : 'zh');
+  const [gateSaving, setGateSaving] = useState(false);
   const [gateConfig, setGateConfig] = useState<AutonomyGateConfig>(DEFAULT_AUTONOMY_GATE);
   const [nativeRuntime, setNativeRuntime] = useState<NativeRuntimeStatus | null>(null);
   const [nativeRuntimeError, setNativeRuntimeError] = useState('');
@@ -3879,6 +3831,20 @@ function AutonomousSettingsPanel({ t, operationMode }: { t: any; operationMode: 
     };
   }, []);
 
+  const updateBackgroundPolicy = async (patch: Partial<AutonomyGateConfig>) => {
+    if (gateSaving) return;
+    setGateSaving(true);
+    try {
+      const response = await apiFetch('/api/autonomy/gate_config', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!response.ok) throw new Error('save_failed');
+      setGateConfig(await response.json());
+    } catch { toast.error(coreCopy.failed); }
+    finally { setGateSaving(false); }
+  };
+
   const refreshNativeRuntime = async () => {
     const { invoke } = await import('@tauri-apps/api/core');
     const status = await invoke<NativeRuntimeStatus>('get_runtime_resilience_status');
@@ -3920,12 +3886,6 @@ function AutonomousSettingsPanel({ t, operationMode }: { t: any; operationMode: 
     } catch {}
   };
 
-  const modeLabel =
-    operationMode === 'autonomous' ? uiMessage('settings.autonomy.6aea974e38') :
-    operationMode === 'assistant' ? uiMessage('settings.assistant.90c4ae600c') :
-    operationMode === 'chat' ? uiMessage('settings.chat.1594b2f45c') :
-    uiMessage('settings.meeting.e16a90b510');
-  const gateLevel = gateConfig.autonomyLevel || (gateConfig.autoProcessEnabled ? 'semi' : 'reactive');
   const ToggleRow = ({
     label,
     desc,
@@ -3955,18 +3915,16 @@ function AutonomousSettingsPanel({ t, operationMode }: { t: any; operationMode: 
 
   return (
     <div className="space-y-4">
-      {/* Desktop Mode Authority */}
-      <div className="p-4 bg-white/5 rounded-2xl border border-white/5 space-y-3">
-        <div>
-          <div className="text-xs font-black uppercase tracking-widest text-white/60">{uiMessage('settings.desktop-modes.569d70b466')}</div>
-          <p className="text-xs text-white/40 mt-1">{uiMessage('settings.permissions-follow-the-three-desktop.5c6e6a2ca1')}</p>
-        </div>
-        <div className="rounded-xl bg-black/18 px-3 py-3 text-[11px] leading-relaxed text-white/42">
-          {uiMessage('settings.current-desktop-mode.0535fb2a2e')}: <span className="font-bold text-white/72">{modeLabel}</span>
-          <span className="mx-2 text-white/18">/</span>
-          {uiMessage('settings.backend-autonomy.cf04ab2476')}: <span className="font-bold text-white/72">{gateLevel}</span>
-        </div>
-      </div>
+      <fieldset disabled={gateSaving} className="space-y-3 rounded-2xl border border-white/5 bg-white/5 p-4 disabled:opacity-60">
+        <div className="text-xs font-bold text-white/70">{coreCopy.backgroundTitle}</div>
+        <p className="text-xs leading-relaxed text-white/40">{coreCopy.backgroundDetail}</p>
+        <ToggleRow label={coreCopy.enabled} desc={coreCopy.enabledDetail}
+          checked={gateConfig.autoProcessEnabled}
+          onClick={() => void updateBackgroundPolicy({ autoProcessEnabled: !gateConfig.autoProcessEnabled })} />
+        <ToggleRow label={coreCopy.idle} desc={coreCopy.idleDetail}
+          checked={gateConfig.requireIdle}
+          onClick={() => void updateBackgroundPolicy({ requireIdle: !gateConfig.requireIdle })} />
+      </fieldset>
 
       {/* Resident Runtime */}
       <div className="p-4 bg-white/5 rounded-2xl border border-white/5 space-y-3">

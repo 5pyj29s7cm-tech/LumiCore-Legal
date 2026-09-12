@@ -1,4 +1,5 @@
 import { TTSResult, VoiceListItem } from '../types';
+import { isStrictPrivacy, requireLocalEndpoint } from '../../config/privacy';
 import fs from 'fs';
 import path from 'path';
 import { getDataPath } from '../../config/data_path';
@@ -19,19 +20,33 @@ let activeSynthesis = 0;
 const synthesisQueue: Array<() => void> = [];
 
 async function withSynthesisSlot<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (activeSynthesis >= MAX_CONCURRENT_SYNTHESIS) {
-    await new Promise<void>((resolve, reject) => {
-      const enter = () => signal?.aborted ? reject(new Error('GPT-SoVITS request was cancelled while queued.')) : resolve();
+  signal?.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      const index = synthesisQueue.indexOf(enter);
+      if (index >= 0) synthesisQueue.splice(index, 1);
+      signal?.removeEventListener('abort', onAbort);
+      reject(signal?.reason ?? new DOMException('GPT-SoVITS request cancelled.', 'AbortError'));
+    };
+    const enter = () => {
+      signal?.removeEventListener('abort', onAbort);
+      if (signal?.aborted) { onAbort(); return; }
+      // Reserve the slot before waking the waiter so another arrival cannot
+      // take it between promise resolution and the waiting continuation.
+      activeSynthesis += 1;
+      resolve();
+    };
+    if (activeSynthesis >= MAX_CONCURRENT_SYNTHESIS || synthesisQueue.length) {
       synthesisQueue.push(enter);
-    });
-  }
-  if (signal?.aborted) throw new Error('GPT-SoVITS request was cancelled.');
-  activeSynthesis += 1;
+      signal?.addEventListener('abort', onAbort, { once: true });
+    } else enter();
+  });
   try {
+    signal?.throwIfAborted();
     return await work();
   } finally {
     activeSynthesis = Math.max(0, activeSynthesis - 1);
-    synthesisQueue.shift()?.();
+    while (activeSynthesis < MAX_CONCURRENT_SYNTHESIS && synthesisQueue.length) synthesisQueue.shift()!();
   }
 }
 
@@ -40,6 +55,7 @@ function getBaseUrl(): string {
 }
 
 export function isConfigured(): boolean {
+  try { requireLocalEndpoint(`${getBaseUrl()}/tts`, 'GPT-SoVITS'); } catch { return false; }
   if (process.env.GPTSOVITS_API_URL || process.env.GPTSOVITS_ENABLED === 'true') return true;
 
   return isGptSovitsRuntimeInstalled();
@@ -106,7 +122,10 @@ async function synthesizeSpeechInternal(
   voiceId?: string,
   signal?: AbortSignal,
 ): Promise<TTSResult> {
-  await ensureGptSovitsRuntime(signal);
+  // Strict mode only contacts an existing local service. A direct provider
+  // call must not start a cold model after automatic selection refused it.
+  requireLocalEndpoint(`${getBaseUrl()}/tts`, 'GPT-SoVITS speech synthesis');
+  if (!isStrictPrivacy()) await ensureGptSovitsRuntime(signal);
   markGptSovitsActivity();
   // Resolve reference audio based on voiceId
   let refAudioPath: string;
@@ -145,12 +164,15 @@ async function synthesizeSpeechInternal(
   };
 
   const audioBuffer = await withCloudResilience(
-    async () => {
-      const res = await fetch(`${getBaseUrl()}/tts`, {
+    async operationSignal => {
+      const endpoint = `${getBaseUrl()}/tts`;
+      requireLocalEndpoint(endpoint, 'GPT-SoVITS speech synthesis');
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal,
+        signal: operationSignal,
+        ...(isStrictPrivacy() ? { redirect: 'error' as const } : {}),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: res.statusText }));
@@ -158,7 +180,7 @@ async function synthesizeSpeechInternal(
       }
       return Buffer.from(await res.arrayBuffer());
     },
-    { provider: 'gptsovits', maxRetries: 2, baseDelayMs: 500 },
+    { provider: 'gptsovits', maxRetries: 2, baseDelayMs: 500, signal },
   );
   markGptSovitsActivity();
   return {

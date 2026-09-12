@@ -234,7 +234,7 @@ describe('live voice selection', () => {
       startVoiceSwitchGeneration: 8,
     })).toBe('abandon_start');
 
-    const source = fs.readFileSync(path.join(process.cwd(), 'server/socket/voice.ts'), 'utf8');
+    const source = fs.readFileSync(path.join(process.cwd(), 'server/socket/voice.ts'), 'utf8').replace(/\r\n/g, '\n');
     const startHandler = source.slice(
       source.indexOf('socket.on("audio:start"'),
       source.indexOf("socket.on('audio:switch-voice'"),
@@ -245,7 +245,7 @@ describe('live voice selection', () => {
   });
 
   it('does not re-resolve the provider for every queued sentence', () => {
-    const source = fs.readFileSync(path.join(process.cwd(), 'server/socket/voice.ts'), 'utf8');
+    const source = fs.readFileSync(path.join(process.cwd(), 'server/socket/voice.ts'), 'utf8').replace(/\r\n/g, '\n');
     const flush = source.slice(
       source.indexOf('const flushSentence ='),
       source.indexOf('const queueFinalizedSpeech ='),
@@ -281,14 +281,11 @@ describe('live voice selection', () => {
 
   it('wires one shared UI state to the live switch protocol and acknowledgements', () => {
     const root = process.cwd();
-    const readSource = (...segments: string[]) => fs
-      .readFileSync(path.join(root, ...segments), 'utf8')
-      .replace(/\r\n?/g, '\n');
-    const context = readSource('src/contexts/AppContext.tsx');
-    const chat = readSource('src/components/AgentChatPage.tsx');
-    const desktop = readSource('src/components/DesktopUI.tsx');
-    const client = readSource('src/hooks/useVoiceCall.ts');
-    const server = readSource('server/socket/voice.ts');
+    const context = fs.readFileSync(path.join(root, 'src/contexts/AppContext.tsx'), 'utf8').replace(/\r\n/g, '\n');
+    const chat = fs.readFileSync(path.join(root, 'src/components/AgentChatPage.tsx'), 'utf8').replace(/\r\n/g, '\n');
+    const desktop = fs.readFileSync(path.join(root, 'src/components/DesktopUI.tsx'), 'utf8').replace(/\r\n/g, '\n');
+    const client = fs.readFileSync(path.join(root, 'src/hooks/useVoiceCall.ts'), 'utf8').replace(/\r\n/g, '\n');
+    const server = fs.readFileSync(path.join(root, 'server/socket/voice.ts'), 'utf8').replace(/\r\n/g, '\n');
 
     expect(context).toContain('const setSelectedVoiceId = useCallback(');
     expect(chat).not.toContain('const [selectedVoiceId, setSelectedVoiceId] = useState');

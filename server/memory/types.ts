@@ -90,8 +90,11 @@ export interface Memory {
   nodeType: MemoryNodeType;
   /** Location where this memory was formed (e.g. 'home', 'office', 'cafe', 'mobile') */
   location?: string;
-  /** 1536-dimension embedding vector from text-embedding-3-small for semantic search */
+  /** Vector space identity must match the query before cosine comparison. */
   embedding?: number[];
+  embeddingNamespace?: { provider: string; model: string; dimensions: number };
+  /** Digest of the exact indexed text and its owning scope. */
+  embeddingContentHash?: string;
   /** Domain: personal or work */
   domain?: string;
   /** Organization ID (work domain only) */
@@ -118,6 +121,10 @@ export interface MemoryTree {
 }
 
 export interface MemoryQuery {
+  /** Only actual conversational recall should train retrieval associations. */
+  recordRetrieval?: boolean;
+  /** Administrative history may explicitly include superseded/test records. */
+  includeSuperseded?: boolean;
   userId?: string;
   /** Free-text search — matched against keywords and content */
   query?: string;
@@ -156,6 +163,8 @@ export interface MemoryQuery {
   retrievalPerspectiveWeights?: Record<string, number>;
   /** Enable vector semantic search via embedding cosine similarity */
   useVector?: boolean;
+  /** Request-scoped cancellation, never persisted with the memory. */
+  signal?: AbortSignal;
   /** Filter by domain */
   domain?: string;
   /** Filter by organization ID */

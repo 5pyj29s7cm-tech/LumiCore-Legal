@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { requireNotStrict } from '../../config/privacy';
 import { TTSResult, VoiceListItem } from '../types';
 import { getKey } from '../../config/keys';
 import { withCloudResilience } from '../../cloud/resilience';
@@ -74,6 +75,7 @@ export async function synthesizeSpeech(
   volume?: number,
   model?: string,
 ): Promise<TTSResult> {
+  requireNotStrict('CosyVoice speech synthesis');
   const apiKey = getApiKey();
   const resolvedModel = model || resolveVoiceModel(voiceId) || getCosyVoiceModel();
 
@@ -90,7 +92,7 @@ export async function synthesizeSpeech(
   const body = { model: resolvedModel, input };
 
   const json = await withCloudResilience(
-    async () => {
+    async operationSignal => {
       const res = await fetch(BASE_URL, {
       method: 'POST',
       headers: {
@@ -98,7 +100,7 @@ export async function synthesizeSpeech(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
-      signal,
+      signal: operationSignal,
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: res.statusText }));
@@ -110,7 +112,7 @@ export async function synthesizeSpeech(
       }
       return payload;
     },
-    { provider: 'cosyvoice', maxRetries: 1 },
+    { provider: 'cosyvoice', maxRetries: 1, signal },
   );
   const audioUrl = json.output?.audio?.url;
 
@@ -188,6 +190,7 @@ async function postVoiceEnrollment(model: string, input: Record<string, any>, op
 
 /** Clone a voice from a prepared public audio URL, or local WAV in data-url mode. */
 export async function cloneVoice(sampleUrls: string[], name: string): Promise<string> {
+  requireNotStrict('CosyVoice voice cloning');
   const firstSource = sampleUrls[0];
   if (!firstSource) throw new Error('At least one prepared audio sample is required');
   const audioData = resolveCloneAudioUrl(firstSource);
@@ -211,6 +214,7 @@ export async function cloneVoice(sampleUrls: string[], name: string): Promise<st
 
 /** Design a new voice from a text description using CosyVoice voice enrollment. */
 export async function designVoice(voicePrompt: string, name: string): Promise<string> {
+  requireNotStrict('Qwen voice design');
   return postVoiceEnrollment('qwen-voice-design', {
     action: 'create_voice',
     target_model: getQwenDesignTargetModel(),

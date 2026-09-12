@@ -19,6 +19,8 @@ export interface MessagingJournalEntry {
   messageId: string;
   platformUserId: string;
   boundUserId?: string;
+  bindingAuthorization?: IncomingMessage['bindingAuthorization'];
+  organizationAuthorization?: IncomingMessage['organizationAuthorization'];
   chatId: string;
   chatType: IncomingMessage['chatType'];
   threadId: string;
@@ -35,6 +37,8 @@ export interface MessagingJournalEntry {
   replyMessageId?: string;
   replyRetryable?: boolean;
   error?: string;
+  /** Durable input for an accepted-but-not-started turn; no transport secrets. */
+  inboundMessage?: IncomingMessage;
 }
 
 const JOURNAL_PATH = getDataPath(path.join('messaging', 'message_journal.json'));
@@ -59,11 +63,12 @@ function readEntries(): MessagingJournalEntry[] {
 }
 
 function writeEntries(next: MessagingJournalEntry[]): void {
-  entries = next.slice(-MAX_ENTRIES);
+  const bounded = next.slice(-MAX_ENTRIES);
   fs.mkdirSync(path.dirname(JOURNAL_PATH), { recursive: true });
   const temporaryPath = `${JOURNAL_PATH}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temporaryPath, JSON.stringify(entries, null, 2), 'utf8');
+  fs.writeFileSync(temporaryPath, JSON.stringify(bounded, null, 2), 'utf8');
   fs.renameSync(temporaryPath, JOURNAL_PATH);
+  entries = bounded;
 }
 
 export function recordMessagingIngress(message: IncomingMessage): void {
@@ -77,6 +82,8 @@ export function recordMessagingIngress(message: IncomingMessage): void {
     messageId: String(message.messageId || ''),
     platformUserId: String(message.userId || ''),
     boundUserId: String(message.boundUserId || ''),
+    bindingAuthorization: message.bindingAuthorization,
+    organizationAuthorization: message.organizationAuthorization,
     chatId: String(message.chatId || ''),
     chatType: message.chatType,
     threadId: String(message.threadId || ''),
@@ -86,6 +93,7 @@ export function recordMessagingIngress(message: IncomingMessage): void {
     receivedAt,
     updatedAt: receivedAt,
     status: 'received',
+    inboundMessage: { ...message, raw: {} },
     routeSequence: message.routeSequence,
     domain: message.boundOrgId ? 'work' : 'personal',
     orgId: String(message.boundOrgId || ''),
@@ -94,13 +102,18 @@ export function recordMessagingIngress(message: IncomingMessage): void {
 
 export function updateMessagingJournal(
   message: Pick<IncomingMessage, 'platform' | 'messageId'>,
-  update: Partial<Pick<MessagingJournalEntry, 'status' | 'replyText' | 'replyMessageId' | 'replyRetryable' | 'error' | 'routeSequence' | 'boundUserId' | 'domain' | 'orgId'>>,
+  update: Partial<Pick<MessagingJournalEntry, 'status' | 'replyText' | 'replyMessageId' | 'replyRetryable' | 'error' | 'routeSequence' | 'boundUserId' | 'bindingAuthorization' | 'organizationAuthorization' | 'domain' | 'orgId'>>,
 ): void {
   const current = readEntries();
   const entry = current.find(item => item.key === journalKey(message));
   if (!entry) return;
-  Object.assign(entry, update, { updatedAt: new Date().toISOString() });
-  writeEntries(current);
+  writeEntries(current.map(item => item === entry ? { ...item, ...update, updatedAt: new Date().toISOString() } : item));
+}
+
+export function listQueuedMessagingInputs(platform: IncomingMessage['platform']): IncomingMessage[] {
+  // Processing turns may already have effects; they are not safe to rerun.
+  return readEntries().filter(entry => entry.platform === platform && entry.status === 'received' && entry.inboundMessage)
+    .map(entry => JSON.parse(JSON.stringify(entry.inboundMessage)) as IncomingMessage);
 }
 
 export function listMessagingJournal(limit = 100): MessagingJournalEntry[] {

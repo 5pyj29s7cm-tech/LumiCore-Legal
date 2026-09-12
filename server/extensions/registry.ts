@@ -236,7 +236,7 @@ const registeredTools = new Map<string, {
   userId: string;
   registry: ToolRegistry;
 }>();
-const providerClients = new Map<string, { signature: string; client: OpenAI }>();
+const providerClients = new Map<string, { revisionId: string; signature: string; client: OpenAI }>();
 const executionCounts = new Map<string, number>();
 let runtimeOverrides: ExtensionRuntimeOverrides | null = null;
 let activationLock: Promise<void> = Promise.resolve();
@@ -897,15 +897,20 @@ function acquireConcurrency(revision: ExtensionRevision): () => void {
 }
 
 function invalidateRevisionRuntime(revision: ExtensionRevision): void {
-  activeRuntime.delete(revision.extensionId);
-  providerClients.delete(revision.extensionId);
-  const registries = new Set<ToolRegistry>();
-  for (const owner of registeredTools.values()) {
+  // A queued call may still hold an older, now inactive revision. Reject that
+  // call without withdrawing the newer revision that owns this extension id.
+  if (activeRuntime.get(revision.extensionId)?.id === revision.id) {
+    activeRuntime.delete(revision.extensionId);
+  }
+  if (providerClients.get(revision.extensionId)?.revisionId === revision.id) {
+    providerClients.delete(revision.extensionId);
+  }
+  for (const [name, owner] of registeredTools) {
     if (owner.extensionId === revision.extensionId && owner.revisionId === revision.id) {
-      registries.add(owner.registry);
+      owner.registry.unregister(name);
+      registeredTools.delete(name);
     }
   }
-  for (const registry of registries) unregisterExtensionTools(registry, revision.extensionId);
 }
 
 function assertCurrentExecutableRevision(revision: ExtensionRevision): void {
@@ -1263,6 +1268,7 @@ export function assertRegisteredProviderModel(
 
 function providerClientFetch(revision: ExtensionRevision): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    assertCurrentExecutableRevision(revision);
     const release = acquireConcurrency(revision);
     const request = input instanceof Request ? input : null;
     const url = new URL(request?.url || String(input));
@@ -1366,7 +1372,7 @@ export function getRegisteredOpenAIClient(providerId: string, userId?: string): 
     maxRetries: 0,
     fetch: providerClientFetch(revision),
   });
-  providerClients.set(providerId, { signature, client });
+  providerClients.set(providerId, { revisionId: revision.id, signature, client });
   return client;
 }
 
@@ -1718,8 +1724,6 @@ export async function installAndActivateExtension(
     }
 
     const oldActive = store.revisions.find(item => item.extensionId === manifest.id && item.status === 'active');
-    const oldDefinitions = oldActive ? buildDefinitions(oldActive) : [];
-    const oldRuntime = activeRuntime.get(manifest.id);
     const arraySnapshot = {
       publishers: structuredClone(store.publishers),
       revisions: structuredClone(store.revisions),
@@ -1760,35 +1764,46 @@ export async function installAndActivateExtension(
       }, null, 2);
     } catch (error) {
       unregisterExtensionTools(targetRegistry, manifest.id);
-      for (const definition of oldDefinitions) {
-        if (targetRegistry.register(definition)) registeredTools.set(definition.name, {
-          extensionId: manifest.id,
-          revisionId: oldActive!.id,
-          userId: oldActive!.userId,
-          registry: targetRegistry,
-        });
-      }
       db.extensionPublishers = arraySnapshot.publishers;
       db.extensionRevisions = arraySnapshot.revisions;
       db.extensionActivationReceipts = arraySnapshot.receipts;
-      if (oldRuntime) activeRuntime.set(manifest.id, oldRuntime);
-      else activeRuntime.delete(manifest.id);
+      activeRuntime.delete(manifest.id);
       providerClients.delete(manifest.id);
       const restored = arrays(db);
       const failed = restored.revisions.find(item => item.id === revision.id) || revision;
       failed.status = 'failed';
       failed.error = cleanError(error);
       failed.updatedAt = nowIso();
-      const rollbackReceipt = receipt(failed, 'rolled_back', oldActive?.id || '', failed.error);
+      // Rebuild closures from the restored record, never from the old object
+      // which the unsuccessful activation already changed to inactive.
+      let runtimeRestored = true;
+      if (oldActive) {
+        try {
+          const previous = restored.revisions.find(item => item.id === oldActive.id && item.status === 'active');
+          if (!previous) throw new Error('Previous active revision is missing from the rollback snapshot.');
+          registerRevisionTools(targetRegistry, previous);
+          activeRuntime.set(manifest.id, previous);
+          if (!extensionRuntimeState(previous, targetRegistry).usable) throw new Error('Previous extension runtime could not be restored.');
+        } catch (restoreError) {
+          runtimeRestored = false;
+          unregisterExtensionTools(targetRegistry, manifest.id);
+          activeRuntime.delete(manifest.id);
+          failed.error = cleanError(`${failed.error}; rollback: ${cleanError(restoreError)}`);
+        }
+      }
+      const rollbackStatus = runtimeRestored ? 'rolled_back' : 'rollback_failed';
+      const rollbackReceipt = receipt(failed, rollbackStatus, oldActive?.id || '', failed.error);
       pushReceipt(restored, rollbackReceipt);
       writeDB(db);
-      try { await persistStrict(); } catch {}
+      let persisted = true;
+      try { await persistStrict(); } catch { persisted = false; }
       return JSON.stringify({
         ok: false,
-        verified: true,
-        verificationStatus: 'verified',
-        status: 'rolled_back',
-        rollback: oldActive ? 'previous_revision_restored' : 'new_revision_removed_from_runtime',
+        verified: runtimeRestored && persisted,
+        verificationStatus: runtimeRestored && persisted ? 'verified' : 'unverified',
+        persistence: persisted ? 'committed' : 'pending',
+        status: rollbackStatus,
+        rollback: !runtimeRestored ? 'runtime_unavailable' : oldActive ? 'previous_revision_restored' : 'new_revision_removed_from_runtime',
         receipt: rollbackReceipt,
         error: failed.error,
       }, null, 2);
@@ -1812,7 +1827,11 @@ export async function rollbackExtension(
     const candidates = store.revisions.filter(item => item.extensionId === input.extensionId && item.userId === userId && item.status !== 'active');
     const target = input.version
       ? candidates.find(item => item.version === input.version)
-      : [...candidates].sort((a, b) => Date.parse(b.activatedAt || b.createdAt) - Date.parse(a.activatedAt || a.createdAt))[0];
+      : candidates
+        // Failed/staged installs have a creation date but have never owned
+        // the active runtime. Default rollback must not turn into an upgrade.
+        .filter(item => Number.isFinite(Date.parse(item.activatedAt || '')))
+        .sort((a, b) => Date.parse(b.activatedAt!) - Date.parse(a.activatedAt!))[0];
     if (!target) throw new Error('No prior extension revision is available for rollback.');
     verifyPersistedRevision(target, store);
     const compatibility = await compatibilityProbe(target.manifest);

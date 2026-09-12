@@ -4,9 +4,10 @@
 
 import * as EDB from './db';
 import { logAudit } from './db';
-import { generateEmbedding, cosineSimilarity } from '../memory/store';
+import { generateEmbeddingWithIdentity, cosineSimilarity } from '../memory/store';
 import { generateConfiguredEmbedding } from '../llm/embedding_provider';
 import { getRerankSelection, rerankConfiguredDocuments } from '../llm/rerank_provider';
+import { isProviderLocalOnly, isStrictPrivacy } from '../config/privacy';
 import {
   assertOrganizationResourceAccess,
   authorizeOrganizationResource,
@@ -72,6 +73,7 @@ interface SearchOptions {
   category?: string;
   status?: string;
   userId?: string;
+  signal?: AbortSignal;
 }
 
 interface ArticleMutationOptions {
@@ -313,7 +315,8 @@ const CHUNK_OVERLAP = 120;
 
 const articleIndexGenerations = new Map<string, number>();
 
-export async function indexArticle(orgId: string, articleId: string, actorUserId?: string): Promise<number> {
+export async function indexArticle(orgId: string, articleId: string, actorUserId?: string, options: { signal?: AbortSignal } = {}): Promise<number> {
+  options.signal?.throwIfAborted();
   const article = getArticle(orgId, articleId, actorUserId, 'write');
   if (!article) return 0;
   const generation = (articleIndexGenerations.get(articleId) || 0) + 1;
@@ -371,17 +374,21 @@ export async function indexArticle(orgId: string, articleId: string, actorUserId
     try {
       embeddingResults[i] = await generateConfiguredEmbedding(
         `${contextPrefix}\n\n${chunks[i].text}`,
-        article.authorId,
+        actorUserId || article.authorId,
+        { signal: options.signal },
       );
+      options.signal?.throwIfAborted();
       if (i > 0 && i % 5 === 0) {
         await new Promise(r => setTimeout(r, 200));
       }
     } catch (err: any) {
+      options.signal?.throwIfAborted();
       embeddingResults[i] = { error: String(err?.message || err || 'embedding_failed').slice(0, 300) };
       console.error(`[KB] Failed to embed chunk ${i} of article ${articleId}:`, err);
     }
   }
 
+  options.signal?.throwIfAborted();
   const latest = EDB.getKbArticle(orgId, articleId);
   if (!latest
     || articleIndexGenerations.get(articleId) !== generation
@@ -524,6 +531,7 @@ export async function searchKnowledgeBase(
   limitOrOptions: number | SearchOptions = 5
 ): Promise<KnowledgeSearchResult[]> {
   const options = typeof limitOrOptions === 'number' ? { limit: limitOrOptions } : limitOrOptions;
+  options.signal?.throwIfAborted();
   const limit = clampLimit(options.limit || 5);
   const normalizedQuery = String(query || '').trim();
   if (!normalizedQuery) return [];
@@ -537,7 +545,8 @@ export async function searchKnowledgeBase(
 
   const articleById = new Map(articles.map(article => [article.id, article]));
   const retrievalUserId = options.userId || 'anonymous';
-  const semanticResults = await semanticSearch(orgId, normalizedQuery, limit * 4, articleById, retrievalUserId);
+  const semanticResults = await semanticSearch(orgId, normalizedQuery, limit * 4, articleById, retrievalUserId, options.signal);
+  options.signal?.throwIfAborted();
   const keywordResults = keywordSearch(articles, normalizedQuery, limit * 2);
 
   const merged = new Map<string, KnowledgeSearchResult>();
@@ -554,14 +563,16 @@ export async function searchKnowledgeBase(
     .slice(0, Math.max(limit * 4, 20));
 
   const rerank = getRerankSelection(retrievalUserId);
-  if (rerank.enabled && candidates.length > 1) {
+  if (rerank.enabled && candidates.length > 1 && (!isStrictPrivacy() || isProviderLocalOnly(rerank.provider))) {
     try {
       const ranked = await rerankConfiguredDocuments(
         normalizedQuery,
         candidates.map(result => `${result.title}\n${result.chunk}`),
         retrievalUserId,
         Math.max(limit, rerank.topN),
+        { signal: options.signal },
       );
+      options.signal?.throwIfAborted();
       const seen = new Set<number>();
       const reordered = ranked.items
         .map(item => {
@@ -573,6 +584,7 @@ export async function searchKnowledgeBase(
       reordered.push(...candidates.filter((_, index) => !seen.has(index)));
       return reordered.slice(0, limit);
     } catch (error: any) {
+      options.signal?.throwIfAborted();
       console.warn(`[KB] Rerank unavailable; preserving hybrid search order: ${error?.message || String(error)}`);
     }
   }
@@ -586,21 +598,26 @@ async function semanticSearch(
   limit: number,
   articleById: Map<string, EDB.KbArticle>,
   userId: string,
+  signal?: AbortSignal,
 ): Promise<KnowledgeSearchResult[]> {
+  signal?.throwIfAborted();
   const allEmbeddings = EDB.getAllKbEmbeddings(orgId)
     .filter(embedding => articleById.has(embedding.articleId));
   if (allEmbeddings.length === 0) return [];
 
-  let queryEmbedding: number[] | null = null;
+  let queryEmbedding: Awaited<ReturnType<typeof generateEmbeddingWithIdentity>> = null;
   try {
-    queryEmbedding = await generateEmbedding(query, userId);
+    queryEmbedding = await generateEmbeddingWithIdentity(query, userId, { signal });
   } catch {
+    signal?.throwIfAborted();
     return [];
   }
+  signal?.throwIfAborted();
   if (!queryEmbedding) return [];
 
   return allEmbeddings
     .map(embedding => {
+      if (embedding.modelName !== `${queryEmbedding!.provider}/${queryEmbedding!.model}`) return null;
       let embeddingArr: number[];
       try {
         embeddingArr = JSON.parse(embedding.embedding);
@@ -609,7 +626,8 @@ async function semanticSearch(
       }
       const article = articleById.get(embedding.articleId);
       if (!article) return null;
-      const score = cosineSimilarity(queryEmbedding!, embeddingArr);
+      if (!Array.isArray(embeddingArr) || embeddingArr.length !== queryEmbedding!.vector.length || !embeddingArr.every(Number.isFinite)) return null;
+      const score = cosineSimilarity(queryEmbedding!.vector, embeddingArr);
       if (score < 0.28) return null;
       return toSearchResult(article, embedding.content, score, 'semantic', embedding.chunkIndex);
     })

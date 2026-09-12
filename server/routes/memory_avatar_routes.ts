@@ -1,10 +1,16 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { getActiveConversation, getMessages } from '../conversation/manager';
 import { requireAuth } from '../middleware/auth';
-import { createMemoryAvatar, getMemoryAvatar, listMemoryAvatars, archiveMemoryAvatar } from '../memory_avatar/store';
+import { createRequestAbortController } from '../http/request_abort';
+import { mountMemoryAvatarMediaRoutes } from '../memory_avatar/media_routes';
+import { mountMemoryAvatarPortraitRoutes } from '../memory_avatar/portrait_routes';
+import { createMemoryAvatar, getMemoryAvatar, listMemoryAvatars, archiveMemoryAvatar, updateMemoryAvatar, listMemoryAvatarMaterials, addMemoryAvatarMaterial, removeMemoryAvatarMaterial, MemoryAvatarError } from '../memory_avatar/store';
 
 const asyncHandler = (fn: (req: Request, res: Response, next: NextFunction) => Promise<any>) =>
-  (req: Request, res: Response, next: NextFunction) => Promise.resolve(fn(req, res, next)).catch(next);
+  (req: Request, res: Response, next: NextFunction) => Promise.resolve(fn(req, res, next)).catch(error => {
+    if (error instanceof MemoryAvatarError) return res.status(error.status).json({ error: error.message, code: error.code });
+    next(error);
+  });
 
 function publicAvatar(avatar: any) {
   return {
@@ -14,12 +20,16 @@ function publicAvatar(avatar: any) {
     status: avatar.status,
     isFrozen: avatar.isFrozen !== false,
     evidenceMap: avatar.evidenceMap || [],
-    seedMemoryIds: (avatar.seedMemories || []).map((_: unknown, index: number) => `${avatar.id}:seed:${index}`),
+    seedMemoryIds: avatar.seedMemoryIds || [],
+    revision: avatar.revision,
+    appearance: avatar.appearance,
+    voice: avatar.voice,
+    presentation: avatar.presentation,
     narrative: avatar.narrative || '',
     personalityConfig: avatar.personalityConfig || {},
     createdAt: avatar.createdAt,
     updatedAt: avatar.updatedAt,
-    memoryCount: (avatar.seedMemories || []).length,
+    memoryCount: avatar.memoryCount,
   };
 }
 export function mountMemoryAvatarRoutes(
@@ -31,6 +41,12 @@ export function mountMemoryAvatarRoutes(
     getKimi?: () => any; getGlm?: () => any; getRelay?: () => any;
   },
 ) {
+  router.use('/memory-avatars', requireAuth, (req, res, next) => {
+    if (req.user?.orgId) return res.status(403).json({ error: 'Memory Territory requires your personal workspace.', code: 'memory_avatar_personal_scope_required' });
+    next();
+  });
+  mountMemoryAvatarMediaRoutes(router, llmGetters, publicAvatar);
+  mountMemoryAvatarPortraitRoutes(router);
   router.post('/memory-avatars/distill', requireAuth, asyncHandler(async (req, res) => {
     const { chatLog, format, relationshipType, name: targetName, audioTranscript } = req.body || {};
     if (typeof chatLog !== 'string' || !chatLog.trim() || !format) {
@@ -39,47 +55,56 @@ export function mountMemoryAvatarRoutes(
     if (!['wechat', 'qq', 'plain'].includes(format)) {
       return res.status(400).json({ error: 'format must be: wechat, qq, or plain' });
     }
-    const { distillPersona } = await import('../memory_avatar/distiller');
-    const result = await distillPersona(
-      {
-        chatLog,
-        format,
-        targetName: typeof targetName === 'string' ? targetName.slice(0, 120) : undefined,
-        relationshipType: typeof relationshipType === 'string' ? relationshipType.slice(0, 40) : undefined,
-        userId: req.user!.uid,
-        audioTranscript: typeof audioTranscript === 'string' ? audioTranscript.slice(0, 20_000) : undefined,
-      },
-      {
-        getDeepSeek: llmGetters.getDeepSeek,
-        getGemini: llmGetters.getGemini,
-        getOpenAI: llmGetters.getOpenAI,
-        getAnthropic: llmGetters.getAnthropic,
-        getQwen: llmGetters.getQwen,
-        getOllama: llmGetters.getOllama,
-        getLmStudio: llmGetters.getLmStudio,
-        getArk: llmGetters.getArk,
-        getXiaomi: llmGetters.getXiaomi,
-        getKimi: llmGetters.getKimi,
-        getGlm: llmGetters.getGlm,
-        getRelay: llmGetters.getRelay,
-      },
-    );
-    return res.json({
-      personalityConfig: result.personalityConfig,
-      seedMemories: result.seedMemories,
-      evidenceMap: result.evidenceMap,
-      relationshipType: result.relationshipType,
-      narrative: result.narrative,
-      inferredName: result.inferredName,
-      summary: {
-        messageCount: chatLog.split('\n').filter((line: string) => line.trim()).length,
-        memoryCount: result.seedMemories.length,
-        cognitiveStyle: result.personalityConfig.personalityVector?.cognitiveStyle,
-        socialStyle: result.personalityConfig.personalityVector?.socialStyle,
-        tone: result.personalityConfig.expressionStyle?.tone,
-        topPhrases: result.personalityConfig.expressionStyle?.vocabularyHints?.slice(0, 5),
-      },
-    });
+    const request = createRequestAbortController(req, res);
+    try {
+      const { distillPersona } = await import('../memory_avatar/distiller');
+      const result = await distillPersona(
+        {
+          chatLog,
+          format,
+          targetName: typeof targetName === 'string' ? targetName.slice(0, 120) : undefined,
+          relationshipType: typeof relationshipType === 'string' ? relationshipType.slice(0, 40) : undefined,
+          userId: req.user!.uid,
+          signal: request.signal,
+          audioTranscript: typeof audioTranscript === 'string' ? audioTranscript.slice(0, 20_000) : undefined,
+        },
+        {
+          getDeepSeek: llmGetters.getDeepSeek,
+          getGemini: llmGetters.getGemini,
+          getOpenAI: llmGetters.getOpenAI,
+          getAnthropic: llmGetters.getAnthropic,
+          getQwen: llmGetters.getQwen,
+          getOllama: llmGetters.getOllama,
+          getLmStudio: llmGetters.getLmStudio,
+          getArk: llmGetters.getArk,
+          getXiaomi: llmGetters.getXiaomi,
+          getKimi: llmGetters.getKimi,
+          getGlm: llmGetters.getGlm,
+          getRelay: llmGetters.getRelay,
+        },
+      );
+      if (request.signal.aborted) return;
+      return res.json({
+        personalityConfig: result.personalityConfig,
+        seedMemories: result.seedMemories,
+        evidenceMap: result.evidenceMap,
+        relationshipType: result.relationshipType,
+        narrative: result.narrative,
+        inferredName: result.inferredName,
+        summary: {
+          messageCount: chatLog.split('\n').filter((line: string) => line.trim()).length,
+          memoryCount: result.seedMemories.length,
+          cognitiveStyle: result.personalityConfig.personalityVector?.cognitiveStyle,
+          socialStyle: result.personalityConfig.personalityVector?.socialStyle,
+          tone: result.personalityConfig.expressionStyle?.tone,
+          topPhrases: result.personalityConfig.expressionStyle?.vocabularyHints?.slice(0, 5),
+        },
+      });
+    } catch (error) {
+      if (!request.signal.aborted) throw error;
+    } finally {
+      request.dispose();
+    }
   }));
 
   router.get('/memory-avatars', requireAuth, (req, res) => {
@@ -92,39 +117,29 @@ export function mountMemoryAvatarRoutes(
     return res.json(publicAvatar(avatar));
   });
 
-  router.post('/memory-avatars', requireAuth, (req, res) => {
-    const body = req.body || {};
-    if (!body.personalityConfig || typeof body.personalityConfig !== 'object') {
-      return res.status(400).json({ error: 'personalityConfig is required' });
-    }
-    const config = {
-      ...body.personalityConfig,
-      // A memory avatar is deliberately a private conversational persona. It
-      // cannot acquire tools or alter the single-core task scheduler.
-      toolPolicy: {
-        ...(body.personalityConfig.toolPolicy || {}),
-        allowedTools: [],
-        requireConfirmation: [],
-        forbiddenTools: ['*'],
-        maxIterations: 0,
-      },
-      memoryPolicy: {
-        ...(body.personalityConfig.memoryPolicy || {}),
-        retrieveLimit: Math.min(20, Math.max(1, Number(body.personalityConfig.memoryPolicy?.retrieveLimit) || 10)),
-        autoExtract: true,
-      },
-    };
-    const avatar = createMemoryAvatar({
-      userId: req.user!.uid,
-      name: String(body.name || 'Memory').slice(0, 120),
-      relationshipType: String(body.relationshipType || 'close_friend').slice(0, 40),
-      personalityConfig: config,
-      evidenceMap: Array.isArray(body.evidenceMap) ? body.evidenceMap : [],
-      seedMemories: Array.isArray(body.seedMemories) ? body.seedMemories : [],
-      narrative: String(body.narrative || '').slice(0, 2000),
-    });
+  router.post('/memory-avatars', requireAuth, asyncHandler(async (req, res) => {
+    const avatar = await createMemoryAvatar({ ...req.body, userId: req.user!.uid });
     return res.status(201).json(publicAvatar(avatar));
-  });
+  }));
+
+  router.patch('/memory-avatars/:id', requireAuth, asyncHandler(async (req, res) => {
+    const avatar = await updateMemoryAvatar(req.user!.uid, String(req.params.id), req.body || {});
+    return res.json(publicAvatar(avatar));
+  }));
+
+  router.get('/memory-avatars/:id/materials', requireAuth, asyncHandler(async (req, res) => {
+    return res.json(listMemoryAvatarMaterials(req.user!.uid, String(req.params.id)));
+  }));
+
+  router.post('/memory-avatars/:id/materials', requireAuth, asyncHandler(async (req, res) => {
+    const result = await addMemoryAvatarMaterial(req.user!.uid, String(req.params.id), req.body || {});
+    return res.status(201).json({ material: result.material, avatar: publicAvatar(result.avatar) });
+  }));
+
+  router.delete('/memory-avatars/:id/materials/:materialId', requireAuth, asyncHandler(async (req, res) => {
+    const avatar = await removeMemoryAvatarMaterial(req.user!.uid, String(req.params.id), String(req.params.materialId), req.body?.revision);
+    return res.json({ ok: true, avatar: publicAvatar(avatar) });
+  }));
 
   router.get('/memory-avatars/:id/history', requireAuth, (req, res) => {
     const id = String(req.params.id || '');
@@ -133,16 +148,16 @@ export function mountMemoryAvatarRoutes(
     const conversation = getActiveConversation(req.user!.uid, id, 'personal', '');
     const messages = conversation ? getMessages(conversation.id, 150) : [];
     return res.json(messages.map((message: any) => ({
+      id: message.id,
+      requestId: message.requestId || message.externalMessageId || '',
       role: message.role,
       content: message.content || message.message || '',
       timestamp: message.createdAt || message.timestamp,
     })));
   });
 
-  router.delete('/memory-avatars/:id', requireAuth, (req, res) => {
-    if (!archiveMemoryAvatar(req.user!.uid, String(req.params.id || ''))) {
-      return res.status(404).json({ error: 'Memory avatar not found' });
-    }
+  router.delete('/memory-avatars/:id', requireAuth, asyncHandler(async (req, res) => {
+    await archiveMemoryAvatar(req.user!.uid, String(req.params.id), req.body?.revision);
     return res.json({ ok: true });
-  });
+  }));
 }

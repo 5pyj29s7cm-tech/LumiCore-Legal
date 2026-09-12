@@ -1,4 +1,5 @@
 import { ToolPolicy } from '../personality/types';
+import { classifySkillAuthoringIntent, skillAuthoringTools } from '../skills/authoring_intent';
 import {
   ToolRegistry,
 } from '../tools/registry';
@@ -438,6 +439,11 @@ function requestsExplicitCadFileExport(text: string): boolean {
 
 function priorityToolsForRoute(categories: string[], text: string): string[] {
   const priorities: string[] = [];
+  // Keep the requested producer ahead of broad file/document helpers. The
+  // model projection is smaller than the route and otherwise drops media.
+  if (categories.includes('image_generation')) priorities.push('generate_image');
+  if (categories.includes('image_editing')) priorities.push('ai_edit_image');
+  if (categories.includes('video_generation')) priorities.push('generate_video');
   const instructionText = primaryRoutingInstruction(text);
   if (requestsBlankAutoCadDocument(instructionText)) {
     priorities.push('mcp_cad-drafting_autocad_new_document');
@@ -875,6 +881,11 @@ export function routeToolsForTurn(
   const available = new Set(
     availableNames.filter(name => !name.startsWith('mcp_filesystem_')),
   );
+  const authoring = classifySkillAuthoringIntent(primaryInstructionText);
+  if (authoring !== 'none') {
+    const toolNames = skillAuthoringTools(authoring).filter(name => available.has(name)).slice(0, maxTools);
+    return { toolNames, categories: ['skill_authoring'], reasons: ['the user requested authoring a reusable skill/workflow, not executing the example domain task'], totalAvailable: declarations.length, maxTools, truncated: false };
+  }
   const routingManifest: CapabilityRoutingProjection[] = options?.capabilityManifest?.length
     ? options.capabilityManifest
     : declarations.map(projectToolDeclarationForRouting);
@@ -1527,7 +1538,9 @@ export function formatToolRouteForPrompt(route: ToolRoute): string {
       ? `Use only the exposed tools. Prefer the most specific skill tool when one directly matches the task.`
       : 'No tool matched strongly. Answer naturally or ask one clarification question instead of inventing tool work.',
     route.hardAllowlist
-      ? route.toolNames.includes('cad_draw_floorplan_in_autocad')
+      ? route.categories.includes('industry_workflow') || route.categories.includes('industry_guidance')
+        ? 'Use only the tools in this exact industry contract. Produce only its authorized deliverables, verify current-task receipts, and preserve all review and external-action boundaries.'
+        : route.toolNames.includes('cad_draw_floorplan_in_autocad')
         ? 'This route is a hard allowlist for one composite CAD skill. Call only cad_draw_floorplan_in_autocad; it owns source discovery, calibration, geometry verification, visible AutoCAD playback, resume, and final acceptance internally.'
         : route.categories.includes('desktop_launch')
         ? 'This route is a hard allowlist for launching or focusing the exact requested target and verifying the resulting window/process. Do not start unrelated work inside the application.'

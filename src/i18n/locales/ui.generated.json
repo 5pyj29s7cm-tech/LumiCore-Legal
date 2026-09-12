@@ -36,8 +36,8 @@
     "zh": "Lumi \u5b98\u65b9 API"
   },
   "settings.lumi-official-service-description.2c8f6a1e05": {
-    "en": "Use the documented Lumi/ModelDepot endpoint and keep the API key on the backend. The default endpoint is https://zhuan.huaczy.com/v1. It covers reasoning, vision, world actions, embeddings, reranking, image/video generation, and configurable speech adapters.",
-    "zh": "使用随附文档中的 ModelDepot 官方接口，并将 API 密钥只保存在后端。默认地址为 https://zhuan.huaczy.com/v1；角色模型覆盖推理、视觉、世界操作、嵌入、重排、图像、视频，以及可配置的语音适配器。"
+    "en": "Use the documented Lumi/ModelDepot endpoint and keep the API key on the backend. The default endpoint is https://lumi.xingcyj.com/v1. It covers reasoning, vision, world actions, embeddings, reranking, image/video generation, and configurable speech adapters.",
+    "zh": "使用随附文档中的 ModelDepot 官方接口，并将 API 密钥只保存在后端。默认地址为 https://lumi.xingcyj.com/v1；角色模型覆盖推理、视觉、世界操作、嵌入、重排、图像、视频，以及可配置的语音适配器。"
   },
   "settings.lumi-official-relay.7d3b1f9c24": {
     "en": "Lumi Official API endpoint",
@@ -6620,8 +6620,8 @@
     "zh": "兼容 OpenAI 的 API 中转服务。请输入代理/中转服务的 Base URL 和 API Key。"
   },
   "settings.our-protocol-strictly-enforces-local.872b7c5677": {
-    "en": "Our protocol strictly enforces local-only processing. Your visual and auditory data streams are never transmitted outside your sovereign mesh node without direct user-signed override.",
-    "zh": "协议默认强制本地处理。没有你的明确确认，视觉和听觉数据流不会离开你的本地主权节点。"
+    "en": "Standard mode may send inputs to configured cloud AI services, including voice and visual processing. Strict mode can be configured under Privacy & Security and takes effect after fully quitting and restarting the application. It restricts cloud AI and automatic tool execution, including local file operations. It does not control other applications' network access.",
+    "zh": "标准模式可能将输入发送给已配置的云端 AI 服务，包括语音与视觉处理。严格模式可在“隐私与安全”中设置，完全退出并重新启动后生效。它限制云端 AI 和自动工具执行，包括本地文件操作，不控制其他程序的网络访问。"
   },
   "settings.permissions-follow-the-three-desktop.5c6e6a2ca1": {
     "en": "Permissions follow the three desktop modes: Chat, Assistant, and Autonomy. Meeting is a separate capture mode and does not create another autonomy level.",

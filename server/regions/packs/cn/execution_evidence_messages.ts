@@ -1,4 +1,16 @@
 export const CN_EXECUTION_EVIDENCE_MESSAGES = {
+  desktopCompletionNeedsObservation: '已保留当前进度，并停下后续操作，暂时无法确认结果。',
+  checkingPlayback: '正在核对节目和播放进度。',
+  waitingPlaybackAd: '广告还在播放，正在等待正片。',
+  waitingPlaybackLoad: '视频还在加载，正在等待播放。',
+  playbackAdUnconfirmed: '广告仍在播放，还没有确认正片开始；我已停止后续操作。',
+  playbackLoadingUnconfirmed: '播放器仍在加载，还没有确认内容开始播放；我已停止后续操作。',
+  playbackPausedUnconfirmed: '当前画面显示播放已暂停，我已停止后续操作。',
+  playbackBlockedUnconfirmed: '播放遇到阻碍，我还没有确认正片开始，已停止后续操作。',
+  playbackContentUnconfirmed: '已看到视频画面，但没有确认持续播放；我已停止后续操作。',
+  playbackObservationUnavailable: '暂时无法读取播放画面，不能确认是否开始播放；我已停止后续操作。',
+  playbackTargetChanged: '播放窗口发生了变化，未能确认正片已开始；我已停止后续操作。',
+  playbackProgressUnconfirmed: '已保留当前进度，并停下后续操作。我还没看到可靠的播放进度，暂时无法确认已开始播放。',
   inventedToolMode: '实际上没有发生这个模式切换。Fetcher / System Diagnostics 不是需要用户切换的运行模式；本轮实际声明的工具列表才是准确状态。',
   inventedToolAvailability: '本轮没有真实回执证明“工具没打开”，也不存在需要你切换的“工具可用模式”。如果任务没有执行，Lumi 应该继续真实工具链，不能把内部路由问题推给你。',
   ledgerOnlyTaskCompletion: '任务账本只证明了记账或状态写回，不证明任务步骤已实际执行。本轮没有真实动作的已验证终态回执，不能将该步骤标记为完成。',
@@ -61,13 +73,16 @@ export const CN_EXECUTION_EVIDENCE_MESSAGES = {
   visualProbeInterrupted: '\u521a\u624d\u7684\u89c6\u89c9\u68c0\u67e5\u88ab\u524d\u53f0\u64cd\u4f5c\u6253\u65ad\u4e86\uff0c\u8fd9\u6b21\u8fd8\u4e0d\u80fd\u786e\u8ba4\u6a21\u578b\u53ef\u7528\u3002',
   visualProbeUnconfirmed: '\u89c6\u89c9\u6a21\u578b\u8fd9\u6b21\u6ca1\u6709\u8fd4\u56de\u53ef\u7528\u7ed3\u679c\uff0c\u76ee\u524d\u8fd8\u4e0d\u80fd\u786e\u8ba4\u5b83\u53ef\u7528\u3002',
   genericMusicPlayer: '\u97f3\u4e50\u64ad\u653e\u5668',
-  mediaPlaybackActive: (label: string) => `\u5df2\u6253\u5f00${label}\uff0c\u97f3\u4e50\u6b63\u5728\u64ad\u653e\u3002`,
+  mediaPlaybackActive: (label: string, video = false) => `\u5df2\u6253\u5f00${label}\uff0c${video ? '\u89c6\u9891' : '\u97f3\u4e50'}\u6b63\u5728\u64ad\u653e\u3002`,
   mediaPlaybackConfirmed: '\u64ad\u653e\u72b6\u6001\u5df2\u786e\u8ba4\u3002',
+  verifiedPlaybackTarget: (player: string, title: string, season: string, episode: string) => (
+    `已确认${player}正在播放${title ? `《${title}》` : '你要的内容'}${season ? `第${season}季` : ''}${episode ? `第${episode}集` : ''}，播放进度正在推进。`
+  ),
   mediaOpenedPlaybackUnconfirmed: (label: string) => (
-    `\u5df2\u6253\u5f00${label}\uff0c\u4f46\u8fd8\u4e0d\u80fd\u786e\u8ba4\u97f3\u4e50\u5df2\u7ecf\u5f00\u59cb\u64ad\u653e\u3002\u521a\u624d\u7684\u6309\u952e\u53ea\u80fd\u786e\u8ba4\u8f93\u5165\u5df2\u9001\u8fbe\uff0c\u65e0\u6cd5\u533a\u5206\u662f\u64ad\u653e\u8fd8\u662f\u6682\u505c\u3002`
+    `已打开${label}，但没有确认你要的内容已经开始播放。`
   ),
   mediaOpenAndPlaybackUnconfirmed: (label: string) => (
-    `\u8fd9\u6b21\u8fd8\u6ca1\u6709\u786e\u8ba4${label}\u5df2\u6253\u5f00\uff0c\u97f3\u4e50\u4e5f\u6ca1\u6709\u786e\u8ba4\u5f00\u59cb\u64ad\u653e\u3002`
+    `这次还没有确认${label}已打开，也没有确认你要的内容开始播放。`
   ),
   desktopObservedOpen: (label: string) => `\u5df2\u6253\u5f00${label}\u3002`,
   desktopObservedOpenReason: '\u76ee\u6807\u9875\u9762\u6216\u7a97\u53e3\u5df2\u5728\u540c\u8f6e\u684c\u9762\u7ed3\u679c\u4e2d\u786e\u8ba4\u3002',

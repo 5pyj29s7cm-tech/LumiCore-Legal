@@ -5,6 +5,8 @@
 import {
   attachAutonomousExecutionPlan,
   checkpointAutonomousTask,
+  cancelAutonomousTaskFinalization,
+  cancelTask,
   dequeue,
   markRunning,
   markCompleted,
@@ -16,7 +18,17 @@ import {
   markPaused,
   requestPauseAutonomousTask,
   recordAutonomousTaskFailure,
+  getAutonomousTaskPriorRecords,
+  persistAutonomousTaskQueue,
+  prepareAutonomousTaskAction,
+  reconcileExpiredAutonomousTasks,
+  registerAutonomousTaskExecutor,
+  releaseAutonomousTaskExecutor,
+  settleAutonomousTaskAction,
+  setAutonomousTaskFinalizationPending,
+  startAutonomousTaskAction,
 } from './task_queue';
+import { toolExecutionInputDigests } from '../tools/execution_engine';
 import { getGateConfig, isAutonomousWorkAllowed, recordAutonomousTokens } from './safety_gate';
 import { runWithTools } from '../llm/adapter';
 import { toolRegistry, type ToolRegistry } from '../tools/registry';
@@ -27,10 +39,10 @@ import { Server as SocketIOServer } from 'socket.io';
 import type { AutonomousTask } from './task_queue';
 import { getUserPreferredLLMConfig } from '../llm/user_preferences';
 import { formatLumiConstitutionForPrompt } from '../personality/constitution';
-import { getPlan, updatePlan, updatePlanStep } from './planner';
+import { getPlan, stageAutonomousPlanCompletion, updatePlan, updatePlanStep } from './planner';
 import { createDesktopRelay } from '../socket/desktop_relay';
 import type { PlanScope } from './planner';
-import { isRealtimeUserActive } from './foreground_activity';
+import { createRealtimeVoicePrioritySignal, isRealtimeUserActive } from './foreground_activity';
 import { finalizeLumiResponse } from '../cognition/result_finalizer';
 import { finalizeExecutionForOutboundDelivery } from '../cognition/execution_guard_recovery';
 import {
@@ -55,12 +67,13 @@ import {
   type PublicExecutionLanguage,
 } from '../../shared/public_execution_language';
 import { CN_AUTONOMOUS_CUSTOMER_MESSAGES } from '../regions/packs/cn/autonomous_customer_messages';
+import { isOrganizationMembershipAuthorizationCurrent, watchOrganizationMembershipAuthorization } from '../org/membership_authorization';
 import {
   canUseQueuedSelfImprovementStageAuthorization,
   isLocalAdminAuthorizedSelfImprovementTask,
 } from '../self_extension/improvement_program';
 
-interface LLMGetters {
+export interface LLMGetters {
   getDeepSeek: () => any;
   getGemini: () => any;
   getOpenAI?: () => any;
@@ -519,24 +532,6 @@ function markLinkedPlanRunning(task: AutonomousTask) {
   }
 }
 
-function markLinkedPlanCompleted(task: AutonomousTask, summary: string) {
-  if (!task.planId) return;
-  const scope = planScopeForTask(task);
-  const plan = getPlan(task.planId, scope);
-  if (!plan) return;
-  const clipped = clipPlanResult(summary);
-  const step = plan.steps.find(item => item.status === 'in_progress')
-    || plan.steps.find(item => item.status === 'pending');
-  if (!step) return;
-  const updatedPlan = updatePlanStep(plan.id, step.id, {
-    status: 'done',
-    result: clipped,
-  }, scope);
-  if (updatedPlan?.status === 'completed') {
-    updatePlan(plan.id, { result: clipped }, scope);
-  }
-}
-
 function markLinkedPlanFailed(task: AutonomousTask, error: string) {
   if (!task.planId) return;
   const scope = planScopeForTask(task);
@@ -570,21 +565,150 @@ function markLinkedPlanCancelled(task: AutonomousTask) {
   updatePlan(plan.id, { status: 'cancelled', result: message }, scope);
 }
 
+function markLinkedPlanPaused(task: AutonomousTask) {
+  if (!task.planId) return;
+  const scope = planScopeForTask(task);
+  const plan = getPlan(task.planId, scope);
+  if (!plan || plan.status === 'cancelled' || plan.status === 'completed') return;
+  // Preserve the current step and its receipts so an explicit resume can
+  // continue it. Pausing does not skip or fail the remaining work.
+  updatePlan(plan.id, { status: 'paused', result: 'Autonomous task paused by user' }, scope);
+}
+
+function publishAutonomousTaskInterruption(
+  io: SocketIOServer,
+  room: string,
+  task: AutonomousTask,
+  settled: AutonomousTask,
+): string | null {
+  if (settled.status !== 'cancelled' && settled.status !== 'paused') return null;
+  if (settled.status === 'cancelled') markLinkedPlanCancelled(task);
+  else markLinkedPlanPaused(task);
+  io.to(room).emit(settled.status === 'cancelled' ? 'autonomous:task_cancelled' : 'autonomous:task_paused', {
+    taskId: task.id,
+    title: task.title,
+    status: settled.status,
+    completionFeedback: projectAutonomousCompletionFeedback(buildTaskCompletionFeedback(
+      settled.terminalReceipt, task.title, { status: settled.status },
+    )),
+    timestamp: new Date().toISOString(),
+  });
+  return settled.status === 'cancelled' ? 'Cancelled by user' : 'Paused';
+}
+
+interface PendingCompletion {
+  room: string;
+  payload: Record<string, unknown>;
+  confirmPlanSaved?: () => void;
+  task: AutonomousTask;
+  isAuthorized: () => boolean;
+  returnResult: { executed: boolean; taskId: string; result: string };
+  cancelled?: boolean;
+}
+const pendingCompletions = new Map<string, PendingCompletion>();
+let taskFinalizationQueue: Promise<void> = Promise.resolve();
+
+function cancelUnauthorizedCompletion(completion: PendingCompletion): boolean {
+  if (completion.cancelled || completion.isAuthorized()) return false;
+  const settled = cancelAutonomousTaskFinalization(completion.task.id, 'Task authorization was revoked before final delivery');
+  if (!settled) throw new Error('Pending task finalization could not be cancelled after authorization was revoked');
+  markLinkedPlanCancelled(completion.task);
+  completion.cancelled = true;
+  completion.returnResult.result = 'Cancelled because task authorization was revoked';
+  completion.payload = {
+    taskId: completion.task.id, title: completion.task.title, status: 'cancelled',
+    finalized: false, verified: false,
+    completionFeedback: projectAutonomousCompletionFeedback(buildTaskCompletionFeedback(
+      settled?.terminalReceipt, completion.task.title, { status: 'cancelled' },
+    )),
+    timestamp: new Date().toISOString(),
+  };
+  return true;
+}
+
+/** Retry only durable finalization, never the already-settled tool actions. */
+export function persistAutonomousTaskFinalizations(io: SocketIOServer): Promise<void> {
+  // Every caller gets its own barrier and snapshots only once it owns the
+  // queue. Reusing an in-flight promise would omit later staged completions.
+  const finalization = taskFinalizationQueue.then(() => flushAutonomousTaskFinalizations(io));
+  taskFinalizationQueue = finalization.catch(() => {});
+  return finalization;
+}
+
+async function flushAutonomousTaskFinalizations(io: SocketIOServer): Promise<void> {
+  // Snapshot before the write barrier: a completion staged during this await
+  // belongs to its own barrier and must not be published by this invocation.
+  const pending = [...pendingCompletions];
+  let authorizationChanged: boolean;
+  do {
+    for (const [taskId, completion] of pending) {
+      if (pendingCompletions.get(taskId) === completion) cancelUnauthorizedCompletion(completion);
+    }
+    await persistAutonomousTaskQueue();
+    // Revocation can arrive while SQLite acknowledges the write. Persist the
+    // cancelled state before publishing anything; each entry changes once.
+    authorizationChanged = false;
+    for (const [taskId, completion] of pending) {
+      if (pendingCompletions.get(taskId) === completion && cancelUnauthorizedCompletion(completion)) authorizationChanged = true;
+    }
+  } while (authorizationChanged);
+  for (const [taskId, completion] of pending) {
+    if (pendingCompletions.get(taskId) !== completion) continue;
+    pendingCompletions.delete(taskId);
+    setAutonomousTaskFinalizationPending(taskId, false);
+    completion.confirmPlanSaved?.();
+    io.to(completion.room).emit(completion.cancelled ? 'autonomous:task_cancelled' : 'autonomous:task_completed', completion.payload);
+  }
+}
+
+export async function retryAutonomousTaskFinalizations(io: SocketIOServer): Promise<void> {
+  if (pendingCompletions.size > 0) await persistAutonomousTaskFinalizations(io);
+}
+
 export async function executeNextAutonomousTask(
   io: SocketIOServer,
   getters: LLMGetters,
   userId?: string,
+  options: { taskId?: string; signal?: AbortSignal; isAuthorized?: () => boolean } = {},
 ): Promise<{ executed: boolean; taskId?: string; result?: string }> {
+  let taskIsAuthorized = () => true;
+  const isAuthorized = () => {
+    try { return taskIsAuthorized() && options.isAuthorized?.() !== false; } catch { return false; }
+  };
+  const rejectUnauthorizedAdmission = async () => {
+    if (options.taskId && cancelTask(options.taskId, userId)) await persistAutonomousTaskQueue();
+    return { executed: false, taskId: options.taskId, result: 'Task authorization was revoked' };
+  };
+  if (!isAuthorized()) return rejectUnauthorizedAdmission();
+  if (options.signal?.aborted) return { executed: false, result: 'Parent execution was cancelled' };
+  await retryAutonomousTaskFinalizations(io);
+  if (!isAuthorized()) return rejectUnauthorizedAdmission();
   if (userId && isRealtimeUserActive(userId)) {
     return { executed: false, result: 'Live user voice session has priority' };
   }
+  // Expiry is reclaimable only after the prior local executor has settled.
+  if (reconcileExpiredAutonomousTasks()) await persistAutonomousTaskQueue();
+  if (!isAuthorized()) return rejectUnauthorizedAdmission();
+  if (options.signal?.aborted) return { executed: false, result: 'Parent execution was cancelled' };
   // Don't start a new task if one is already running
   if (getRunningTask(userId)) {
     return { executed: false, result: 'Task already running' };
   }
 
-  const task = dequeue(userId);
+  const task = dequeue(userId, options.taskId);
   if (!task) return { executed: false };
+  // Both scheduled and manual plan runs carry the original membership identity.
+  // The built-in cycle must enforce it even without a caller authority callback.
+  const organizationPlanTask = task.domain === 'work'
+    && Boolean(task.planId && task.idempotencyKey?.startsWith(`command-center-plan:${task.planId}:`));
+  if (organizationPlanTask) {
+    taskIsAuthorized = () => isOrganizationMembershipAuthorizationCurrent(task.membershipAuthorization, task.orgId || '', task.userId);
+    if (!isAuthorized()) {
+      cancelTask(task.id, task.userId);
+      await persistAutonomousTaskQueue();
+      return { executed: false, taskId: task.id, result: 'Task authorization was revoked' };
+    }
+  }
   const publicLanguage = inferAutonomousPublicLanguage(`${task.title}\n${task.description}`);
 
   const gate = isAutonomousWorkAllowed(task.userId);
@@ -595,18 +719,50 @@ export async function executeNextAutonomousTask(
   const running = markRunning(task.id);
   if (!running) return { executed: false };
   if (!running.leaseId) return { executed: false, taskId: task.id, result: 'Task lease was not created' };
+  const executionAbort = new AbortController();
+  const abortExecution = (reason: string) => {
+    if (!executionAbort.signal.aborted) executionAbort.abort(new Error(reason));
+  };
+  const authorizationWasRevoked = () => {
+    if (isAuthorized()) return false;
+    cancelTask(task.id, task.userId);
+    abortExecution('Task authorization was revoked');
+    return true;
+  };
+  const assertAuthorized = () => {
+    if (authorizationWasRevoked()) throw new Error('Task authorization was revoked');
+  };
+  if (!registerAutonomousTaskExecutor(task.id, running.leaseId, abortExecution)) return { executed: false };
+  const membershipAuthority = organizationPlanTask
+    ? watchOrganizationMembershipAuthorization(task.membershipAuthorization, task.orgId || '', task.userId, () => {
+        cancelTask(task.id, task.userId);
+        abortExecution('Task organization membership was revoked');
+      })
+    : undefined;
+  if (membershipAuthority) taskIsAuthorized = membershipAuthority.isAuthorized;
+  const onParentCancelled = () => {
+    cancelTask(task.id, task.userId);
+    abortExecution('Parent execution was cancelled');
+  };
+  options.signal?.addEventListener('abort', onParentCancelled, { once: true });
+  if (options.signal?.aborted) onParentCancelled();
+  const voicePriority = createRealtimeVoicePrioritySignal(task.userId);
+  const onVoicePriority = () => abortExecution('Live user voice session has priority');
+  voicePriority.signal.addEventListener('abort', onVoicePriority, { once: true });
+  if (voicePriority.signal.aborted) onVoicePriority();
   let leaseLost = false;
   const leaseHeartbeat = setInterval(() => {
     const renewed = heartbeatAutonomousTask(task.id, running.leaseId!);
     if (!renewed) {
       leaseLost = true;
+      abortExecution('Autonomous task lease expired');
       clearInterval(leaseHeartbeat);
     }
   }, 20_000);
   if (typeof (leaseHeartbeat as any).unref === 'function') (leaseHeartbeat as any).unref();
   markLinkedPlanRunning(running);
   let releaseDesktopControlLease = () => undefined;
-  const toolLedger: ToolExecutionRecord[] = [];
+  const toolLedger: ToolExecutionRecord[] = getAutonomousTaskPriorRecords(running);
   let sideEffectClass = running.executionPlan?.risk.sideEffectClass;
 
   const taskScope = planScopeForTask(running);
@@ -621,6 +777,7 @@ export async function executeNextAutonomousTask(
   });
 
   try {
+    assertAuthorized();
     const currentGate = getGateConfig(task.userId);
     const maxIterations = currentGate.autonomyLevel === 'full' ? 50 : 30;
     // Build desktop relay using the user's registered desktop client, not a broad user-room broadcast.
@@ -663,6 +820,7 @@ export async function executeNextAutonomousTask(
       taskId: running.id,
       desktopRelay: task.mode === 'desktop' ? desktopRelay : undefined,
       requestConfirmation: async (toolName, args) => {
+        if (authorizationWasRevoked()) return false;
         if (toolName === 'self_improvement_stage_patch') {
           return canUseQueuedSelfImprovementStageAuthorization(
             taskScope,
@@ -676,10 +834,13 @@ export async function executeNextAutonomousTask(
       routedTaskText: executionPipeline.turnIntent.flow.routeText,
       toolPolicy,
       modelToolProjection: executionPipeline.modelToolProjection,
-      isCancelled: () => isTaskCancellationRequested(task.id, task.userId)
+      isCancelled: () => authorizationWasRevoked()
+        || isTaskCancellationRequested(task.id, task.userId)
         || isTaskPauseRequested(task.id, task.userId)
         || isRealtimeUserActive(task.userId)
-        || leaseLost,
+        || leaseLost
+        || Boolean(options.signal?.aborted),
+      executionSignal: executionAbort.signal,
       autonomous: true,
       localExecution: isLocalAdminAuthorizedSelfImprovementTask(
         taskScope,
@@ -688,6 +849,24 @@ export async function executeNextAutonomousTask(
       ),
       source: 'autonomous',
       idempotencyKey: running.idempotencyKey,
+      priorToolRecords: getAutonomousTaskPriorRecords(running),
+      resolveToolIdempotencyKey: call => {
+        assertAuthorized();
+        const capability = toolRegistry.getCapabilityManifestEntry(call.name, toolPolicy);
+        const mayHaveSideEffects = !capability || !['observe', 'test'].includes(capability.operation)
+          || capability.sideEffects.some(effect => !['none', 'local_read', 'network_read'].includes(effect.type));
+        return prepareAutonomousTaskAction(running.id, running.leaseId!, {
+          callId: call.id, name: call.name,
+          argumentsDigest: toolExecutionInputDigests(call.arguments).argumentsDigest,
+          mayHaveSideEffects,
+        });
+      },
+      onAdapterStart: async call => {
+        assertAuthorized();
+        if (!call.idempotencyKey) throw new Error('Autonomous adapter is missing its action identity.');
+        await startAutonomousTaskAction(running.id, running.leaseId!, call.idempotencyKey);
+        assertAuthorized();
+      },
     }, { ownerUserId: task.userId, taskId: running.id });
 
     const messages = [
@@ -695,6 +874,7 @@ export async function executeNextAutonomousTask(
         `You are Lumi executing an autonomous background task. You work independently without user interaction. Be efficient and direct. Current task mode: ${task.mode}.`,
         formatLumiConstitutionForPrompt(),
         executionPipeline.capabilityPlan.promptOverlay,
+        ...(toolLedger.length ? [`Previously completed action receipts are preserved below. Continue only missing work; do not repeat those actions.\n${JSON.stringify(toolLedger.map(record => ({ id: record.id, name: record.name, result: record.result?.slice(0, 500), error: record.error })))}`] : []),
         ...(running.recovery?.planRevisions?.length
           ? [`This is durable recovery attempt ${running.attempt}. Follow the latest persisted recovery revision: ${running.recovery.planRevisions.at(-1)?.strategy}. Do not repeat any side effect from a prior receipt. If exact prior state cannot be reconciled, stop and report the blocker.`]
           : []),
@@ -709,8 +889,9 @@ export async function executeNextAutonomousTask(
     const result = await runWithTools(
       messages,
       toolRegistry,
-      getUserPreferredLLMConfig(task.userId, { maxTokens: 2000 }),
-      (record) => {
+      { ...getUserPreferredLLMConfig(task.userId, { maxTokens: 2000 }), signal: executionAbort.signal },
+      async (record) => {
+        await settleAutonomousTaskAction(running.id, running.leaseId!, record);
         upsertToolLedger(toolLedger, record);
         if (record.result !== undefined || record.error !== undefined) {
           checkpointAutonomousTask(running.id, {
@@ -742,12 +923,14 @@ export async function executeNextAutonomousTask(
     );
 
     for (const record of result.toolCalls) upsertToolLedger(toolLedger, record);
+    authorizationWasRevoked();
     const toolCallCount = toolLedger.length;
     const tokensUsed = result.usageRecords.reduce((sum, r) => sum + r.totalTokens, 0);
     recordAutonomousTokens(task.userId, tokensUsed);
 
-    if (isTaskPauseRequested(task.id, task.userId)) {
+    if (isTaskPauseRequested(task.id, task.userId) && !isTaskCancellationRequested(task.id, task.userId)) {
       markPaused(task.id);
+      markLinkedPlanPaused(task);
       io.to(taskRoom).emit('autonomous:task_paused', {
         taskId: task.id,
         title: task.title,
@@ -785,6 +968,19 @@ export async function executeNextAutonomousTask(
       outcome,
       toolLedger,
     );
+    // Final response preparation is asynchronous. A stop arriving during it
+    // takes priority over verification, including a pausing task whose lease
+    // intentionally no longer admits normal completion/failure transitions.
+    authorizationWasRevoked();
+    const voiceTookPriority = isRealtimeUserActive(task.userId);
+    const cancellationRequested = isTaskCancellationRequested(task.id, task.userId) || voiceTookPriority;
+    if (cancellationRequested || isTaskPauseRequested(task.id, task.userId)) {
+      const settled = cancellationRequested
+        ? markCancelled(task.id, voiceTookPriority ? 'Cancelled because a live user voice session took priority' : 'Cancelled by user')
+        : markPaused(task.id);
+      const interruption = settled && publishAutonomousTaskInterruption(io, taskRoom, task, settled);
+      return { executed: true, taskId: task.id, result: interruption || 'Task settlement was superseded.' };
+    }
     const terminalReceipt = buildTaskTerminalReceipt({
       taskId: task.id,
       runtime: 'autonomous',
@@ -821,6 +1017,8 @@ export async function executeNextAutonomousTask(
       if (!settled) {
         return { executed: true, taskId: task.id, result: 'Task lease was lost; stale completion was discarded.' };
       }
+      const interruption = publishAutonomousTaskInterruption(io, taskRoom, task, settled);
+      if (interruption) return { executed: true, taskId: task.id, result: interruption };
       const willRetry = settled.status === 'pending';
       if (!willRetry) markLinkedPlanFailed(task, failureReason);
       const publicFailureText = projectAutonomousCustomerMessage(publicOutcome.text, {
@@ -881,9 +1079,20 @@ export async function executeNextAutonomousTask(
     if (!completed) {
       return { executed: true, taskId: task.id, result: 'Task lease was lost; stale completion was discarded.' };
     }
-    markLinkedPlanCompleted(task, summary);
+    if (completed.status !== 'completed') {
+      const interruption = publishAutonomousTaskInterruption(io, taskRoom, task, completed);
+      return { executed: true, taskId: task.id, result: interruption || completed.status };
+    }
+    const confirmPlanSaved = task.planId
+      ? stageAutonomousPlanCompletion(task.id, task.planId, planScopeForTask(task), clipPlanResult(summary))
+      : undefined;
 
-    io.to(taskRoom).emit('autonomous:task_completed', {
+    setAutonomousTaskFinalizationPending(task.id, true);
+    const returnResult = { executed: true, taskId: task.id, result: summary };
+    pendingCompletions.set(task.id, { room: taskRoom, confirmPlanSaved, task,
+      isAuthorized: () => isAuthorized() && !options.signal?.aborted,
+      returnResult,
+      payload: {
       taskId: task.id,
       title: task.title,
       result: publicSummary,
@@ -898,14 +1107,15 @@ export async function executeNextAutonomousTask(
         { status: completed.status, accepted: true },
       )),
       timestamp: new Date().toISOString(),
-    });
+    } });
 
-    console.log(`[AutoExecutor] Task "${task.title}" completed: ${toolCallCount} tools, ${tokensUsed} tokens`);
-    return { executed: true, taskId: task.id, result: summary };
+    return returnResult;
   } catch (err: any) {
     const errorMsg = err.message || 'Unknown error';
-    if (isTaskPauseRequested(task.id, task.userId)) {
+    authorizationWasRevoked();
+    if (isTaskPauseRequested(task.id, task.userId) && !isTaskCancellationRequested(task.id, task.userId)) {
       markPaused(task.id);
+      markLinkedPlanPaused(task);
       io.to(taskRoom).emit('autonomous:task_paused', {
         taskId: task.id,
         title: task.title,
@@ -955,6 +1165,8 @@ export async function executeNextAutonomousTask(
     if (!settled) {
       return { executed: true, taskId: task.id, result: 'Task lease was lost; stale failure was discarded.' };
     }
+    const interruption = publishAutonomousTaskInterruption(io, taskRoom, task, settled);
+    if (interruption) return { executed: true, taskId: task.id, result: interruption };
     const willRetry = settled.status === 'pending';
     if (!willRetry) markLinkedPlanFailed(task, errorMsg);
     const publicFailureText = projectAutonomousCustomerMessage(errorMsg, {
@@ -985,6 +1197,27 @@ export async function executeNextAutonomousTask(
     };
   } finally {
     clearInterval(leaseHeartbeat);
+    options.signal?.removeEventListener('abort', onParentCancelled);
+    voicePriority.signal.removeEventListener('abort', onVoicePriority);
+    voicePriority.dispose();
     releaseDesktopControlLease();
+    try {
+      await persistAutonomousTaskFinalizations(io);
+    } catch (error) {
+      if (pendingCompletions.has(task.id)) {
+        io.to(taskRoom).emit('autonomous:task_failed', {
+          taskId: task.id, title: task.title, status: 'blocked', finalized: false, verified: false, blocked: true,
+          error: publicLanguage === 'zh'
+            ? CN_AUTONOMOUS_CUSTOMER_MESSAGES.finalizationPending
+            : 'The work finished, but its final state could not be saved. Saving must succeed before completion can be confirmed.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+      throw error;
+    } finally {
+      // The live owner outlasts both its handler and terminal persistence.
+      membershipAuthority?.dispose();
+      releaseAutonomousTaskExecutor(task.id, running.leaseId);
+    }
   }
 }

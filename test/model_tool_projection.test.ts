@@ -105,7 +105,7 @@ describe('model tool declaration projection', () => {
     operationMode => {
       const registry = new ToolRegistry();
       registerAllTools(registry);
-      const text = '我说的是切换客户端聊天模式';
+      const text = '我说的是打开聊天界面';
       const dispatch = buildLumiTurnDispatch({
         userId: `client_projection_${operationMode}`,
         text,
@@ -1015,6 +1015,22 @@ describe('model tool declaration projection', () => {
     expect(rejected.generate).not.toHaveBeenCalled();
     expect(rejectedResult.toolCalls.find(record => record.name === 'generate_skill')?.error)
       .toContain('final reuse route');
+
+    // Explicit authoring bypasses only automatic discovery, not the actual
+    // tool confirmation boundary or a generated draft's later hash review.
+    mocks.makeLLMCall.mockReset();
+    const explicit = buildRegistry();
+    mocks.makeLLMCall.mockResolvedValueOnce({ text: '', toolCalls: [{ id: 'explicit-draft', name: 'generate_skill', arguments: { description: 'Normalize supplied arrays' } }] })
+      .mockResolvedValueOnce({ text: 'Reviewed draft is ready.', toolCalls: null });
+    await projectedRun(explicit.registry, { taskId: 'explicit-authoring', actionIntent: 'Create a reusable skill that normalizes an input array.', requestConfirmation: async () => true, toolPolicy: WILDCARD_POLICY, modelToolProjection: projection });
+    expect(explicit.generate).toHaveBeenCalledTimes(1);
+
+    mocks.makeLLMCall.mockReset();
+    const declined = buildRegistry();
+    mocks.makeLLMCall.mockResolvedValueOnce({ text: '', toolCalls: [{ id: 'declined-draft', name: 'generate_skill', arguments: { description: 'Normalize supplied arrays' } }] })
+      .mockResolvedValueOnce({ text: 'Not approved.', toolCalls: null });
+    await projectedRun(declined.registry, { taskId: 'declined-authoring', actionIntent: 'Create a reusable skill that normalizes an input array.', requestConfirmation: async () => false, toolPolicy: { ...WILDCARD_POLICY, requireConfirmation: ['generate_skill'] }, modelToolProjection: projection });
+    expect(declined.generate).not.toHaveBeenCalled();
 
     mocks.makeLLMCall.mockReset();
     const blockedBySignedExtension = buildRegistry(true);

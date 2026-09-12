@@ -6,9 +6,8 @@
  * All data stored in org_kb_articles + org_kb_embeddings with legal metadata.
  */
 import * as EDB from '../org/db';
-import { generateEmbedding, cosineSimilarity } from '../memory/store';
-import { chunkLegalText } from './parser';
-import { LUMI_EMBEDDING_MODEL } from './types';
+import { generateEmbeddingWithIdentity, cosineSimilarity } from '../memory/store';
+import { indexArticle } from '../org/kb';
 import { getStatuteAuthorityCheck, type StatuteAuthorityCheck } from './statute_authority_store';
 import { authorizeOrganizationResource, getOrganizationResourcePolicy } from '../org/resource_acl';
 
@@ -82,35 +81,26 @@ export function createLegalArticle(
   });
 }
 
-export async function indexLegalArticle(orgId: string, articleId: string): Promise<number> {
-  const article = EDB.getKbArticle(orgId, articleId);
-  if (!article) return 0;
-
-  EDB.deleteKbEmbeddings(articleId);
-
-  const chunks = chunkLegalText(article.content, 800, 150);
-  if (chunks.length === 0) return 0;
-
-  let indexed = 0;
-  for (let i = 0; i < chunks.length; i++) {
-    try {
-      const embedding = await generateEmbedding(chunks[i]);
-      if (embedding) {
-        EDB.saveKbEmbedding(articleId, i, embedding, chunks[i], LUMI_EMBEDDING_MODEL);
-        indexed++;
-      }
-      if (i > 0 && i % 5 === 0) {
-        await new Promise(r => setTimeout(r, 200));
-      }
-    } catch (err) {
-      console.error(`[LegalKB] Failed to embed chunk ${i} of ${articleId}:`, err);
-    }
-  }
-
-  return indexed;
+export async function indexLegalArticle(orgId: string, articleId: string, actorUserId?: string, options: { signal?: AbortSignal } = {}): Promise<number> {
+  // Legal parsing and metadata remain domain-specific; persistence, revision
+  // fencing and ingestion receipts belong to the shared knowledge pipeline.
+  return indexArticle(orgId, articleId, actorUserId, options);
 }
 
 // ── Case Similarity Search ──────────────────────────────────────────────
+
+function legalEmbeddingScore(
+  row: { modelName: string; embedding: string },
+  query: NonNullable<Awaited<ReturnType<typeof generateEmbeddingWithIdentity>>>,
+): number | null {
+  // Legacy labels cannot establish which model actually produced the vector.
+  // Reindex those articles; never guess identity from a matching dimension.
+  if (row.modelName !== `${query.provider}/${query.model}`) return null;
+  let vector: unknown;
+  try { vector = JSON.parse(row.embedding); } catch { return null; }
+  if (!Array.isArray(vector) || vector.length !== query.vector.length || !vector.every(Number.isFinite)) return null;
+  return cosineSimilarity(query.vector, vector);
+}
 
 export interface CaseResult {
   articleId: string;
@@ -137,9 +127,9 @@ export async function searchSimilarCases(
   const relevantEmbeddings = allEmbeddings.filter(e => judgmentIds.has(e.articleId));
   if (relevantEmbeddings.length === 0) return [];
 
-  let queryEmbedding: number[] | null = null;
+  let queryEmbedding: Awaited<ReturnType<typeof generateEmbeddingWithIdentity>> = null;
   try {
-    queryEmbedding = await generateEmbedding(query);
+    queryEmbedding = await generateEmbeddingWithIdentity(query, actorUserId);
   } catch {
     return [];
   }
@@ -147,9 +137,8 @@ export async function searchSimilarCases(
 
   const results = relevantEmbeddings
     .map(emb => {
-      let vec: number[];
-      try { vec = JSON.parse(emb.embedding); } catch { return null; }
-      return { ...emb, score: cosineSimilarity(queryEmbedding!, vec) };
+      const score = legalEmbeddingScore(emb, queryEmbedding!);
+      return score === null ? null : { ...emb, score };
     })
     .filter((r): r is NonNullable<typeof r> => r !== null && r.score > 0.3)
     .sort((a, b) => b.score - a.score)
@@ -689,15 +678,14 @@ export async function searchStatutes(
     const relevant = allEmbeddings.filter(e => statuteIds.has(e.articleId));
 
     if (relevant.length > 0) {
-      let queryEmb: number[] | null = null;
-      try { queryEmb = await generateEmbedding(query); } catch { /* empty */ }
+      let queryEmb: Awaited<ReturnType<typeof generateEmbeddingWithIdentity>> = null;
+      try { queryEmb = await generateEmbeddingWithIdentity(query, actorUserId); } catch { /* empty */ }
 
       if (queryEmb) {
         const semantic = relevant
           .map(emb => {
-            let vec: number[];
-            try { vec = JSON.parse(emb.embedding); } catch { return null; }
-            return { ...emb, score: cosineSimilarity(queryEmb!, vec) };
+            const score = legalEmbeddingScore(emb, queryEmb!);
+            return score === null ? null : { ...emb, score };
           })
           .filter((s): s is NonNullable<typeof s> => s !== null && s.score > 0.3)
           .sort((a, b) => b.score - a.score);

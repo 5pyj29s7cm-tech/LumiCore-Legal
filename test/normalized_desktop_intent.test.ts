@@ -375,6 +375,21 @@ describe('normalized desktop intent priority', () => {
     }))).toBe('已打开聊天界面。');
   });
 
+  it('parses an actionable restatement as a correction of the same client action', () => {
+    const intent = normalizeActionIntent('我说的是打开聊天界面');
+    expect(intent).toMatchObject({
+      kind: 'client_navigation',
+      operation: 'navigate',
+      target: 'chat',
+      clientAction: 'open_chat',
+      relation: 'correction',
+    });
+    expect(buildDeterministicClientNavigationCommand(intent)?.toolCall).toEqual({
+      name: 'client_action',
+      arguments: { action: 'open_chat' },
+    });
+  });
+
   it('treats the spoken wallpaper-state imperative as native wallpaper activation', () => {
     const intent = normalizeActionIntent('打开壁纸状态。');
     expect(intent).toMatchObject({

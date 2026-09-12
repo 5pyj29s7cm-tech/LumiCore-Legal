@@ -25,6 +25,30 @@ describe('autonomous task generator model routing', () => {
     vi.clearAllMocks();
   });
 
+  it('does not seed fallback tasks after its parent cancels an in-flight generation', async () => {
+    const userId = `autonomous-generation-cancel-${Date.now()}`;
+    const { saveGateConfig } = await import('../server/autonomy/safety_gate');
+    const { ensureLearningWorkflow } = await import('../server/autonomy/workflows');
+    const { generateAutonomousTasks } = await import('../server/autonomy/task_generator');
+    const { getTaskQueue } = await import('../server/autonomy/task_queue');
+    const { upsertUserPreferredLLM } = await import('../server/llm/user_preferences');
+    saveGateConfig({ autonomyLevel: 'full' }, userId);
+    ensureLearningWorkflow(userId);
+    upsertUserPreferredLLM(userId, { provider: 'deepseek', model: 'deepseek-v4-flash', selectionMode: 'single' });
+    const controller = new AbortController();
+    const create = vi.fn(async (_request: unknown, options?: { signal?: AbortSignal }) => {
+      expect(options?.signal).toBeDefined();
+      controller.abort(new Error('Parent cycle stopped'));
+      expect(options?.signal?.aborted).toBe(true);
+      return { choices: [{ message: { role: 'assistant', content: '[]' } }] };
+    });
+    expect(await generateAutonomousTasks(userId, {
+      getDeepSeek: () => ({ chat: { completions: { create } } }), getGemini: () => null,
+    }, controller.signal)).toBe(0);
+    expect(create).toHaveBeenCalledOnce();
+    expect(getTaskQueue(userId)).toHaveLength(0);
+  });
+
   it('preserves the full getter chain and records ordered fallback to LM Studio', async () => {
     const userId = `autonomous-routing-${Date.now()}`;
     const { saveGateConfig } = await import('../server/autonomy/safety_gate');
@@ -81,5 +105,66 @@ describe('autonomous task generator model routing', () => {
     });
     expect(receipt.requestId).toMatch(/^autonomous_task_generation_[0-9a-f-]{36}$/i);
     expect(receipt.interactionId).toBe(receipt.requestId);
+  });
+
+  it('does not place Memory Avatar seed text in Lumi task-generation context', async () => {
+    const userId = `autonomous-avatar-isolation-${Date.now()}`;
+    const { readDB, writeDB } = await import('../db_layer');
+    const { saveGateConfig } = await import('../server/autonomy/safety_gate');
+    const { ensureLearningWorkflow } = await import('../server/autonomy/workflows');
+    const { generateAutonomousTasks } = await import('../server/autonomy/task_generator');
+
+    saveGateConfig({ autonomyLevel: 'full', alwaysOnline: true }, userId);
+    ensureLearningWorkflow(userId);
+    const db = readDB();
+    db.memories = [
+      ...(db.memories || []),
+      {
+        id: `lumi-context-${userId}`,
+        userId,
+        type: 'fact',
+        content: 'LUMI_VISIBLE_CONTEXT_MEMORY',
+        keywords: [],
+        confidence: 0.9,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        agentId: '',
+      },
+      {
+        id: `avatar-context-${userId}`,
+        userId,
+        type: 'fact',
+        content: 'SECRET_AVATAR_CONTEXT_MUST_NOT_REACH_TASK_GENERATOR',
+        keywords: [],
+        confidence: 0.99,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        agentId: 'memory_avatar_task_isolation',
+      },
+    ];
+    writeDB(db);
+
+    const create = vi.fn(async () => ({
+      choices: [{ message: { role: 'assistant', content: '[]' } }],
+    }));
+    await generateAutonomousTasks(userId, {
+      getDeepSeek: () => null,
+      getGemini: () => null,
+      getOpenAI: () => null,
+      getAnthropic: () => null,
+      getQwen: () => null,
+      getOllama: () => null,
+      getLmStudio: () => null,
+      getArk: () => null,
+      getXiaomi: () => null,
+      getKimi: () => null,
+      getGlm: () => null,
+      getRelay: () => ({ chat: { completions: { create } } }),
+    });
+
+    expect(create).toHaveBeenCalled();
+    const prompt = JSON.stringify((create.mock.calls as any[])[0]?.[0] || '');
+    expect(prompt).toContain('LUMI_VISIBLE_CONTEXT_MEMORY');
+    expect(prompt).not.toContain('SECRET_AVATAR_CONTEXT_MUST_NOT_REACH_TASK_GENERATOR');
   });
 });

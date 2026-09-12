@@ -16,6 +16,7 @@ import { makeLLMCall, NormalizedMessage } from '../llm/providers';
 import { getRecentActivity } from '../context/activity_stream';
 import { getUserPreferredLLMConfig } from '../llm/user_preferences';
 import { formatIndustryLearningContext } from './industry_learning';
+import { isMemoryAvatarScoped } from '../memory';
 
 interface LLMGetters {
   getDeepSeek: () => any;
@@ -266,7 +267,9 @@ function seedFallbackLearningTasksIfDue(
 export async function generateAutonomousTasks(
   userId: string,
   getters: LLMGetters,
+  signal?: AbortSignal,
 ): Promise<number> {
+  if (signal?.aborted) return 0;
   // Safety gate check
   const gate = isAutonomousWorkAllowed(userId);
   if (!gate.allowed) {
@@ -340,7 +343,7 @@ export async function generateAutonomousTasks(
   // Recent memories
   const db = readDB();
   const recentMemories = (db.memories || [])
-    .filter((m: any) => m.userId === userId && m.confidence >= 0.4)
+    .filter((m: any) => m.userId === userId && !isMemoryAvatarScoped(m) && m.confidence >= 0.4)
     .slice(-10)
     .map((m: any) => m.content.slice(0, 100));
   if (recentMemories.length > 0) {
@@ -349,7 +352,7 @@ export async function generateAutonomousTasks(
 
   // Pending reminders
   const pendingReminders = (db.memories || [])
-    .filter((m: any) => m.userId === userId && m.type === 'reminder' && m.confidence > 0)
+    .filter((m: any) => m.userId === userId && !isMemoryAvatarScoped(m) && m.type === 'reminder' && m.confidence > 0)
     .slice(0, 5)
     .map((m: any) => m.content);
   if (pendingReminders.length > 0) {
@@ -410,13 +413,13 @@ ${contextParts.join('\n')}
     const routingRequestId = `autonomous_task_generation_${crypto.randomUUID()}`;
     const result = await makeLLMCall(
       messages, [],
-      getUserPreferredLLMConfig(userId, {
+      { ...getUserPreferredLLMConfig(userId, {
         maxTokens: 500,
         domain: 'personal',
         source: 'autonomous_task_generation',
         requestId: routingRequestId,
         interactionId: routingRequestId,
-      }),
+      }), signal },
       getters.getDeepSeek, getters.getGemini,
       getters.getOpenAI || (() => null),
       getters.getAnthropic || (() => null),
@@ -430,6 +433,7 @@ ${contextParts.join('\n')}
       getters.getRelay || (() => null),
     );
 
+    if (signal?.aborted) return 0;
     const text = (result.text || '').replace(/```json|```/g, '').trim();
     if (!text || text === '[]') return seedFallbackLearningTasksIfDue(userId, workflows, contextParts);
 
@@ -485,6 +489,7 @@ ${contextParts.join('\n')}
     console.log(`[AutoTasks] Generated ${enqueued} autonomous tasks for ${userId}`);
     return enqueued;
   } catch (err: any) {
+    if (signal?.aborted) return 0;
     console.warn(`[AutoTasks] Generation failed:`, err.message);
     return seedFallbackLearningTasksIfDue(userId, workflows, contextParts);
   }

@@ -34,9 +34,9 @@ describe('unified organization workspace boundary', () => {
     expect(desktop).toContain("case 'org'");
     expect(desktop).toContain('<OrgPortal />');
     expect(portal).toContain("await switchDomain('work')");
-    expect(portal).toContain('<OrgHub />');
+    expect(portal).toMatch(/<OrgHub\s+key=/);
     expect(hub).toContain("const target = workDomain === 'personal' ? 'work' : 'personal'");
-    expect(hub).toContain('await switchDomain(target)');
+    expect(hub).toContain("await switchDomain(target)");
   });
 
   it('keeps native desktop window controls visible above the organization workbench', () => {

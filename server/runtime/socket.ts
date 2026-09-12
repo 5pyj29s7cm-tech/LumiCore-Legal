@@ -1,6 +1,6 @@
 // Socket aggregator — mounts all Socket.IO handlers
 import { Server } from "socket.io";
-import jwt from "jsonwebtoken";
+import { decodeUserSessionToken } from '../middleware/auth';
 import { registerChatHandler } from "../socket/chat";
 import { registerTaskHandler } from "../socket/task";
 import { registerVoiceHandlers } from "../socket/voice";
@@ -18,13 +18,14 @@ import { perceptionEvents } from "../socket/shared";
 import { deviceRegistry, projectPublicDevice } from "../devices";
 import { personalityRegistry } from "../personality";
 import { initMemorySync, initMemoryAssociations } from "../memory";
-import { handleDesktopRelayResult } from "../socket/desktop_relay";
+import { handleDesktopRelayResult, registerDesktopRelayRecoveryHandlers } from "../socket/desktop_relay";
 import { getMember } from "../org/db";
 import { resolveSocketScope, runtimeScopeStorageKey } from "../socket/scope";
 import {
   resolveDesktopSession,
 } from "../config/desktop_bootstrap";
 import { authorizeTaskRegressionDesktopRelaySocket } from "../evidence/task_regression_desktop_relay";
+import { setOfficeBroadcast } from '../tools/definitions/office_tools';
 
 interface SocketContext {
   io: Server;
@@ -34,7 +35,7 @@ interface SocketContext {
   };
 }
 
-function getSocketAuth(socket: any, jwtSecret: string): {
+export function getSocketAuth(socket: any, jwtSecret: string): {
   uid: string;
   username: string;
   role: string;
@@ -53,8 +54,8 @@ function getSocketAuth(socket: any, jwtSecret: string): {
   try {
     const authToken = socket.handshake?.auth?.token;
     if (authToken) {
-      const decoded: any = jwt.verify(authToken, jwtSecret);
-      return decoded.uid ? {
+      const decoded = decodeUserSessionToken(authToken, jwtSecret);
+      return decoded ? {
         uid: decoded.uid,
         username: decoded.username || '',
         role: decoded.role || 'user',
@@ -62,12 +63,12 @@ function getSocketAuth(socket: any, jwtSecret: string): {
         orgRole: decoded.orgRole || '',
       } : null;
     }
-    const cookies = socket.handshake.headers.cookie;
+    const cookies = socket.handshake?.headers?.cookie;
     if (cookies) {
       const token = cookies.split(';').find((c: string) => c.trim().startsWith('token='))?.split('=')[1];
       if (token) {
-        const decoded: any = jwt.verify(token, jwtSecret);
-        return decoded.uid ? {
+        const decoded = decodeUserSessionToken(token, jwtSecret);
+        return decoded ? {
           uid: decoded.uid,
           username: decoded.username || '',
           role: decoded.role || 'user',
@@ -85,6 +86,12 @@ function getUserIdFromSocket(socket: any, jwtSecret: string): string | null {
 }
 
 export function initSocketRuntime({ io, jwtSecret, llm }: SocketContext) {
+  setOfficeBroadcast((scope, event, data) => {
+    if (scope.domain === 'work' && getMember(scope.orgId, scope.userId)?.status !== 'active') return;
+    const room = scope.domain === 'work'
+      ? `user:${scope.userId}:org:${scope.orgId}` : `user:${scope.userId}:personal`;
+    io.to(room).emit(event, data);
+  });
   // Personality loading
   personalityRegistry.load();
 
@@ -200,12 +207,15 @@ export function initSocketRuntime({ io, jwtSecret, llm }: SocketContext) {
     });
 
     const getUserId = (s: any) => getUserIdFromSocket(s, jwtSecret) || uid;
+    registerDesktopRelayRecoveryHandlers(socket, () => getUserId(socket));
 
     // Optional diagnostics. Event payloads may contain private user content.
     socket.onAny((event, ...args) => {
       if (event.startsWith('tool:desktop_result:')) {
         const correlationId = event.slice('tool:desktop_result:'.length);
-        handleDesktopRelayResult(correlationId, args[0] || {}, socket.id);
+        const accepted = handleDesktopRelayResult(correlationId, args[0] || {}, socket.id);
+        const acknowledge = args.at(-1);
+        if (typeof acknowledge === 'function') acknowledge({ accepted });
       }
       const noisyEvents = new Set([
         'audio:chunk',

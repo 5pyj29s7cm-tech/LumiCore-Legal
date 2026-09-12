@@ -23,6 +23,7 @@ export interface ChunkOptions {
 }
 
 export interface IngestDocumentOptions {
+  signal?: AbortSignal;
   chunkSize?: number;
   tier?: 'episodic' | 'internalized';
   filePath?: string;
@@ -89,6 +90,7 @@ export async function ingestDocument(
   content: string,
   options?: IngestDocumentOptions,
 ): Promise<IngestDocumentResult> {
+  options?.signal?.throwIfAborted();
   const chunks = chunkKnowledgeText(content, {
     maxChunkSize: options?.chunkSize || 500,
   });
@@ -110,6 +112,19 @@ export async function ingestDocument(
       sourceSizeBytes = stat.size;
     }
   } catch {}
+  if (options?.filePath && path.isAbsolute(options.filePath) && !sourcePath) throw new Error('Knowledge source file is no longer available.');
+  const sourceVersion = sourcePath ? fs.statSync(sourcePath) : undefined;
+  const assertSourceCurrent = () => {
+    options?.signal?.throwIfAborted();
+    if (!sourcePath || !sourceVersion) return;
+    const current = fs.statSync(sourcePath);
+    if (!current.isFile() || current.dev !== sourceVersion.dev || current.ino !== sourceVersion.ino
+      || current.mtimeMs !== sourceVersion.mtimeMs || current.ctimeMs !== sourceVersion.ctimeMs
+      || current.size !== sourceVersion.size
+      || crypto.createHash('sha256').update(fs.readFileSync(sourcePath)).digest('hex') !== sourceFileHash) {
+      throw new Error('Knowledge source changed while it was being indexed. Retry using the current file.');
+    }
+  };
   const metadataKeywords = buildSourceMetadataKeywords(options?.sourceMetadata);
 
   const verifyEmbeddings = options?.verifyEmbeddings !== false;
@@ -119,13 +134,18 @@ export async function ingestDocument(
           return await generateConfiguredEmbedding(
             `knowledge: ${chunk.text} ${documentTitle} source:${path.basename(sourceFile)}`,
             userId,
+            { signal: options?.signal },
           );
         } catch (error: any) {
+          options?.signal?.throwIfAborted();
           return { error: String(error?.message || error || 'embedding_failed').slice(0, 300) };
         }
       })
     : chunks.map(() => null);
   const chunkManifests: KnowledgeChunkManifest[] = [];
+  // This is the commit boundary. No source-derived memory is written after
+  // deletion, replacement, or cancellation during the asynchronous embedding.
+  assertSourceCurrent();
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
@@ -152,6 +172,7 @@ export async function ingestDocument(
         confidence: 0.7,
         sourceInteractionId: sourceFile,
         embedding: embedding?.vector,
+        embeddingNamespace: embedding ? { provider: embedding.provider, model: embedding.model, dimensions: embedding.vector.length } : undefined,
         knowledgeProvenance: {
           sourceId: sourceFile,
           sourceLabel,
@@ -210,8 +231,9 @@ export async function ingestDocument(
       agentId,
       manifest,
       options.goldenCases,
-      { domain: options.domain, orgId: options.orgId },
+      { domain: options.domain, orgId: options.orgId, signal: options.signal },
     );
+    assertSourceCurrent();
   }
 
   console.log(`[RAG] Ingested "${documentTitle}" -> ${chunks.length} chunks for agent ${agentId}`);
@@ -224,7 +246,7 @@ export async function verifyIngestedDocument(
   agentId: string,
   manifest: KnowledgeIngestionManifest,
   cases: KnowledgeGoldenCaseDefinition[],
-  scope: { domain?: string; orgId?: string } = {},
+  scope: { domain?: string; orgId?: string; signal?: AbortSignal } = {},
 ): Promise<KnowledgeIngestionManifest> {
   const retrieval = await runKnowledgeGoldenEvaluation({
     cases,
@@ -272,7 +294,7 @@ export async function retrieveChunks(
   agentId: string,
   query: string,
   limit = 5,
-  scope: { domain?: string; orgId?: string } = {},
+  scope: { domain?: string; orgId?: string; signal?: AbortSignal } = {},
 ): Promise<Array<Memory & { citation: string }>> {
   const requestedLimit = Math.max(1, Math.min(50, Number(limit) || 5));
   const memories = await queryMemoriesVector({
@@ -287,6 +309,7 @@ export async function retrieveChunks(
     domain: scope.domain,
     orgId: scope.orgId,
     useVector: true,
+    signal: scope.signal,
   });
 
   return memories

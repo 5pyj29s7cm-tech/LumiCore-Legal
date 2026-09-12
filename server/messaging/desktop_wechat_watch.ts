@@ -331,6 +331,9 @@ export class DesktopWechatWatchService {
   private dependencies: DesktopWechatWatchDependencies | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private activeUsers = new Set<string>();
+  private activeScans = new Set<Promise<void>>();
+  private draftAttempts = new Map<string, { eventId: string; controller: AbortController }>();
+  private stopped = false;
   private runtime = new Map<string, DesktopWechatWatchRuntimeStatus>();
 
   configure(dependencies: DesktopWechatWatchDependencies): void {
@@ -338,16 +341,19 @@ export class DesktopWechatWatchService {
   }
 
   start(): void {
+    this.stopped = false;
     if (this.timer) return;
     this.timer = setInterval(() => { void this.runLoop(); }, LOOP_INTERVAL_MS);
     if (typeof (this.timer as any).unref === 'function') (this.timer as any).unref();
     void this.runLoop();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
+    this.stopped = true;
+    for (const attempt of this.draftAttempts.values()) attempt.controller.abort();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    this.activeUsers.clear();
+    while (this.activeScans.size) await Promise.all([...this.activeScans]);
   }
 
   getConfig(userId: string): DesktopWechatWatchConfig {
@@ -356,7 +362,14 @@ export class DesktopWechatWatchService {
   }
 
   updateConfig(userId: string, input: Partial<DesktopWechatWatchConfig>): DesktopWechatWatchConfig {
+    const interrupted = this.draftAttempts.get(userId);
+    interrupted?.controller.abort();
     const store = readStore();
+    const interruptedEvent = store.events.find(event => event.userId === userId && event.id === interrupted?.eventId && event.status === 'processing');
+    if (interruptedEvent) {
+      interruptedEvent.status = 'detected';
+      interruptedEvent.updatedAt = now();
+    }
     const current = normalizeDesktopWechatWatchConfig(store.configs[userId]);
     const updated = normalizeDesktopWechatWatchConfig({
       enabled: input.enabled,
@@ -392,6 +405,7 @@ export class DesktopWechatWatchService {
   }
 
   async scanNow(userId: string): Promise<ReturnType<DesktopWechatWatchService['status']>> {
+    if (this.stopped) throw new Error('Desktop WeChat watch is stopping.');
     const store = readStore();
     const retry = store.events
       .filter(event => event.userId === userId && event.status === 'attention_required' && !event.draft)
@@ -407,6 +421,8 @@ export class DesktopWechatWatchService {
   }
 
   dismissEvent(userId: string, eventId: string): DesktopWechatWatchEvent {
+    const attempt = this.draftAttempts.get(userId);
+    if (attempt?.eventId === eventId) attempt.controller.abort();
     return this.updateEvent(userId, eventId, { status: 'dismissed', error: '' });
   }
 
@@ -474,6 +490,7 @@ export class DesktopWechatWatchService {
   }
 
   private async runLoop(): Promise<void> {
+    if (this.stopped) return;
     const store = readStore();
     const enabledUsers = Object.entries(store.configs)
       .filter(([, config]) => normalizeDesktopWechatWatchConfig(config).enabled)
@@ -487,7 +504,15 @@ export class DesktopWechatWatchService {
     }
   }
 
-  private async scanUser(userId: string, manual: boolean): Promise<void> {
+  private scanUser(userId: string, manual: boolean): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    const task = this.performScanUser(userId, manual);
+    this.activeScans.add(task);
+    void task.then(() => this.activeScans.delete(task), () => this.activeScans.delete(task));
+    return task;
+  }
+
+  private async performScanUser(userId: string, manual: boolean): Promise<void> {
     if (this.activeUsers.has(userId)) return;
     const dependencies = this.requireDependencies();
     const config = this.getConfig(userId);
@@ -645,13 +670,21 @@ export class DesktopWechatWatchService {
       return;
     }
 
+    const controller = new AbortController();
+    const attempt = { eventId: event.id, controller };
+    this.draftAttempts.set(userId, attempt);
+    const isCurrent = () => !this.stopped && !controller.signal.aborted
+      && this.draftAttempts.get(userId) === attempt
+      && this.getConfig(userId).enabled === config.enabled
+      && readStore().events.some(item => item.userId === userId && item.id === event.id && ['detected', 'processing'].includes(item.status));
+    try {
     const idle = parseDesktopJson(await desktopRelay('desktop_idle_time', {}));
+    if (!isCurrent()) return;
     const idleSeconds = Number(idle?.idle_seconds ?? idle?.idleSeconds ?? 0);
     if (!Number.isFinite(idleSeconds) || idleSeconds < config.idleBeforeInspectSeconds) return;
 
     runtime.processingEventId = event.id;
     this.updateEvent(userId, event.id, { status: 'processing', error: '' });
-    try {
       const readResult = await executeToolCallOrThrow({
         registry: toolRegistry,
         name: 'wechat_read_recent_chat',
@@ -667,15 +700,19 @@ export class DesktopWechatWatchService {
           desktopRelay,
           llmGetters: this.requireDependencies().llmGetters,
           source: 'wechat_desktop_watch',
+          executionSignal: controller.signal,
+          isCancelled: () => !isCurrent(),
           actionIntent: `Read visible recent messages from the verified WeChat contact ${event.contact} and prepare a draft only.`,
         },
       });
+      if (!isCurrent()) return;
       const parsed = parseDesktopJson(readResult);
       const summary = compact(parsed?.contentSummary || '', 3000);
       if (parsed?.read !== true || !summary) {
         throw new Error(parsed?.visionError || 'No reliable visible chat content was extracted.');
       }
-      const draft = await this.createDraft(userId, event.contact, summary);
+      const draft = await this.createDraft(userId, event.contact, summary, controller.signal);
+      if (!isCurrent()) return;
       if (!draft.replyNeeded) {
         const updated = this.updateEvent(userId, event.id, {
           status: 'dismissed',
@@ -713,6 +750,7 @@ export class DesktopWechatWatchService {
         updated,
       );
     } catch (error: any) {
+      if (!isCurrent()) return;
       const updated = this.updateEvent(userId, event.id, {
         status: 'attention_required',
         error: compact(error?.message || error, 500),
@@ -727,6 +765,12 @@ export class DesktopWechatWatchService {
       );
     } finally {
       runtime.processingEventId = null;
+      if (controller.signal.aborted) {
+        const interrupted = readStore();
+        const current = interrupted.events.find(item => item.userId === userId && item.id === event.id && item.status === 'processing');
+        if (current) { current.status = 'detected'; current.updatedAt = now(); writeStore(interrupted); }
+      }
+      if (this.draftAttempts.get(userId) === attempt) this.draftAttempts.delete(userId);
     }
   }
 
@@ -734,6 +778,7 @@ export class DesktopWechatWatchService {
     userId: string,
     contact: string,
     summary: string,
+    signal?: AbortSignal,
   ): Promise<{ risk: 'low' | 'high'; reason: string; draft: string; replyNeeded: boolean }> {
     const fallback = classifyDesktopWechatSummaryRisk(summary);
     const dependencies = this.requireDependencies();
@@ -752,7 +797,7 @@ export class DesktopWechatWatchService {
       const result = await makeLLMCall(
         [{ role: 'user', content: prompt }],
         [],
-        getUserPreferredLLMConfig(userId, { maxTokens: 500, domain: 'personal' }),
+        { ...getUserPreferredLLMConfig(userId, { maxTokens: 500, domain: 'personal' }), signal },
         dependencies.llmGetters.getDeepSeek,
         dependencies.llmGetters.getGemini,
         dependencies.llmGetters.getOpenAI,
@@ -766,6 +811,7 @@ export class DesktopWechatWatchService {
         dependencies.llmGetters.getGlm,
         dependencies.llmGetters.getRelay,
       );
+      signal?.throwIfAborted();
       const parsed = parseJsonObject(String(result.text || ''));
       const draft = compact(parsed?.draft, 2000);
       const risk = parsed?.risk === 'high' || fallback.risk === 'high' ? 'high' : 'low';
@@ -775,6 +821,7 @@ export class DesktopWechatWatchService {
       if (!draft) throw new Error('The model returned no reply draft.');
       return { risk, reason: compact(parsed?.reason, 400) || fallback.reason, draft, replyNeeded: true };
     } catch (error: any) {
+      signal?.throwIfAborted();
       return {
         risk: fallback.risk,
         reason: `${fallback.reason} Draft generation failed: ${compact(error?.message || error, 220)}`,

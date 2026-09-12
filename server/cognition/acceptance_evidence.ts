@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import { isDelegatedActionEvidenceArchive } from './task_execution_ledger';
+import { projectAutonomousTaskFinalization } from '../autonomy/task_finalization';
 import { getJwtSecret } from '../config/local_identity';
 import type { CapabilityManifestEntry, ToolExecutionRecord } from '../tools/types';
 import {
@@ -8,8 +10,11 @@ import {
 import {
   parseReceiptObject,
   toolRecordHasTerminalPayload,
+  toolRecordTerminalPayload,
 } from '../tools/receipt_payload';
 import { buildActionEvidenceContract, hasCoreActionEvidence } from './action_contract';
+import { normalizeActionIntent } from './normalized_action_intent';
+import { buildMediaArtifactReceipt } from '../socket/media_artifact_receipt';
 
 export type AcceptanceStage = 'registered' | 'available' | 'exercised' | 'verified';
 export type RuntimeSampleStatus = 'not_exercised' | 'unknown' | 'degraded' | 'verified';
@@ -412,10 +417,16 @@ export function buildForegroundTaskCompletionFeedback(input: {
   toolRecords?: ToolExecutionRecord[];
   blocked?: boolean;
   reason?: string;
-  status?: 'waiting_confirmation' | 'cancelled' | 'persistence_unknown';
+  status?: 'waiting_confirmation' | 'executing' | 'cancelled' | 'persistence_unknown';
 }): TaskCompletionFeedback | undefined {
   const records = input.toolRecords || [];
   const label = compact(input.taskLabel, 200) || 'Task';
+  if (input.status === 'executing') return {
+    status: 'working', completed: [],
+    evidence: boundedUnique(records.map(record => `Observed tool receipt: ${compact(record.name, 120)}`), 20),
+    incomplete: [`${label} is still running in the background.`], blockers: [],
+    nextSteps: ['Wait for the workflow result or inspect its current progress.'],
+  };
   // Transport-owned lifecycle state outranks any late or duplicated tool
   // payload when confirmation, cancellation, or persistence is unresolved.
   if (input.status === 'waiting_confirmation') {
@@ -435,8 +446,14 @@ export function buildForegroundTaskCompletionFeedback(input: {
   // status probe into completed foreground feedback. Broader action kinds are
   // adjudicated by the result finalizer, whose target rules are richer than
   // this compact cross-runtime summary layer.
-  const missingRequestedActionEvidence = contract.kind === 'task_control'
-    && !hasCoreActionEvidence(contract, records, label);
+  const mediaIntent = normalizeActionIntent(input.taskLabel);
+  const missingMediaEvidence = mediaIntent.kind === 'media_generation' && !records.some(record => (
+    record.name === mediaIntent.target
+    && record.terminalVerification?.status === 'verified'
+    && buildMediaArtifactReceipt(record.name, record.arguments, toolRecordTerminalPayload(record), record.error)
+  ));
+  const missingRequestedActionEvidence = missingMediaEvidence || (contract.kind === 'task_control'
+    && !hasCoreActionEvidence(contract, records, label));
   const outcome: TaskTerminalOutcome = input.status === 'cancelled'
     ? 'cancelled'
     : input.blocked || input.status === 'persistence_unknown' || missingRequestedActionEvidence
@@ -836,7 +853,7 @@ export function buildTaskAcceptanceProjections(db: any, input: {
 } = {}): TaskAcceptanceProjection[] {
   const actionReceipts = Array.isArray(db?.conversationActionReceipts) ? db.conversationActionReceipts : [];
   const conversation = (Array.isArray(db?.conversationActionTasks) ? db.conversationActionTasks : [])
-    .filter((task: any) => scopeMatches(task, input))
+    .filter((task: any) => !isDelegatedActionEvidenceArchive(task) && scopeMatches(task, input))
     .map((task: any) => {
       const context = parseObject(task?.context);
       return context.source === 'scheduler' && context.compactAudit === true
@@ -845,7 +862,7 @@ export function buildTaskAcceptanceProjections(db: any, input: {
     });
   const autonomous = (Array.isArray(db?.autonomousTasks) ? db.autonomousTasks : [])
     .filter((task: any) => scopeMatches(task, input))
-    .map((task: any) => projectDurableTask(task));
+    .map((task: any) => projectDurableTask(projectAutonomousTaskFinalization(task)));
   return [...conversation, ...autonomous]
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }

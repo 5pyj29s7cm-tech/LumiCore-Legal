@@ -10,8 +10,12 @@ import {
 } from './types';
 export { CONVERSATIONAL_MEMORY_EVIDENCE } from './types';
 import { applyMemoryFirewallMetadata, evaluateMemoryFirewall } from './firewall';
-import { generateConfiguredEmbedding, getEmbeddingRoute } from '../llm/embedding_provider';
+import { generateConfiguredEmbedding, getEmbeddingRoute, type EmbeddingResult } from '../llm/embedding_provider';
 import { getRerankSelection, rerankConfiguredDocuments } from '../llm/rerank_provider';
+import { isProviderLocalOnly, isStrictPrivacy } from '../config/privacy';
+import { hasCurrentMemoryEmbedding, invalidateMemoryEmbedding, memoryEmbeddingInputHash } from './embedding_identity';
+import { isTestMemory } from './provenance';
+import { runSerializedMutation } from '../persistence/durable_scope_mutation';
 
 function getMemoryStore(): Memory[] {
   const db = readDB();
@@ -72,19 +76,26 @@ function dedupeMemoriesInRankOrder(memories: Memory[]): Memory[] {
 
 // ── Embedding / Vector Search ──
 
-/** LRU cache for embeddings: text → vector. Avoids re-embedding the same content. */
-const embeddingCache = new Map<string, number[]>();
+/** Bounded cache keyed by user, actual vector space and input text. */
+const embeddingCache = new Map<string, EmbeddingResult>();
 const EMBEDDING_CACHE_MAX = 500;
+// A gateway may return its canonical model name for a configured alias. Keep
+// that identity bound to the exact user/selection, never to a fallback route.
+const resolvedEmbeddingRoutes = new Map<string, { provider: string; model: string }>();
+function embeddingRouteIdentity(userId: string) {
+  const primary = getEmbeddingRoute(userId).primary;
+  return resolvedEmbeddingRoutes.get(JSON.stringify([userId, primary.provider, primary.model])) || primary;
+}
 
-function cacheEmbedding(key: string, vec: number[]) {
+function cacheEmbedding(key: string, result: EmbeddingResult) {
   if (embeddingCache.size >= EMBEDDING_CACHE_MAX) {
     const first = embeddingCache.keys().next().value;
     if (first) embeddingCache.delete(first);
   }
-  embeddingCache.set(key, vec);
+  embeddingCache.set(key, result);
 }
 
-function getCachedEmbedding(key: string): number[] | undefined {
+function getCachedEmbedding(key: string): EmbeddingResult | undefined {
   return embeddingCache.get(key);
 }
 
@@ -102,6 +113,9 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 function matchesMemoryQueryFilters(memory: Memory, query: MemoryQuery): boolean {
+  if (!query.includeOperationalTraces && isTestMemory(memory)) return false;
+  if (!query.includeSuperseded && memory.conflict?.status === 'resolved'
+    && memory.conflict.resolution === 'prefer_one' && memory.conflict.chosenMemoryId !== memory.id) return false;
   if (query.includeOperationalTraces !== true && isOperationalTraceMemory(memory)) return false;
   if (query.evidenceClasses && !query.evidenceClasses.includes(classifyMemoryEvidence(memory))) return false;
   if (query.userId && memory.userId !== query.userId) return false;
@@ -140,44 +154,69 @@ function markMemoriesRetrieved(memories: Memory[]): void {
 }
 
 /** Generate an embedding through the configured retrieval role. */
-export async function generateEmbedding(text: string, userId = 'anonymous'): Promise<number[] | null> {
+export async function generateEmbedding(text: string, userId = 'anonymous', options: { signal?: AbortSignal } = {}): Promise<number[] | null> {
+  return (await generateEmbeddingWithIdentity(text, userId, options))?.vector || null;
+}
+
+function embeddingCacheKey(userId: string, provider: string, model: string, text: string): string {
+  return JSON.stringify([userId, provider, model, text]);
+}
+
+function embeddingNamespace(result: EmbeddingResult): NonNullable<Memory['embeddingNamespace']> {
+  return { provider: result.provider, model: result.model, dimensions: result.vector.length };
+}
+
+export async function generateEmbeddingWithIdentity(text: string, userId = 'anonymous', options: { signal?: AbortSignal; allowFallback?: boolean; onError?: (error: unknown) => void } = {}): Promise<EmbeddingResult | null> {
+  options.signal?.throwIfAborted();
   const route = getEmbeddingRoute(userId);
-  const routeKey = [
-    userId,
-    route.primary.provider,
-    route.primary.model,
-    route.fallback?.provider || '',
-    route.fallback?.model || '',
-    text,
-  ].join('\u0000');
-  const cached = getCachedEmbedding(routeKey);
+  // Only the currently selected primary identity can satisfy a cache read.
+  // A fallback vector is retained under its actual identity, never the primary route.
+  const routeKey = embeddingCacheKey(userId, route.primary.provider, route.primary.model, text);
+  const cached = !isStrictPrivacy() || isProviderLocalOnly(route.primary.provider)
+    ? getCachedEmbedding(routeKey) : undefined;
   if (cached) return cached;
 
   try {
-    const result = await generateConfiguredEmbedding(text, userId);
-    cacheEmbedding(routeKey, result.vector);
-    return result.vector;
-  } catch {
+    const result = await generateConfiguredEmbedding(text, userId, options);
+    options.signal?.throwIfAborted();
+    cacheEmbedding(embeddingCacheKey(userId, result.provider, result.model, text), result);
+    if (result.route === 'primary') {
+      if (resolvedEmbeddingRoutes.size >= EMBEDDING_CACHE_MAX) resolvedEmbeddingRoutes.delete(resolvedEmbeddingRoutes.keys().next().value!);
+      resolvedEmbeddingRoutes.set(JSON.stringify([userId, route.primary.provider, route.primary.model]), { provider: result.provider, model: result.model });
+      cacheEmbedding(routeKey, result);
+    }
+    return result;
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    options.onError?.(error);
     return null;
   }
 }
 
 /** Async background embedding generation — updates memory in-place */
 async function attachEmbedding(memory: Memory): Promise<void> {
-  if (memory.embedding && memory.embedding.length > 0) return;
+  if (hasCurrentMemoryEmbedding(memory)) return;
+  const inputHash = memoryEmbeddingInputHash(memory);
   const text = `${memory.type}: ${memory.content} ${memory.keywords.join(' ')}`;
-  const vec = await generateEmbedding(text, memory.userId);
-  if (vec) {
-    memory.embedding = vec;
+  const result = await generateEmbeddingWithIdentity(text, memory.userId);
+  if (result) {
     try {
       const all = getMemoryStore();
       const existing = all.find(m => m.id === memory.id);
-      if (existing) {
-        existing.embedding = vec;
+      if (existing && memoryEmbeddingInputHash(existing) === inputHash) {
+        existing.embedding = result.vector;
+        existing.embeddingNamespace = embeddingNamespace(result);
+        existing.embeddingContentHash = inputHash;
         saveMemoryStore(all);
       }
     } catch {}
   }
+}
+
+/** Clear the old index synchronously; background work can only attach to this content. */
+export function refreshMemoryEmbedding(memory: Memory): void {
+  invalidateMemoryEmbedding(memory);
+  void attachEmbedding(memory).catch(() => {});
 }
 
 // ── Hebbian Co-Retrieval Map — "cells that fire together, wire together" ──
@@ -462,9 +501,7 @@ export function queryMemories(q: MemoryQuery): Memory[] {
       .filter(({ score }) => score > 0)
       .sort((a, b) => {
         // Tier priority overrides score within same magnitude
-        const tierDiff = priorityForTier(a.m.tier) - priorityForTier(b.m.tier);
-        if (Math.abs(tierDiff) >= 2) return tierDiff;
-        return b.score - a.score;
+        return b.score - a.score || priorityForTier(a.m.tier) - priorityForTier(b.m.tier);
       });
     memories = scored.map(({ m }) => m);
   } else {
@@ -494,7 +531,7 @@ export function queryMemories(q: MemoryQuery): Memory[] {
   const result = memories.slice(0, limit);
 
   // ── Hebbian learning: co-retrieved memories strengthen pairwise associations ──
-  if (q.userId && result.length >= 2) {
+  if (q.recordRetrieval === true && q.userId && result.length >= 2) {
     const resultIds = result.map(m => m.id);
     strengthenAssociations(q.userId, resultIds);
 
@@ -529,20 +566,22 @@ export function queryMemories(q: MemoryQuery): Memory[] {
   }
 
   const uniqueResult = dedupeMemoriesInRankOrder(result);
-  markMemoriesRetrieved(uniqueResult);
+  if (q.recordRetrieval === true) markMemoriesRetrieved(uniqueResult);
 
   return uniqueResult;
 }
 
 /** Async vector-based semantic search. Falls back to keyword search if embeddings unavailable. */
 export async function queryMemoriesVector(q: MemoryQuery): Promise<Memory[]> {
+  q.signal?.throwIfAborted();
   if (!q.query || !q.useVector) {
     return queryMemories(q);
   }
 
   // Generate query embedding
-  const queryVec = await generateEmbedding(q.query, q.userId);
-  if (!queryVec) {
+  const queryEmbedding = await generateEmbeddingWithIdentity(q.query, q.userId, { signal: q.signal });
+  q.signal?.throwIfAborted();
+  if (!queryEmbedding) {
     // Embeddings unavailable — fall back to keyword search
     return queryMemories({ ...q, useVector: false });
   }
@@ -557,17 +596,21 @@ export async function queryMemoriesVector(q: MemoryQuery): Promise<Memory[]> {
   const ranked = scopedMemories
     .map(m => {
       let score = 0;
-      if (!m.embedding || m.embedding.length === 0 || m.embedding.length !== queryVec.length) {
+      if (!hasCurrentMemoryEmbedding(m) || !m.embedding
+        || m.embedding.length !== queryEmbedding.vector.length
+        || m.embeddingNamespace?.provider !== queryEmbedding.provider
+        || m.embeddingNamespace?.model !== queryEmbedding.model
+        || m.embeddingNamespace?.dimensions !== queryEmbedding.vector.length) {
         score = relevanceScore(q.query!, m);
       } else {
-        const cos = cosineSimilarity(queryVec, m.embedding);
+        const cos = cosineSimilarity(queryEmbedding.vector, m.embedding);
         score = +(cos * m.confidence).toFixed(4);
       }
       if (score > 0) {
         score *= typeBias[m.type] || 1;
         score *= perspectiveBias[m.perspective] || 1;
       }
-      return { m, score: +score.toFixed(4) };
+      return { m, inputHash: memoryEmbeddingInputHash(m), score: +score.toFixed(4) };
     })
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score);
@@ -579,9 +622,21 @@ export async function queryMemoriesVector(q: MemoryQuery): Promise<Memory[]> {
     return true;
   });
 
+  const publishCurrent = (candidates: typeof scored): Memory[] => {
+    q.signal?.throwIfAborted();
+    const current = new Map(getMemoryStore().map(memory => [memory.id, memory]));
+    const result = candidates.flatMap(candidate => {
+      const memory = current.get(candidate.m.id);
+      return memory && matchesMemoryQueryFilters(memory, q)
+        && memoryEmbeddingInputHash(memory) === candidate.inputHash ? [memory] : [];
+    }).slice(0, limit);
+    if (q.recordRetrieval === true) markMemoriesRetrieved(result);
+    return result;
+  };
+
   const retrievalUserId = q.userId || 'anonymous';
   const rerank = getRerankSelection(retrievalUserId);
-  if (rerank.enabled && scored.length > 1) {
+  if (rerank.enabled && scored.length > 1 && (!isStrictPrivacy() || isProviderLocalOnly(rerank.provider))) {
     try {
       const candidates = scored.slice(0, candidateLimit);
       const ranked = await rerankConfiguredDocuments(
@@ -589,7 +644,9 @@ export async function queryMemoriesVector(q: MemoryQuery): Promise<Memory[]> {
         candidates.map(({ m }) => `${m.type}: ${m.content}\nKeywords: ${m.keywords.join(', ')}`),
         retrievalUserId,
         Math.max(limit, rerank.topN),
+        { signal: q.signal },
       );
+      q.signal?.throwIfAborted();
       const seen = new Set<number>();
       const reordered = ranked.items
         .map(item => {
@@ -598,36 +655,73 @@ export async function queryMemoriesVector(q: MemoryQuery): Promise<Memory[]> {
         })
         .filter(Boolean);
       reordered.push(...candidates.filter((_, index) => !seen.has(index)));
-      const result = reordered.slice(0, limit).map(({ m }) => m);
-      markMemoriesRetrieved(result);
-      return result;
+      return publishCurrent(reordered);
     } catch (error: any) {
+      q.signal?.throwIfAborted();
       console.warn(`[Memory] Rerank unavailable; preserving vector order: ${error?.message || String(error)}`);
     }
   }
 
-  const result = scored.slice(0, limit).map(({ m }) => m);
-  markMemoriesRetrieved(result);
-  return result;
+  q.signal?.throwIfAborted();
+  return publishCurrent(scored);
 }
 
-/** Pre-generate embeddings for all existing memories that lack them. One-time migration. */
-export async function backfillEmbeddings(userId?: string): Promise<number> {
+export interface MemoryIndexProgress { attempted: number; indexed: number; failed: number; stale: number; remaining: number; errors: Record<string, number> }
+
+/** Explicitly migrate missing, legacy or differently configured vector spaces. */
+type MemoryIndexOptions = { limit?: number; signal?: AbortSignal; domain?: string; orgId?: string; progress?: MemoryIndexProgress };
+export function backfillEmbeddings(userId?: string, options: MemoryIndexOptions = {}): Promise<number> {
+  return runSerializedMutation(`memory_index:${userId || 'all'}`, () => runMemoryIndexBackfill(userId, options));
+}
+async function runMemoryIndexBackfill(userId: string | undefined, options: MemoryIndexOptions): Promise<number> {
   const all = getMemoryStore();
-  const targets = all.filter(m => !m.embedding && (!userId || m.userId === userId));
+  const needsIndex = (m: Memory) => {
+    if (userId && m.userId !== userId) return false;
+    if (!matchesMemoryScope(m, options.domain, options.orgId)) return false;
+    if (isTestMemory(m) || isOperationalTraceMemory(m) || isMemoryAvatarScoped(m) || m.nodeType === 'branch') return false;
+    const primary = embeddingRouteIdentity(m.userId);
+    return !hasCurrentMemoryEmbedding(m) || !m.embedding || !m.embeddingNamespace
+      || m.embeddingNamespace.provider !== primary.provider
+      || m.embeddingNamespace.model !== primary.model
+      || m.embeddingNamespace.dimensions !== m.embedding.length;
+  };
+  const progress = options.progress;
+  const targets = all.filter(needsIndex).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, options.limit ?? Infinity);
   let count = 0;
+  let lastRequestAt = 0;
   for (const m of targets) {
-    const vec = await generateEmbedding(`${m.type}: ${m.content} ${m.keywords.join(' ')}`, m.userId);
-    if (vec) {
-      m.embedding = vec;
+    options.signal?.throwIfAborted();
+    if (!needsIndex(m)) continue;
+    // Background maintenance shares the official gateway's user-wide quota
+    // with foreground chat. Keep it below 40 requests/minute and stop on the
+    // first provider failure rather than flooding fallback routes.
+    const delay = 1500 - (Date.now() - lastRequestAt);
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+    options.signal?.throwIfAborted();
+    lastRequestAt = Date.now();
+    if (progress) progress.attempted++;
+    const inputHash = memoryEmbeddingInputHash(m);
+    const result = await generateEmbeddingWithIdentity(`${m.type}: ${m.content} ${m.keywords.join(' ')}`, m.userId, { signal: options.signal, allowFallback: false, onError: error => {
+      if (!progress) return;
+      const message = error instanceof Error ? error.message : '';
+      const status = message.match(/(?:failed|HTTP)\s*\(?([45]\d\d)/i)?.[1];
+      const code = status ? `http_${status}` : /timed? ?out|timeout/i.test(message) ? 'timeout' : 'provider_error';
+      progress.errors[code] = (progress.errors[code] || 0) + 1;
+    } });
+    const current = getMemoryStore().find(memory => memory.id === m.id);
+    if (result && current && memoryEmbeddingInputHash(current) === inputHash) {
+      current.embedding = result.vector;
+      current.embeddingNamespace = embeddingNamespace(result);
+      current.embeddingContentHash = inputHash;
+      saveMemoryStore(getMemoryStore());
       count++;
+      if (progress) progress.indexed++;
+    } else if (progress) {
+      if (!result) progress.failed++; else progress.stale++;
     }
-    // Small delay to avoid rate limits
-    if (count % 10 === 0 && count > 0) {
-      await new Promise(r => setTimeout(r, 200));
-    }
+    if (!result) break;
   }
-  if (count > 0) saveMemoryStore(all);
+  if (progress) progress.remaining = getMemoryStore().filter(needsIndex).length;
   return count;
 }
 
@@ -797,6 +891,7 @@ export function addMemory(
 
   if (existing) {
     // Merge: increase confidence, update content if new one has higher confidence
+    const previousInput = memoryEmbeddingInputHash(existing);
     existing.content = memory.confidence > existing.confidence ? memory.content : existing.content;
     existing.keywords = dedupeKeywords([...existing.keywords, ...memory.keywords]);
     existing.confidence = Math.min(1, existing.confidence + 0.1);
@@ -805,6 +900,10 @@ export function addMemory(
     existing.domain = domain;
     existing.orgId = orgId;
     Object.assign(existing, applyMemoryFirewallMetadata(existing, firewall));
+    if (memoryEmbeddingInputHash(existing) !== previousInput) {
+      invalidateMemoryEmbedding(existing);
+      if (overrides?.generateEmbedding !== false) void attachEmbedding(existing).catch(() => {});
+    }
     saveMemoryStore(all);
     return existing;
   }
@@ -826,6 +925,11 @@ export function addMemory(
     domain,
     orgId,
   }, firewall);
+
+  if (newMemory.embedding && newMemory.embeddingNamespace) {
+    newMemory.embeddingContentHash = memoryEmbeddingInputHash(newMemory);
+    if (!hasCurrentMemoryEmbedding(newMemory)) invalidateMemoryEmbedding(newMemory);
+  }
 
   if (contradictions.length > 0) {
     const detectedAt = now;
@@ -1028,6 +1132,7 @@ export function formatMemoriesForContext(
 
   const lines: string[] = [
     '## Retrieved memory evidence',
+    'When quoting a recalled identifier, marker, path, code or exact location, copy its characters verbatim. Do not decorate, translate, insert spaces, or invent a variant. If uncertain, say so.',
     'Each item below is a recalled candidate from an earlier source, not part of the current user message and not unquestionable truth. The current turn and same-conversation evidence take priority.',
     'Memory confidence describes the stored extraction, not whether a current name, code, person, customer, project, or task is the same entity. Every recalled entity binding starts unconfirmed. A shared word, exact token, name fragment, code prefix, or semantic similarity is retrieval evidence only; never transfer attributes, status, plans, or actions until the user or same-conversation history explicitly establishes the identity. Ask one short clarification when that binding matters.',
     'Owner statements prove that the owner previously said something; owner observations are inferences that may be wrong; shared context is not proof of an owner trait; Lumi narrative describes Lumi and must never be used as evidence about the owner.',

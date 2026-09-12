@@ -1,3 +1,4 @@
+import { withoutNegatedLookupClauses, isStoredMemoryRecallQuestion } from './normalized_action_intent';
 import {
   detectRequestedOperationMode,
   isPureOperationModeSwitchRequest,
@@ -7,6 +8,7 @@ import {
 import { hasVisionIntent } from './vision_routing';
 import { normalizeActionIntent } from './normalized_action_intent';
 import { isReadOnlyKnowledgeBaseInspectionRequest } from './knowledge_intent';
+import { isVideoPlaybackRequest } from './media_intent';
 
 interface IntentGrammarRule {
   name: string;
@@ -51,6 +53,9 @@ export interface ToolIntentDecisionTrace {
   };
 }
 const EXPLICIT_NO_TOOL_PATTERNS: RegExp[] = [
+  // i18n-allow: discussion-only planning requests, not user-facing copy.
+  /(?:^|[。！？；;，,：:]|\s)(?:请)?(?:现在|这次|先)?(?:只|仅)(?:告诉我|说说|说明|解释)(?:你)?(?:准备|打算|计划)?(?:怎么做|如何做|怎样做|执行步骤|计划|方案)/u,
+  /\b(?:first\s+)?(?:only|just)\s+(?:tell\s+me|explain|describe)\s+(?:how\s+you\s+(?:would|plan\s+to)|(?:the|your)\s+plan)\b/iu,
   /(?:\u4e0d\u8981|\u522b|\u65e0\u9700|\u4e0d\u7528)\s*(?:\u518d)?(?:\u6267\u884c|\u8fdb\u884c|\u505a)\s*(?:\u4efb\u4f55|\u65b0\u7684?|\u5176\u4ed6|\u5176\u5b83)?\s*(?:\u64cd\u4f5c|\u52a8\u4f5c|\u4efb\u52a1)/u,
   // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
   /(?:不要|别|无需|不需要|不用|禁止|请勿|勿)\s*(?:再|继续|再次)?\s*(?:调用|使用|执行|启动)?\s*(?:(?:任何|这些|外部|新(?:的)?|其他|其它)\s*){0,3}(?:工具|插件|技能|脚本)(?!(?:说明|介绍|解释|清单|列表|文档))/u,
@@ -71,7 +76,9 @@ export function hasExplicitNoToolInstruction(text: string): boolean {
 }
 
 const EXPLICIT_NO_MUTATION_PATTERNS: RegExp[] = [
-  /(?:不要|别|无需|不用|禁止|请勿|勿)\s*(?:再|继续)?\s*(?:修改|改动|改写|写入|保存|覆盖|创建|新建|生成|删除|发送|提交|操作)(?:这|该|当前|任何)?(?:个|份)?\s*(?:文件|文档|内容|页面|系统|数据)?/u,
+  // i18n-allow: Chinese prohibition input recognition, not user-visible copy.
+  /(?:不要|不|别|无需|不用|禁止|请勿|勿)\s*(?:再|继续)?\s*(?:修改|改动|改写|写入|保存|覆盖|创建|新建|生成|删除|发送|提交|操作)(?:这|该|当前|任何|原)?(?:个|份)?\s*(?:文件|文档|内容|页面|系统|数据)?/u,
+  /(?:保持|保留)\s*(?:原|源)?(?:文件|文档|数据)(?:原样|不变)|(?:原|源)(?:文件|文档|数据)\s*(?:不动|不变|保持原样)/u, // i18n-allow: Chinese preservation input recognition.
   /\b(?:do\s+not|don't|without)\s+(?:modify|edit|write|save|overwrite|create|delete|send|submit|change)\b/iu,
 ];
 
@@ -85,9 +92,19 @@ export function hasExplicitNoMutationInstruction(text: string): boolean {
   return EXPLICIT_NO_MUTATION_PATTERNS.some(pattern => pattern.test(normalized));
 }
 
+/** The positive artifact operation, with prohibited operations removed. */
+export function hasRequestedArtifactMutation(text: string): boolean {
+  const positive = EXPLICIT_NO_MUTATION_PATTERNS.reduce(
+    (value, pattern) => value.replace(new RegExp(pattern.source, `${pattern.flags.replace('g', '')}g`), ' '),
+    String(text || ''),
+  );
+  // i18n-allow: multilingual task-operation recognition, not user-facing copy.
+  return /(?:创建|新建|写入|编辑|修改|更新|追加|替换|删除|重命名|移动|复制|保存|另存|导出|生成|覆盖)|\b(?:creat(?:e|es|ed|ing)|writ(?:e|es|ing|ten)|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|updat(?:e|es|ed|ing)|append(?:s|ed|ing)?|replac(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|remov(?:e|es|ed|ing)|renam(?:e|es|ed|ing)|mov(?:e|es|ed|ing)|copy|copies|copied|copying|sav(?:e|es|ed|ing)|export(?:s|ed|ing)?|generat(?:e|es|ed|ing)|overwrit(?:e|es|ing|ten))\b/iu.test(positive);
+}
+
 const CLIENT_NAVIGATION_VERBS = /(?:\u6253\u5f00|\u8fdb\u5165|\u53bb|\u770b\u770b|\u5207\u6362|\u5207\u5230|\u6362\u5230|\u542f\u52a8|\u5f00\u542f|\u5f00\u59cb|\u5c55\u5f00|\u9000\u51fa|\u6536\u8d77|\u5173\u95ed|\u5173\u6389|\u56de\u5230|\u8fd4\u56de|\b(?:open|show|enter|switch|start|expand|exit|hide|close|collapse|return|go back)\b)/iu;
-const CLIENT_SURFACES = /(?:\u4e2d\u67a2\u4e16\u754c|\u4e2d\u67a2|\u4e16\u754c\u89c6\u56fe|\u4e91\u7aef\u753b\u5e03|\u6280\u80fd\u5927\u5385|\u6280\u80fd|\u6587\u4ef6\u7ba1\u7406\u5668|\u6587\u4ef6\u4e2d\u5fc3|\u58c1\u7eb8\u6a21\u5f0f|\u8bbe\u7f6e|\u65e5\u5fd7|\u97f3\u4e50\u4e2d\u5fc3|\u77e5\u8bc6\u5e93|\u684c\u9762\u5c0f\u7ec4\u4ef6|\u5c0f\u7ec4\u4ef6|\u4e3b\u5c4f\u5e55|\u4e3b\u9875|\u9996\u9875|\u804a\u5929|\u804a\u5929\u7a97\u53e3|\u5de5\u5177|\u5de5\u5177\u9762\u677f|\u5f62\u8c61|\u5934\u50cf\u5de5\u4f5c\u5ba4|\u58f0\u97f3|\u58f0\u97f3\u5de5\u4f5c\u5ba4|\u7ec4\u7ec7|\u7ec4\u7ec7\u7a7a\u95f4|\u7ec4\u7ec7\u5de5\u4f5c\u533a|\u8ba1\u5212|\u8ba1\u5212\u9762\u677f|\u5de5\u4f5c\u961f\u5217|\u7535\u8111\u9002\u914d\u4e2d\u5fc3|\u8ba1\u7b97\u673a\u9002\u914d\u4e2d\u5fc3|\u8bbe\u5907\u540c\u6b65|\u8bbe\u5907|\u901a\u77e5\u9762\u677f|\u901a\u77e5\u7a97\u53e3|\u63d0\u9192\u9762\u677f|\u63d0\u9192\u7a97\u53e3|\u8bb0\u5fc6\u5316\u8eab|\u8bb0\u5fc6\u5934\u50cf|\u8bb0\u5fc6\u7a7a\u95f4|\b(?:home|main screen|chat|chat window|nexus|nexus view|cloud canvas|world view|skill center|skills?|file manager|files app|settings|logs?|wallpaper mode|music center|desktop widget|widget mode|tools?|avatar studio|sound studio|memory avatar|memory avatars|memory sanctuary|organization|org workspace|plans?|planner|work queue|computer adaptation|device sync|devices?|notifications?|notification panel|reminders?|reminder panel)\b)/iu;
-const EXTENDED_PERSONAL_CLIENT_SURFACES = /(?:\u4e2a\u4eba\u57df|\u4e2a\u4eba\u5de5\u4f5c\u533a|\u5e94\u7528\u542f\u52a8\u5668|\u5e94\u7528\u641c\u7d22|\u4eba\u683c\u5b9e\u9a8c\u5ba4|\u4eba\u683c|\u7ec8\u7aef|\u4ee4\u724c\u7528\u91cf|\u6a21\u578b\u7528\u91cf|\u4e2a\u4eba\u8d44\u6599|\u8bb0\u5fc6\u5316\u8eab|\u8bb0\u5fc6\u5934\u50cf|\u8bb0\u5fc6\u7a7a\u95f4|MCP\s*\u8bbe\u7f6e|\u8bed\u97f3\u5de5\u574a|\u58f0\u97f3\u514b\u9686|\u6280\u80fd\u751f\u6210\u5668?|\u5e2e\u6211\u6587\u6863|\u4ea7\u54c1\u6587\u6863|\u521b\u59cb\u4eba\u7a7a\u95f4|GitHub\s*MCP|\b(?:personal workspace|app launcher|spotlight|personality lab|terminal|token dashboard|usage dashboard|profile|memory avatar|memory sanctuary|mcp settings|voice forge|voice cloning|skill generator|documentation|docs|founder workspace|github mcp)\b)/iu;
+const CLIENT_SURFACES = /(?:\u4e2d\u67a2\u4e16\u754c|\u4e2d\u67a2|\u4e16\u754c\u89c6\u56fe|\u4e91\u7aef\u753b\u5e03|\u6280\u80fd\u5927\u5385|\u6280\u80fd|\u6587\u4ef6\u7ba1\u7406\u5668|\u6587\u4ef6\u4e2d\u5fc3|\u58c1\u7eb8\u6a21\u5f0f|\u8bbe\u7f6e|\u65e5\u5fd7|\u97f3\u4e50\u4e2d\u5fc3|\u77e5\u8bc6\u5e93|\u684c\u9762\u5c0f\u7ec4\u4ef6|\u5c0f\u7ec4\u4ef6|\u4e3b\u5c4f\u5e55|\u4e3b\u9875|\u9996\u9875|\u804a\u5929|\u804a\u5929\u7a97\u53e3|\u5de5\u5177|\u5de5\u5177\u9762\u677f|\u5f62\u8c61|\u5934\u50cf\u5de5\u4f5c\u5ba4|\u58f0\u97f3|\u58f0\u97f3\u5de5\u4f5c\u5ba4|\u7ec4\u7ec7|\u7ec4\u7ec7\u7a7a\u95f4|\u7ec4\u7ec7\u5de5\u4f5c\u533a|\u8ba1\u5212|\u8ba1\u5212\u9762\u677f|\u5de5\u4f5c\u961f\u5217|\u7535\u8111\u9002\u914d\u4e2d\u5fc3|\u8ba1\u7b97\u673a\u9002\u914d\u4e2d\u5fc3|\u8bbe\u5907\u540c\u6b65|\u8bbe\u5907|\u901a\u77e5\u9762\u677f|\u901a\u77e5\u7a97\u53e3|\u63d0\u9192\u9762\u677f|\u63d0\u9192\u7a97\u53e3|\u8bb0\u5fc6\u9886\u5730|\u8bb0\u5fc6\u5316\u8eab|\u8bb0\u5fc6\u5934\u50cf|\u8bb0\u5fc6\u7a7a\u95f4|\b(?:home|main screen|chat|chat window|nexus|nexus view|cloud canvas|world view|skill center|skills?|file manager|files app|settings|logs?|wallpaper mode|music center|desktop widget|widget mode|tools?|avatar studio|sound studio|memory territory|memory avatar|memory avatars|memory sanctuary|organization|org workspace|plans?|planner|work queue|computer adaptation|device sync|devices?|notifications?|notification panel|reminders?|reminder panel)\b)/iu;
+const EXTENDED_PERSONAL_CLIENT_SURFACES = /(?:\u4e2a\u4eba\u57df|\u4e2a\u4eba\u5de5\u4f5c\u533a|\u5e94\u7528\u542f\u52a8\u5668|\u5e94\u7528\u641c\u7d22|\u4eba\u683c\u5b9e\u9a8c\u5ba4|\u4eba\u683c|\u7ec8\u7aef|\u4ee4\u724c\u7528\u91cf|\u6a21\u578b\u7528\u91cf|\u4e2a\u4eba\u8d44\u6599|\u8bb0\u5fc6\u9886\u5730|\u8bb0\u5fc6\u5316\u8eab|\u8bb0\u5fc6\u5934\u50cf|\u8bb0\u5fc6\u7a7a\u95f4|MCP\s*\u8bbe\u7f6e|\u8bed\u97f3\u5de5\u574a|\u58f0\u97f3\u514b\u9686|\u6280\u80fd\u751f\u6210\u5668?|\u5e2e\u6211\u6587\u6863|\u4ea7\u54c1\u6587\u6863|\u521b\u59cb\u4eba\u7a7a\u95f4|GitHub\s*MCP|\b(?:personal workspace|app launcher|spotlight|personality lab|terminal|token dashboard|usage dashboard|profile|memory territory|memory avatar|memory sanctuary|mcp settings|voice forge|voice cloning|skill generator|documentation|docs|founder workspace|github mcp)\b)/iu;
 const ORGANIZATION_WORKSPACE_SURFACES = /(?:\u7ec4\u7ec7\u77e5\u8bc6\u5e93|\u516c\u53f8\s*lumi|\u7ec4\u7ec7\s*lumi|\u6d88\u606f\u63a5\u5165|\u6210\u5458\u4e0e\u6743\u9650|\u5ba1\u8ba1\u65e5\u5fd7|\u5f8b\u6240\u5de5\u4f5c\u53f0|\u7a7a\u95f4\u5efa\u7b51\u8bbe\u8ba1|\u54c1\u724c\u521b\u610f\u8bbe\u8ba1|\u7ec4\u7ec7\u8bbe\u7f6e|\u5206\u652f\u8fde\u63a5|\b(?:organization knowledge|company lumi|organization lumi|org lumi|message access|members and permissions|audit log|law firm workspace|spatial and architecture|brand and creative|organization settings|branch connection)\b)/iu;
 const EXTERNAL_APP_CONTEXT = /(?:\u5fae\u4fe1|\u4f01\u4e1a\u5fae\u4fe1|\u98de\u4e66|\u804a\u5929\u8bb0\u5f55|\u804a\u5929\u5185\u5bb9|\u6d4f\u89c8\u5668|WPS|Word|Excel|PowerPoint|Office|\u7f51\u6613\u4e91\u97f3\u4e50|QQ\s*\u97f3\u4e50|\u9177\u72d7\u97f3\u4e50|Chrome|Edge|CAD|AutoCAD|Revit|\b(?:wechat|weixin|wecom|feishu|lark|browser|wps|word|excel|powerpoint|office|spotify|chrome|edge|autocad|revit)\b)/iu;
 const LUMI_CLIENT_CONTEXT = /(?:Lumi|\u5ba2\u6237\u7aef|\u4e2d\u67a2|\u4e16\u754c\u89c6\u56fe|\u4e91\u7aef\u753b\u5e03|\u6280\u80fd\u5927\u5385|\u8fd0\u884c\u65e5\u5fd7|\u8bbe\u7f6e|\u5c0f\u7ec4\u4ef6|\b(?:client|nexus|cloud canvas|world view|skill center|settings|runtime log|widget)\b)/iu;
@@ -106,6 +123,7 @@ function canonicalIntentOwnsNonClientAction(
     'payment',
     'signature',
     'cad_drafting',
+    'media_generation',
     'scheduled_task',
     'work_task',
   ].includes(kind);
@@ -140,7 +158,7 @@ const WORK_PRODUCT_TERMS = /(?:\u6587\u4ef6|\u6587\u4ef6\u5939|\u76ee\u5f55|\u65
 const DESKTOP_MUSIC_CONTROL_RE = /(?:\u97f3\u4e50|\u6b4c\u66f2|\u6b4c\u5355|\u7f51\u6613\u4e91|QQ\u97f3\u4e50|\u9177\u72d7|Spotify).{0,32}(?:\u6253\u5f00|\u542f\u52a8|\u64ad\u653e|\u6682\u505c|\u7ee7\u7eed|\u5207\u6b4c|\u4e0a\u4e00\u9996|\u4e0b\u4e00\u9996|\u641c\u7d22|\u97f3\u91cf)|(?:\u6253\u5f00|\u542f\u52a8|\u64ad\u653e|\u653e|\u542c|\u6682\u505c|\u7ee7\u7eed\u64ad\u653e|\u5207\u6b4c|\u4e0a\u4e00\u9996|\u4e0b\u4e00\u9996|\u641c\u7d22).{0,32}(?:\u97f3\u4e50|\u6b4c\u66f2|\u6b4c\u5355|\u7f51\u6613\u4e91|QQ\u97f3\u4e50|\u9177\u72d7|Spotify)|\b(?:open|launch|play|pause|resume|skip|next|previous|search)\b.{0,40}\b(?:music|song|playlist|netease|spotify|music player)\b/iu;
 
 export function isDesktopMusicControlRequest(text: string): boolean {
-  return DESKTOP_MUSIC_CONTROL_RE.test(String(text || '').trim());
+  return DESKTOP_MUSIC_CONTROL_RE.test(String(text || '').trim()) || isVideoPlaybackRequest(text);
 }
 
 const STRUCTURED_TOOL_INTENT_RULES: IntentGrammarRule[] = [
@@ -220,8 +238,8 @@ const CLIENT_ACTION_ONLY_PATTERNS: RegExp[] = [
 
 // Memory Avatar is a personal surface, not an Agent/team action. Keep its
 // navigation explicit so opening it never activates the task/tool lane.
-CLIENT_ACTION_INTENT_PATTERNS.push(/(?:\u6253\u5f00|\u8fdb\u5165|\u53bb|\u770b\u770b|\u5207\u6362|\u542f\u52a8|\u5f00\u542f|\u9000\u51fa|\u5173\u95ed|\u8fd4\u56de|\b(?:open|show|enter|start|close|exit|return)\b).{0,24}(?:\u8bb0\u5fc6\u5316\u8eab|\u8bb0\u5fc6\u5934\u50cf|\u8bb0\u5fc6\u7a7a\u95f4|memory\s+avatar|memory\s+sanctuary)/iu);
-CLIENT_ACTION_ONLY_PATTERNS.push(/(?:\u6253\u5f00|\u8fdb\u5165|\u53bb|\u770b\u770b|\u5207\u6362|\u542f\u52a8|\u5f00\u542f|\u9000\u51fa|\u5173\u95ed|\u8fd4\u56de|\b(?:open|show|enter|start|close|exit|return)\b).{0,24}(?:\u8bb0\u5fc6\u5316\u8eab|\u8bb0\u5fc6\u5934\u50cf|\u8bb0\u5fc6\u7a7a\u95f4|memory\s+avatar|memory\s+sanctuary)/iu);
+CLIENT_ACTION_INTENT_PATTERNS.push(/(?:\u6253\u5f00|\u8fdb\u5165|\u53bb|\u770b\u770b|\u5207\u6362|\u542f\u52a8|\u5f00\u542f|\u9000\u51fa|\u5173\u95ed|\u8fd4\u56de|\b(?:open|show|enter|start|close|exit|return)\b).{0,24}(?:\u8bb0\u5fc6\u9886\u5730|\u8bb0\u5fc6\u5316\u8eab|\u8bb0\u5fc6\u5934\u50cf|\u8bb0\u5fc6\u7a7a\u95f4|memory\s+territory|memory\s+avatar|memory\s+sanctuary)/iu);
+CLIENT_ACTION_ONLY_PATTERNS.push(/(?:\u6253\u5f00|\u8fdb\u5165|\u53bb|\u770b\u770b|\u5207\u6362|\u542f\u52a8|\u5f00\u542f|\u9000\u51fa|\u5173\u95ed|\u8fd4\u56de|\b(?:open|show|enter|start|close|exit|return)\b).{0,24}(?:\u8bb0\u5fc6\u9886\u5730|\u8bb0\u5fc6\u5316\u8eab|\u8bb0\u5fc6\u5934\u50cf|\u8bb0\u5fc6\u7a7a\u95f4|memory\s+territory|memory\s+avatar|memory\s+sanctuary)/iu);
 
 // Questions that explicitly ask Lumi to inspect its live client structure are
 // informational in wording but still require the safe client_get_state tool.
@@ -366,6 +384,7 @@ export function isUserCorrectionOrExplanationQuestion(text: string): boolean {
 }
 
 export function isInformationOnlyQuestion(text: string): boolean {
+  if (isStoredMemoryRecallQuestion(text)) return true;
   if (isExternalAiHistoryCapabilityQuestion(text)) return true;
   if (isExternalAiHistoryActionRequest(text)) return false;
   // i18n-allow: Chinese input-recognition patterns; not user-visible copy.
@@ -439,14 +458,16 @@ function hasExternalDesktopExecutionIntent(text: string): boolean {
 }
 
 export function hasExplicitToolIntent(text: string): boolean {
-  const normalized = text.trim();
+  const normalized = withoutNegatedLookupClauses(text).trim();
   if (!normalized) return false;
   if (hasExplicitNoToolInstruction(normalized)) return false;
+  if (isVideoPlaybackRequest(normalized)) return true;
   if (isExternalAiHistoryActionRequest(normalized)) return true;
   const canonical = normalizeActionIntent(normalized);
   if (canonical.kind === 'external_ai_history') return !isInformationOnlyQuestion(normalized);
   if (canonical.kind === 'messaging_read' || canonical.kind === 'messaging_send') return true;
   if (canonical.kind === 'work_task') return true;
+  if (canonical.kind === 'media_generation') return true;
   if (canonical.kind === 'correction_explanation' || canonical.kind === 'status_query') return false;
   if (isInformationOnlyQuestion(normalized)) return false;
   if (matchesIntentGrammar(normalized, STRUCTURED_TOOL_INTENT_RULES)) return true;
@@ -454,7 +475,7 @@ export function hasExplicitToolIntent(text: string): boolean {
 }
 
 export function hasClientActionIntent(text: string): boolean {
-  const normalized = text.trim();
+  const normalized = withoutNegatedLookupClauses(text).trim();
   if (!normalized) return false;
   if (hasExplicitNoToolInstruction(normalized)) return false;
   if (isExternalAiHistoryActionRequest(normalized)) return false;
@@ -476,7 +497,7 @@ export function hasClientActionIntent(text: string): boolean {
 }
 
 export function hasClientActionOnlyIntent(text: string): boolean {
-  const normalized = text.trim();
+  const normalized = withoutNegatedLookupClauses(text).trim();
   if (!normalized) return false;
   if (hasExplicitNoToolInstruction(normalized)) return false;
   if (isExternalAiHistoryActionRequest(normalized)) return false;
@@ -518,22 +539,16 @@ export function isDiagnosticOrRepairRequest(text: string): boolean {
 export function shouldAllowToolUseForTurn(text: string, source?: string, operationMode?: string): boolean {
   if (hasExplicitNoToolInstruction(text)) return false;
   const mode = normalizeOperationMode(operationMode);
-  if (mode === 'chat') {
-    return hasClientActionIntent(text)
-      || isDiagnosticOrRepairRequest(text)
-      || hasVisionIntent(text)
-      || hasExplicitToolIntent(text);
-  }
   if (isDiagnosticOrRepairRequest(text)) return true;
   if (mode === 'meeting') return hasClientActionIntent(text);
   if (hasVisionIntent(text)) return true;
-  if (mode === 'autonomous' && AUTONOMOUS_TASK_PATTERNS.some((pattern) => pattern.test(text.trim()))) return true;
+  if (AUTONOMOUS_TASK_PATTERNS.some((pattern) => pattern.test(text.trim()))) return true;
   if (hasExplicitToolIntent(text)) return true;
   return false;
 }
 
 export function traceToolIntentDecision(text: string, source?: string, operationMode?: string): ToolIntentDecisionTrace {
-  const normalized = text.trim();
+  const normalized = withoutNegatedLookupClauses(text).trim();
   const canonical = normalizeActionIntent(normalized);
   const mode = normalizeOperationMode(operationMode);
   const requestedMode = normalized ? detectRequestedOperationMode(normalized) : null;
@@ -575,6 +590,10 @@ export function traceToolIntentDecision(text: string, source?: string, operation
       : canonical.kind === 'messaging_send'
         ? ['messaging-send']
         : matchedStructuredToolRules;
+  if (canonical.kind === 'media_generation') structuredToolRules.push('media-generation');
+  if (!informationOnlyQuestion && isVideoPlaybackRequest(normalized)) {
+    structuredToolRules.push('video-playback');
+  }
   const legacyToolRules = !informationOnlyQuestion && normalized
     ? matchPatternRuleNames(normalized, TOOL_INTENT_PATTERNS, 'tool-pattern')
     : [];
@@ -587,7 +606,7 @@ export function traceToolIntentDecision(text: string, source?: string, operation
   const clientActionOnlyRules = !informationOnlyQuestion && !externalDesktopExecution && !desktopMusicControl && normalized
     ? matchPatternRuleNames(normalized, CLIENT_ACTION_ONLY_PATTERNS, 'client-action-only-pattern')
     : [];
-  const autonomousTaskRules = mode === 'autonomous' && normalized
+  const autonomousTaskRules = mode !== 'meeting' && normalized
     ? matchPatternRuleNames(normalized, AUTONOMOUS_TASK_PATTERNS, 'autonomous-task-pattern')
     : [];
   const visionIntent = normalized ? hasVisionIntent(normalized) : false;
@@ -629,16 +648,6 @@ export function traceToolIntentDecision(text: string, source?: string, operation
   } else if (explicitNoToolInstruction) {
     allowToolUse = false;
     decisionReason = 'explicit current-turn no-tool instruction';
-  } else if (mode === 'chat') {
-    allowToolUse = !informationOnlyQuestion && (
-      clientActionIntent
-      || diagnosticOrRepair
-      || visionIntent
-      || explicitToolIntent
-    );
-    decisionReason = allowToolUse
-      ? 'chat foreground action signal matched; Assistant capabilities may be borrowed for this turn'
-      : 'chat remains conversational because no foreground action signal matched';
   } else if (diagnosticOrRepair) {
     allowToolUse = true;
     decisionReason = 'diagnostic or repair wording enables self-inspection tools';
@@ -655,9 +664,9 @@ export function traceToolIntentDecision(text: string, source?: string, operation
   } else if (visionIntent) {
     allowToolUse = true;
     decisionReason = 'vision wording asks Lumi to inspect visible content';
-  } else if (mode === 'autonomous' && autonomousTask) {
+  } else if (autonomousTask) {
     allowToolUse = true;
-    decisionReason = 'autonomous mode task pattern matched';
+    decisionReason = 'explicit continuing-task intent matched';
   } else if (explicitToolIntent) {
     allowToolUse = true;
     decisionReason = 'explicit tool or work action matched';
@@ -669,9 +678,7 @@ export function traceToolIntentDecision(text: string, source?: string, operation
     if (explicitNoToolInstruction) blockedBy.push('explicit-no-tool-instruction');
     if (informationOnlyQuestion) blockedBy.push('information-only-question');
     if (mode === 'meeting' && !clientActionIntent) blockedBy.push('meeting-mode-client-actions-only');
-    if (mode === 'chat' && !clientActionIntent && !diagnosticOrRepair && !visionIntent && !explicitToolIntent) {
-      blockedBy.push('chat-mode-no-foreground-action');
-    }
+
     if (!blockedBy.length) blockedBy.push('no-tool-intent');
   }
 
@@ -694,7 +701,7 @@ export function traceToolIntentDecision(text: string, source?: string, operation
       visionIntent,
       autonomousTask,
     },
-  };
+};
 }
 
 /**

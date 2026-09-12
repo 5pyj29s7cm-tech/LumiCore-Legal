@@ -20,9 +20,14 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 mod local_bootstrap;
+mod backend_shutdown;
+mod desktop_command_supervisor;
+mod desktop_command_ipc;
+use desktop_command_supervisor::{CommandExecution, CommandSupervisor};
 mod native_identity;
 mod window_activation;
 use local_bootstrap::bootstrap_local_identity;
+use backend_shutdown::{request_backend_save, ShutdownBarrier};
 use native_identity::get_native_client_identity;
 use window_activation::{execute_window_activation_steps, WindowActivationOps};
 
@@ -82,11 +87,6 @@ pub struct WallpaperMode {
     pub enabled: bool,
     pub presentation: WallpaperPresentation,
     pub workspace: WallpaperWorkspace,
-}
-
-#[derive(Default)]
-struct ActiveDesktopCommands {
-    pids: HashMap<String, u32>,
 }
 
 struct ResidentState {
@@ -164,6 +164,13 @@ pub struct RuntimeResilienceStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct StorageDiskInfo {
+    pub mount_point: String,
+    pub total_space: u64,
+    pub available_space: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SystemInfo {
     pub platform: String,
     pub release: String,
@@ -177,9 +184,10 @@ pub struct SystemInfo {
     pub cpu_model: String,
     pub memory_unit: String,
     pub uptime: u64,
+    pub disks: Vec<StorageDiskInfo>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandResult {
     pub success: bool,
     pub output: String,
@@ -415,7 +423,7 @@ fn read_native_files(dir: &Path, limit: Option<usize>) -> Vec<NativeFile> {
 
 #[tauri::command]
 fn get_system_info() -> SystemInfo {
-    use sysinfo::System;
+    use sysinfo::{Disks, System};
     let sys = System::new_all();
     let cpu_model = sys
         .cpus()
@@ -437,6 +445,15 @@ fn get_system_info() -> SystemInfo {
         cpu_model,
         memory_unit: "bytes".to_string(),
         uptime: System::uptime(),
+        disks: Disks::new_with_refreshed_list()
+            .list()
+            .iter()
+            .map(|disk| StorageDiskInfo {
+                mount_point: disk.mount_point().to_string_lossy().to_string(),
+                total_space: disk.total_space(),
+                available_space: disk.available_space(),
+            })
+            .collect(),
     }
 }
 
@@ -1036,13 +1053,13 @@ fn decode_command_bytes(bytes: &[u8]) -> String {
     }
 }
 
-fn parse_command_executable(command: &str) -> (String, String) {
+fn parse_command_executable(command: &str, host: &str) -> (String, String) {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return (String::new(), String::new());
     }
     let first = trimmed.chars().next().unwrap_or_default();
-    if first == '"' || first == '\'' {
+    if first == '"' || (host != "windows" && first == '\'') {
         if let Some(end) = trimmed[1..].find(first) {
             let executable = trimmed[1..end + 1].to_string();
             let remainder = trimmed[end + 2..].trim().to_string();
@@ -1074,7 +1091,8 @@ fn shell_control_operator(command: &str, host: &str) -> Option<&'static str> {
             index += 2;
             continue;
         }
-        if current == '\'' && quote != Some('"') {
+        // cmd.exe does not use apostrophes to quote shell control characters.
+        if host != "windows" && current == '\'' && quote != Some('"') {
             quote = if quote == Some('\'') {
                 None
             } else {
@@ -1116,7 +1134,7 @@ fn validate_command_for_host(command: &str, host: &str) -> Result<(), String> {
             operator
         ));
     }
-    let (executable, remainder) = parse_command_executable(command);
+    let (executable, remainder) = parse_command_executable(command, host);
     let normalized = executable.replace('\\', "/").to_lowercase();
     let name = normalized
         .rsplit('/')
@@ -1167,6 +1185,29 @@ fn validate_command_for_host(command: &str, host: &str) -> Result<(), String> {
 #[cfg(test)]
 mod command_platform_validation_tests {
     use super::validate_command_for_host;
+
+    #[test]
+    fn shared_windows_quote_boundaries() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../test/fixtures/windows_command_boundaries.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            let command = case["command"].as_str().unwrap();
+            assert_eq!(
+                validate_command_for_host(command, "windows").is_ok(),
+                case["windowsAccepted"].as_bool().unwrap(),
+                "{}",
+                command
+            );
+            assert_eq!(
+                validate_command_for_host(command, "linux").is_ok(),
+                case["posixAccepted"].as_bool().unwrap(),
+                "{}",
+                command
+            );
+        }
+    }
 
     #[test]
     fn rejects_posix_commands_on_windows() {
@@ -1233,18 +1274,20 @@ fn terminate_command_tree(child: &mut Child) {
             .stderr(Stdio::null())
             .status();
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // run_command creates a separate process group so descendants are
+        // included instead of leaving a shell's child running after cancel.
+        let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
 
-#[tauri::command]
-fn run_command(
-    command: String,
-    cwd: Option<String>,
-    timeout_ms: Option<u64>,
-    command_id: Option<String>,
-    active_commands: tauri::State<'_, Mutex<ActiveDesktopCommands>>,
-) -> CommandResult {
+
+fn run_command_blocking(command: String, cwd: Option<String>, timeout_ms: Option<u64>, execution: &CommandExecution) -> CommandResult {
+    if execution.is_cancelled() { return CommandResult { success: false, output: "Command cancelled before native dispatch.".into() }; }
     let now = SystemTime::now();
     let truncated: String = if command.chars().count() > 500 {
         let head: String = command.chars().take(500).collect();
@@ -1315,8 +1358,10 @@ fn run_command(
     };
     #[cfg(not(target_os = "windows"))]
     let mut cmd = {
+        use std::os::unix::process::CommandExt;
         let mut cmd = Command::new("sh");
         cmd.args(["-c", &command]);
+        cmd.process_group(0);
         cmd
     };
     if let Some(path) = cwd_path.as_ref() {
@@ -1326,18 +1371,19 @@ fn run_command(
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));
 
-    let result = match cmd.spawn() {
-        Ok(mut child) => {
-            if let Some(id) = command_id.as_ref().filter(|value| !value.trim().is_empty()) {
-                if let Ok(mut active) = active_commands.lock() {
-                    active.pids.insert(id.clone(), child.id());
-                }
-            }
+    let result = match execution.dispatch(|| cmd.spawn()) {
+        Some(Ok(mut child)) => {
             let deadline = Instant::now() + timeout;
             let mut timed_out = false;
+            let mut cancelled = false;
             let status = loop {
                 match child.try_wait() {
                     Ok(Some(status)) => break Ok(status),
+                    Ok(None) if execution.is_cancelled() => {
+                        cancelled = true;
+                        terminate_command_tree(&mut child);
+                        break child.try_wait().and_then(|status| status.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "[outcome_unknown] Cancellation could not confirm process exit")));
+                    }
                     Ok(None) if Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(50))
                     }
@@ -1348,12 +1394,15 @@ fn run_command(
                             status.ok_or_else(|| {
                                 std::io::Error::new(
                                     std::io::ErrorKind::TimedOut,
-                                    "command timed out",
+                                    "[outcome_unknown] Timed out but process exit was not confirmed",
                                 )
                             })
                         });
                     }
-                    Err(error) => break Err(error),
+                    Err(error) => {
+                        terminate_command_tree(&mut child);
+                        break Err(std::io::Error::new(std::io::ErrorKind::Other, format!("[outcome_unknown] Command exit could not be verified: {error}")));
+                    }
                 }
             };
             let (stdout, stdout_truncated) = read_command_output(&stdout_path);
@@ -1374,15 +1423,12 @@ fn run_command(
                     timeout.as_millis()
                 ));
             }
-            status.map(|status| (status.success() && !timed_out, combined))
+            if cancelled { combined.push_str("\n[Command cancelled; native process exit confirmed]"); }
+            status.map(|status| (status.success() && !timed_out && !cancelled, combined))
         }
-        Err(error) => Err(error),
+        Some(Err(error)) => Err(error),
+        None => Ok((false, "Command cancelled before native dispatch.".into())),
     };
-    if let Some(id) = command_id.as_ref() {
-        if let Ok(mut active) = active_commands.lock() {
-            active.pids.remove(id);
-        }
-    }
     let _ = std::fs::remove_file(&stdout_path);
     let _ = std::fs::remove_file(&stderr_path);
 
@@ -1473,40 +1519,7 @@ fn spawn_hidden(cmd: &mut Command) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
-#[tauri::command]
-fn cancel_command(
-    command_id: String,
-    active_commands: tauri::State<'_, Mutex<ActiveDesktopCommands>>,
-) -> bool {
-    let pid = active_commands
-        .lock()
-        .ok()
-        .and_then(|mut active| active.pids.remove(command_id.trim()));
-    let Some(pid) = pid else {
-        return false;
-    };
 
-    #[cfg(target_os = "windows")]
-    {
-        let mut taskkill = Command::new("taskkill");
-        taskkill.args(["/PID", &pid.to_string(), "/T", "/F"]);
-        taskkill.creation_flags(0x08000000u32);
-        taskkill
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-    }
-}
 
 #[cfg(target_os = "windows")]
 #[derive(Clone)]
@@ -1999,13 +2012,73 @@ fn resolve_desktop_item_fuzzy(target: &str) -> Option<PathBuf> {
 
 #[cfg(all(test, target_os = "windows"))]
 mod app_query_tests {
-    use super::normalize_app_query;
+    use super::{
+        normalize_app_query, resolve_app_definition, search_app_definitions,
+        windows_app_definitions, WindowsAppDefinition,
+    };
 
     #[test]
     fn strips_desktop_location_words_without_shortening_the_app_name() {
         assert_eq!(normalize_app_query("打开桌面上的网易云音乐"), "网易云音乐");
         assert_eq!(normalize_app_query("桌面的网易云音乐软件"), "网易云音乐");
         assert_eq!(normalize_app_query("打开微信消息值守"), "微信消息值守");
+    }
+
+    #[test]
+    fn bilingual_search_finds_the_same_known_application_once() {
+        let definitions = windows_app_definitions();
+        for query in ["计算器 Calculator", "计算器 / Calculator", "Calculator（计算器）"] {
+            let matches = search_app_definitions(query, &definitions);
+            assert_eq!(matches.len(), 1, "query: {query}");
+            assert_eq!(matches[0].app_id, "calculator");
+        }
+        // Broader discovery must not silently broaden direct launch matching.
+        assert!(resolve_app_definition("计算器 Calculator").is_none());
+    }
+
+    #[test]
+    fn complete_application_names_with_spaces_take_precedence_over_fragments() {
+        let definitions = vec![
+            WindowsAppDefinition {
+                app_id: "visual_studio_code",
+                label: "Visual Studio Code",
+                aliases: vec!["VS Code"],
+                executable_names: vec!["Code.exe"],
+                fixed_paths: vec![],
+            },
+            WindowsAppDefinition {
+                app_id: "studio",
+                label: "Studio",
+                aliases: vec!["Studio"],
+                executable_names: vec![],
+                fixed_paths: vec![],
+            },
+        ];
+        let matches = search_app_definitions("Visual Studio Code", &definitions);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].app_id, "visual_studio_code");
+        let alias_matches = search_app_definitions("VS Code", &definitions);
+        assert_eq!(alias_matches.len(), 1);
+        assert_eq!(alias_matches[0].app_id, "visual_studio_code");
+    }
+
+    #[test]
+    fn ambiguous_search_returns_all_candidates_without_picking_a_launch_target() {
+        let definitions = windows_app_definitions();
+        let matches = search_app_definitions("计算器 Notepad", &definitions);
+        let ids: Vec<_> = matches.iter().map(|item| item.app_id).collect();
+        assert!(ids.contains(&"calculator"));
+        assert!(ids.contains(&"notepad"));
+        assert_eq!(ids.len(), 2);
+        assert!(resolve_app_definition("计算器 Notepad").is_none());
+    }
+
+    #[test]
+    fn empty_or_unrelated_search_terms_do_not_match_every_application() {
+        let definitions = windows_app_definitions();
+        for query in ["", "  ", " / | （） ", "c", "CalculatorHelper"] {
+            assert!(search_app_definitions(query, &definitions).is_empty(), "query: {query}");
+        }
     }
 }
 
@@ -2322,6 +2395,38 @@ fn app_query_matches_definition(query: &str, def: &WindowsAppDefinition) -> bool
             .executable_names
             .iter()
             .any(|name| normalized == compact_app_text(name))
+}
+
+#[cfg(target_os = "windows")]
+fn search_app_definitions<'a>(
+    query: &str,
+    definitions: &'a [WindowsAppDefinition],
+) -> Vec<&'a WindowsAppDefinition> {
+    let exact: Vec<_> = definitions
+        .iter()
+        .filter(|def| app_query_matches_definition(query, def))
+        .collect();
+    // Preserve complete names such as "Visual Studio Code" before considering
+    // alternate keywords. This only broadens discovery, never direct launch.
+    if !exact.is_empty() {
+        return exact;
+    }
+    let terms: Vec<_> = query
+        .split(|ch: char| {
+            ch.is_whitespace()
+                || matches!(ch, '/' | ',' | '，' | '、' | ';' | '；' | '|' | '(' | ')' | '（' | '）')
+        })
+        .filter(|term| !term.is_empty())
+        .take(16)
+        .map(normalize_app_query)
+        .filter(|term| term.chars().count() >= 2)
+        .collect();
+    // Multiple different app aliases remain multiple candidates. Selection
+    // and target verification stay with the existing open/execute boundary.
+    definitions
+        .iter()
+        .filter(|def| terms.iter().any(|term| app_query_matches_definition(term, def)))
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -2663,10 +2768,7 @@ fn list_windows_native_apps(query: Option<&str>, limit: usize) -> Vec<NativeAppE
     let definitions = windows_app_definitions();
     let mut candidates = Vec::new();
     if let Some(q) = query.map(str::trim).filter(|q| !q.is_empty()) {
-        for def in definitions
-            .iter()
-            .filter(|def| app_query_matches_definition(q, def))
-        {
+        for def in search_app_definitions(q, &definitions) {
             candidates.extend(candidates_for_definition(def));
         }
         candidates.extend(generic_windows_launch_candidates(Some(q)));
@@ -2818,6 +2920,173 @@ fn focus_running_windows_app(def: &WindowsAppDefinition) -> Option<CommandResult
 }
 
 #[cfg(target_os = "windows")]
+fn quote_windows_open_argument(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    let mut slashes = 0;
+    for current in value.chars() {
+        if current == '\\' {
+            slashes += 1;
+            continue;
+        }
+        if current == '"' {
+            quoted.push_str(&"\\".repeat(slashes * 2 + 1));
+        } else {
+            quoted.push_str(&"\\".repeat(slashes));
+        }
+        slashes = 0;
+        quoted.push(current);
+    }
+    quoted.push_str(&"\\".repeat(slashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(target_os = "windows")]
+fn shell_open_windows(target: &str, args: &[String]) -> CommandResult {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: isize,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show_command: i32,
+        ) -> isize;
+    }
+    if target.is_empty()
+        || target.chars().any(char::is_control)
+        || args.iter().any(|arg| arg.chars().any(char::is_control))
+    {
+        return CommandResult {
+            success: false,
+            output: "Invalid open target or argument".to_string(),
+        };
+    }
+    let wide = |value: &str| {
+        std::ffi::OsStr::new(value)
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<u16>>()
+    };
+    let operation = wide("open");
+    let file = wide(target);
+    let parameters = wide(
+        &args
+            .iter()
+            .map(|arg| quote_windows_open_argument(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    // The target is a separate native API parameter, never cmd.exe source text.
+    let result = unsafe {
+        ShellExecuteW(
+            0,
+            operation.as_ptr(),
+            file.as_ptr(),
+            if args.is_empty() {
+                std::ptr::null()
+            } else {
+                parameters.as_ptr()
+            },
+            std::ptr::null(),
+            1,
+        )
+    };
+    CommandResult {
+        success: result > 32,
+        output: if result > 32 {
+            format!("Opened: {}", target)
+        } else {
+            format!("Windows could not open {} (error {})", target, result)
+        },
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn validate_windows_open_target(target: &str) -> Result<String, String> {
+    if target.is_empty() || target.chars().any(char::is_control) {
+        return Err("Invalid open target".to_string());
+    }
+    if Path::new(target).exists() {
+        let absolute = std::fs::canonicalize(target).map_err(|error| error.to_string())?;
+        let absolute = absolute.to_string_lossy();
+        // Windows shell APIs expect ordinary DOS/UNC names, rather than Rust's
+        // verbatim filesystem namespace returned by canonicalize.
+        return Ok(if let Some(unc) = absolute.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{}", unc)
+        } else {
+            absolute
+                .strip_prefix(r"\\?\")
+                .unwrap_or(&absolute)
+                .to_string()
+        });
+    }
+    if let Ok(url) = tauri::Url::parse(target) {
+        if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() {
+            return Ok(url.to_string());
+        }
+        if url.scheme() == "mailto" && !url.path().is_empty() {
+            return Ok(url.to_string());
+        }
+    }
+    Err("Open target must be an existing file or folder, an installed application, or an HTTP(S)/mailto URL".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[cfg(test)]
+mod windows_open_target_tests {
+    use super::{quote_windows_open_argument, validate_windows_open_target};
+
+    #[test]
+    fn validates_supported_urls_without_launching_them() {
+        for target in [
+            "https://example.invalid/docs?a=1&b=2",
+            "mailto:test@example.invalid",
+        ] {
+            assert!(validate_windows_open_target(target).is_ok(), "{}", target);
+        }
+        for target in [
+            "",
+            "unknown-protocol:example",
+            "mailto:",
+            "missing-file.txt",
+            "https://example.invalid/\n",
+        ] {
+            assert!(
+                validate_windows_open_target(target).is_err(),
+                "{:?}",
+                target
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_existing_file_names_as_one_native_target() {
+        let target =
+            std::env::temp_dir().join(format!("lumi-open-test-{}-a & b.txt", std::process::id()));
+        std::fs::write(&target, "validation fixture").unwrap();
+        let result = validate_windows_open_target(&target.to_string_lossy());
+        std::fs::remove_file(&target).unwrap();
+        let normalized = result.unwrap();
+        assert!(normalized.ends_with("-a & b.txt"));
+        assert!(!normalized.starts_with(r"\\?\"));
+    }
+
+    #[test]
+    fn quotes_application_arguments_with_windows_backslash_rules() {
+        assert_eq!(quote_windows_open_argument(""), "\"\"");
+        assert_eq!(quote_windows_open_argument("a & b"), "\"a & b\"");
+        assert_eq!(quote_windows_open_argument("a\"b"), "\"a\\\"b\"");
+        assert_eq!(
+            quote_windows_open_argument("C:\\directory with spaces\\"),
+            "\"C:\\directory with spaces\\\\\""
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn launch_windows_path(path: &Path, extra_args: &[String]) -> CommandResult {
     let extension = path
         .extension()
@@ -2825,15 +3094,16 @@ fn launch_windows_path(path: &Path, extra_args: &[String]) -> CommandResult {
         .unwrap_or("")
         .to_lowercase();
 
-    let spawned = if matches!(extension.as_str(), "bat" | "cmd" | "lnk" | "url") {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", ""]);
-        cmd.arg(path);
-        for arg in extra_args {
-            cmd.arg(arg);
+    if matches!(extension.as_str(), "bat" | "cmd" | "lnk" | "url") {
+        if matches!(extension.as_str(), "bat" | "cmd") && !extra_args.is_empty() {
+            return CommandResult {
+                success: false,
+                output: "Script arguments require the command execution workflow".to_string(),
+            };
         }
-        spawn_hidden(&mut cmd)
-    } else {
+        return shell_open_windows(&path.to_string_lossy(), extra_args);
+    }
+    let spawned = {
         let mut cmd = Command::new(path);
         for arg in extra_args {
             cmd.arg(arg);
@@ -3101,35 +3371,24 @@ fn open_item(
         }
     }
 
-    if cfg!(target_os = "windows") && Path::new(&target).is_dir() {
-        let mut cmd = Command::new("explorer.exe");
-        cmd.arg(&target);
-        return match spawn_hidden(&mut cmd) {
-            Ok(_) => CommandResult {
-                success: true,
-                output: format!("Opened folder: {}", target),
-            },
-            Err(e) => CommandResult {
+    #[cfg(target_os = "windows")]
+    {
+        return match validate_windows_open_target(&target) {
+            Ok(target) => shell_open_windows(&target, &[]),
+            Err(error) => CommandResult {
                 success: false,
-                output: e.to_string(),
+                output: error,
             },
         };
     }
 
-    let result = if cfg!(target_os = "windows") {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", &target]);
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000u32);
-        }
-        cmd.output()
-    } else if cfg!(target_os = "macos") {
+    #[cfg(not(target_os = "windows"))]
+    let result = if cfg!(target_os = "macos") {
         Command::new("open").arg(&target).output()
     } else {
         Command::new("xdg-open").arg(&target).output()
     };
+    #[cfg(not(target_os = "windows"))]
     match result {
         Ok(out) => {
             if out.status.success() {
@@ -3816,17 +4075,57 @@ fn show_main_window(app: tauri::AppHandle) -> Result<WindowActivationDiagnostic,
     }
 }
 
-#[tauri::command]
-fn quit_app(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, Mutex<ResidentState>>,
-) -> Result<(), String> {
-    {
-        let mut resident = state.lock().map_err(|e| e.to_string())?;
+fn save_before_app_exit(app: &tauri::AppHandle) -> Result<(), String> {
+    let supervisor = app.state::<CommandSupervisor>();
+    let _exit_attempt = supervisor.lock_exit_attempt()?;
+    supervisor.cancel_all_and_wait(Duration::from_secs(30))?;
+    let saved = app.state::<ShutdownBarrier>().run(|| {
+        let owned_pid = {
+            let state = app.state::<Mutex<BackendProcesses>>();
+            let mut processes = state.lock().map_err(|error| error.to_string())?;
+            match processes.node.as_mut() {
+                // Development/attached backends remain running independently.
+                None => None,
+                Some(child) => match child.try_wait().map_err(|error| error.to_string())? {
+                    None => Some(child.id()),
+                    Some(_) => return Err("The owned backend exited before it confirmed saving. Closing was cancelled.".into()),
+                },
+            }
+        };
+        if let Some(pid) = owned_pid { request_backend_save(pid)?; }
+        Ok(())
+    });
+    if let Err(error) = saved {
+        app.state::<CommandSupervisor>().resume_after_failed_exit();
+        return Err(error);
+    }
+    if let Ok(mut resident) = app.state::<Mutex<ResidentState>>().lock() {
         resident.force_quit = true;
     }
     app.exit(0);
     Ok(())
+}
+
+fn request_app_exit(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = save_before_app_exit(&handle) {
+            eprintln!("[LumiCore] Shutdown cancelled: {error}");
+            show_main_window_impl(&handle, "shutdown_failed");
+            let _ = handle.emit("lumi:shutdown-failed", &error);
+            #[cfg(not(test))]
+            handle.dialog().message(format!("暂时无法退出：后台尚未确认保存。\n\n{error}\n\n数据仍保留在后台。请解决保存问题后重新退出。"))
+                .title("LumiCore — 保存未完成")
+                .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                .show(|_| {});
+        }
+    });
+}
+
+#[tauri::command]
+async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || save_before_app_exit(&app))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -4208,11 +4507,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 let _ = hide_main_window_impl(app);
             }
             "quit" => {
-                let state = app.state::<Mutex<ResidentState>>();
-                if let Ok(mut resident) = state.lock() {
-                    resident.force_quit = true;
-                }
-                app.exit(0);
+                request_app_exit(app);
             }
             _ => {}
         })
@@ -5655,6 +5950,7 @@ pub fn run() {
     };
 
     builder
+        .manage(ShutdownBarrier::default())
         .manage(Mutex::new(BackendProcesses {
             node: None,
             python: None,
@@ -5662,7 +5958,7 @@ pub fn run() {
             python_restarts: 0,
             node_config: None,
         }))
-        .manage(Mutex::new(ActiveDesktopCommands::default()))
+        .manage(CommandSupervisor::default())
         .manage(Mutex::new(WallpaperState::default()))
         .manage(Mutex::new(ResidentState {
             close_to_background: started_in_background,
@@ -5694,8 +5990,10 @@ pub fn run() {
             create_directory,
             rename_item,
             delete_item,
-            run_command,
-            cancel_command,
+            desktop_command_ipc::run_command,
+            desktop_command_ipc::cancel_command,
+            desktop_command_ipc::get_command_result,
+            desktop_command_ipc::acknowledge_unknown_command_stop,
             open_item,
             pick_directory,
             set_wallpaper_mode,
@@ -5856,6 +6154,9 @@ pub fn run() {
                     let max_restarts: u32 = 30;
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(5));
+                        // An acknowledged graceful shutdown must not be
+                        // mistaken for a crash and immediately restarted.
+                        if app_handle.state::<ShutdownBarrier>().prevents_restart() { continue; }
                         let app_state = app_handle.state::<Mutex<BackendProcesses>>();
                         let mut state = app_state.lock().unwrap();
 
@@ -5922,7 +6223,10 @@ pub fn run() {
             let window = app.get_webview_window("main").unwrap();
             let reg = app.global_shortcut();
             if let Err(error) =
-                reg.on_shortcut(WINDOW_TOGGLE_SHORTCUT, move |app, _shortcut, _event| {
+                reg.on_shortcut(WINDOW_TOGGLE_SHORTCUT, move |app, _shortcut, event| {
+                    if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        return;
+                    }
                     let wallpaper_enabled = app
                         .state::<Mutex<WallpaperState>>()
                         .lock()
@@ -5975,6 +6279,15 @@ pub fn run() {
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.hide();
                     }
+                } else if label == "main" && !app.state::<ShutdownBarrier>().is_saved() {
+                    api.prevent_close();
+                    request_app_exit(app);
+                }
+            }
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                if !app.state::<ShutdownBarrier>().is_saved() {
+                    api.prevent_exit();
+                    request_app_exit(app);
                 }
             }
             #[cfg(target_os = "macos")]
@@ -5990,8 +6303,9 @@ pub fn run() {
                 let state = app.state::<Mutex<BackendProcesses>>();
                 let mut procs = state.lock().unwrap();
                 if let Some(child) = procs.node.as_mut() {
-                    println!("[LumiCore] Stopping Node backend...");
-                    let _ = child.kill();
+                    // The backend exited after its save receipt. Never kill
+                    // an unacknowledged process from an OS close callback.
+                    let _ = child.try_wait();
                 }
                 if let Some(child) = procs.python.as_mut() {
                     println!("[LumiCore] Stopping GPT-SoVITS API...");

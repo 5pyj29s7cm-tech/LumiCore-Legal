@@ -1,13 +1,29 @@
 const INTERNAL_EXECUTION_DETAIL_RE = /(?:No successful (?:current-turn )?tool execution|这一轮没有.{0,40}(?:真实)?工具执行|我还不能说正在执行|先真正调用对应工具|\ballowedTools\b|\bappTarget\b|\bUI\s*evidence\b|work product guard|action contract|Required completion evidence|Preferred tools|Verification tools|tool route|tool protocol|Maximum tool call iterations|<\/?function_calls?>|<invoke\b)/i;
 
+export const CN_MODEL_FAILURE_BEFORE_EXECUTION = '这次模型调用失败，未发起新的操作。原任务和失败记录仍然保留，可以重试。';
+
+export function formatCnMediaGenerationFailure(errors: string[]): string {
+  const details = [...new Set(errors.map(formatCnToolFailureDetail))];
+  const retry = errors.some(error => /timed?\s*out|timeout|outcome is unknown/i.test(error))
+    ? '可以重试，但超时请求的服务端结果需要先核对，避免重复生成。'
+    : '可以重试；如果服务继续拒绝，需要调整图片要求。';
+  return `本次生成没有完成。${details.join('\n')}\n${retry}`;
+}
+
 export function isInternalExecutionDetail(value: string): boolean {
   return INTERNAL_EXECUTION_DETAIL_RE.test(String(value || ''));
 }
 
 export function formatCnToolFailureDetail(error: string): string {
   const raw = String(error || '').trim();
+  if (raw === 'model_failed_before_tool_execution') return '本轮模型调用失败，未发起新的操作；原任务仍未完成。';
   if (!raw || /^(?:undefined|null|unknown|\[object Object\])$/iu.test(raw)) {
     return '系统没有返回可核实的失败原因。';
+  }
+  if (/Lumi Official API request/i.test(raw)) {
+    if (/IP infringement/i.test(raw)) return '图片服务拒绝了这次请求，返回的原因是疑似侵犯知识产权；没有返回图片。';
+    const timeoutMs = raw.match(/timed out after (\d+)ms/i)?.[1];
+    if (timeoutMs) return `官方接口等待 ${Number(timeoutMs) / 1000} 秒后超时，没有收到生成结果，不能确认服务端是否仍在处理。`;
   }
   const httpStatus = raw.match(/(?:HTTP\s*)?(\d{3})(?:\s+status(?:\s+code)?)?/iu)?.[1]
     || raw.match(/status(?:\s+code)?\s*[:=]?\s*(\d{3})/iu)?.[1];
@@ -167,12 +183,14 @@ export const CN_VOICE_WORK_MESSAGES = {
   coordinatingTask: (task: string) => `还在继续，正在并行处理${task || '这个任务'}。`,
   continuingTask: (task: string) => `还在继续处理${task || '这个任务'}，没有停。`,
   modelRoutesUnavailable: '当前配置的模型暂时都不可用，这次处理没有完成。检查模型服务或余额后，可以直接重试。',
+  privacyRestricted: '严格模式已停用云端 AI 和自动工具。请选用已就绪的本地模型；如果要恢复官网 API，请到“设置 → 隐私与安全”关闭严格模式，并完全退出后重新启动主程序。',
   processingFailed: '这次没有完成处理，已经停止，你可以直接继续说。',
   processingTimedOut: '这次处理超时，已经停止，不会在后台继续。',
 } as const;
 
 export const CN_TASK_EXECUTION_MESSAGES = {
   persistenceUnknown: '本轮最终状态未能可靠保存，我没有把它标记为完成。若刚才涉及外部操作，请先核对实际结果后再重试。',
+  cancellationOutcomeUnknown: '已停止继续执行，已完成的步骤会保留。但还有已开始的操作未返回可靠结果，请先核对实际情况后再重试。',
   noResumableTask: '现在没有可续接的工作任务。',
   goalWithCurrentStep: (goal: string, step: string) => `${goal}；当前步骤：${step}`,
   completed: (goal: string, receiptCount: number) => `“${goal}”已完成${receiptCount ? `，已核对${receiptCount}个执行回执` : ''}。`,
@@ -246,6 +264,9 @@ export const CN_TASK_EXECUTION_MESSAGES = {
 } as const;
 
 export const CN_RESULT_GROUNDING_MESSAGES = {
+  artifactSavedReadback: (path: string) => `已保存并回读文件：${path}`,
+  artifactReadbackHeading: '回读结果：',
+  artifactReadbackExcerpt: (limit: number) => `这里只展示回读内容的前 ${limit} 个字符。`,
   desktopObservationLabel: '桌面状态读取',
   priorDiagnosticUnsupported: '刚才没有可核实的客户端自检工具回执。我不能把延迟解释成“在跑自检”；只能确认那一轮没有记录到客户端自检。',
   clientStateProtocolBlocked: '我还没有读取到当前客户端状态，不能把内部工具请求当作回答。',

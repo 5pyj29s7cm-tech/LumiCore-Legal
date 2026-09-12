@@ -34,7 +34,6 @@ import { getAdapterResilienceSnapshot } from '../adapter_resilience';
 import { getCurrentIndustryCapabilityProfile } from '../../regions/packs/cn/industry_capability_profile';
 
 const ACTIONS = Array.from(new Set([
-  'set_client_mode',
   'close_client_surface',
   'focus_home',
   'enter_widget_mode',
@@ -401,8 +400,8 @@ export function registerClientSelfTools(registry: ToolRegistry): void {
         },
         mode: {
           type: 'string',
-          enum: ['meeting', 'chat', 'assistant', 'autonomous'],
-          description: 'Target Lumi mode for set_client_mode.',
+          enum: ['meeting', 'assistant'],
+          description: 'Legacy capture-state compatibility field. Use start_meeting_mode/end_meeting_mode for capture; Lumi has no operation mode selector.',
         },
         task: {
           type: 'string',

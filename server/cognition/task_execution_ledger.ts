@@ -25,6 +25,16 @@ export type ConversationTaskStatus =
   | 'failed'
   | 'cancelled';
 
+/** An archive shares receipt storage, while its delegated owner owns execution. */
+export function isDelegatedActionEvidenceArchive(task: { id?: string; context?: unknown }): boolean {
+  let context: any = task.context;
+  if (typeof context === 'string') {
+    try { context = JSON.parse(context); } catch { return false; }
+  }
+  return context?.executionOwner === 'work_takeover'
+    && typeof task.id === 'string' && context?.ownerTaskId === task.id;
+}
+
 export const CONVERSATION_TASK_STATUSES = [
   'created',
   'planning',
@@ -73,6 +83,13 @@ export interface ConversationTaskPolicySnapshot {
 
 export interface ConversationTaskReceipt {
   id: string;
+  taskId?: string;
+  turnId?: string;
+  requestId?: string;
+  /** Preserve the exact archive deduplication identity across task hydration. */
+  idempotencyKey?: string;
+  /** Preserve conflicting source fences instead of laundering them on hydration. */
+  scopeConflict?: true;
   key: string;
   name: string;
   arguments: Record<string, unknown>;
@@ -259,6 +276,9 @@ export function normalizeConversationTaskReceipt(value: unknown): ConversationTa
   if (!name || !key) return null;
   return {
     id: compact(candidate.id, 180) || key,
+    ...receiptScope(candidate),
+    ...(typeof candidate.idempotencyKey === 'string' && candidate.idempotencyKey
+      ? { idempotencyKey: candidate.idempotencyKey } : {}),
     key,
     name,
     arguments: candidate.arguments && typeof candidate.arguments === 'object' && !Array.isArray(candidate.arguments)
@@ -282,6 +302,21 @@ export function normalizeConversationTaskReceipt(value: unknown): ConversationTa
     capability: cloneCapability(candidate.capability),
     recordedAt: compact(candidate.recordedAt, 80) || new Date(0).toISOString(),
   };
+}
+
+function receiptScope(value: Record<string, any>): {
+  taskId?: string; turnId?: string; requestId?: string; scopeConflict?: true;
+} {
+  const scope: { taskId?: string; turnId?: string; requestId?: string; scopeConflict?: true } = {};
+  for (const field of ['taskId', 'turnId', 'requestId'] as const) {
+    const values = [value[field], value.envelope?.[field]]
+      .filter(candidate => typeof candidate === 'string' && candidate.trim())
+      .map(candidate => candidate.trim());
+    if (values.length) scope[field] = values[0].slice(0, 180);
+    if (new Set(values).size > 1 || values.some(value => value.length > 180)) scope.scopeConflict = true;
+  }
+  if (value.scopeConflict === true || value.receiptScopeConflict === true) scope.scopeConflict = true;
+  return scope;
 }
 
 function parseResult(value: unknown): unknown {
@@ -319,6 +354,10 @@ export function toolRecordSucceeded(record: ToolExecutionRecord): boolean {
     const ignoredFalseFields = /^(?:wps_create_document|wps_create_document_with_text)$/i.test(record.name)
       ? new Set<string>(['saved'])
       : new Set<string>();
+    const declaredProgress = record.terminalVerification?.status === 'verified'
+      && record.capability?.verification.successStatuses?.includes(status)
+      && ['started', 'queued', 'running', 'waiting_confirmation', 'paused'].includes(status);
+    if (declaredProgress) ignoredFalseFields.add('completed');
     const explicitlyFailedOutcome = SEMANTIC_FALSE_FIELDS.some(field => (
       !ignoredFalseFields.has(field) && payload[field] === false
     ));
@@ -331,7 +370,7 @@ export function toolRecordSucceeded(record: ToolExecutionRecord): boolean {
       payload.ok === false
       || payload.success === false
       || payload.failed === true
-      || payload.completed === false
+      || payload.completed === false && !declaredProgress
       || payload.verified === false
       || explicitlyFailedOutcome
       || payload.completionMarkerExists === false
@@ -366,6 +405,12 @@ export function toolRecordKey(record: Pick<ToolExecutionRecord, 'name' | 'argume
   return `${compact(record.name, 160)}:${args}`;
 }
 
+function hasPlaybackObservation(record: Pick<ToolExecutionRecord, 'name' | 'result' | 'receipt'>): boolean {
+  const payload = record.name === 'computer_use' ? toolRecordTerminalPayload(record) : null;
+  return Boolean(payload && typeof payload === 'object' && !Array.isArray(payload)
+    && Object.prototype.hasOwnProperty.call(payload, 'playbackVerification'));
+}
+
 /**
  * A retry is one logical step. Once the same tool with the same arguments
  * succeeds, an earlier precondition/transport failure must not poison the
@@ -380,6 +425,14 @@ export function coalesceToolExecutionRecords(
   for (const record of records) {
     if (!record?.name) continue;
     const key = toolRecordKey(record);
+    if (hasPlaybackObservation(record)) {
+      // A new capture can supersede earlier playback, including an ad, pause
+      // or unreadable progress. Preserve runtime observation order instead of
+      // treating the new protocol as a retry of an immutable write operation.
+      latestIndexByKey.set(key, output.length);
+      output.push(record);
+      continue;
+    }
     const previousIndex = latestIndexByKey.get(key);
     if (previousIndex === undefined) {
       latestIndexByKey.set(key, output.length);
@@ -493,6 +546,9 @@ export function recordsToTaskReceipts(
       : null;
     return ({
     id: compact(record.id, 180) || `receipt_${Date.now()}_${index}`,
+    ...receiptScope(record),
+    ...(typeof record.idempotencyKey === 'string' && record.idempotencyKey
+      ? { idempotencyKey: record.idempotencyKey } : {}),
     key: toolRecordKey(record),
     name: compact(record.name, 160),
     arguments: stableValue(record.arguments || {}) as Record<string, unknown>,
@@ -531,10 +587,14 @@ export function mergeTaskReceipts(
   const order: string[] = [];
   for (const receipt of [...previous, ...recordsToTaskReceipts(records, recordedAt)]) {
     if (!receipt?.key || !receipt.name) continue;
-    if (!merged.has(receipt.key)) order.push(receipt.key);
-    const prior = merged.get(receipt.key);
+    const playback = hasPlaybackObservation(receipt);
+    const mergeKey = playback
+      ? JSON.stringify(['playback', receipt.requestId || '', receipt.taskId || '', receipt.id || receipt.key])
+      : receipt.key;
+    if (!merged.has(mergeKey)) order.push(mergeKey);
+    const prior = merged.get(mergeKey);
     const rank = { failure: 0, partial: 1, success: 2 } as const;
-    if (!prior || rank[receipt.outcome] >= rank[prior.outcome]) merged.set(receipt.key, receipt);
+    if (playback || !prior || rank[receipt.outcome] >= rank[prior.outcome]) merged.set(mergeKey, receipt);
   }
   return order
     .map(key => merged.get(key))
@@ -548,6 +608,11 @@ export function taskReceiptsToRecords(receipts: ConversationTaskReceipt[] = []):
     if (!receipt) return null;
     return {
     id: receipt.id,
+    ...(receipt.taskId ? { taskId: receipt.taskId } : {}),
+    ...(receipt.turnId ? { turnId: receipt.turnId } : {}),
+    ...(receipt.requestId ? { requestId: receipt.requestId } : {}),
+    ...(receipt.idempotencyKey ? { idempotencyKey: receipt.idempotencyKey } : {}),
+    ...(receipt.scopeConflict ? { receiptScopeConflict: true } : {}),
     name: receipt.name,
     arguments: receipt.arguments || {},
     result: receipt.result || '',
@@ -567,6 +632,7 @@ export function taskCompletionFromReceipts(
   goal: string,
   receipts: ConversationTaskReceipt[] = [],
   taskCapsule?: TaskCapsuleV1 | null,
+  currentTurn?: { requestId?: string; taskId?: string },
 ): { complete: boolean; blocker: string; records: ToolExecutionRecord[] } {
   const records = coalesceToolExecutionRecords(taskReceiptsToRecords(receipts));
   const contract = buildActionEvidenceContract(goal);
@@ -577,7 +643,7 @@ export function taskCompletionFromReceipts(
     record.name === 'wps_create_document' && toolRecordSucceeded(record)
   ));
   const complete = contract.applies
-    ? hasCoreActionEvidence(contract, records, goal, taskCapsule) || legacyVerifiedWpsCreate
+    ? hasCoreActionEvidence(contract, records, goal, taskCapsule, currentTurn) || legacyVerifiedWpsCreate
     : records.some(toolRecordVerifiedForCompletion);
   const failures = [...records].reverse().filter(record => !toolRecordSucceeded(record));
   // A later policy/routing rejection is useful diagnostic evidence, but it
