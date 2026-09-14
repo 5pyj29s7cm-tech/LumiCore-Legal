@@ -19,15 +19,15 @@ use tauri::{
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-mod local_bootstrap;
 mod backend_shutdown;
-mod desktop_command_supervisor;
 mod desktop_command_ipc;
+mod desktop_command_supervisor;
+mod local_bootstrap;
 use desktop_command_supervisor::{CommandExecution, CommandSupervisor};
 mod native_identity;
 mod window_activation;
-use local_bootstrap::bootstrap_local_identity;
 use backend_shutdown::{request_backend_save, ShutdownBarrier};
+use local_bootstrap::bootstrap_local_identity;
 use native_identity::get_native_client_identity;
 use window_activation::{execute_window_activation_steps, WindowActivationOps};
 
@@ -1278,16 +1278,28 @@ fn terminate_command_tree(child: &mut Child) {
     {
         // run_command creates a separate process group so descendants are
         // included instead of leaving a shell's child running after cancel.
-        let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
     let _ = child.kill();
     let _ = child.wait();
 }
 
-
-fn run_command_blocking(command: String, cwd: Option<String>, timeout_ms: Option<u64>, execution: &CommandExecution) -> CommandResult {
-    if execution.is_cancelled() { return CommandResult { success: false, output: "Command cancelled before native dispatch.".into() }; }
+fn run_command_blocking(
+    command: String,
+    cwd: Option<String>,
+    timeout_ms: Option<u64>,
+    execution: &CommandExecution,
+) -> CommandResult {
+    if execution.is_cancelled() {
+        return CommandResult {
+            success: false,
+            output: "Command cancelled before native dispatch.".into(),
+        };
+    }
     let now = SystemTime::now();
     let truncated: String = if command.chars().count() > 500 {
         let head: String = command.chars().take(500).collect();
@@ -1382,7 +1394,14 @@ fn run_command_blocking(command: String, cwd: Option<String>, timeout_ms: Option
                     Ok(None) if execution.is_cancelled() => {
                         cancelled = true;
                         terminate_command_tree(&mut child);
-                        break child.try_wait().and_then(|status| status.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "[outcome_unknown] Cancellation could not confirm process exit")));
+                        break child.try_wait().and_then(|status| {
+                            status.ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    "[outcome_unknown] Cancellation could not confirm process exit",
+                                )
+                            })
+                        });
                     }
                     Ok(None) if Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(50))
@@ -1401,7 +1420,12 @@ fn run_command_blocking(command: String, cwd: Option<String>, timeout_ms: Option
                     }
                     Err(error) => {
                         terminate_command_tree(&mut child);
-                        break Err(std::io::Error::new(std::io::ErrorKind::Other, format!("[outcome_unknown] Command exit could not be verified: {error}")));
+                        break Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!(
+                                "[outcome_unknown] Command exit could not be verified: {error}"
+                            ),
+                        ));
                     }
                 }
             };
@@ -1423,7 +1447,9 @@ fn run_command_blocking(command: String, cwd: Option<String>, timeout_ms: Option
                     timeout.as_millis()
                 ));
             }
-            if cancelled { combined.push_str("\n[Command cancelled; native process exit confirmed]"); }
+            if cancelled {
+                combined.push_str("\n[Command cancelled; native process exit confirmed]");
+            }
             status.map(|status| (status.success() && !timed_out && !cancelled, combined))
         }
         Some(Err(error)) => Err(error),
@@ -1518,8 +1544,6 @@ fn spawn_hidden(cmd: &mut Command) -> std::io::Result<Child> {
     cmd.stderr(std::process::Stdio::null());
     cmd.spawn()
 }
-
-
 
 #[cfg(target_os = "windows")]
 #[derive(Clone)]
@@ -2027,7 +2051,11 @@ mod app_query_tests {
     #[test]
     fn bilingual_search_finds_the_same_known_application_once() {
         let definitions = windows_app_definitions();
-        for query in ["计算器 Calculator", "计算器 / Calculator", "Calculator（计算器）"] {
+        for query in [
+            "计算器 Calculator",
+            "计算器 / Calculator",
+            "Calculator（计算器）",
+        ] {
             let matches = search_app_definitions(query, &definitions);
             assert_eq!(matches.len(), 1, "query: {query}");
             assert_eq!(matches[0].app_id, "calculator");
@@ -2077,7 +2105,10 @@ mod app_query_tests {
     fn empty_or_unrelated_search_terms_do_not_match_every_application() {
         let definitions = windows_app_definitions();
         for query in ["", "  ", " / | （） ", "c", "CalculatorHelper"] {
-            assert!(search_app_definitions(query, &definitions).is_empty(), "query: {query}");
+            assert!(
+                search_app_definitions(query, &definitions).is_empty(),
+                "query: {query}"
+            );
         }
     }
 }
@@ -2414,7 +2445,10 @@ fn search_app_definitions<'a>(
     let terms: Vec<_> = query
         .split(|ch: char| {
             ch.is_whitespace()
-                || matches!(ch, '/' | ',' | '，' | '、' | ';' | '；' | '|' | '(' | ')' | '（' | '）')
+                || matches!(
+                    ch,
+                    '/' | ',' | '，' | '、' | ';' | '；' | '|' | '(' | ')' | '（' | '）'
+                )
         })
         .filter(|term| !term.is_empty())
         .take(16)
@@ -2425,7 +2459,11 @@ fn search_app_definitions<'a>(
     // and target verification stay with the existing open/execute boundary.
     definitions
         .iter()
-        .filter(|def| terms.iter().any(|term| app_query_matches_definition(term, def)))
+        .filter(|def| {
+            terms
+                .iter()
+                .any(|term| app_query_matches_definition(term, def))
+        })
         .collect()
 }
 
@@ -4125,7 +4163,8 @@ fn request_app_exit(app: &tauri::AppHandle) {
 #[tauri::command]
 async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || save_before_app_exit(&app))
-        .await.map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
