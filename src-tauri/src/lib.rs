@@ -1396,8 +1396,7 @@ fn run_command_blocking(
                         terminate_command_tree(&mut child);
                         break child.try_wait().and_then(|status| {
                             status.ok_or_else(|| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::Other,
+                                std::io::Error::other(
                                     "[outcome_unknown] Cancellation could not confirm process exit",
                                 )
                             })
@@ -1420,12 +1419,9 @@ fn run_command_blocking(
                     }
                     Err(error) => {
                         terminate_command_tree(&mut child);
-                        break Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!(
-                                "[outcome_unknown] Command exit could not be verified: {error}"
-                            ),
-                        ));
+                        break Err(std::io::Error::other(format!(
+                            "[outcome_unknown] Command exit could not be verified: {error}"
+                        )));
                     }
                 }
             };
