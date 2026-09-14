@@ -21,6 +21,12 @@ import { hasCurrentMemoryEmbedding, invalidateMemoryEmbedding } from '../server/
 import { createRequestAbortController } from '../server/http/request_abort';
 import { buildKnowledgeIngestionManifest, evaluateKnowledgeManifest, hashKnowledgeContent } from '../server/knowledge/ingestion_manifest';
 import { getDataPath, getGeneratedOutputDir } from '../server/config/data_path';
+import { collectChatArtifacts } from '../server/conversation/chat_artifacts';
+import { sameArtifactPath } from '../server/tools/artifact_evidence';
+import { readDocumentPreview } from '../server/files/document_preview';
+import { getPersonalKnowledgeDirectory } from '../server/files/knowledge_directory';
+import { listGeneratedArchive, reconcileGeneratedArchive, mutateGeneratedArchiveFile, registerGeneratedKnowledgeFile } from '../server/files/generated_archive';
+import { streamLocalFile } from '../server/files/stream_local_file';
 import {
   requireAdmin as requireUnifiedAdmin,
   requireAuth as requireUnifiedAuth,
@@ -109,6 +115,9 @@ function formatSize(bytes: number): string {
 }
 
 interface KnowledgeEntry {
+  archiveId?: string;
+  archiveKind?: string;
+  sourceConversationId?: string;
   id: string;
   name: string;
   displayName: string;
@@ -353,7 +362,7 @@ const RTF_KNOWLEDGE_EXTS = /\.rtf$/i;
 const EXTRACTABLE_KNOWLEDGE_EXTS = /\.(docx|xlsx|xls|pptx|pdf)$/i;
 const IMAGE_KNOWLEDGE_EXTS = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
 const AUDIO_KNOWLEDGE_EXTS = AUDIO_FILE_EXTS;
-const GENERATED_FILE_EXTS = /\.(docx?|pptx?|xlsx?|pdf|txt|md|csv|json|png|jpe?g|webp|gif|svg|html|dxf|dwg|mp4|mov)$/i;
+const GENERATED_FILE_EXTS = /\.(docx?|pptx?|xlsx?|pdf|txt|md|csv|tsv|json|png|jpe?g|webp|gif|bmp|svg|html|dxf|dwg|mp4|mov|m4v|webm|mp3|wav|m4a|ogg|flac|aac|rtf|log|xml|yaml|yml|css|js|ts|tsx|jsx|py)$/i;
 const OBSIDIAN_NOTE_EXTS = /\.(md|markdown)$/i;
 const OBSIDIAN_MAX_NOTE_BYTES = Math.max(256 * 1024, Number(process.env.OBSIDIAN_NOTE_MAX_BYTES || 5 * 1024 * 1024));
 const OBSIDIAN_DEFAULT_MAX_FILES = Math.max(50, Number(process.env.OBSIDIAN_SYNC_MAX_FILES || 500));
@@ -406,6 +415,9 @@ const DOWNLOAD_MIME_TYPES: Record<string, string> = {
   '.webm': 'audio/webm',
   '.mp4': 'video/mp4',
   '.mov': 'video/quicktime',
+  '.m4v': 'video/mp4',
+  '.bmp': 'image/bmp',
+  '.tsv': 'text/tab-separated-values',
   '.dxf': 'application/dxf',
   '.dwg': 'application/octet-stream',
 };
@@ -428,7 +440,7 @@ function isInsideRoot(filePath: string, root: string): boolean {
   return normalizedFile === normalizedRoot || normalizedFile.startsWith(normalizedRoot + path.sep.toLowerCase());
 }
 
-function resolveGeneratedDownloadPath(value: unknown): string {
+function resolveGeneratedDownloadPath(value: unknown, req?: Request): string {
   const rawInput = String(value || '').trim();
   const normalizedRawInput = rawInput.replace(/\\/g, '/');
   const raw = normalizedRawInput.startsWith('/lumi_output/')
@@ -454,6 +466,27 @@ function resolveGeneratedDownloadPath(value: unknown): string {
   }
   const generatedRoot = fs.realpathSync.native(getGeneratedOutputDir());
   const realPath = fs.realpathSync.native(resolved);
+  // Scope conversation links to actual server-owned output receipts, including
+  // files saved outside the shared output directory. Prose grants no access.
+  const conversationId = String(req?.query.conversationId || '').trim();
+  if (conversationId) {
+    const db = readDB();
+    const conv = (db.conversations || []).find((item: any) => item.id === conversationId && item.userId === req?.user?.uid);
+    const membershipMatches = conv && (!conv.orgId || conv.orgId === req?.user?.orgId);
+    const ownedOutput = membershipMatches && (db.interactions || []).some((item: any) =>
+      item.conversationId === conversationId && item.userId === req?.user?.uid
+      && (item.role === 'assistant' || Boolean(item.response))
+      && collectChatArtifacts(item.toolCalls, conversationId).some(artifact => sameArtifactPath(artifact.path, resolved)));
+    // Reject redirected symlinks/junctions, including a replaced output parent.
+    let redirected = false;
+    for (let entry = resolved; path.dirname(entry) !== entry; entry = path.dirname(entry)) {
+      if (fs.lstatSync(entry).isSymbolicLink()) { redirected = true; break; }
+    }
+    if (!ownedOutput || redirected) {
+      throw Object.assign(new Error('File is not a verified output of this conversation'), { status: 403 });
+    }
+    return realPath;
+  }
   if (!isInsideRoot(realPath, generatedRoot)) {
     const err: any = new Error('Generated file path is outside the generated-output directory');
     err.status = 403;
@@ -483,7 +516,11 @@ function resolveKnowledgeFilePath(req: Request, idValue: unknown): string {
     err.status = 404;
     throw err;
   }
-  return fs.realpathSync.native(filePath);
+  const realPath = fs.realpathSync.native(filePath);
+  if (!isInsideRoot(realPath, fs.realpathSync.native(scopeDir))) {
+    throw Object.assign(new Error('File path is outside allowed directories'), { status: 403 });
+  }
+  return realPath;
 }
 
 function openPathWithDefaultApp(filePath: string): Promise<void> {
@@ -859,25 +896,6 @@ function getRequestedDomain(req: Request): 'personal' | 'work' | null {
   return normalizeFileDomain(value);
 }
 
-function isPrimaryLocalOwner(userId: string): boolean {
-  const db = readDB();
-  const primaryAdmin = (db.users || []).find((user: any) => user?.role === 'admin');
-  return Boolean(primaryAdmin?.uid && primaryAdmin.uid === userId);
-}
-
-function getPersonalKnowledgeDirectory(userId: string): { dir: string; legacyPersonalOwner: boolean } {
-  // Preserve the original on-device owner's vault location. Any additional local
-  // account gets a separate directory so an organization member cannot enter a
-  // personal token context and see the host owner's files.
-  if (isPrimaryLocalOwner(userId)) {
-    return { dir: PERSONAL_KNOWLEDGE_DIR, legacyPersonalOwner: true };
-  }
-  const directoryId = crypto.createHash('sha256').update(userId).digest('hex').slice(0, 24);
-  const dir = path.join(PERSONAL_KNOWLEDGE_DIR, '_users', directoryId);
-  fs.mkdirSync(dir, { recursive: true });
-  return { dir, legacyPersonalOwner: false };
-}
-
 function assertLocalHostRequest(req: Request): void {
   const address = String(req.socket?.remoteAddress || '').toLowerCase();
   const loopback = address === '::1'
@@ -966,7 +984,19 @@ function metaMatchesScope(meta: any, scope: FileScope): boolean {
 }
 
 function findFileMeta(db: any, filename: string, scope: FileScope): any | undefined {
-  return (db.knowledgeFiles || []).find((m: any) => m.filename === filename && metaMatchesScope(m, scope));
+  const existing = (db.knowledgeFiles || []).find((m: any) => m.filename === filename && metaMatchesScope(m, scope));
+  const archived = listGeneratedArchive(scope).find(entry => entry.filename === filename);
+  if (!archived) return existing;
+  const meta = existing || { filename, agentIds: [], status: 'ready' };
+  Object.assign(meta, archiveFileMeta(archived));
+  if (!existing) { db.knowledgeFiles ||= []; db.knowledgeFiles.push(meta); }
+  return meta;
+}
+
+function archiveFileMeta(entry: ReturnType<typeof listGeneratedArchive>[number]) {
+  return { filename: entry.filename, displayName: entry.displayName, userId: entry.userId, domain: entry.domain,
+    orgId: entry.orgId, source: 'generated', archiveId: entry.id, archiveKind: entry.kind,
+    sourceConversationId: entry.sourceConversationId, createdAt: entry.createdAt };
 }
 
 function removeFileMeta(db: any, filename: string, scope: FileScope): void {
@@ -1795,7 +1825,7 @@ function sendRouteError(res: Response, err: any, fallbackStatus = 400): void {
 
 function buildEntry(filename: string, source: KnowledgeFileSource, agentIds: string[] = [], scope: FileScope, status?: KnowledgeStatus, meta?: any): KnowledgeEntry {
   const filePath = path.join(scope.dir, filename);
-  const displayName = repairFilename(filename);
+  const displayName = repairFilename(meta?.displayName || filename);
   let st: fs.Stats;
   try { st = fs.statSync(filePath); }
   catch { st = { size: 0, mtime: new Date(), birthtime: new Date() } as fs.Stats; }
@@ -1811,6 +1841,9 @@ function buildEntry(filename: string, source: KnowledgeFileSource, agentIds: str
     rawSize: st.size,
     type: 'file',
     source,
+    archiveId: meta?.archiveId,
+    archiveKind: meta?.archiveKind,
+    sourceConversationId: meta?.sourceConversationId,
     agentIds,
     status: status || (agentIds.length > 0 ? 'indexed' : 'ready'),
     extractionStatus: meta?.extractionStatus,
@@ -1988,6 +2021,14 @@ function getSourceBacklinks(db: any, scope: FileScope, filename: string): string
   return buildSourceBacklinkMap(scopedMeta, names).get(filename) || [];
 }
 
+router.post('/files/archive-generated', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const scope = getFileScope(req); assertKnowledgeWriteAccess(scope);
+    const result = await reconcileGeneratedArchive(scope);
+    res.json({ ok: true, ...result });
+  } catch (error: any) { sendRouteError(res, error); }
+});
+
 router.get('/files/list', requireAuth, (req: Request, res: Response) => {
   try {
     const scope = getFileScope(req);
@@ -2001,6 +2042,9 @@ router.get('/files/list', requireAuth, (req: Request, res: Response) => {
     }
 
     const entries = fs.readdirSync(scope.dir);
+    for (const entry of listGeneratedArchive(scope)) {
+      fileMeta[entry.filename] = { ...fileMeta[entry.filename], ...archiveFileMeta(entry) };
+    }
     const visibleNames = entries.filter(name => !name.startsWith('.') && !name.startsWith('_'));
     const backlinkMap = buildSourceBacklinkMap(fileMeta, visibleNames);
     const files: KnowledgeEntry[] = [];
@@ -2289,6 +2333,7 @@ router.post('/files/save', requireAuth, async (req: Request, res: Response) => {
     const filePath = path.join(scope.dir, safeName);
     fs.writeFileSync(filePath, contentText, 'utf-8');
     const assertSourceCurrent = captureKnowledgeSource(filePath);
+    await registerGeneratedKnowledgeFile(scope, safeName);
 
     const db = readDB();
     if (!db.knowledgeFiles) db.knowledgeFiles = [];
@@ -2366,47 +2411,21 @@ router.post('/files/save', requireAuth, async (req: Request, res: Response) => {
 });
 
 // ── GET /files/generated?path=... — download a generated work artifact ──
-router.get('/files/generated', requireUnifiedAuth, requireUnifiedAdmin, requireUnifiedLocalRequest, (req: Request, res: Response) => {
+router.get('/files/generated', requireUnifiedAuth, requireUnifiedAdmin, requireUnifiedLocalRequest, async (req: Request, res: Response) => {
   try {
     assertLocalHostRequest(req);
-    const filePath = resolveGeneratedDownloadPath(req.query.path);
+    const filePath = resolveGeneratedDownloadPath(req.query.path, req);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'");
+    if (req.query.preview === '1') return res.json(await readDocumentPreview(filePath));
     const fileName = path.basename(filePath);
     const mime = getDownloadMime(filePath);
     if (mime) res.setHeader('Content-Type', mime);
-    const inline = req.query.inline === '1';
+    const inline = req.query.inline === '1' && SAFE_INLINE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
     const disposition = inline ? 'inline' : 'attachment';
     res.setHeader('Content-Disposition', `${disposition}; filename*=UTF-8''${encodeURIComponent(fileName)}`);
-    const stats = fs.statSync(filePath);
-    if (mime?.startsWith('video/')) {
-      res.setHeader('Accept-Ranges', 'bytes');
-      const range = String(req.headers.range || '').trim();
-      if (range) {
-        const match = /^bytes=(\d*)-(\d*)$/i.exec(range);
-        const rawStart = match?.[1] || '';
-        const rawEnd = match?.[2] || '';
-        let start = rawStart ? Number(rawStart) : NaN;
-        let end = rawEnd ? Number(rawEnd) : NaN;
-        if (!rawStart && rawEnd) {
-          const suffixLength = Number(rawEnd);
-          start = Math.max(0, stats.size - suffixLength);
-          end = stats.size - 1;
-        } else if (rawStart && !rawEnd) {
-          end = stats.size - 1;
-        }
-        if (!match || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= stats.size) {
-          res.status(416).setHeader('Content-Range', `bytes */${stats.size}`);
-          return res.end();
-        }
-        end = Math.min(end, stats.size - 1);
-        res.status(206);
-        res.setHeader('Content-Range', `bytes ${start}-${end}/${stats.size}`);
-        res.setHeader('Content-Length', String(end - start + 1));
-        fs.createReadStream(filePath, { start, end }).pipe(res);
-        return;
-      }
-    }
-    res.setHeader('Content-Length', String(stats.size));
-    fs.createReadStream(filePath).pipe(res);
+    streamLocalFile(req, res, filePath, mime);
   } catch (err: any) {
     sendRouteError(res, err);
   }
@@ -2432,15 +2451,17 @@ router.post('/files/open', requireAuth, async (req: Request, res: Response) => {
 });
 
 // ── GET /files/download/:id — download or preview a file ──
-router.get('/files/download/:id', requireAuth, (req: Request, res: Response) => {
+router.get('/files/download/:id', requireAuth, async (req: Request, res: Response) => {
   try {
     const scope = getFileScope(req);
     const safeName = path.basename(req.params.id);
-    const filePath = path.join(scope.dir, safeName);
+    const filePath = resolveKnowledgeFilePath(req, req.params.id);
     if (!safeName || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
       return res.status(404).json({ error: 'File not found' });
     }
 
+    res.setHeader('Cache-Control', 'no-store');
+    if (req.query.preview === '1') return res.json(await readDocumentPreview(filePath));
     const ext = path.extname(safeName).toLowerCase();
     const mime = getDownloadMime(ext);
     res.setHeader('Content-Type', mime || 'application/octet-stream');
@@ -2452,9 +2473,10 @@ router.get('/files/download/:id', requireAuth, (req: Request, res: Response) => 
     if (inline) {
       res.setHeader('Content-Disposition', 'inline');
     } else {
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(repairFilename(safeName))}`);
+      const meta = findFileMeta(readDB(), safeName, scope);
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(repairFilename(meta?.displayName || safeName))}`);
     }
-    fs.createReadStream(filePath).pipe(res);
+    streamLocalFile(req, res, filePath, mime);
   } catch (err: any) {
     sendRouteError(res, err);
   }
@@ -2501,7 +2523,7 @@ router.delete('/files/delete/:id', requireAuth, async (req: Request, res: Respon
     const db = readDB();
     const meta = findFileMeta(db, safeName, scope);
     const removedMemoryCount = removeFileMemoryReferences(db, safeName, scope);
-    fs.unlinkSync(filePath);
+    await mutateGeneratedArchiveFile(scope, safeName);
     if (db.knowledgeFiles) {
       removeFileMeta(db, safeName, scope);
     }
@@ -2531,7 +2553,7 @@ router.post('/files/rename', requireAuth, async (req: Request, res: Response) =>
     if (!fs.existsSync(oldPath)) return res.status(404).json({ error: 'Not found' });
     if (fs.existsSync(newPath)) return res.status(409).json({ error: 'Name already taken' });
 
-    fs.renameSync(oldPath, newPath);
+    await mutateGeneratedArchiveFile(scope, path.basename(id), safeNewName);
 
     const db = readDB();
     const oldName = path.basename(id);

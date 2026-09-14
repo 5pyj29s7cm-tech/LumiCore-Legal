@@ -158,6 +158,10 @@ describe('scheduler stability', () => {
         requiresReconciliation: false,
         reconciliationResolution: 'accepted_unknown_outcome',
       });
+      const archived = readDB().settings.filter((setting: any) => setting.key.startsWith('scheduler_reconciliation_v1:'))
+        .map((setting: any) => JSON.parse(setting.value)).find((entry: any) => entry.taskId === taskId);
+      expect(archived).toMatchObject({ historicalStatus: 'unknown', replayed: false,
+        resolution: 'accepted_unknown_outcome', quarantineReason: expect.stringContaining('late result was discarded') });
     } finally {
       settle?.();
       scheduler.stop();
@@ -165,7 +169,9 @@ describe('scheduler stability', () => {
   });
 
   it('keeps non-cooperative handlers cancelling after stop until they truly settle', async () => {
-    const scheduler = new Scheduler();
+    // This exercises handler cancellation, not disk latency. Dedicated tests
+    // below cover admission/terminal durability failures and deadlines.
+    const scheduler = new Scheduler(async () => {});
     const taskId = `test_scheduler_stop_fence_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     let started!: () => void;
     let settle!: () => void;
@@ -423,6 +429,27 @@ describe('scheduler stability', () => {
     } finally {
       scheduler.stop();
     }
+  });
+
+  it('drains an already completed handler through its durable receipt during graceful shutdown', async () => {
+    let flushCount = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const scheduler = new Scheduler(async () => { if (++flushCount === 2) await gate; });
+    const task: ScheduledTask = { id: `graceful_receipt_${crypto.randomUUID()}`, cron: 'every_hour', lastRun: null,
+      executionClass: 'autonomous_orchestration', timeoutMs: 5000, handler: vi.fn(async () => null) };
+    scheduler.register(task);
+    const pending = (scheduler as any).runTask(task);
+    try {
+      await vi.waitFor(() => expect(flushCount).toBe(2));
+      scheduler.stop({ drainSettledHandlers: true });
+      expect(scheduler.listTasks()[0].requiresReconciliation).toBe(false);
+      release();
+      await pending;
+      expect(scheduler.listTasks()[0]).toMatchObject({ lastStatus: 'completed', running: false,
+        requiresReconciliation: false, nextRun: null, persistenceStatus: 'ok' });
+      expect(task.handler).toHaveBeenCalledOnce();
+    } finally { release(); await pending; scheduler.stop(); }
   });
 
   it('bounds delivery persistence, suppresses late emission, and records unknown outcome', async () => {
@@ -1027,7 +1054,7 @@ describe('scheduler stability', () => {
   });
 
   it('admits only one concurrent run for a task', async () => {
-    const scheduler = new Scheduler();
+    const scheduler = new Scheduler(async () => {});
     const taskId = `test_scheduler_concurrency_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     let release!: () => void;
     let started!: () => void;

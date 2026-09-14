@@ -2,6 +2,8 @@ import {
   classifyConversationActionFollowupIntent,
   conversationActionRequiresFreshConfirmationReview,
   isBlockedTaskRetryAcceptance,
+  isTaskPreparationContinuation,
+  isExplicitUnfinishedTaskContinuation,
   type ConversationActionContinuationState,
 } from './action_continuation';
 import { classifyTaskCapsuleTurn } from '../conversation/task_capsule';
@@ -98,6 +100,22 @@ export interface ActiveTaskRelationOptions {
   pendingAssistantOfferContext?: PendingAssistantOfferContext;
 }
 
+/** Preparation owns the accepted task binding; an earlier queue classification
+ * may have used a stale live pointer before restart hydration completed. */
+export function bindPreparedTaskMessageRelation(
+  resolution: ActiveTaskMessageResolution,
+  prepared: { kind: string; state: ConversationActionContinuationState | null },
+): ActiveTaskMessageResolution {
+  const state = prepared.state;
+  if (!state?.taskId) return resolution;
+  const recoveredContinuation = prepared.kind === 'resume' && resolution.taskRelation === 'new';
+  return { ...resolution,
+    ...(recoveredContinuation ? { relation: 'continue' as const, taskRelation: 'continue' as const,
+      feedback: 'continue' as const, operation: 'resume' as const, preservesRootGoal: true,
+      requiresRootVerification: false, reason: 'durable_task_resumed' } : {}),
+    binding: 'active_task', taskId: state.taskId, revision: state.revision, targetRequestId: state.activeRequestId };
+}
+
 // These are task-control utterances, not domain intents. Keeping them here
 // prevents every socket surface from inventing a different cancellation rule.
 // i18n-allow: multilingual task-control recognition; not user-visible copy.
@@ -124,7 +142,7 @@ const CONTINUE_ONLY_RE =
 // pending action or root-task verification.
 // i18n-allow: multilingual task-feedback recognition; not user-visible copy.
 const ACCEPT_ONLY_RE =
-  /^(?:(?:我)?(?:确认|同意|接受|批准|授权)(?:(?:这个|该|上述|当前|刚才的)?(?:操作|方案|修改|执行|权限扩张))?了?|(?:嗯|好|好的|可以|行|没问题|就这样|按这个做|开始吧)|(?:yes|ok|okay|confirmed?|approved?|accepted?|go\s+ahead|looks\s+good))[。！？.!?]*$/iu; // i18n-allow: multilingual task-feedback recognition; not user-visible copy.
+  /^(?:(?:我)?(?:确认|同意|允许|接受|批准|授权)(?:(?:这个|该|上述|当前|刚才的)?(?:操作|方案|修改|执行|权限扩张))?了?|(?:嗯|好|好的|可以|行|没问题|就这样|按这个做|开始吧)|(?:yes|ok|okay|confirmed?|approved?|accepted?|go\s+ahead|looks\s+good))[。！？.!?]*$/iu; // i18n-allow: multilingual task-feedback recognition; not user-visible copy.
 
 // A bare acknowledgement is conversational unless the durable state proves
 // that the immediately adjacent action is actually waiting for confirmation.
@@ -173,6 +191,8 @@ function feedbackKind(
     if (offeredConversationTaskId === currentConversationTaskId) return 'accept';
   }
   const normalizedIntent = normalizeActionIntent(normalized);
+  if (isTaskPreparationContinuation(normalized, state)) return 'continue';
+  if (isExplicitUnfinishedTaskContinuation(normalized, state)) return 'continue';
   if (isBlockedTaskRetryAcceptance(normalized, state)) return 'retry';
   // A runtime-work status query asks about Lumi's global execution ledger,
   // not the status of the adjacent conversation action. It must enter the

@@ -1,13 +1,16 @@
-import { withoutNegatedLookupClauses } from './normalized_action_intent';
+import { withoutNegatedLookupClauses, compositeNavigationInstructions } from './normalized_action_intent';
+import { classifyExternalCliIntent, isExternalCliDelegation, requestedCliProviders } from './external_cli_intent';
+import { verifiedExternalCliStatus } from './external_cli_status';
 import type { CapabilityLane, CapabilityOperation, ToolExecutionRecord } from '../tools/types';
-import { classifySkillAuthoringIntent, skillAuthoringTools } from '../skills/authoring_intent';
+import { classifySkillAuthoringIntent, skillAuthoringTools, executionBeforeWorkflowSave } from '../skills/authoring_intent';
 import { verifiedSkillAuthoringReceipt } from '../skills/authoring_receipt';
-import { artifactRecordMatchesTurn, isArtifactProducerRecord, resolveArtifactDelivery } from '../tools/artifact_evidence';
+import { artifactPathFromRecord, artifactRecordMatchesTurn, isArtifactProducerRecord, resolveArtifactDelivery } from '../tools/artifact_evidence';
 import { LEGAL_ENTRY_PREFERRED_TOOLS, isLegalEntryTurn, isRemoteLegalMessageTurn } from './legal_entry';
 import { hasExplicitNoToolInstruction, hasRequestedArtifactMutation, isInformationOnlyQuestion } from './tool_intent';
 import type { AcceptedTaskTarget } from '../conversation/task_target_anchor';
-import { preservedSourceOutputScope } from './artifact_write_scope';
-import { isVideoPlaybackRequest } from './media_intent';
+import { preservedSourceOutputScope, matchesRequestedArtifactOutput } from './artifact_write_scope';
+import { isMediaPauseRequest, isVideoPlaybackRequest } from './media_intent';
+import { buildClientDiagnosticPlan } from './client_diagnostic_result';
 import { parsePlaybackGoal, validatePlaybackVerification } from './playback_verification';
 import {
   buildDesktopObservationPlan,
@@ -54,6 +57,7 @@ export type LumiActionContractKind =
   | 'work_task'
   | 'external_ai_history'
   | 'external_ai_request'
+  | 'external_cli_status'
   | 'extension_registry'
   | 'legal_workspace'
   | 'legal_document'
@@ -61,6 +65,7 @@ export type LumiActionContractKind =
   | 'artifact_work';
 
 export interface LumiActionContract {
+  components?: Array<{ text: string; contract: LumiActionContract }>;
   applies: boolean;
   kind: LumiActionContractKind;
   label: string;
@@ -96,6 +101,7 @@ const ACTION_CAPABILITY_REQUIREMENTS: Partial<Record<LumiActionContractKind, Act
   work_task: [{ lanes: ['agents'], operations: ['create', 'observe', 'mutate'], terms: ['persistent', 'task', 'takeover', 'ledger', 'workflow'] }],
   external_ai_history: [{ lanes: ['agents'], operations: ['observe', 'create', 'mutate'], terms: ['external', 'ai', 'history', 'conversation', 'sync', 'authorization'] }],
   external_ai_request: [{ lanes: ['web', 'desktop'], operations: ['communicate', 'observe'], terms: ['external', 'ai', 'tool', 'answer', 'target'] }],
+  external_cli_status: [{ lanes: ['agents'], operations: ['observe'], terms: ['external', 'cli', 'status'] }],
   extension_registry: [{ lanes: ['system'], operations: ['observe', 'test', 'mutate'], terms: ['extension', 'registry', 'provider', 'plugin', 'compatibility', 'rollback'] }],
   legal_workspace: [{ lanes: ['industry'], operations: ['observe'], terms: ['legal', 'case', 'workspace', 'ledger', 'status'] }],
   legal_document: [{ lanes: ['industry', 'web', 'office'], terms: ['legal', 'law', 'case', 'citation', 'court', 'document'] }],
@@ -169,7 +175,7 @@ function extensionRegistryToolForAction(text: string): string | null {
 const CURRENT_TURN_ATTACHMENTS_RE = /(?:^|\r?\n)\s*##\s+Current Turn Attachments\b/i;
 const INJECTED_TASK_CONTEXT_RE = /(?:^|\r?\n)\s*##\s+(?:Current Turn Attachments|Recent action continuation context|Internal client-surface continuation context)\b/i;
 
-function extractPrimaryTaskText(input: string): string {
+export function extractPrimaryTaskText(input: string): string {
   const raw = String(input || '');
   const marker = INJECTED_TASK_CONTEXT_RE.exec(raw);
   if (!marker || marker.index <= 0) return raw;
@@ -303,6 +309,19 @@ export function extractSimpleDesktopOpenTarget(input: string): string {
     }
   }
   const text = compact(primary);
+  // Discourse before a standalone command does not add an account/login
+  // requirement. Preserve compound work: only non-action prefaces may be
+  // ignored, and never turn reported speech or a question into execution.
+  const clauses = text.split(/[，,；;。]/u).map(clause => clause.trim()).filter(Boolean); // i18n-allow: Spoken sentence boundaries.
+  if (clauses.length > 1 && clauses.slice(0, -1).every(clause => (
+    normalizeActionIntent(clause).kind === 'none'
+    && !/(?:读取|查看|检查|搜索|发送|创建|生成|绘制|画|保存|修改|删除|播放|登录|不要|别|如果|假设|说|问|为什么|怎么)|\b(?:read|check|search|send|create|draw|save|delete|play|login|if|said|say|ask|why|how)\b/iu.test(clause) // i18n-allow: Preserve action, negation, reported-speech and hypothetical prefixes.
+  ))) return extractSimpleDesktopOpenTarget(clauses[clauses.length - 1]);
+  // i18n-allow: Object-first launch instruction; exact single-clause input only.
+  if (/^(?:(?:请|请你|帮我)\s*)?(?:先\s*)?(?:把|将|用)\s*[^，,。；;\n]{1,80}?(?:先\s*)?(?:打开|启动|运行)(?:一下|吧)?[。！!\s]*$/iu.test(text)) {
+    const intent = normalizeActionIntent(text);
+    if (intent.kind === 'desktop_operation' && intent.operation === 'navigate' && intent.sideEffectClass === 'none') return compact(intent.target);
+  }
   // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
   const match = text.match(/^(?:(?:请|麻烦|请你|帮我|你帮我|给我|我要|我想)\s*)?(?:打开|启动|运行|开启|launch|open|start|run)\s*(?:程序|应用|app|软件)?\s*(?:一下)?\s*(.+?)[。！？.!?]*$/iu);
   if (!match) return '';
@@ -348,6 +367,7 @@ export function requiresVisualModelAvailabilityCheck(input: string): boolean {
  * is only preparation, and a generic key dispatch is not playback state. */
 export function requiresMediaPlaybackAction(input: string): boolean {
   const text = compact(extractPrimaryTaskText(input));
+  if (isMediaPauseRequest(text)) return false;
   if (isVideoPlaybackRequest(text)) return true;
   if (!text || /(?:AutoCAD|\bCAD\b|\u56de\u653e\u56fe\u7eb8|\u7ed8\u56fe\u56de\u653e)/iu.test(text)) return false;
   const mediaSurface = /(?:\u7f51\u6613\u4e91(?:\u97f3\u4e50)?|QQ\s*\u97f3\u4e50|\u9177\u72d7(?:\u97f3\u4e50)?|\u97f3\u4e50|\u6b4c\u66f2|\u6b4c\u5355)|\b(?:NetEase|CloudMusic|Spotify|Apple\s+Music|music|song|playlist|music\s+player)\b/iu.test(text);
@@ -988,6 +1008,15 @@ export function buildActionContract(input: string): LumiActionContract {
   const normalizedIntent = normalizeActionIntent(rawInput);
   const primaryTaskText = extractPrimaryTaskText(rawInput);
   if (hasExplicitNoToolInstruction(primaryTaskText || rawInput)) return NONE_CONTRACT;
+  const components = compositeNavigationInstructions(primaryTaskText || rawInput)
+    .map(item => ({ text: item.text, contract: buildActionContract(item.text) }));
+  if (components.length > 1) {
+    const primary = components.find(item => normalizeActionIntent(item.text).kind === 'desktop_operation')!.contract;
+    const all = <K extends 'preferredTools' | 'verificationTools' | 'requiredEvidence'>(key: K) => Array.from(new Set(components.flatMap(item => item.contract[key])));
+    return { ...primary, components, preferredTools: all('preferredTools'), verificationTools: all('verificationTools'),
+      requiredEvidence: all('requiredEvidence'), coreAction: components.map(item => item.contract.coreAction).join('; '),
+      nextStep: 'Complete every requested operation and verify each one. One successful operation does not complete the whole request.' };
+  }
   if (primaryTaskText && primaryTaskText.trim() !== rawInput.trim()) {
     const primaryContract = buildActionContract(primaryTaskText);
     if (
@@ -1003,7 +1032,42 @@ export function buildActionContract(input: string): LumiActionContract {
 
   const text = compact(withoutNegatedLookupClauses(rawInput));
   if (!text) return NONE_CONTRACT;
+  if (classifyExternalCliIntent(text) === 'inspect') {
+    return withDefaults({ kind: 'external_cli_status', label: 'External CLI availability check',
+      coreAction: 'Inspect the named local CLI installation and login/configuration; answer the capability question from that receipt.',
+      preparationIsNotCompletion: ['An unverified claim about the local installation'],
+      requiredEvidence: ['Verified current-turn external_cli_status receipt containing every requested provider'],
+      preferredTools: ['external_cli_status'], verificationTools: ['external_cli_status'],
+      nextStep: 'Report installed/readiness facts directly. No project directory or CLI task is required for this question.',
+      caution: 'A successful status check can report an unavailable CLI. It does not verify model quota or task execution.' });
+  }
+  if (isExternalCliDelegation(text)) {
+    return withDefaults({ kind: 'external_ai_request', label: 'External CLI task',
+      coreAction: 'Delegate the bounded task to the named CLI within the existing Lumi task and verify its returned result.',
+      preparationIsNotCompletion: ['CLI installed', 'CLI authenticated', 'process started', 'provider text without terminal success'],
+      requiredEvidence: ['external_cli_run successful terminal receipt, matching provider and current task', 'validate returned deliverables and source changes against the user request'],
+      preferredTools: ['external_cli_run', 'external_cli_status', 'external_cli_get_run'], verificationTools: ['external_cli_get_run'],
+      nextStep: 'Resume the exact Lumi runId for follow-ups; use existing task cancellation. Verify business correctness separately.',
+      caution: 'CLI settings and account are independent from Lumi model routing. Never claim completion for a timed-out, cancelled, or unverified run.' });
+  }
   const authoringIntent = classifySkillAuthoringIntent(rawInput);
+  const executionBeforeSave = executionBeforeWorkflowSave(rawInput);
+  if (executionBeforeSave) {
+    const execution = buildActionContract(executionBeforeSave);
+    const saveText = rawInput.slice(rawInput.indexOf(executionBeforeSave) + executionBeforeSave.length);
+    return withDefaults({ kind: 'skill_authoring', label: 'Execute and save workflow',
+      components: [
+        { text: executionBeforeSave, contract: execution },
+        { text: saveText, contract: buildActionContract(saveText) },
+      ],
+      coreAction: 'Execute and verify the explicit current task, then save its input-dependent workflow draft.',
+      preparationIsNotCompletion: ['saving a draft without performing the requested current task', 'performing the task without saving its executable workflow'],
+      requiredEvidence: [...execution.requiredEvidence, 'a verified current-turn workflow draft save receipt'],
+      preferredTools: [...execution.preferredTools, 'code_execution', ...skillAuthoringTools('save')],
+      verificationTools: [...execution.verificationTools, 'get_workflow'],
+      nextStep: 'Complete and verify the current task first, then save all calculations as executable steps bound to fresh inputs.',
+      caution: 'The separately requested current action is authorized; a skill description or past example alone is not.' });
+  }
   if (['generate', 'save', 'install', 'publish'].includes(authoringIntent)
     || authoringIntent === 'use' && /工作流|流程|\bworkflow\b/iu.test(rawInput)) { // i18n-allow: workflow execution intent recognition.
     return withDefaults({
@@ -1021,6 +1085,16 @@ export function buildActionContract(input: string): LumiActionContract {
   // a verified work_takeover_task_list receipt, so do not demand the unrelated
   // runtime_work_status tool in the final completion gate.
   if (isNamedPersistentWorkTaskStatusQuery(text)) return NONE_CONTRACT;
+  const diagnosticPlan = buildClientDiagnosticPlan(primaryTaskText || rawInput);
+  if (diagnosticPlan.length) {
+    const tools = diagnosticPlan.map(step => step.name);
+    return withDefaults({ kind: 'desktop_operation', label: 'Current Lumi runtime diagnostic',
+      coreAction: 'Inspect the current Lumi runtime state and explain its actual health findings.',
+      preparationIsNotCompletion: ['listing generic capabilities or unrelated business integrations'],
+      requiredEvidence: tools.map(name => `successful current-turn ${name} receipt`), preferredTools: tools, verificationTools: tools,
+      nextStep: 'Read all required runtime receipts, identify attention items, and distinguish optional disconnected integrations from core failures.',
+      caution: 'A task ledger snapshot alone does not verify client and backend health.' });
+  }
   // Runtime status/cancellation has its own exact ledger contract. Classify it
   // before the generic normalized status guard so a phrase such as
   // "background task progress" cannot be reduced to a no-tool status turn.
@@ -1315,6 +1389,13 @@ export function buildActionContract(input: string): LumiActionContract {
     });
   }
 
+  if (isMediaPauseRequest(text)) {
+    const contract = buildMediaPlaybackContract();
+    return { ...contract, label: 'Verified media pause',
+      coreAction: 'Pause the requested player and verify that its current playback state is paused.',
+      requiredEvidence: ['current-turn observation of the requested player with an explicit paused state'],
+      nextStep: 'Observe the player first; if it is already paused, stop. Otherwise pause once, then observe the paused state without toggling again.' };
+  }
   if (requiresMediaPlaybackAction(text)) {
     return buildMediaPlaybackContract();
   }
@@ -1632,6 +1713,9 @@ function requestedDesktopTargetAliases(target: string): string[] {
   }
   if (/(?:googlechrome|chrome|\u8c37\u6b4c\u6d4f\u89c8\u5668)/u.test(normalized)) {
     add('Google Chrome', 'chrome', 'chrome.exe', '\u8c37\u6b4c\u6d4f\u89c8\u5668'); // i18n-allow: Application alias used only for evidence matching.
+  }
+  if (/^(?:浏览器|默认浏览器|browser|defaultbrowser)$/iu.test(normalized)) { // i18n-allow: Generic browser evidence aliases; named browsers keep exact matching.
+    add('chrome.exe', 'msedge.exe', 'firefox.exe', 'Google Chrome', 'Microsoft Edge', 'Mozilla Firefox');
   }
   if (/(?:\u7f51\u6613\u4e91|netease|cloudmusic)/u.test(normalized)) {
     add('\u7f51\u6613\u4e91', '\u7f51\u6613\u4e91\u97f3\u4e50', 'NetEase Cloud Music', 'cloudmusic', 'cloudmusic.exe'); // i18n-allow: Application aliases used only for evidence matching.
@@ -2049,13 +2133,12 @@ function isPlaybackActuation(record: ToolExecutionRecord): boolean {
   return /(?:^|_)(?:media|music|audio)(?:_|.*_)(?:play|resume|control)(?:_|$)/i.test(name);
 }
 
-export function hasMediaPlaybackEvidence(
+function scopedMediaEvidence(
   records: ToolExecutionRecord[] = [],
-  taskText = '',
   currentTurn?: { requestId?: string; taskId?: string },
-): boolean {
+): ToolExecutionRecord[] {
   const scoped = Boolean(currentTurn?.requestId || currentTurn?.taskId);
-  const successful = records.filter(record => {
+  return records.filter(record => {
     if (scoped) {
       if ((record as ToolExecutionRecord & { receiptScopeConflict?: boolean }).receiptScopeConflict === true) return false;
       const requestIds = [record.requestId, record.envelope?.requestId].filter(Boolean);
@@ -2073,6 +2156,29 @@ export function hasMediaPlaybackEvidence(
     return expandSuccessfulRecords([record]).length > 0
       || Boolean(payload && Object.prototype.hasOwnProperty.call(payload, 'playbackVerification'));
   });
+}
+
+export function hasMediaPauseEvidence(records: ToolExecutionRecord[], taskText: string, currentTurn?: { requestId?: string; taskId?: string }): boolean {
+  const target = requestedMediaPlayerTarget(taskText);
+  let paused = false;
+  for (const record of scopedMediaEvidence(records, currentTurn)) {
+    if (!/^(?:desktop_ui_snapshot|ocr_screen|ocr_region|computer_vision|computer_use)$/i.test(record.name) || record.error) continue;
+    if (target && playbackPlayerMatch(record, target) !== true) continue;
+    const payload = parseRecordJson(record);
+    if (payload?.ok === false) continue;
+    const state = payload?.playback || payload;
+    const status = String(state?.playbackState || state?.playerState || '').toLowerCase();
+    if (status) { paused = status === 'paused' && state?.isPlaying !== true && state?.playing !== true; continue; }
+    const observed = playbackObservationText(record);
+    // i18n-allow: Observe an actual paused state, not a button label, plan, or negated state.
+    if (/(?:没有|尚未|还没|未能).{0,12}暂停|正在播放|播放中|\b(?:is playing|not paused)\b/iu.test(observed)) { paused = false; continue; }
+    if (/(?:当前|现在|已经|已).{0,12}(?:暂停|停止播放)|\b(?:is paused|playback (?:is )?paused)\b/iu.test(observed)) paused = true;
+  }
+  return paused;
+}
+
+export function hasMediaPlaybackEvidence(records: ToolExecutionRecord[] = [], taskText = '', currentTurn?: { requestId?: string; taskId?: string }): boolean {
+  const successful = scopedMediaEvidence(records, currentTurn);
   const requested = requestedPlaybackContent(taskText);
   let target = requestedMediaPlayerTarget(taskText);
   if (/^(?:音乐|歌曲?|播放器|视频|music|song|player|video)$/iu.test(target)) target = ''; // i18n-allow: Generic player labels.
@@ -3300,6 +3406,7 @@ export function hasCoreActionEvidence(
   acceptedTaskTarget?: AcceptedTaskTarget,
 ): boolean {
   if (!contract.applies) return true;
+  if (contract.components?.length) return contract.components.every(item => hasCoreActionEvidence(item.contract, records, item.text, taskCapsule, currentTurn, acceptedTaskTarget));
   if (contract.kind === 'skill_authoring') return Boolean(verifiedSkillAuthoringReceipt(taskText, records, currentTurn));
   const successful = expandSuccessfulRecords(records);
   const recoverableObservedOpen = contract.kind === 'desktop_operation'
@@ -3407,9 +3514,23 @@ export function hasCoreActionEvidence(
     }
     const current = successful.filter(record => artifactRecordMatchesTurn(record, currentTurn || {}));
     if (!hasRequestedArtifactPostWriteReadback(current, taskText)) return false;
-    return current.some(isArtifactProducerRecord);
+    return current.some(record => isArtifactProducerRecord(record) && matchesRequestedArtifactOutput(taskText, artifactPathFromRecord(record)));
   }
+  if (contract.kind === 'external_cli_status') return verifiedExternalCliStatus(taskText, records, currentTurn) !== null;
   if (contract.kind === 'external_ai_request') {
+    if (isExternalCliDelegation(taskText)) {
+      const requested = requestedCliProviders(taskText);
+      const providers = requested.length ? requested : ['codex', 'claude'];
+      const completed = (provider: string) =>
+        successful.some(record => {
+          const payload = parseRecordJson(record);
+          return record.name === 'external_cli_run' && record.terminalVerification?.status === 'verified'
+            && artifactRecordMatchesTurn(record, currentTurn || {}) && payload?.ok === true
+            && payload.status === 'completed' && payload.exitCode === 0 && Boolean(compact(payload.response))
+            && Boolean(payload.runId) && payload.provider === provider;
+        });
+      return requested.length ? providers.every(completed) : providers.some(completed);
+    }
     const hasSubmission = successful.some(record => {
       const payload = parseRecordJson(record);
       return record.name === 'desktop_ai_ask'
@@ -3456,6 +3577,14 @@ export function hasCoreActionEvidence(
     });
   }
   if (contract.kind === 'desktop_operation') {
+    if (contract.label === 'Current Lumi runtime diagnostic') {
+      return contract.verificationTools.every(name => successful.some(record => {
+        if (record.name !== name) return false;
+        const payload = parseRecordJson(record);
+        return Boolean(payload) && payload?.ok !== false && payload?.success !== false
+          && !/^(?:failed|error|blocked|denied|timeout|unavailable)$/.test(String(payload?.status || ''));
+      }));
+    }
     const clientIntent = normalizeActionIntent(taskText);
     if (clientIntent.kind === 'client_navigation' && clientIntent.clientAction) {
       return successful.some(record => {
@@ -3477,6 +3606,7 @@ export function hasCoreActionEvidence(
     if (requiresVisualModelAvailabilityCheck(taskText)) {
       return hasVisualModelAvailabilityEvidence(records);
     }
+    if (isMediaPauseRequest(taskText)) return hasMediaPauseEvidence(records, taskText, currentTurn);
     if (requiresMediaPlaybackAction(taskText)) {
       return hasMediaPlaybackEvidence(records, taskText, currentTurn);
     }

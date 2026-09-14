@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChatViewWorkRegistry } from '@/lib/chatViewWork';
+import { useGeneratedLibrary } from '@/hooks/useGeneratedLibrary';
+import { archivedMediaArtifacts } from '@/lib/generatedLibrary';
 import { ChatAttachmentUploads, type ChatUploadFailure, type ChatUploadKind, type ChatUploadSource } from '@/lib/chatAttachmentUploads';
 import { ChatAttachmentUploadStatus } from './ChatAttachmentUploadStatus';
 import { chatAttachmentCopy } from '../i18n/locales/chatAttachments';
@@ -8,10 +10,10 @@ import { saveFileResource } from '@/services/fileResource';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
 import { Send, Loader2, ArrowLeft, Ghost, Castle, Zap, Cpu, Sparkles, FileText, Mic, CheckCircle2, Square, ChevronDown, ChevronRight, XCircle, Copy, Check, Paperclip, Image as ImageIcon, Video, MessageCircle, Briefcase, User, ExternalLink, FolderOpen, Upload, Plus, History, CalendarClock, Trash2 } from 'lucide-react';
-import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeHighlight from 'rehype-highlight';
-import { safeMarkdownComponents } from '@/lib/externalNavigation';
+import { ChatFilePreview, type ChatPreviewFile } from './ChatFilePreview';
+import { ChatMessageMarkdown } from './ChatMessageMarkdown';
+import { chatArtifactKind, makeChatArtifact, type ChatArtifact } from '../../shared/chat_artifacts';
+import { legacyChatArtifacts } from '@/lib/chatArtifactLinks';
 import { projectAgentActivity } from '@/lib/agentStatusTruth';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -179,13 +181,7 @@ function makeChatMessageId(prefix = 'msg'): string {
 
 type ChatAttachment = ChatAttachmentReference;
 
-type GeneratedFileLink = {
-  id: string;
-  fileName: string;
-  path: string;
-  url: string;
-  kind: 'image' | 'video' | 'document' | 'deck' | 'sheet' | 'pdf' | 'cad' | 'file';
-};
+type GeneratedFileLink = ChatArtifact;
 
 type ChatSendOptions = {
   onRequestCreated?: (requestId: string) => void;
@@ -429,9 +425,6 @@ const CHAT_ATTACHMENT_ACCEPT = [
   '.txt,.md,.json,.csv,.pdf,.docx,.xlsx,.xls,.pptx,.ppt,.rtf,.ts,.tsx,.js,.jsx,.py,.html,.css,.yaml,.yml,.xml,.log',
 ].join(',');
 
-const GENERATED_FILE_EXTS = 'docx|pptx|xlsx|xls|pdf|txt|md|csv|json|png|jpe?g|webp|gif|svg|html|dxf|dwg|mp4|mov';
-const WINDOWS_GENERATED_FILE_RE = new RegExp(`[A-Za-z]:\\\\[^\\n\\r"'<>|]+?\\.(?:${GENERATED_FILE_EXTS})\\b`, 'gi');
-const LUMI_OUTPUT_FILE_RE = new RegExp(`/lumi_output/[^\\s\\])"'<>]+?\\.(?:${GENERATED_FILE_EXTS})\\b`, 'gi');
 const MEDIA_GENERATION_TOOL_NAMES = new Set(['generate_image', 'ai_edit_image', 'generate_video']);
 
 function isExpectedMediaGenerationTool(expectation: MediaGenerationExpectation, toolName: string): boolean {
@@ -488,51 +481,15 @@ function extractPersistedMediaArtifacts(message: any): MediaGenerationArtifact[]
 }
 
 function generatedFileKind(fileName: string): GeneratedFileLink['kind'] {
-  const lower = fileName.toLowerCase();
-  if (/\.(png|jpe?g|webp|gif|svg)$/i.test(lower)) return 'image';
-  if (/\.(mp4|mov)$/i.test(lower)) return 'video';
-  if (/\.pptx?$/i.test(lower)) return 'deck';
-  if (/\.xlsx?$/i.test(lower)) return 'sheet';
-  if (/\.pdf$/i.test(lower)) return 'pdf';
-  if (/\.(dxf|dwg)$/i.test(lower)) return 'cad';
-  if (/\.(docx?|txt|md|csv|json|html)$/i.test(lower)) return 'document';
-  return 'file';
+  return chatArtifactKind(fileName);
 }
 
-function buildGeneratedFileUrl(filePath: string): string {
-  if (filePath.startsWith('/lumi_output/')) return filePath;
-  return `/api/files/generated?path=${encodeURIComponent(filePath)}&inline=1`;
-}
-
-function extractGeneratedFiles(text: string): GeneratedFileLink[] {
+function extractGeneratedFiles(text: string, conversationId?: string): GeneratedFileLink[] {
   const canExposeFiles =
     /(?:Verified generated files|Generated and verified these files exist|Audio transcription result|Text file:|Output file:|Saved to:|已生成)/i.test(text || '');
   if (!canExposeFiles) return [];
 
-  const seen = new Set<string>();
-  const candidates = [
-    ...(text.match(WINDOWS_GENERATED_FILE_RE) || []),
-    ...(text.match(LUMI_OUTPUT_FILE_RE) || []),
-  ];
-
-  return candidates
-    .map(raw => raw.trim().replace(/[)\].,;，。；]+$/g, ''))
-    .filter(filePath => {
-      const key = filePath.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .map(filePath => {
-      const fileName = filePath.split(/[\\/]/).pop() || filePath;
-      return {
-        id: `generated-${filePath}`,
-        fileName,
-        path: filePath,
-        url: buildGeneratedFileUrl(filePath),
-        kind: generatedFileKind(fileName),
-      };
-    });
+  return legacyChatArtifacts(text, conversationId);
 }
 
 export function AgentChatPage({
@@ -876,11 +833,10 @@ export function AgentChatPage({
   const [conversationAttachments, setConversationAttachments] = useState<ChatAttachment[]>([]);
   const conversationAttachmentsRef = useRef<ChatAttachment[]>([]);
   const attachmentConversationIdRef = useRef('');
+  const [previewFile, setPreviewFile] = useState<ChatPreviewFile | null>(null);
   const [attachmentContextStorageKey, setAttachmentContextStorageKey] = useState('');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const nativeDropHandledAtRef = useRef(0);
-  const [knowledgeFiles, setKnowledgeFiles] = useState<FileEntry[]>([]);
-  const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearchingHistory, setIsSearchingHistory] = useState(false);
@@ -1125,6 +1081,7 @@ export function AgentChatPage({
   ) => {
     const nextConversationId = String(conversationId || '').trim();
     if (attachmentConversationIdRef.current !== nextConversationId) invalidateChatViewWork();
+    if (attachmentConversationIdRef.current !== nextConversationId) setPreviewFile(null);
     if (!nextConversationId) {
       attachmentConversationIdRef.current = '';
       setAttachmentContextStorageKey('');
@@ -1176,22 +1133,10 @@ export function AgentChatPage({
       : '';
     return `${path}${separator}domain=${encodeURIComponent(activeDomain)}${orgScope}`;
   }, [activeDomain, activeOrgId]);
-  const refreshKnowledgeFiles = useCallback(async () => {
-    setKnowledgeLoading(true);
-    try {
-      const res = await fetch(scopedFileUrl('/api/files/list'), { credentials: 'include' });
-      if (!res.ok) return;
-      const data = await res.json().catch(() => ({}));
-      const list = Array.isArray(data.files) ? data.files as FileEntry[] : [];
-      setKnowledgeFiles([...list].sort((a, b) =>
-        new Date(b.updatedAt || b.createdAt || 0).getTime() - new Date(a.updatedAt || a.createdAt || 0).getTime(),
-      ));
-    } catch {
-      // Knowledge status is a convenience surface; chat itself should stay usable.
-    } finally {
-      setKnowledgeLoading(false);
-    }
-  }, [scopedFileUrl]);
+  const { files: knowledgeFiles, loading: knowledgeLoading, failed: knowledgeFailed, refresh: refreshKnowledgeFiles } = useGeneratedLibrary(
+    JSON.stringify([user?.uid, activeDomain, activeOrgId]), scopedFileUrl,
+  );
+  const libraryMediaArtifacts = useMemo(() => archivedMediaArtifacts(knowledgeFiles, scopedFileUrl), [knowledgeFiles, scopedFileUrl]);
   const notifyKnowledgeUpdated = useCallback((files?: Array<{ id?: string; name?: string; displayName?: string }>) => {
     const detail: KnowledgeUpdateDetail = {
       domain: activeDomain,
@@ -1203,6 +1148,7 @@ export function AgentChatPage({
   }, [activeDomain, activeOrgId]);
 
   const isKnowledgeReady = useCallback((file: FileEntry) => {
+    if (file.archiveId) return true;
     const status = String(file.extractionStatus || file.status || '');
     if (status === 'indexed' || status === 'partial') return true;
     const targetAgentId = activeDomain === 'work' ? 'org-kb' : 'lumi';
@@ -1229,8 +1175,7 @@ export function AgentChatPage({
     const collected: GeneratedFileLink[] = [];
     for (const message of messages) {
       const text = getDisplayText(message);
-      if (!text) continue;
-      collected.push(...extractGeneratedFiles(text));
+      collected.push(...(message.fileArtifacts || []), ...extractGeneratedFiles(text, message.conversationId));
     }
 
     const seen = new Set<string>();
@@ -1249,6 +1194,7 @@ export function AgentChatPage({
       ...mediaSourceArtifacts,
       ...mediaGenerationArtifacts,
       ...messages.flatMap(message => Array.isArray(message?.mediaArtifacts) ? message.mediaArtifacts : []),
+      ...libraryMediaArtifacts,
     ].filter((artifact): artifact is MediaGenerationArtifact => artifact?.kind === 'image' && Boolean(artifact.url));
     const seen = new Set<string>();
     return collected.filter(artifact => {
@@ -1257,7 +1203,7 @@ export function AgentChatPage({
       seen.add(key);
       return true;
     }).slice(-24).reverse();
-  }, [mediaGenerationArtifacts, mediaSourceArtifacts, messages]);
+  }, [libraryMediaArtifacts, mediaGenerationArtifacts, mediaSourceArtifacts, messages]);
 
   const openNativeFilePath = useCallback(async (target?: string | null): Promise<boolean> => {
     if (platform !== 'tauri' || !target) return false;
@@ -1267,7 +1213,7 @@ export function AgentChatPage({
     return true;
   }, [platform]);
 
-  const openChatFile = useCallback(async (file: Pick<ChatFilePanelItem, 'fileName' | 'fileId' | 'path' | 'openUrl' | 'saveUrl'>) => {
+  const openChatFileInSystem = useCallback(async (file: Pick<ChatFilePanelItem, 'fileName' | 'fileId' | 'path' | 'openUrl' | 'saveUrl'>) => {
     const payload = file.fileId
       ? { id: file.fileId }
       : file.path
@@ -1320,6 +1266,13 @@ export function AgentChatPage({
     }
   }, [openNativeFilePath, scopedFileUrl]);
 
+  const openChatFile = useCallback(async (file: Pick<ChatFilePanelItem, 'fileName' | 'fileId' | 'path' | 'openUrl' | 'saveUrl'>) => {
+    const url = file.openUrl || file.saveUrl || (file.fileId
+      ? scopedFileUrl(`/api/files/download/${encodeURIComponent(file.fileId)}?inline=1`)
+      : file.path ? makeChatArtifact(file.path, attachmentConversationIdRef.current).url : '');
+    if (url) setPreviewFile({ fileName: file.fileName, path: file.path, url });
+  }, [scopedFileUrl]);
+
   const chatFileSections = useMemo(() => {
     const pending: ChatFilePanelItem[] = pendingAttachments.map(item => ({
       id: `pending-${item.id}`,
@@ -1336,16 +1289,23 @@ export function AgentChatPage({
       size: item.size,
     }));
 
-    const generated: ChatFilePanelItem[] = generatedChatFiles.map(file => ({
+    const archived: ChatFilePanelItem[] = knowledgeFiles.filter(file => file.archiveId).map(file => ({
+      id: `archived-${file.archiveId}`, fileId: file.id, fileName: file.displayName || file.name,
+      subtitle: uiMessage('agent-chat-page.generated-by-lumi.27ac470b2c'),
+      kind: chatArtifactKind(file.name), source: 'generated', path: file.path, size: file.rawSize,
+      openUrl: scopedFileUrl(`/api/files/download/${encodeURIComponent(file.id)}?inline=1`),
+      saveUrl: scopedFileUrl(`/api/files/download/${encodeURIComponent(file.id)}`),
+    }));
+    const generated: ChatFilePanelItem[] = [...archived, ...generatedChatFiles.filter(file => !archived.some(item => item.fileName === file.fileName)).map(file => ({
       id: `generated-panel-${file.id}`,
       fileName: file.fileName,
       subtitle: uiMessage('agent-chat-page.generated-by-lumi.27ac470b2c'),
       kind: file.kind,
-      source: 'generated',
+      source: 'generated' as const,
       path: file.path,
       openUrl: file.url,
       saveUrl: file.url,
-    }));
+    }))].slice(0, 12);
 
     const knowledge: ChatFilePanelItem[] = knowledgeFiles.slice(0, 12).map(file => {
       const fileName = file.displayName || file.name || file.id;
@@ -1410,7 +1370,11 @@ export function AgentChatPage({
   useEffect(() => {
     if (!socket || !isOpen || isFounder) return;
     socket.on('memories:changed', refreshKnowledgeFiles);
-    return () => { socket.off('memories:changed', refreshKnowledgeFiles); };
+    socket.on('chat:conversation_updated', refreshKnowledgeFiles);
+    return () => {
+      socket.off('memories:changed', refreshKnowledgeFiles);
+      socket.off('chat:conversation_updated', refreshKnowledgeFiles);
+    };
   }, [isFounder, isOpen, refreshKnowledgeFiles, socket]);
 
   useEffect(() => { agentNameRef.current = agentName; }, [agentName]);
@@ -1529,7 +1493,7 @@ export function AgentChatPage({
     const agentDisplayName = agentNameRef.current || 'Lumi';
 
     const pushMessage = (message: any) => {
-      if ((!message.text || !String(message.text).trim()) && !message.mediaArtifacts?.length) return;
+      if ((!message.text || !String(message.text).trim()) && !message.mediaArtifacts?.length && !message.fileArtifacts?.length) return;
       normalized.push(message);
     };
 
@@ -1561,7 +1525,7 @@ export function AgentChatPage({
       }
 
       const mediaArtifacts = extractPersistedMediaArtifacts(m);
-      if (assistantText || mediaArtifacts.length) {
+      if (assistantText || mediaArtifacts.length || m.fileArtifacts?.length) {
         const completionFeedback = normalizeTaskCompletionFeedback(m.completionFeedback);
         pushMessage({
           id: `${baseId}-assistant`,
@@ -1573,6 +1537,8 @@ export function AgentChatPage({
           ...(legacyExecutionReport ? { legacyExecutionReport: true } : {}),
           ...(completionFeedback ? { completionFeedback } : {}),
           ...(mediaArtifacts.length ? { mediaArtifacts } : {}),
+          fileArtifacts: m.fileArtifacts || [],
+          conversationId: m.conversationId,
         });
       }
     });
@@ -2038,6 +2004,7 @@ export function AgentChatPage({
       taskRelation?: unknown;
       completionFeedback?: unknown;
       artifactReceipt?: unknown;
+      fileArtifacts?: ChatArtifact[];
     }) => {
       if (!isCurrentChatEvent(data)) return;
       recordTaskRelation(data);
@@ -2066,9 +2033,10 @@ export function AgentChatPage({
         requestId,
         ...(responseOperation ? { operation: responseOperation } : {}),
       }));
+      const responseFileArtifacts = Array.isArray(data.fileArtifacts) ? data.fileArtifacts : [];
       setIsTyping(hasRemainingRequests);
 
-      const mediaReceiptDisplayable = responseMediaArtifacts.length > 0 && isFinalizedSuccessfulResponse(data);
+      const mediaReceiptDisplayable = (responseMediaArtifacts.length > 0 || responseFileArtifacts.length > 0) && isFinalizedSuccessfulResponse(data);
       const displayable = shouldDisplayAgentResponse(data) || mediaReceiptDisplayable;
       const deliveredText = sanitizeAgentResponseTextForDisplay(
         data.text?.trim() || (mediaReceiptDisplayable ? mediaGenerationText.mediaCompleted : ''),
@@ -2084,6 +2052,8 @@ export function AgentChatPage({
                   ...message,
                   ...(completionFeedback ? { completionFeedback } : {}),
                   ...(responseMediaArtifacts.length ? { mediaArtifacts: responseMediaArtifacts } : {}),
+                  fileArtifacts: responseFileArtifacts,
+                  conversationId: data.conversationId,
                 }
               : message
           )));
@@ -2100,6 +2070,8 @@ export function AgentChatPage({
           type: 'agent',
           ...(completionFeedback ? { completionFeedback } : {}),
           ...(responseMediaArtifacts.length ? { mediaArtifacts: responseMediaArtifacts } : {}),
+          fileArtifacts: responseFileArtifacts,
+          conversationId: data.conversationId,
         }]);
       }
       streamingRawTextRef.current.delete(streamKey);
@@ -3354,6 +3326,7 @@ export function AgentChatPage({
   ]);
 
   const openMediaGenerationStudio = useCallback((mode: MediaGenerationKind) => {
+    void refreshKnowledgeFiles();
     const activeRequest = activeMediaGenerationRef.current;
     mediaStudioOpenRef.current = true;
     if (activeRequest) {
@@ -3371,7 +3344,7 @@ export function AgentChatPage({
       setMediaGenerationDetail('');
     }
     setMediaStudioMode(mode);
-  }, []);
+  }, [refreshKnowledgeFiles]);
 
   const handleMediaSourceChange = useCallback((change: MediaGenerationSourceChange) => {
     const artifactId = change.artifact?.id || '';
@@ -3823,7 +3796,7 @@ export function AgentChatPage({
         kind: 'image',
         url: uploaded.id
           ? scopedFileUrl(`/api/files/download/${encodeURIComponent(String(uploaded.id))}?inline=1`)
-          : buildGeneratedFileUrl(sourcePath),
+          : scopedFileUrl(makeChatArtifact(sourcePath).url),
         path: sourcePath,
         fileName,
       };
@@ -4038,6 +4011,9 @@ export function AgentChatPage({
 
   return (
     <AnimatePresence>
+      {isOpen && previewFile && <ChatFilePreview key={previewFile.url} file={previewFile} isZh={isZh}
+        onClose={() => setPreviewFile(null)}
+        onOpenSystem={() => openChatFileInSystem({ fileName: previewFile.fileName, path: previewFile.path, openUrl: previewFile.url, saveUrl: previewFile.url })} />}
       {isOpen && (
         <motion.div
           data-lumi-rendered-surface={layout === 'command-center' ? 'command-center' : 'chat'}
@@ -4099,6 +4075,17 @@ export function AgentChatPage({
               status={mediaGenerationStatus}
               statusDetail={mediaGenerationDetail}
               artifacts={mediaGenerationArtifacts.filter(artifact => artifact.kind === mediaStudioMode)}
+              libraryArtifacts={libraryMediaArtifacts}
+              libraryLoading={knowledgeLoading}
+              libraryFailed={knowledgeFailed}
+              onRefreshLibrary={refreshKnowledgeFiles}
+              onReferenceArtifact={artifact => {
+                const result = appendPendingAttachments([createChatAttachmentReference({
+                  fileId: artifact.fileId, fileName: artifact.fileName, path: artifact.path,
+                  kind: artifact.kind === 'image' ? 'image' : 'file', openUrl: artifact.url,
+                })]);
+                if (result.added.length) closeMediaGenerationStudio();
+              }}
               sourceArtifacts={availableMediaSourceArtifacts}
               primaryImage={mediaPrimaryImage}
               referenceImages={mediaReferenceImages}
@@ -4703,7 +4690,10 @@ export function AgentChatPage({
                     ));
                     const embeddedImages = embeddedMedia.filter(artifact => artifact.kind === 'image');
                     const embeddedVideos = embeddedMedia.filter(artifact => artifact.kind === 'video');
-                    const generatedFiles = extractGeneratedFiles(messageText);
+                    const allFiles: ChatArtifact[] = [...(msg.fileArtifacts || []), ...extractGeneratedFiles(messageText, msg.conversationId)];
+                    const generatedFiles = allFiles.filter((file, index) =>
+                      !embeddedMedia.some(media => media.path === file.path)
+                      && allFiles.findIndex(other => other.path === file.path) === index);
                     if (embeddedMedia.length === 0 && generatedFiles.length === 0) return null;
                     return (
                       <div className="max-w-[85%] mb-1 space-y-2">
@@ -4778,9 +4768,9 @@ export function AgentChatPage({
                     }}
                   >
                     <div className={`markdown-body chat-message-markdown select-text ${msg.type === 'agent' ? 'chat-message-markdown-agent' : 'chat-message-markdown-user'}`}>
-                      <Markdown components={safeMarkdownComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                      <ChatMessageMarkdown conversationId={msg.conversationId || attachmentConversationIdRef.current} onPreview={setPreviewFile}>
                         {getCustomerDisplayText(msg, isZh)}
-                      </Markdown>
+                      </ChatMessageMarkdown>
                     </div>
                     {msg.type === 'agent' && msg.completionFeedback && (
                       <TaskCompletionFeedbackDetails

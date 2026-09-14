@@ -9,6 +9,7 @@ import { hasVisionIntent } from './vision_routing';
 import { normalizeActionIntent } from './normalized_action_intent';
 import { isReadOnlyKnowledgeBaseInspectionRequest } from './knowledge_intent';
 import { isVideoPlaybackRequest } from './media_intent';
+import { isExternalCliRequest } from './external_cli_intent';
 
 interface IntentGrammarRule {
   name: string;
@@ -116,6 +117,7 @@ function canonicalIntentOwnsNonClientAction(
   if (kind === 'desktop_operation') return EXTERNAL_APP_CONTEXT.test(text);
   return [
     'external_ai_history',
+    'external_cli_status',
     'messaging_read',
     'messaging_send',
     'public_publish',
@@ -126,6 +128,7 @@ function canonicalIntentOwnsNonClientAction(
     'media_generation',
     'scheduled_task',
     'work_task',
+    'workflow',
   ].includes(kind);
 }
 const SKILL_TERMS = /(?:\u6280\u80fd|\u6280\u80fd\u5927\u5385|\b(?:skill|skills|plugin|mcp)\b)/iu;
@@ -300,15 +303,22 @@ export function isClientRuntimeMutationRequest(text: string): boolean {
  * Keep this narrower than the general diagnostic lane: checking a file,
  * contract, or desktop image is work on that artifact, not a client self-check.
  */
+export function isCoordinatedClientHealthRequest(text: string): boolean {
+  // i18n-allow: Coordinated client/backend health subjects, not output text.
+  return /(?:检查|排查|诊断|看看|查看).{0,8}(?:客户端|前端|后端|后台)(?:(?:和|与|及|、)(?:客户端|前端|后端|后台))*(?:的)?(?:运行)?(?:状态|健康|是否正常)/u.test(text);
+}
+
 export function isCurrentClientDiagnosticRequest(text: string): boolean {
   const normalized = String(text || '').trim();
   if (!normalized) return false;
   if (PRIOR_CLIENT_DIAGNOSTIC_INQUIRY_RE.test(normalized)) return false;
+  if (/^(?:请|帮我)?(?:做一下|进行|执行|检查一下)?状态检查[。！!\s]*$/u.test(normalized)) return true; // i18n-allow: Standalone runtime status-check request.
 
   if (CLIENT_INTEGRATION_DIAGNOSTIC_RE.test(normalized)) return true;
   if (DIRECT_CLIENT_SELF_HEALTH_RE.test(normalized)) return true;
   const namesArtifact = CLIENT_SELF_DIAGNOSTIC_ARTIFACT_RE.test(normalized);
   if (namesArtifact && !EXPLICIT_SELF_DIAGNOSTIC_RUN_RE.test(normalized)) return false;
+  if (isCoordinatedClientHealthRequest(normalized)) return true;
   if (EXPLICIT_CLIENT_SELF_DIAGNOSTIC_RE.test(normalized)) return true;
 
   return CLIENT_SELF_DIAGNOSTIC_SUBJECT_RE.test(normalized)
@@ -461,6 +471,7 @@ export function hasExplicitToolIntent(text: string): boolean {
   const normalized = withoutNegatedLookupClauses(text).trim();
   if (!normalized) return false;
   if (hasExplicitNoToolInstruction(normalized)) return false;
+  if (isExternalCliRequest(normalized)) return true;
   if (isVideoPlaybackRequest(normalized)) return true;
   if (isExternalAiHistoryActionRequest(normalized)) return true;
   const canonical = normalizeActionIntent(normalized);

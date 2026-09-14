@@ -4,10 +4,16 @@
  * for repeatable patterns and triggers skill generation.
  */
 
+import { isTestLearningSource, isTestMemory } from '../memory/provenance';
+import { isDeepStrictEqual } from 'node:util';
+import { toolRecordIdempotencyKey } from '../tools/execution_envelope';
+
 export interface WorkflowStep {
   name: string;
   args: Record<string, any>;
   resultSummary: string;   // first 200 chars of tool result
+  /** Complete bounded result for exact dataflow matching; never infer from a preview. */
+  result?: string;
   verified?: boolean;
   operation?: string;
 }
@@ -23,10 +29,16 @@ export interface WorkflowRecord {
   orgId?: string;
   conversationId?: string;
   taskId?: string;
+  source?: string;
 }
 
 const recentWorkflows: WorkflowRecord[] = [];
 const MAX_WORKFLOWS = 50;
+
+/** Metadata probes are useful evidence, but do not constitute a reusable job. */
+export function isWorkflowBusinessTool(name: string): boolean {
+  return !/^(?:client_|list_skills$|skill_marketplace_|self_extension_plan$|capability_|external_control_candidates$|external_cli_(?:status|get_run)$|extension_registry_list$|list_directory$|(?:capture_recent|save|list|get|publish|delete|run)_workflow(?:s)?$)/u.test(name);
+}
 
 function generateId(): string {
   return `wf_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
@@ -34,13 +46,27 @@ function generateId(): string {
 
 /** Record a completed tool execution workflow */
 export function recordWorkflow(record: Omit<WorkflowRecord, 'id' | 'timestamp'>): WorkflowRecord {
+  const previousIndex = record.taskId ? recentWorkflows.findIndex(item => item.taskId === record.taskId
+    && item.userId === record.userId && item.conversationId === record.conversationId
+    && item.domain === (record.domain === 'work' ? 'work' : 'personal')
+    && item.orgId === (record.domain === 'work' ? (record.orgId || '') : '')) : -1;
+  const previous = previousIndex >= 0 ? recentWorkflows[previousIndex] : undefined;
+  const merged = new Map<string, WorkflowStep>();
+  for (const step of [...(previous?.toolSequence || []), ...record.toolSequence].filter(step => isWorkflowBusinessTool(step.name))) {
+    const key = toolRecordIdempotencyKey({ name: step.name, arguments: step.args, result: '' });
+    merged.set(key, step);
+  }
   const entry: WorkflowRecord = {
     id: generateId(),
     ...record,
+    userIntent: previous?.userIntent || record.userIntent,
+    toolSequence: [...merged.values()].slice(-40),
     domain: record.domain === 'work' ? 'work' : 'personal',
     orgId: record.domain === 'work' ? (record.orgId || '') : '',
     timestamp: new Date().toISOString(),
   };
+  if (!entry.toolSequence.length) return entry;
+  if (previousIndex >= 0) recentWorkflows.splice(previousIndex, 1);
   recentWorkflows.push(entry);
   if (recentWorkflows.length > MAX_WORKFLOWS) {
     recentWorkflows.shift();
@@ -62,18 +88,91 @@ export function getRecentWorkflows(userId?: string, domain?: string, orgId?: str
 }
 
 /** Capture is a scoped proposal, never an assertion that model-only reasoning is executable. */
+export function boundCapturedWorkflowSteps(record: WorkflowRecord): WorkflowStep[] | null {
+  const steps = record.toolSequence.map(step => ({ ...step, args: structuredClone(step.args) }));
+  const outputs: Array<{ ref: string; value: unknown; reader: boolean }> = [];
+  const same = (a: unknown, b: unknown) => a !== undefined && b !== undefined && isDeepStrictEqual(a, b);
+  let sawReader = false;
+  let sawCalculation = false;
+  const bindInput = (value: unknown): { value: unknown; matched: boolean } => {
+    const match = [...outputs].reverse().find(output => same(output.value, value));
+    if (match) return { value: { $stepOutputRef: match.ref }, matched: true };
+    if (!value || typeof value !== 'object') return { value, matched: false };
+    const entries = Object.entries(value).map(([key, child]) => [key, bindInput(child)] as const);
+    return { value: Array.isArray(value) ? entries.map(([, child]) => child.value)
+      : Object.fromEntries(entries.map(([key, child]) => [key, child.value])),
+    matched: entries.some(([, child]) => child.matched) };
+  };
+  const addOutput = (ref: string, value: unknown, depth = 0): void => {
+    outputs.push({ ref, value, reader: false });
+    if (depth >= 6 || !value || typeof value !== 'object') return;
+    for (const [key, child] of Object.entries(value)) {
+      // Typed workflow paths use dot-separated safe property names only.
+      if (/^(?:[A-Za-z_][A-Za-z0-9_]*|\d+)$/.test(key)
+        && !['__proto__', 'constructor', 'prototype'].includes(key)) addOutput(`${ref}.${key}`, child, depth + 1);
+    }
+  };
+  for (const [index, step] of steps.entries()) {
+    const reader = /(?:^|[._])read(?:[._]|$)/i.test(step.name);
+    if (step.name === 'code_execution') {
+      const bound = bindInput(step.args.input);
+      if (sawReader && !bound.matched) return null;
+      step.args.input = bound.matched ? bound.value : { $inputRef: `inputs.step_${index + 1}_input` };
+      sawCalculation = true;
+    } else if (sawCalculation && ['write_file', 'desktop_write_text_file'].includes(step.name)) {
+      const key = 'content';
+      const match = [...outputs].reverse().find(output => same(output.value, step.args[key]));
+      if (!match) return null;
+      step.args[key] = { $stepOutputRef: match.ref };
+    }
+    sawReader ||= reader;
+    if (step.result === undefined || step.verified !== true) continue;
+    let value: unknown = step.result;
+    try { value = JSON.parse(step.result); } catch { /* Plain-text readers return text. */ }
+    outputs.push({ ref: `step_${index + 1}`, value, reader });
+    if (step.name === 'code_execution' && value && typeof value === 'object' && 'output' in value) {
+      addOutput(`step_${index + 1}.output`, (value as { output: unknown }).output);
+    }
+  }
+  return steps;
+}
+
 export function workflowCaptureBlocker(record: WorkflowRecord): string | null {
   if (!record.conversationId || !record.taskId) return 'The trace has no verified conversation/task identity. Perform the workflow in this conversation first.';
   if (!record.toolSequence.length || record.toolSequence.some(step => step.verified !== true)) return 'The trace contains failed or unverified actions and cannot be captured as a reusable workflow.';
-  if (record.toolSequence.every(step => /^(?:client_|list_skills$|skill_marketplace_|self_extension_plan$|capability_|external_control_candidates$|extension_registry_list$)/.test(step.name))) return 'Capability discovery alone is not a completed business workflow.';
-  return workflowTransformationBlocker(record.userIntent, record.toolSequence);
+  if (record.toolSequence.every(step => !isWorkflowBusinessTool(step.name))) return 'Capability discovery alone is not a completed business workflow.';
+  const bound = boundCapturedWorkflowSteps(record);
+  if (!bound) return 'The trace has a dataflow gap: calculation input or written content does not match a complete earlier tool result. Include parsing and transformation in executable code; do not replace a reader result with model-retyped rows. Author the missing step with save_workflow.';
+  return workflowTransformationBlocker(record.userIntent, bound);
 }
 
-export function workflowTransformationBlocker(intent: string, steps: Array<{ operation?: string }>): string | null {
+export function workflowTransformationBlocker(intent: string, steps: Array<{
+  operation?: string; name?: string; args?: Record<string, any>;
+}>, requireBindings = false): string | null {
   // i18n-allow: multilingual computation-intent recognition, not user-visible copy.
   const transformsData = /计算|汇总|总额|求和|统计|转换|整理|总结|\b(?:calculat\w*|sum|total|aggregat\w*|transform\w*|summari[sz]\w*)\b/iu.test(intent);
+  if (!transformsData) return null;
+  const hasReference = (value: unknown): boolean => {
+    if (!value || typeof value !== 'object') return false;
+    if (Array.isArray(value)) return value.some(hasReference);
+    const record = value as Record<string, unknown>;
+    if (Object.keys(record).length === 1 && (typeof record.$inputRef === 'string' || typeof record.$stepOutputRef === 'string')) return true;
+    return Object.values(record).some(hasReference);
+  };
+  const isReader = (name = '') => /(?:^|[._])(?:read|list|search|extract|inspect|get)(?:[._]|$)/i.test(name);
+  const hasCalculation = steps.some(step => {
+    const sandbox = ['code_execution', 'code.javascript.sandbox.execute'].includes(step.name || '');
+    if (sandbox) return Boolean(step.args?.code) && (!requireBindings || hasReference(step.args.input));
+    // A reviewed pure Skill can be the transformation between the reader and
+    // writer. Its arguments must receive this run's input or verified output.
+    return ['observe', 'test'].includes(step.operation || '') && Boolean(step.name)
+      && !isReader(step.name) && hasReference(step.args);
+  });
+  if (hasCalculation) return null;
   const onlyReads = steps.length > 0 && steps.every(step => ['observe', 'test'].includes(step.operation || ''));
-  if (transformsData && onlyReads) return 'Only reads were executed; subsequent model computation is not an executable workflow step. Generate and review a pure input-dependent transformation skill, then save a workflow that binds its inputs to the reader output. Do not replay an old total or claim this trace is complete.';
+  const readsThenWrites = steps.some(step => isReader(step.name))
+    && steps.some(step => step.operation && !['observe', 'test', 'unknown'].includes(step.operation));
+  if (onlyReads || readsThenWrites) return 'The saved steps do not contain an input-dependent calculation. Use code_execution with args.code containing JavaScript (not Python, imports, or top-level return), and args.input containing a JSON object such as {"$stepOutputRef":"step_1"}. The script reads global input and returns its last expression or an invoked function result. Bind the writer to {"$stepOutputRef":"step_2.output"}. Never use quoted ${...} references or invent a compute tool. A reviewed transformation Skill with typed inputs is also supported. Saving a previous total or fixed file content does not make the calculation reusable.';
   return null;
 }
 
@@ -216,7 +315,11 @@ export function findWorkflowClusters(
   domain?: string,
   orgId?: string,
 ): WorkflowCluster[] {
-  const candidates = getRecentWorkflows(userId, domain, orgId);
+  // Keep test traces available for explicit capture/reuse acceptance, but do
+  // not infer the owner's routines from automatic acceptance conversations.
+  const candidates = getRecentWorkflows(userId, domain, orgId).filter(record =>
+    !isTestLearningSource(record.source)
+    && !isTestMemory({ sourceInteractionId: record.source || '', content: record.conversationExcerpt }));
   if (candidates.length < minSize) return [];
 
   const clusters: WorkflowCluster[] = [];
