@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
 use std::collections::HashMap;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::collections::HashSet;
