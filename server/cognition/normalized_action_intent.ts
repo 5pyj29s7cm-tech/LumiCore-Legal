@@ -1,4 +1,6 @@
 import { PERSONAL_CLIENT_SURFACES } from '../../shared/client_surfaces';
+import { classifySkillAuthoringIntent } from '../skills/authoring_intent';
+import { classifyExternalCliIntent, requestedCliProviders } from './external_cli_intent';
 
 /** Read/search verbs in an explicitly forbidden clause are not requests.
  * Keep the original user message for the model and side-effect authorization.
@@ -31,6 +33,7 @@ export function isStoredMemoryRecallQuestion(value: string): boolean {
 
 export type NormalizedActionIntentKind =
   | 'none'
+  | 'external_cli_status'
   | 'external_ai_history'
   | 'messaging_read'
   | 'messaging_send'
@@ -45,6 +48,7 @@ export type NormalizedActionIntentKind =
   | 'cad_drafting'
   | 'scheduled_task'
   | 'work_task'
+  | 'workflow'
   | 'status_query'
   | 'correction_explanation';
 
@@ -208,6 +212,10 @@ function relativeArtifactPath(text: string, includeJson = true): string {
 }
 
 function explicitArtifactPath(text: string): string {
+  // A directory followed by an explicit creation verb is not one filename.
+  // i18n-allow: directory plus newly named artifact grammar.
+  const inDirectory = text.match(/(?:^|[，,。；;\n])\s*(?:请\s*)?(?:在|in)\s+((?:[A-Za-z]:[\\/]|\/)[^\r\n"'<>|?*]+?)\s+(?:创建|新建|生成|create|write)\s+([^\s\\/:"'<>|?*]+\.(?:txt|md|csv|json|docx?|xlsx?|pptx?|pdf))(?=$|[\s，,。；;])/iu);
+  if (inDirectory) return `${inDirectory[1].replace(/[\\/]+$/u, '')}${inDirectory[1].includes('\\') ? '\\' : '/'}${inDirectory[2]}`;
   // Most turns do not contain a supported artifact suffix. This linear gate
   // keeps them away from the more specific absolute-path matcher entirely.
   if (!ARTIFACT_FILE_EXTENSION_RE.test(text)) return '';
@@ -215,6 +223,12 @@ function explicitArtifactPath(text: string): string {
     /([A-Za-z]:[\\/][^\r\n"'<>|?*]+?\.(?:txt|md|csv|json|docx?|xlsx?|pptx?|pdf))(?=$|[\s.,，。;；:：!！?？)）\]}'"])/iu,
   )?.[1];
   if (absolute) return trimSlot(absolute);
+  // POSIX paths use the same filename boundary as Windows paths. A slash in
+  // a URL or a relative path must not become a local output authorization.
+  const posix = text.match(
+    /(?<![\p{L}\p{N}_.:/\\~-])(\/[^\r\n"'<>|?*，,。；;！？]+?\.(?:txt|md|csv|json|docx?|xlsx?|pptx?|pdf))(?=$|[\s.,，。;；:：!！?？)）\]}'"])/iu,
+  )?.[1]; // i18n-allow: multilingual punctuation at a concrete filesystem path boundary.
+  if (posix) return trimSlot(posix);
   return relativeArtifactPath(text);
 }
 
@@ -884,6 +898,15 @@ function outgoingMessageSend(text: string): NormalizedActionIntent | null {
   return null;
 }
 
+function localWorkflowIntent(text: string): NormalizedActionIntent | null {
+  const intent = classifySkillAuthoringIntent(text);
+  // i18n-allow: local named workflow lifecycle recognition.
+  if (!['save', 'publish', 'use'].includes(intent) || !/工作流|\bworkflow\b/iu.test(text)) return null;
+  return { kind: 'workflow', operation: intent === 'save' ? 'create' : 'mutate', subject: 'user',
+    target: 'local_workflow', payload: text, sideEffectClass: 'local_write', relation: 'new',
+    confidence: 0.95, rule: `local-workflow-${intent}` };
+}
+
 function genericExternalCommit(text: string): NormalizedActionIntent | null {
   // Explicit negation and retrospective/explanatory language must never be
   // promoted into an external mutation merely because it contains an action
@@ -915,7 +938,15 @@ function genericExternalCommit(text: string): NormalizedActionIntent | null {
 
   // i18n-allow: Chinese publication semantic-role input recognition.
   const publish = text.match(/(?:发布|发帖|公开发表|上线|publish|post)\s*(?:到|至|on|to)?\s*([^，。！？!?\n]{1,160})/iu);
-  if (publish) {
+  // "Publish the local workflow" and "run the published workflow" refer to
+  // a version in the local registry, not a public post. Real destinations
+  // still belong to the external-commit boundary and keep payload redaction.
+  const localPublication = publish && localWorkflowIntent(text)
+    // i18n-allow: local workflow target qualifiers, including published adjective.
+    && /^(?:(?:的|这个|已审核的|本地的?|已有的|已经|已|the\b|a\b|reviewed\b|local\b|ed\b)\s*)*(?:工作流|\bworkflow\b)/iu.test(publish[1])
+    // i18n-allow: a publication destination remains an external request.
+    && !/(?:到|至|\b(?:to|on|onto)\b)/iu.test(publish[1]);
+  if (publish && !localPublication) {
     return {
       kind: 'public_publish', operation: 'mutate', subject: 'user',
       target: trimSlot(publish[1]), payload: text,
@@ -948,11 +979,12 @@ function localDesktopOperation(text: string): NormalizedActionIntent | null {
   );
   const direct = text.match(
     // i18n-allow: Chinese local desktop semantic-role input recognition.
-    /(?:^|[，。！？!?：:；;\s])(?:现在\s*)?(?:请|请你|帮我|麻烦你|给我)?\s*(打开|启动|运行|切换到|聚焦|最大化|最小化|还原|关闭|\b(?:open|launch|start|focus|maximi[sz]e|minimi[sz]e|restore|close)\b)\s*(?:程序|应用|软件|窗口|app|application)?\s*([^，。！？!?；;\n]{1,120})/iu,
+    /(?:^|[，。！？!?：:；;\s])(?:现在\s*)?(?:请|请你|帮我|麻烦你|给我)?\s*(?:先|首先)?\s*(打开|启动|运行|切换到|聚焦|最大化|最小化|还原|关闭|\b(?:open|launch|start|focus|maximi[sz]e|minimi[sz]e|restore|close)\b)\s*(?:程序|应用|软件|窗口|app|application)?\s*([^，。！？!?；;\n]{1,120})/iu,
   );
-  if (!instrumented && !direct) return null;
-  const verb = trimSlot(instrumented?.[1] || instrumented?.[3] || direct?.[1] || '');
-  const target = trimSlot(instrumented?.[2] || instrumented?.[4] || direct?.[2] || '');
+  const objectFirst = text.match(/^(?:请|请你|帮我)?\s*(?:先)?(?:把|将|用)\s*([^，。！？!?；;\n]{1,80}?)\s*(?:先)?(打开|启动|运行|最大化|最小化|还原|关闭)(?:一下|吧)?[。！!]*$/u); // i18n-allow: Object-before-verb desktop instructions.
+  if (!instrumented && !direct && !objectFirst) return null;
+  const verb = trimSlot(instrumented?.[1] || instrumented?.[3] || objectFirst?.[2] || direct?.[1] || '');
+  const target = trimSlot(instrumented?.[2] || instrumented?.[4] || objectFirst?.[1] || direct?.[2] || '');
   if (!target || /^(?:什么|啥|哪个|why|what|which)$/iu.test(target)) return null; // i18n-allow: Chinese interrogative input recognition.
   return {
     kind: 'desktop_operation',
@@ -1002,9 +1034,28 @@ export function mediaGenerationIntent(value: string): NormalizedActionIntent | n
     payload: text, sideEffectClass: 'external_commit', relation: 'new', confidence: 0.98, rule: 'explicit-media-generation' };
 }
 
+/** Independent client + application navigation must retain both obligations. */
+export function compositeNavigationInstructions(value: string): Array<{ text: string; intent: NormalizedActionIntent }> {
+  const text = currentTurnText(value);
+  if (text.length > 1200 || isExplicitArtifactCreationText(text)) return [];
+  const instructions = text.split(/[，,；;。\n]/u).map(part => part.trim().replace(/^(?:然后|接着|同时|并且|再)\s*/u, '')).filter(Boolean) // i18n-allow: Independent instruction boundaries.
+    .filter(part => !/(?:不要|别|如果|假设|例如|说|为什么|怎么)|\b(?:don't|do not|if|said|why|how)\b/iu.test(part)) // i18n-allow: No authority from negative or hypothetical clauses.
+    .map(part => ({ text: part, intent: clientNavigation(part) || localDesktopOperation(part) }))
+    .filter((item): item is { text: string; intent: NormalizedActionIntent } => Boolean(item.intent));
+  return instructions.length > 1 && instructions.some(item => item.intent.kind === 'client_navigation')
+    && instructions.some(item => item.intent.kind === 'desktop_operation') ? instructions : [];
+}
+
 export function normalizeActionIntent(value: string): NormalizedActionIntent {
   const text = withoutNegatedLookupClauses(currentTurnText(value));
   if (!text) return { ...EMPTY_INTENT };
+  // A fresh local observation is work. `status_query` means explaining saved
+  // task evidence and intentionally disables new tools on follow-up turns.
+  if (classifyExternalCliIntent(text) === 'inspect') return {
+    ...EMPTY_INTENT, kind: 'external_cli_status', operation: 'read', subject: 'external_cli',
+    target: requestedCliProviders(text).join(','), relation: 'new', confidence: 0.96,
+    rule: 'external-cli-availability',
+  };
   const correctedInstruction = extractActionableCorrectionInstruction(text);
   if (correctedInstruction) {
     const corrected = normalizeActionIntent(correctedInstruction);
@@ -1025,6 +1076,7 @@ export function normalizeActionIntent(value: string): NormalizedActionIntent {
   const artifactRead = explicitLocalArtifactReadIntent(text);
   const currentAuthoringDocumentRead = currentAuthoringDocumentReadIntent(text);
   const explicitArtifactCreation = Boolean(artifactCreation);
+  const compositeNavigation = !artifactCreation && !artifactRead ? compositeNavigationInstructions(text) : [];
 
   // Order is a safety invariant. Later action-shaped words cannot override a
   // correction, status query, client-native route, external-AI read, or
@@ -1037,11 +1089,13 @@ export function normalizeActionIntent(value: string): NormalizedActionIntent {
     artifactCreation,
     artifactRead,
     currentAuthoringDocumentRead,
+    compositeNavigation.find(item => item.intent.kind === 'desktop_operation')?.intent,
     explicitArtifactCreation ? null : clientNavigation(text),
     explicitArtifactCreation ? null : externalAiHistoryRead(text),
     explicitArtifactCreation ? null : inboundMessageRead(text),
     explicitArtifactCreation ? null : outgoingMessageSend(text),
     explicitArtifactCreation ? null : genericExternalCommit(text),
+    explicitArtifactCreation ? null : localWorkflowIntent(text),
     explicitArtifactCreation ? null : localDesktopOperation(text),
   ].find(Boolean);
   if (priority) return priority;

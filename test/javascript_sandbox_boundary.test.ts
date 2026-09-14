@@ -5,6 +5,8 @@ import { registerCodeOpsTools } from '../server/tools/definitions/code_tools';
 import { executeToolCall } from '../server/tools/execution_engine';
 import { executeSandboxedJavaScript } from '../server/tools/javascript_sandbox';
 import type { ToolContext } from '../server/tools/types';
+import { guardCurrentAppToolCall } from '../server/cognition/current_app_execution';
+import { personalityRegistry } from '../server/personality/registry';
 
 const context: ToolContext = {
   userId: 'synthetic-local-code-owner', authenticated: true, source: 'chat',
@@ -16,6 +18,34 @@ function execute(code: string, overrides: Partial<ToolContext> = {}) {
 }
 
 describe('JavaScript calculation guest and host boundary', () => {
+  it('uses the same safe factory policy while preserving an explicit stricter owner policy', () => {
+    const tools = registry();
+    const factory = personalityRegistry.getDefault().toolPolicy;
+    expect(tools.resolveSecurity('code_execution', factory).level).toBe('safe');
+    expect(tools.resolveSecurity('code_execution', { ...factory, requireConfirmation: ['code_execution'] }).level).toBe('confirm');
+  });
+  it('allows I/O-free calculation through both chat preflight and mandatory file-target guards', async () => {
+    const taskText = '读取 C:/Users/test/Documents/input.csv，计算数量乘单价并生成 output.csv。';
+    const args = { code: 'input.quantity * input.price', input: { quantity: 4, price: 18 } };
+    expect(guardCurrentAppToolCall({ taskText, toolName: 'code_execution', arguments: args }).allowed).toBe(false);
+    const preflight = guardCurrentAppToolCall({ taskText, toolName: 'code_execution', arguments: args, isolatedCalculation: true });
+    expect(preflight.allowed).toBe(true);
+    const record = await executeToolCall({ registry: registry(), name: 'code_execution', arguments: args,
+      context: { ...context, actionIntent: taskText, routedTaskText: taskText, currentTurnExecutionRequested: true },
+      preflight: () => ({ allowed: preflight.allowed, reason: preflight.reason, arguments: args }) });
+    expect(record.error).toBeUndefined();
+    expect(record.terminalVerification?.status).toBe('verified');
+    expect(JSON.parse(record.result).output).toBe(72);
+    expect(guardCurrentAppToolCall({ taskText, toolName: 'python_exec', isolatedCalculation: true }).allowed).toBe(false);
+  });
+  it('reuses the same calculation with fresh JSON input and treats code-like data literally', async () => {
+    const code = '({total: input.quantity * input.price, label: input.label})';
+    const label = '\"); throw new Error("data executed"); //';
+    expect(JSON.parse(await executeSandboxedJavaScript(code, 1500, context, { quantity: 4, price: 18, label })).output).toEqual({ total: 72, label });
+    expect(JSON.parse(await executeSandboxedJavaScript(code, 1500, context, { quantity: 5, price: 18, label })).output.total).toBe(90);
+    expect(JSON.parse(await executeSandboxedJavaScript('typeof input', 1500, context)).output).toBe('undefined');
+    expect(JSON.parse(await executeSandboxedJavaScript('input', 1500, context, 'x'.repeat(140000))).ok).toBe(false);
+  });
   it('keeps normal arithmetic and JSON while exposing no Node, filesystem or network APIs', async () => {
     const record = await execute('JSON.stringify({ result: 6 * 7, process: typeof process, require: typeof require, fetch: typeof fetch, timer: typeof setTimeout, global: typeof global })');
     expect(record.error).toBeUndefined();
@@ -73,8 +103,8 @@ describe('JavaScript calculation guest and host boundary', () => {
     } finally { clearTimeout(timer); }
   });
 
-  it('rejects unconfirmed, remote and anonymous callers at the existing tool boundary', async () => {
-    expect((await execute('42', { userConfirmed: false })).error).toMatch(/confirmation/i);
+  it('allows bounded local arithmetic without a separate approval while rejecting remote and anonymous callers', async () => {
+    expect((await execute('42', { userConfirmed: false })).terminalVerification?.status).toBe('verified');
     expect((await execute('42', { executionBoundary: 'remote_restricted', localExecution: false })).error).toMatch(/remote execution surfaces/i);
     expect((await execute('42', { userId: 'anonymous', authenticated: false })).error).toMatch(/authenticated user/i);
   });

@@ -1,3 +1,5 @@
+import { verifiedExternalCliStatus, formatExternalCliStatus } from './external_cli_status';
+import { CN_EXTERNAL_CLI_MESSAGES } from '../regions/packs/cn/external_cli_messages';
 import fs from 'node:fs';
 import { hasImmediateExecutionPromise } from './execution_claims';
 import { verifiedSkillAuthoringReceipt } from '../skills/authoring_receipt';
@@ -9,6 +11,7 @@ import { buildMediaArtifactReceipt } from '../socket/media_artifact_receipt';
 import { isVideoPlaybackRequest } from './media_intent';
 import type { ToolExecutionRecord } from '../tools/types';
 import { artifactPathFromRecord, resolveArtifactDelivery } from '../tools/artifact_evidence';
+import { matchesRequestedArtifactOutput } from './artifact_write_scope';
 import type { LumiTurnFlow } from './turn_flow';
 import {
   evaluateDesktopObservationEvidence,
@@ -16,7 +19,7 @@ import {
 } from './desktop_observation';
 import {
   formatClientDiagnosticResult,
-  hasSuccessfulSubstantiveClientDiagnosticReceipt,
+  hasCompleteClientDiagnosticReceipts,
 } from './client_diagnostic_result';
 import {
   hasExplicitNoMutationInstruction,
@@ -48,6 +51,7 @@ import {
   documentReadMatchesRequestedTarget,
   isSuccessfulExactDocumentRead,
   extractDesktopLaunchTarget,
+  extractPrimaryTaskText,
   extractExplicitArtifactTextRequirements,
   extractSimpleDesktopOpenTarget,
   requestedMediaPlayerTarget,
@@ -59,6 +63,7 @@ import {
   hasCurrentAppSaveEvidence,
   hasCurrentAppUiMutationEvidence,
   hasMediaPlaybackEvidence,
+  hasMediaPauseEvidence,
   hasRequestedDesktopOpenEvidence,
   hasVisualModelAvailabilityEvidence,
   hasVerifiedCadGeometryExtractionEvidence,
@@ -74,6 +79,7 @@ import {
   resolveVerifiedCurrentAuthoringDocumentEvidence,
   summarizeActionContractBlocker,
 } from './action_contract';
+import { isMediaPauseRequest } from './media_intent';
 import { CN_RESULT_GROUNDING_MESSAGES } from '../regions/packs/cn/voice_fast_path_messages';
 import { CN_EXECUTION_EVIDENCE_MESSAGES } from '../regions/packs/cn/execution_evidence_messages';
 import { CN_TASK_TARGET_ANCHOR_MESSAGES } from '../regions/packs/cn/task_target_anchor_messages';
@@ -354,6 +360,7 @@ function hasVerifiedEvidenceForRealWorldClaim(
     ));
   }
   if (kind === 'playback') {
+    if (isMediaPauseRequest(taskText)) return hasMediaPauseEvidence(records, taskText, { requestId: input.requestId, taskId: input.taskId });
     return requiresMediaPlaybackAction(taskText)
       && hasMediaPlaybackEvidence(records, taskText, { requestId: input.requestId, taskId: input.taskId });
   }
@@ -455,9 +462,9 @@ function groundedVerifiedDocumentObservation(
   // Recovered capsule diagnostics describe internal steps, not new user goals.
   const [currentAction, recoveredContext = ''] = task.split(/\n## Recent action continuation context\b/i, 2);
   const recoveredGoal = recoveredContext.match(/^- originalGoal:[ \t]*([^\r\n]*)/im)?.[1] || '';
-  const requestedAction = [currentAction, recoveredGoal].filter(Boolean).join('\n');
-  const calculationRequested = /(?:计算|重算|算出|金额|总额|合计|\b(?:calculat\w*|recalculat\w*|total|multiply)\b)/iu.test(requestedAction); // i18n-allow: document calculation intent.
-  const analysisRequested = calculationRequested || /(?:分析|审查|审阅|总结|概括|提炼|解读|\b(?:review|analy[sz]e|summari[sz]e|interpret|synthesize)\b)/iu.test(requestedAction);
+  const instruction = [extractPrimaryTaskText(task), input.flow?.rootTaskText || recoveredGoal].join('\n');
+  const calculationRequested = /(?:计算|重算|算出|金额|总额|合计|\b(?:calculat\w*|recalculat\w*|total|multiply)\b)/iu.test(instruction); // i18n-allow: document calculation intent.
+  const analysisRequested = calculationRequested || /(?:分析|审查|审阅|总结|概括|提炼|解读|\b(?:review|analy[sz]e|summari[sz]e|interpret|synthesize)\b)/iu.test(instruction);
   const calculationOutput = /(?:金额|总额|合计|总计|结果|[=×]|\b(?:amount|total|result)\b)[^\r\n]{0,100}(?:\d|[零一二三四五六七八九十百千万])|^\s*[-+]?\d+(?:\.\d+)?\s*(?:元|美元|USD|CNY)?[。.!！]?\s*$/iu.test(response); // i18n-allow: returned calculation data, not tool-count or path digits.
   const onlyReadAcknowledgment = /^(?:(?:已|已经|成功|完成|文件|内容|数据|读取|阅读|查看|检查|核验|验证|完毕|任务|操作|read|file|content|verified|completed|successfully|done)|[\s。.!！,，:：;；-])+$/iu.test(response);
   const rawReadOnly = response.replace(/\s+/gu, '') === String(record.result || '').replace(/\s+/gu, '');
@@ -729,7 +736,14 @@ function unsupportedPriorDiagnosticClaim(input: LumiResultFinalizerInput): strin
 }
 
 function taskActionContract(input: LumiResultFinalizerInput) {
-  return buildActionEvidenceContract(resultTaskText(input));
+  const text = resultTaskText(input);
+  const contract = buildActionEvidenceContract(text);
+  if (!input.flow?.preparationRootText) return contract;
+  const root = input.flow.preparationRootText;
+  return { ...contract, components: [
+    { text: root, contract: buildActionEvidenceContract(root) },
+    { text: extractPrimaryTaskText(text), contract },
+  ] };
 }
 
 function parseRuntimeWorkReceipt(record: ToolExecutionRecord): Record<string, any> | null {
@@ -759,6 +773,7 @@ function formatGroundedRuntimeWorkResult(
   input: LumiResultFinalizerInput,
   contract: ReturnType<typeof taskActionContract>,
 ): LumiResultFinalizerResult | null {
+  if (contract.label === 'Current Lumi runtime diagnostic') return null;
   const runtimeRecord = [...(input.toolRecords || [])].reverse().find(item => (
     item.name === 'runtime_work_cancel' || item.name === 'runtime_work_status'
   ));
@@ -1414,7 +1429,6 @@ function formatGroundedClientActionResult(input: LumiResultFinalizerInput): stri
   // The client-action-only route already performed exact target selection and
   // state-diff verification. A verified native navigation receipt is stronger
   // evidence than a model sentence that happens to claim the action failed.
-  if (!input.flow?.clientActionOnlyTurn) return null;
   const expectedIntent = normalizeActionIntent(resultTaskText(input));
   if (
     expectedIntent.kind !== 'client_navigation'
@@ -1424,6 +1438,7 @@ function formatGroundedClientActionResult(input: LumiResultFinalizerInput): stri
   const expectedMode = String(expectedIntent.clientActionArguments?.mode || '').trim();
   const expectedEnabled = expectedIntent.clientActionArguments?.enabled;
   const receipts = (input.toolRecords || [])
+    .filter(record => recordMatchesCurrentTurnIdentity(input, record))
     .map(parseVerifiedClientActionReceipt)
     .filter((receipt): receipt is NonNullable<typeof receipt> => Boolean(receipt));
   const receipt = [...receipts].reverse().find(item => (
@@ -1772,6 +1787,22 @@ function formatGroundedWorkflowProgress(input: LumiResultFinalizerInput): LumiRe
 function formatGroundedSkillDraft(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
   const actionText = resultTaskText(input);
   const authoring = verifiedSkillAuthoringReceipt(actionText, input.toolRecords || [], { requestId: input.requestId, taskId: input.taskId });
+  if (authoring?.intent === 'publish') {
+    const published = authoring.result;
+    // i18n-allow: Verified local workflow publication, distinct from execution.
+    return { text: isChineseText(actionText)
+      ? `工作流已审核发布：${published.name}，版本 ${published.version}。\n本轮尚未运行。`
+      : `Workflow published: ${published.name}, version ${published.version}.\nIt has not been run in this turn.`,
+    blocked: false, reason: 'workflow_published' };
+  }
+  if (authoring?.intent === 'save') {
+    const draft = authoring.result;
+    // i18n-allow: Verified draft state; never imply publication or execution.
+    return { text: isChineseText(actionText)
+      ? `工作流草稿已保存：${draft.name || '未命名工作流'}，共 ${draft.stepCount || 0} 步。\n尚未审核发布，暂不能运行。`
+      : `Workflow draft saved: ${draft.name || 'Untitled workflow'}, ${draft.stepCount || 0} steps.\nIt has not been reviewed or published and cannot run yet.`,
+      blocked: false, reason: 'workflow_draft_saved' };
+  }
   if (authoring?.intent === 'generate') {
     const draft = authoring.result;
     return {
@@ -1794,6 +1825,7 @@ export function formatGroundedArtifactResult(
   if (!delivery) return null;
   const { producer: created, outputPath: path, readback } = delivery;
   const actionText = resultTaskText(input);
+  if (!matchesRequestedArtifactOutput(actionText, path)) return null;
   const readbackRequired = requiresArtifactPostWriteReadback(actionText);
   const asksToOpen = /(?:\u6253\u5f00|\u6253\u5f00\u770b\u770b|\u76f4\u63a5\u6253\u5f00)|\bopen\b/iu.test(actionText);
   const openRecord = [...records].reverse().find(record => /^(?:desktop_open|browser_open_task)$/i.test(String(record.name || '')));
@@ -2883,11 +2915,15 @@ export function tryFinalizeVerifiedBoundedAction(
   const records = coalesceToolExecutionRecords(input.toolRecords || [])
     .filter(record => recordMatchesCurrentTurnIdentity(input, record));
   const scopedInput = { ...input, toolRecords: records, responseText: '' };
+  const cliStatus = verifiedExternalCliStatus(task, records, input);
+  if (cliStatus) return { text: formatExternalCliStatus(task, cliStatus), blocked: false, reason: 'verified_external_cli_status' };
   // The same verified-media projection owns both loop termination and channel
   // delivery. A complete generation needs no second model call; compound
   // publication/delivery tasks and missing artifacts still fail this check.
   const media = groundedMediaGeneration(scopedInput);
   if (media) return media;
+  const workflow = formatGroundedWorkflowProgress(scopedInput);
+  if (workflow && ['workflow_completed', 'workflow_incomplete'].includes(workflow.reason || '')) return workflow;
   const contract = taskActionContract(scopedInput);
   if (!hasCoreActionEvidence(contract, records, task, undefined, {
     requestId: input.requestId, taskId: input.taskId,
@@ -2953,8 +2989,48 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     )),
   };
   const actionText = resultTaskText(input);
+  if (isMediaPauseRequest(actionText)) {
+    const verified = hasMediaPauseEvidence(input.toolRecords || [], actionText, { requestId: input.requestId, taskId: input.taskId });
+    const zh = isChineseText(actionText);
+    return { text: verified
+      ? zh ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaPaused : 'The requested player is confirmed paused.'
+      : zh ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaPauseUnconfirmed : 'The requested player is not yet confirmed paused.',
+      blocked: !verified, reason: verified ? 'verified_media_pause' : 'media_pause_unconfirmed' };
+  }
+  const composite = taskActionContract(input);
+  if (composite.kind === 'external_cli_status') {
+    const status = verifiedExternalCliStatus(actionText, input.toolRecords || [], input);
+    return status ? { text: formatExternalCliStatus(actionText, status), blocked: false, reason: 'verified_external_cli_status' }
+      : { text: isChineseText(actionText) ? CN_EXTERNAL_CLI_MESSAGES.unverified : 'The local CLI status could not be verified.',
+        blocked: true, reason: 'Missing verified current-turn external CLI status.' };
+  }
+  if (composite.components?.length) {
+    const outcomes = composite.components.map(component => {
+      const verified = hasResultCoreActionEvidence(input, component.contract, input.toolRecords || [], component.text);
+      const result = finalizeLumiResponse({ ...input, taskText: component.text, flow: undefined, completionGuard: undefined, responseText: '' });
+      const complete = verified && !result.blocked && Boolean(result.text);
+      return { complete, text: complete ? result.text
+        : isChineseText(actionText) ? CN_EXECUTION_EVIDENCE_MESSAGES.incompleteComponent(component.text) : `Not completed: ${component.text}` };
+    });
+    return { text: outcomes.map(outcome => outcome.text).join('\n'), blocked: outcomes.some(outcome => !outcome.complete),
+      reason: outcomes.every(outcome => outcome.complete) ? 'All requested operations verified.' : 'Some requested operations remain unverified.' };
+  }
   const workflowProgress = formatGroundedWorkflowProgress(input);
   if (workflowProgress) return workflowProgress;
+  // Lifecycle completion is a receipt verdict, independent of model wording
+  // or output redaction. A successful input read cannot complete a failed save.
+  if (composite.kind === 'skill_authoring'
+    && !hasResultCoreActionEvidence(input, composite, input.toolRecords || [], actionText)) {
+    return { text: formatCompactBlockedResponse(input, 'Missing verified skill/workflow lifecycle receipt.'),
+      blocked: true, reason: 'Missing verified skill/workflow lifecycle receipt.' };
+  }
+  if (composite.kind === 'skill_authoring') {
+    // The earlier business read is not the target of a draft-save component.
+    // A verified save owns this phase even if capture failed before authoring
+    // succeeded. Keep those failures in the audit trail, not in its verdict.
+    const draft = formatGroundedSkillDraft(input);
+    if (draft) return draft;
+  }
   const operationModeFacts = buildOperationModeMetaResponse({
     text: actionText,
     operationMode: input.flow?.operationMode,
@@ -3139,7 +3215,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     reason: 'Response promised another action after execution ended.' };
   const diagnosticResult = formatClientDiagnosticResult(input.toolRecords || [], actionText, input.responseText);
   if (diagnosticResult) {
-    const diagnosticCompleted = hasSuccessfulSubstantiveClientDiagnosticReceipt(input.toolRecords || []);
+    const diagnosticCompleted = hasCompleteClientDiagnosticReceipts(input.toolRecords || [], actionText);
     return preserveModelWordingOnGroundedSuccess(input, {
       text: diagnosticResult,
       blocked: !diagnosticCompleted,

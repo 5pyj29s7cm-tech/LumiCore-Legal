@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { buildTaskTargetAnchorProjection } from '../conversation/task_target_anchor';
 import {
   hasMixedStatusExecutionIntent,
   isImmediateAssistantRestatementRequest,
@@ -414,7 +415,7 @@ const STATUS_FOLLOWUP_RE =
 
 // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
 const CN_SHORT_EXECUTION_CONTINUATION_RE =
-  /^(?:确认(?:了|执行)?|确定(?:了)?|继续|继续执行|接着做|执行|开始|开始执行|重试|再试|再来一次|建立|创建|打开|保存|发送|提交|就这么做|按这个做|做吧|弄吧)[。！？.!?]*$/u; // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
+  /^(?:确认(?:了|执行)?|确定(?:了)?|允许|同意|继续|继续执行|接着做|执行|开始|开始执行|重试|再试|再来一次|建立|创建|打开|保存|发送|提交|就这么做|按这个做|做吧|弄吧)[。！？.!?]*$/u; // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
 
 const ENGLISH_STATUS_FOLLOWUP_RE =
   /^(?:are you (?:doing|running) it|did you do it|is it (?:done|running)|what(?:'s| is) the result|why (?:didn'?t|haven'?t) you|what was my task)[.!?]*$/i;
@@ -962,6 +963,50 @@ export function pendingRuntimeCancellationRecheck(
   };
 }
 
+function explicitlyReferencesUnfinishedTask(text: string): boolean {
+  const value = compact(text, 700);
+  // i18n-allow: referential task resumption, not arbitrary continuation verbs.
+  return /^(?:(?:请|现在|那就)\s*)?(?:继续|接着)(?:完成|处理|执行|做)?(?:刚才|之前|上述|当前|这个|上次)(?:的)?(?:未完成的|没完成的|剩余的)?|^(?:please\s+)?(?:continue|resume|finish)\s+(?:(?:the|this|that)\s+)?(?:(?:previous|current|unfinished|remaining)\s+)(?:task|work|workflow|step)\b/iu.test(value);
+}
+
+/** Explicitly referential resumption precedes the self-contained action gate. */
+export function isExplicitUnfinishedTaskContinuation(text: string, state?: ConversationActionContinuationState | null): boolean {
+  if (!state?.unfinished || !state.taskId || !state.goal || !explicitlyReferencesUnfinishedTask(text)) return false;
+  const value = compact(text, 700);
+  const current = buildActionContract(value);
+  const root = buildActionContract(state.goal);
+  if (!current.applies) return true;
+  const kinds = new Set([root.kind, ...(root.components || []).map(part => part.contract.kind)]);
+  if (kinds.has(current.kind)) return true;
+  // A workflow's named output step is still part of that workflow even though
+  // the latest sentence describes a file write rather than the whole recipe.
+  if (normalizeActionIntent(state.goal).kind === 'workflow' && current.kind === 'artifact_work') {
+    const target = buildTaskTargetAnchorProjection({ taskText: value }).target.path;
+    if (target) {
+      const normalized = (text: string) => text.replace(/\\/g, '/').toLowerCase();
+      const escaped = normalized(target).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(escaped + '(?:$|[\\s,，。;；"\u201d])', 'u').test(normalized(state.goal)); // i18n-allow: file-reference boundary punctuation.
+    }
+  }
+  return false;
+}
+
+/** An explicitly ordered preparation step retains the matching unfinished goal. */
+export function isTaskPreparationContinuation(text: string, state?: ConversationActionContinuationState | null): boolean {
+  if (!state?.unfinished || !state.goal) return false;
+  const intent = normalizeActionIntent(text);
+  if (intent.kind !== 'desktop_operation' || intent.operation !== 'navigate' || !intent.target) return false;
+  const browserPlaybackStep = requiresMediaPlaybackAction(state.goal)
+    && /^(?:浏览器|默认浏览器|Chrome|Edge|Firefox|browser)$/iu.test(intent.target) // i18n-allow: Explicit browser as the medium for an unfinished viewing task.
+    && /(?:^|[，,。；;])\s*用[^，,。；;]{1,40}打开/iu.test(text); // i18n-allow: Object omitted because the original viewing goal owns it.
+  if (!browserPlaybackStep && !/(?:先|首先|第一步)|\bfirst\b/iu.test(text)) return false; // i18n-allow: Sequencing a prerequisite, not replacing the task.
+  const key = (value: string) => value.normalize('NFKC').toLowerCase().replace(/[\s_.-]+/gu, '');
+  const target = key(intent.target).replace(/exe$/u, '');
+  const goal = key(state.goal);
+  const rootContract = buildActionContract(state.goal);
+  return target.length > 1 && (goal.includes(target) || browserPlaybackStep) && rootContract.applies && rootContract.kind !== 'none';
+}
+
 export function classifyConversationActionFollowupIntent(
   text: string,
   state?: ConversationActionContinuationState | null,
@@ -981,6 +1026,8 @@ export function classifyConversationActionFollowupIntent(
   if (isBlockedTaskRetryAcceptance(compactText, durableState)) return 'execute';
   if (isNegativeResultCorrectionForTask(compactText, durableState)) return 'execute';
   if (isMediaPlaybackContinuationForTask(compactText, durableState)) return 'execute';
+  if (isTaskPreparationContinuation(compactText, durableState)) return 'execute';
+  if (isExplicitUnfinishedTaskContinuation(compactText, durableState)) return 'execute';
   const normalizedIntent = normalizeActionIntent(text);
   if (
     durableState?.unfinished
@@ -1054,6 +1101,7 @@ export function buildConversationActionContinuationState(
   const completionGoal = inheritsPrevious
     && followupIntent === 'execute'
     && isActionBearingGoal(userText)
+    && !isTaskPreparationContinuation(userText, previous)
     ? userText
     : goal;
   const taskId = inheritsPrevious && previous?.taskId ? previous.taskId : `task_${randomUUID()}`;
@@ -1082,7 +1130,8 @@ export function buildConversationActionContinuationState(
     version: 2,
     taskId,
     status,
-    policySnapshot: snapshotTaskPolicy(input.toolPolicy) || (inheritsPrevious ? previous?.policySnapshot : undefined),
+    policySnapshot: isTaskPreparationContinuation(userText, previous) && previous?.policySnapshot
+      ? previous.policySnapshot : snapshotTaskPolicy(input.toolPolicy) || (inheritsPrevious ? previous?.policySnapshot : undefined),
     receipts,
     activeRequestId: input.requestId || (inheritsPrevious ? previous?.activeRequestId : undefined),
     supersededTaskId: !inheritsPrevious && previous?.unfinished ? previous.taskId : undefined,
@@ -1185,7 +1234,7 @@ export function prepareConversationActionTaskState(
         latestInstruction: userText,
         latestInstructionRef: latestInstructionRef || undefined,
         activeRequestId: input.requestId,
-        policySnapshot: snapshotTaskPolicy(
+        policySnapshot: isTaskPreparationContinuation(userText, previous) ? previous.policySnapshot : snapshotTaskPolicy(
           applyTaskPolicySnapshot(input.toolPolicy, previous.policySnapshot),
         ) || previous.policySnapshot,
         revision: (previous.revision || 0) + 1,
@@ -1326,6 +1375,7 @@ export function isUserObservedTaskCompletion(
 
 export function needsRecentActionContinuationContext(userText: string): boolean {
   const clean = compact(userText, 500);
+  if (explicitlyReferencesUnfinishedTask(clean)) return true;
   if (!clean || (clean.length > 180 && !isCurrentAppEditingRequest(clean))) return false;
   const normalizedIntent = normalizeActionIntent(clean);
   if (normalizedIntent.kind === 'work_task') return false;

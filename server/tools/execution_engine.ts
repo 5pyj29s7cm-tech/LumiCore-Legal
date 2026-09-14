@@ -8,6 +8,8 @@ import { decodeToolResult } from './result_envelope';
 import { buildToolExecutionEnvelope, toolRecordIdempotencyKey } from './execution_envelope';
 import { inspectExternalCommitAttempt, settleExternalCommitAttempt } from './external_commit_journal';
 import { isToolLifecyclePersistenceFailure } from './lifecycle_persistence_error';
+import { archiveGeneratedOutputs } from '../files/generated_archive';
+import { isExternalCliDelegation } from '../cognition/external_cli_intent';
 import {
   guardTaskTargetToolCall,
   isFileTargetTask,
@@ -539,6 +541,11 @@ export async function executeToolCall(
         arguments: callerArguments,
         toolRecords: serverTargetPolicyEvidence(input.context, targetPolicyTaskText),
         acceptedTaskTarget: input.context?.acceptedTaskTarget,
+        isolatedCalculation: semanticToolName === 'code_execution'
+          && capability?.source === 'builtin'
+          && capability?.capabilityId === 'code.javascript.sandbox.execute'
+          && capability?.operation === 'test'
+          && capability.sideEffects.every((effect: { type?: string }) => effect.type === 'local_state_change'),
         enforceStructuredFileRead: Boolean(
           capability
           && ['files', 'office'].includes(capability.lane)
@@ -547,6 +554,9 @@ export async function executeToolCall(
         forbidUnstructuredExecution: Boolean(
           capability?.sideEffects.some((effect: { type?: string }) => effect.type === 'process_execution'),
         ),
+        externalCliDelegation: semanticToolName === 'external_cli_run'
+          && capability?.source === 'builtin' && capability.capabilityId === 'external-agent.cli.run'
+          && isExternalCliDelegation(targetPolicyTaskText),
       })
     : { allowed: true, reason: '' };
   const targetPreflight: ToolExecutionPreflightResult = !callerPreflight.allowed
@@ -704,6 +714,14 @@ export async function executeToolCall(
       if (proof) record.terminalVerification = verifyCapabilityReceipt(capability, record, proof);
     } catch {
       // A changed runtime or unavailable host proof cannot promote the receipt.
+    }
+  }
+  if (!record.error && record.terminalVerification?.status === 'verified' && input.context?.userId) {
+    try { await archiveGeneratedOutputs([record], input.context); }
+    catch (error) {
+      // The generated file still succeeded. A library refresh can reconcile
+      // its preserved receipt; never replay the business action to fix indexing.
+      console.warn('[GeneratedLibrary] Output archive pending:', error instanceof Error ? error.message : String(error));
     }
   }
   return finalizeRecord();

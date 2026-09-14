@@ -25,7 +25,14 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Install media and CJK PDF test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-droid-fallback
       - name: Lint and type-check
+        env:
+          # The complete application type graph exceeds Node 24's default CI heap.
+          NODE_OPTIONS: --max-old-space-size=4096
         run: npm run lint
       - name: Run complete Vitest suite
         # Several security suites create isolated Git repositories and worktrees.

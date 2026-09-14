@@ -27,6 +27,10 @@ export function classifySkillAuthoringIntent(value: string): SkillAuthoringInten
     // i18n-allow: multilingual explicit authoring input recognition.
     const target = /(?:技能|工作流|流程)|\b(?:skill|workflow)\b/iu;
     if (!target.test(clause)) continue;
+    // Saving a process *as a Skill* requests a package draft. Saving a workflow
+    // requests a recipe; it must not silently enter package generation/install.
+    // i18n-allow: explicit requested artifact type recognition.
+    if (/(?:保存|沉淀).{0,25}(?:为|成).{0,12}技能|\b(?:save|capture)\b.{0,60}\bas\s+(?:a\s+)?(?:reusable\s+)?skill\b/iu.test(clause)) return 'generate';
     // i18n-allow: explicit continuation of a named workflow, not a new draft.
     if (/^\s*(?:请\s*)?继续(?:当前|这个|刚才的|已有的)?(?:工作流|流程)/u.test(clause)) return 'use';
     // The leading requested operation owns the turn: "run the published
@@ -47,9 +51,30 @@ export function classifySkillAuthoringIntent(value: string): SkillAuthoringInten
 
 export function skillAuthoringTools(intent: SkillAuthoringIntent): string[] {
   if (intent === 'generate') return ['generate_skill', 'install_skill', 'list_skills', 'client_capability_manifest'];
-  if (intent === 'save') return ['capture_recent_workflow', 'save_workflow', 'get_workflow', 'publish_workflow', 'generate_skill', 'install_skill', 'list_skills', 'client_capability_manifest'];
+  if (intent === 'save') return ['capture_recent_workflow', 'save_workflow', 'get_workflow', 'list_workflows'];
   if (intent === 'publish') return ['get_workflow', 'publish_workflow', 'install_skill', 'list_skills', 'client_capability_manifest'];
   if (intent === 'install') return ['install_skill', 'list_skills', 'client_capability_manifest'];
   if (intent === 'use') return ['client_capability_manifest', 'list_skills', 'get_workflow', 'list_workflows', 'run_workflow', 'get_workflow_run', 'decide_workflow_confirmation'];
   return [];
+}
+
+/** A current action followed by saving the process is a compound request.
+ * Retrospective capture and a Skill's example/description do not authorize it.
+ */
+export function executionBeforeWorkflowSave(value: string): string {
+  if (classifySkillAuthoringIntent(value) !== 'save') return '';
+  // i18n-allow: multilingual sequence and explicit action recognition.
+  const sequence = /然后|完成后|并把|并将|接着|\b(?:and\s+then|then)\b/giu;
+  for (const match of value.matchAll(sequence)) {
+    const before = value.slice(0, match.index).trim();
+    const after = value.slice(match.index! + match[0].length);
+    if (classifySkillAuthoringIntent(before) !== 'none' || classifySkillAuthoringIntent(after) !== 'save') continue;
+    // i18n-allow: an explicit present action is required before authoring.
+    if (/(?:不要|别|不必|无需|不用)[^。！？!?；;\n，,]{0,8}(?:执行|运行|读取|计算|生成)|\b(?:do not|don't|never)\b[^.!?;\n,]{0,40}\b(?:execute|run|read|calculate|generate)\b/iu.test(before)) return ''; // i18n-allow: clause-bounded negation of execution.
+    // i18n-allow: descriptions of examples and completed tasks are not commands.
+    if (/(?:功能|示例|例如|刚才|上次|以后|下次)[:：]?|\b(?:example|previously|last\s+time|next\s+time)\b/iu.test(before)) continue;
+    // i18n-allow: multilingual imperative operation recognition.
+    if (/(?:^|[。！？!?；;\n])\s*(?:(?:请|先|帮我|现在|立即)\s*)*(?:读取|打开|执行|运行|计算|处理|生成|写入|转换|检查|查询)|\b(?:please\s+)?(?:read|open|execute|run|calculate|process|write|convert|inspect)\b/iu.test(before)) return before;
+  }
+  return '';
 }

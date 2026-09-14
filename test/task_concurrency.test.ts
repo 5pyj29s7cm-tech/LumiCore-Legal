@@ -3,6 +3,7 @@ import {
   classifyActiveTaskMessage,
   formatActiveTaskRelationContext,
   resolveActiveTaskMessageRelation,
+  bindPreparedTaskMessageRelation,
 } from '../server/cognition/task_concurrency';
 import type { ConversationActionContinuationState } from '../server/cognition/action_continuation';
 
@@ -25,6 +26,36 @@ const activeState: ConversationActionContinuationState = {
 };
 
 describe('active task message relation', () => {
+  it('reconciles stale new-task display metadata with the prepared durable continuation', () => {
+    const early = resolveActiveTaskMessageRelation('Continue the unfinished task.', null);
+    expect(early.taskRelation).toBe('new');
+    expect(bindPreparedTaskMessageRelation(early, { kind: 'resume', state: activeState })).toMatchObject({
+      relation: 'continue', taskRelation: 'continue', operation: 'resume', taskId: 'task-1', preservesRootGoal: true,
+    });
+    expect(bindPreparedTaskMessageRelation(early, { kind: 'new', state: { ...activeState, taskId: 'task-2' } }))
+      .toMatchObject({ taskRelation: 'new', taskId: 'task-2' });
+    const correction = resolveActiveTaskMessageRelation('不对，刚才的目标弄错了', activeState);
+    expect(bindPreparedTaskMessageRelation(correction, { kind: 'resume', state: activeState }).taskRelation).toBe(correction.taskRelation);
+  });
+  it('keeps a workflow output step bound to the named output of the original run', () => {
+    const goal = '运行已经发布的工作流 CSV验收，输入文件用 C:/test/input.csv，输出另存为 C:/test/output.csv。';
+    const state = { ...activeState, status: 'blocked' as const, goal, latestInstruction: goal };
+    const text = '继续完成刚才未完成的任务。确认把刚才工作流算出的结果写入 C:/test/output.csv，完成剩余的写文件步骤。不要新建运行。';
+    expect(normalizeActionIntent(goal)).toMatchObject({ kind: 'workflow', sideEffectClass: 'local_write' });
+    expect(resolveActiveTaskMessageRelation(text, state)).toMatchObject({ taskRelation: 'continue', taskId: 'task-1', preservesRootGoal: true });
+    expect(resolveActiveTaskMessageRelation(text.replace('output.csv', 'unrelated.csv'), state)).toMatchObject({ taskRelation: 'new' });
+  });
+  it('resumes the matching unfinished workflow with detailed constraints on the same task', () => {
+    const goal = '读取 CSV，计算金额并写文件，然后保存成可复用工作流草稿。';
+    const text = '继续完成刚才未完成的工作流草稿保存。只保存读取、计算、写文件这三个步骤，文件路径用参数，计算步骤绑定本次读取结果，写入内容绑定计算结果。不要重做已经完成的文件，也不要发布或安装新技能。';
+    const state = { ...activeState, status: 'blocked' as const, goal, latestInstruction: goal };
+    expect(resolveActiveTaskMessageRelation(text, state)).toMatchObject({
+      taskRelation: 'continue', taskId: 'task-1', preservesRootGoal: true, operation: 'resume',
+    });
+    expect(resolveActiveTaskMessageRelation(text, { ...state, unfinished: false, status: 'completed' })).toMatchObject({ taskRelation: 'new' });
+    expect(resolveActiveTaskMessageRelation('另外创建一个新的工作流草稿', state)).toMatchObject({ taskRelation: 'new' });
+    expect(resolveActiveTaskMessageRelation(text, activeState)).toMatchObject({ taskRelation: 'new' });
+  });
   it('keeps status and confirmation on the existing task', () => {
     expect(classifyActiveTaskMessage('怎么样了', activeState)).toBe('status');
     expect(classifyActiveTaskMessage('确认', activeState)).toBe('continue');

@@ -3,7 +3,7 @@ import { CN_MODEL_FAILURE_BEFORE_EXECUTION, formatCnMediaGenerationFailure } fro
 import path from 'path';
 import { ToolRegistry } from '../tools/registry';
 import { ToolExecutionRecord, ToolContext, LLMUsage, type NormalizedLLMResponse } from '../tools/types';
-import { classifySkillAuthoringIntent } from '../skills/authoring_intent';
+import { classifySkillAuthoringIntent, executionBeforeWorkflowSave, skillAuthoringTools } from '../skills/authoring_intent';
 import {
   NormalizedMessage,
   makeLLMCall,
@@ -14,7 +14,7 @@ import {
   type ModelAttemptTimeouts,
 } from './providers';
 import { recordTokenUsage } from './token_tracker';
-import { recordWorkflow, WorkflowStep } from '../skills/worklog';
+import { recordWorkflow, WorkflowStep, isWorkflowBusinessTool } from '../skills/worklog';
 import { recordLatency } from '../monitor/latency_store';
 import { guardCompletionClaims, needsCompletionEvidence, type CompletionGuardResult } from '../work_product/completion_guard';
 import { findDesktopCompletionReview, desktopCompletionReviewText, DESKTOP_COMPLETION_REVIEW_REASON } from '../cognition/desktop_completion_review';
@@ -51,6 +51,7 @@ import { formatDesktopControlPausePresentation } from '../regions/packs/cn/deskt
 import { buildTaskTargetAnchorProjection } from '../conversation/task_target_anchor';
 import { artifactPathFromRecord, isArtifactProducerRecord } from '../tools/artifact_evidence';
 import { getExactRegisteredExtensionToolNames } from '../extensions/registry';
+import { resolveConversationWorkflowRun } from '../workflows/conversation_binding';
 
 export { isConfirmationBlockedToolRecord } from '../tools/confirmation_block';
 
@@ -66,6 +67,8 @@ export interface LLMConfig {
   requestId?: string;
   interactionId?: string;
   source?: string;
+  /** Accepted transport provenance, separate from the model-routing stage. */
+  workflowSource?: string;
   responseFormat?: LLMResponseFormat;
   signal?: AbortSignal;
   /** Provider-independent lifecycle deadlines for each model candidate. */
@@ -648,6 +651,7 @@ export function resolveRequiredToolNamesForModel(
   for (const name of buildActionContract(primaryTask).verificationTools || []) {
     if (declared.has(name)) required.add(name);
   }
+  if (executionBeforeWorkflowSave(primaryTask) && declared.has('code_execution')) required.add('code_execution');
   const discovery = String(
     projection?.discoveryToolName || 'client_capability_manifest',
   ).trim();
@@ -1995,7 +1999,7 @@ async function runWithToolsInternal(
       };
     }
     refreshRuntimeActivatedToolAuthorization(toolExecutionContext, executionLog, toolRegistry);
-    const toolDeclarations = toolRegistry.getToolDeclarationsForPolicy(
+    let toolDeclarations = toolRegistry.getToolDeclarationsForPolicy(
       toolExecutionContext?.toolPolicy,
       {
         failClosedWithoutPolicy: context?.autonomous === true || context?.source === 'orchestrator',
@@ -2003,6 +2007,16 @@ async function runWithToolsInternal(
         visibleToolNames: resolveModelVisibleToolNames(toolExecutionContext, executionLog, toolRegistry),
       },
     );
+    const compoundExecutionTask = executionBeforeWorkflowSave(primaryTask);
+    const workflowSavePhase = Boolean(compoundExecutionTask
+      && hasCompletedCoreAction(compoundExecutionTask, executionLog, toolExecutionContext));
+    if (compoundExecutionTask) {
+      const authoringNames = new Set(skillAuthoringTools('save'));
+      const businessNames = new Set(buildActionContract(compoundExecutionTask).preferredTools);
+      toolDeclarations = toolDeclarations.filter(tool => workflowSavePhase
+        ? authoringNames.has(tool.function.name)
+        : !authoringNames.has(tool.function.name) || businessNames.has(tool.function.name));
+    }
     const exposedToolNames = new Set(toolDeclarations.map(declaration => declaration.function.name));
     const noNewExecutionRecord = executionLog.length === priorExecutionRecords.length;
     const runtimeRecovery = noNewExecutionRecord
@@ -2022,8 +2036,14 @@ async function runWithToolsInternal(
       : false;
     const directStructuredMediaRecovery = runtimeRecovery?.reason === 'structured_media_request'
       && !runtimeRecoveryAlreadyRecorded;
+    const workflowObservation = iteration === 0 && noNewExecutionRecord && !runtimeRecovery
+      && context?.trustedActionContinuation && exposedToolNames.has('get_workflow_run')
+      ? resolveConversationWorkflowRun(context) : null;
     const llmStart = Date.now();
     const modelMessages = compactMessagesForModel(conversationHistory);
+    if (compoundExecutionTask) modelMessages.push({ role: 'system', content: workflowSavePhase
+      ? 'The execution part of this same root task is verified complete. Only saving its workflow remains. Prefer capture_recent_workflow to reuse the verified trace and its calculation code. Do not repeat completed file actions. Return the saved draft receipt; publication remains separate.'
+      : 'Complete the current execution part of this same root task first. Calculation must consume the complete reader result and include executable parsing. Workflow authoring tools become available after the requested output is verified; do not search for them now.' });
     const invokeModel = async (attempt: ModelBudgetAttempt) => {
       const attemptConfig: LLMConfig = {
         ...config,
@@ -2081,7 +2101,13 @@ async function runWithToolsInternal(
           );
     };
     let response: NormalizedLLMResponse;
-    if (directStructuredMediaRecovery) {
+    if (workflowObservation) {
+      const id = `workflow_observation_${Date.now().toString(36)}`;
+      deterministicRecoveryToolCallIds.add(id);
+      response = { text: null, toolCalls: [{ id, name: 'get_workflow_run', arguments: { runId: workflowObservation.runId } }] };
+      conversationHistory.push({ role: 'system', content:
+        'This continuation belongs to the existing workflow run observed below. Its runId, revision and pending confirmation come from the durable task ledger. Continue that run; a workflowId identifies its definition and cannot be used as a runId. Approve only the steps authorized by the current user instruction through the ordinary confirmation tool; never invent confirmation ids or start a replacement run.' });
+    } else if (directStructuredMediaRecovery) {
       const id = `deterministic_media_${iteration}_${Date.now().toString(36)}`;
       deterministicRecoveryToolCallIds.add(id);
       response = {
@@ -2481,12 +2507,18 @@ async function runWithToolsInternal(
         continue;
       }
 
+      const callCapability = toolRegistry.getCapabilityManifestEntry?.(tc.name, toolExecutionContext?.toolPolicy, toolExecutionContext);
       const currentAppGuard = guardCurrentAppToolCall({
         taskText: primaryTask,
         toolName: tc.name,
         arguments: tc.arguments || {},
         toolRecords: executionLog,
         acceptedTaskTarget: toolExecutionContext?.acceptedTaskTarget,
+        isolatedCalculation: tc.name === 'code_execution'
+          && callCapability?.source === 'builtin'
+          && callCapability?.capabilityId === 'code.javascript.sandbox.execute'
+          && callCapability.operation === 'test'
+          && callCapability.sideEffects.every(effect => effect.type === 'local_state_change'),
       });
       const executionArguments = currentAppGuard.normalizedArguments
         || tc.arguments
@@ -2494,6 +2526,7 @@ async function runWithToolsInternal(
       if (context) context.getCurrentToolRecords = () => [...executionLog];
       invocationBudget.started += 1;
       invocationBudget.lastTouchedAt = Date.now();
+      if (tc.name === 'capture_recent_workflow') recordWorkflowIfToolsUsed(executionLog, messages, config, primaryTask);
       const record = await executeToolCall({
         registry: toolRegistry,
         id: tc.id,
@@ -2506,7 +2539,7 @@ async function runWithToolsInternal(
           }
           if (
             tc.name === 'generate_skill'
-            && !['generate', 'save'].includes(classifySkillAuthoringIntent(String(toolExecutionContext?.actionIntent || primaryTask)))
+            && classifySkillAuthoringIntent(String(toolExecutionContext?.actionIntent || primaryTask)) !== 'generate'
             && !hasSameTaskSkillGenerationDiscovery(executionLog, toolExecutionContext)
           ) {
             return {
@@ -2673,9 +2706,14 @@ async function runWithToolsInternal(
 function recordWorkflowIfToolsUsed(
   executionLog: ToolExecutionRecord[],
   messages: NormalizedMessage[],
-  config: Pick<LLMConfig, 'userId' | 'domain' | 'orgId' | 'conversationId'>,
+  config: Pick<LLMConfig, 'userId' | 'domain' | 'orgId' | 'conversationId' | 'source' | 'workflowSource'>,
+  routedTaskText?: string,
 ): void {
-  if (executionLog.length === 0) return;
+  // Rehydrated ledger summaries are not complete replay data. Keep the
+  // original trace already observed in this process instead of replacing its
+  // code/results with lossy summaries on the next conversation turn.
+  const businessRecords = executionLog.filter(record => record.envelope && isWorkflowBusinessTool(record.name));
+  if (businessRecords.length === 0) return;
   const rawContent = [...messages].reverse().find(message => {
     if (message.role !== 'user') return false;
     const content = typeof message.content === 'string'
@@ -2689,22 +2727,24 @@ function recordWorkflowIfToolsUsed(
     return !/^\s*Internal execution recovery\./i.test(content);
   })?.content || '';
   const userMsg = typeof rawContent === 'string' ? rawContent : Array.isArray(rawContent) ? rawContent.filter(c => c.type === 'text').map(c => (c as any).text).join(' ') : '';
-  const safeMsg = userMsg || '';
+  const safeMsg = routedTaskText || userMsg || '';
   if (!safeMsg.trim()) return;
   // Authoring/discovery turns must not replace the business trace that the
   // next capture request is trying to save.
-  if (classifySkillAuthoringIntent(safeMsg) !== 'none') return;
+  if (classifySkillAuthoringIntent(safeMsg) !== 'none' && !executionBeforeWorkflowSave(safeMsg)) return;
   recordWorkflow({
+    source: config.workflowSource || config.source,
     userId: config.userId || 'anonymous',
     conversationId: config.conversationId,
-    taskId: executionLog[0]?.taskId,
+    taskId: businessRecords[0]?.taskId,
     domain: config.domain === 'work' ? 'work' : 'personal',
     orgId: config.domain === 'work' ? (config.orgId || '') : '',
     userIntent: safeMsg.slice(0, 200),
-    toolSequence: executionLog.map(e => ({
+    toolSequence: businessRecords.map(e => ({
       name: e.name,
       args: e.arguments,
       resultSummary: (e.result || e.error || '').slice(0, 200),
+      ...(e.result && e.result.length <= 32_768 ? { result: e.result } : {}),
       verified: !e.error && e.terminalVerification?.status === 'verified' && e.envelope?.status === 'verified_success',
       operation: e.capability?.operation || e.evidence?.operation,
     })),

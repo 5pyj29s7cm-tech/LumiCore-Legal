@@ -1,5 +1,6 @@
 import { ToolPolicy } from '../personality/types';
-import { classifySkillAuthoringIntent, skillAuthoringTools } from '../skills/authoring_intent';
+import { isExternalCliRequest, classifyExternalCliIntent, externalCliToolsForIntent } from './external_cli_intent';
+import { classifySkillAuthoringIntent, skillAuthoringTools, executionBeforeWorkflowSave } from '../skills/authoring_intent';
 import {
   ToolRegistry,
 } from '../tools/registry';
@@ -42,6 +43,7 @@ import {
 } from './normalized_action_intent';
 import { isReadOnlyKnowledgeBaseInspectionRequest } from './knowledge_intent';
 import { classifyRuntimeWorkIntent } from './runtime_work_intent';
+import { buildClientDiagnosticPlan } from './client_diagnostic_result';
 import {
   isRuntimeCleanupOfferAcceptanceText,
   type PendingAssistantOfferContext,
@@ -473,7 +475,9 @@ function priorityToolsForRoute(categories: string[], text: string): string[] {
   if (isDirectAutocadOperationsPlayback(instructionText)) {
     priorities.push('mcp_cad-drafting_autocad_playback_file');
   }
-  if (isDesktopAiRequest(instructionText)) {
+  if (isExternalCliRequest(instructionText)) {
+    priorities.push(...externalCliToolsForIntent(instructionText));
+  } else if (isDesktopAiRequest(instructionText)) {
     priorities.push(
       'desktop_ai_ask',
       'desktop_ai_collect_answer',
@@ -883,8 +887,22 @@ export function routeToolsForTurn(
   );
   const authoring = classifySkillAuthoringIntent(primaryInstructionText);
   if (authoring !== 'none') {
+    const executionText = executionBeforeWorkflowSave(primaryInstructionText);
+    if (executionText) {
+      const execution = routeToolsForTurn(executionText, declarations, options);
+      const toolNames = unique([...['code_execution'].filter(name => available.has(name)), ...execution.toolNames,
+        ...skillAuthoringTools(authoring).filter(name => available.has(name))]).slice(0, maxTools);
+      return { ...execution, toolNames, categories: unique([...execution.categories, 'skill_authoring']),
+        reasons: [...execution.reasons, 'execute the explicit current task, then save its reusable workflow'],
+        maxTools, truncated: toolNames.length < execution.toolNames.length + skillAuthoringTools(authoring).filter(name => available.has(name) && !execution.toolNames.includes(name)).length };
+    }
     const toolNames = skillAuthoringTools(authoring).filter(name => available.has(name)).slice(0, maxTools);
-    return { toolNames, categories: ['skill_authoring'], reasons: ['the user requested authoring a reusable skill/workflow, not executing the example domain task'], totalAvailable: declarations.length, maxTools, truncated: false };
+    return { toolNames, categories: ['skill_authoring'], reasons: ['the user requested authoring a reusable skill/workflow, not executing the example domain task'], totalAvailable: declarations.length, maxTools, truncated: false, ...(authoring === 'save' ? { hardAllowlist: true } : {}) };
+  }
+  const diagnosticPlan = buildClientDiagnosticPlan(instructionText);
+  if (diagnosticPlan.length) {
+    const toolNames = diagnosticPlan.map(step => step.name).filter(name => available.has(name));
+    if (toolNames.length) return { toolNames, categories: ['client_diagnostic'], reasons: ['A current runtime check uses its state and health receipts, not unrelated business capabilities.'], totalAvailable: declarations.length, maxTools, truncated: false, hardAllowlist: true };
   }
   const routingManifest: CapabilityRoutingProjection[] = options?.capabilityManifest?.length
     ? options.capabilityManifest
@@ -1198,11 +1216,21 @@ export function routeToolsForTurn(
     for (const name of actionContract.preferredTools) addIfAvailable(selected, available, name);
     if (!categories.includes('external_control')) categories.push('external_control');
     reasons.push('external AI history uses only the persistent authorization, synchronization, and local query pipeline');
-    for (const submitTool of ['desktop_ai_ask']) {
+    for (const submitTool of ['desktop_ai_ask', 'external_cli_run']) {
       selected.delete(submitTool);
       forbiddenToolNames.add(submitTool);
     }
     reasons.push('history reads hard-forbid every external AI prompt-submission entry');
+  }
+
+  if (isExternalCliRequest(instructionText)) {
+    for (const name of externalCliToolsForIntent(instructionText)) addIfAvailable(selected, available, name);
+    if (classifyExternalCliIntent(instructionText) === 'inspect') {
+      for (const name of ['external_cli_run', 'external_cli_get_run']) { selected.delete(name); forbiddenToolNames.add(name); }
+    }
+    for (const name of ['desktop_ai_ask', 'desktop_ai_collect_answer', 'computer_use']) {
+      selected.delete(name); forbiddenToolNames.add(name);
+    }
   }
 
   if (currentAuthoringDocumentInspection && !currentAppEdit) {

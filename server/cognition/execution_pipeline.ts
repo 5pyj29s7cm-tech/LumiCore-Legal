@@ -1,7 +1,7 @@
 import type { ToolPolicy } from '../personality/types';
 import { normalizeStructuredMediaRequest, structuredMediaToolCall, type StructuredMediaRequest } from '../../shared/media_generation';
 import type { ToolRegistry } from '../tools/registry';
-import type { ConversationActionContinuationState } from './action_continuation';
+import { isExplicitUnfinishedTaskContinuation, isTaskPreparationContinuation, type ConversationActionContinuationState } from './action_continuation';
 import {
   isExplicitArtifactCreationText,
   isExternalCommitConfirmationOnlyRequest,
@@ -40,7 +40,7 @@ import {
 } from './capability_execution_plan';
 import { recordRoutingShadowComparison } from '../runtime/capability_metrics';
 import { hasExplicitNoMutationInstruction } from './tool_intent';
-import { classifySkillAuthoringIntent } from '../skills/authoring_intent';
+import { classifySkillAuthoringIntent, executionBeforeWorkflowSave } from '../skills/authoring_intent';
 import type { PendingAssistantOfferContext } from './pending_assistant_offer';
 import { buildActionContract } from './action_contract';
 import type { ToolContext } from '../tools/types';
@@ -212,9 +212,14 @@ function applyCurrentTurnNoMutationConstraint(
   // erase the internal workflow ledger and local production capabilities.
   if (flow?.industryWorkflowEntryId) return execution;
   if (!hasExplicitNoMutationInstruction(text)) return execution;
-  const trustedWorkflowHintTools = new Set(flow?.workflowHint?.requiredTools || []);
+  const requestedWorkflowCapture = preservedOutput && executionBeforeWorkflowSave(text);
+  const scopedTools = new Set([
+    ...(flow?.workflowHint?.requiredTools || []),
+    ...(preservedOutput ? ['code_execution'] : []),
+    ...(requestedWorkflowCapture ? ['capture_recent_workflow', 'save_workflow'] : []),
+  ]);
   const mutationTools = registry.getCapabilityManifest(undefined, { context: visibilityContext })
-    .filter(entry => !trustedWorkflowHintTools.has(entry.toolName) && (!preservedOutput || !isPreservedSourceOutputTool(entry.toolName)) && (
+    .filter(entry => !scopedTools.has(entry.toolName) && (!preservedOutput || !isPreservedSourceOutputTool(entry.toolName)) && (
       entry.operation === 'create'
       || entry.operation === 'mutate'
       || entry.sideEffects.some(effect => effect.type !== 'local_read')
@@ -344,8 +349,25 @@ export function buildLumiExecutionPipeline(
         + '. Execute this goal using current file evidence. Do not merge older task revisions or ask the user to choose an older version. Normal tool authorization and confirmation boundaries still apply.'
       : ''].filter(Boolean).join('\n'),
   };
-  const decisionText = acceptedPlan ? turnIntent.flow.routeText : input.decisionText || turnIntent.flow.routeText;
+  let decisionText = acceptedPlan ? turnIntent.flow.routeText : input.decisionText || turnIntent.flow.routeText;
   const trustedActionContinuation = !acceptedPlan && hasTrustedActionContinuation(input);
+  if (trustedActionContinuation) turnIntent.flow.rootTaskText = input.actionTaskState?.goal;
+  // Bind the planning input as well as the ledger id. Detailed "continue the
+  // unfinished task" messages can themselves resemble authoring requests;
+  // routing that fragment alone discards the still-pending business actions.
+  // Only an exact server-bound resumption may use the durable user's goal.
+  const resumesExplicitGoal = trustedActionContinuation
+    && isExplicitUnfinishedTaskContinuation(input.dispatch.text, input.actionTaskState);
+  const actionText = resumesExplicitGoal
+    ? [input.actionTaskState!.goal, effectiveText].join('\n\n')
+    : effectiveText;
+  if (resumesExplicitGoal) {
+    decisionText = actionText;
+    turnIntent.flow.routeText = [actionText, input.dispatch.continuationContext].filter(Boolean).join('\n\n');
+  }
+  if (trustedActionContinuation && isTaskPreparationContinuation(input.dispatch.text, input.actionTaskState)) {
+    turnIntent.flow.preparationRootText = input.actionTaskState?.goal;
+  }
   // A bound retry inherits its authorized goal, not the side-effect class of
   // the acknowledgement ("yes"). Keep current-turn denials authoritative below.
   const currentIntent = normalizeActionIntent(decisionText);
@@ -392,7 +414,7 @@ export function buildLumiExecutionPipeline(
         visibilityContext,
       ),
       input.registry,
-      effectiveText,
+      resumesExplicitGoal && !preservedSourceOutputScope(actionText) ? effectiveText : actionText,
       turnIntent.flow,
       visibilityContext,
     ),
@@ -423,7 +445,7 @@ export function buildLumiExecutionPipeline(
     turnIntent.flow.workflowHint || turnIntent.flow.specialWorkflow
   )?.requiredTools || [];
   const actionVerificationTools = buildActionContract(decisionText).verificationTools || [];
-  const requestedArtifact = requestedSingleArtifact(effectiveText);
+  const requestedArtifact = requestedSingleArtifact(actionText);
   const mediaRequest = normalizeStructuredMediaRequest(input.structuredMediaRequest);
   const modelToolProjection = buildModelToolProjection(execution, {
     lane: selection.lane,
@@ -433,7 +455,7 @@ export function buildLumiExecutionPipeline(
       ...(mediaRequest ? [structuredMediaToolCall(mediaRequest).name] : []),
       ...workflowRequiredTools,
       ...actionVerificationTools,
-      ...preservedSourceOutputTools(effectiveText, acceptedTaskTarget),
+      ...preservedSourceOutputTools(actionText, acceptedTaskTarget),
       ...(requestedArtifact ? [requestedArtifact.producer, requestedArtifact.reader] : []),
     ],
   });
