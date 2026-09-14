@@ -4,6 +4,7 @@ import path from 'node:path';
 import jwt from 'jsonwebtoken';
 import { makeApp, JWT_SECRET } from './helpers';
 import type { ToolExecutionRecord } from '../server/tools/types';
+import { PRODUCT_VARIANT } from '../shared/product_variant';
 
 let base: string;
 let output: string;
@@ -37,13 +38,13 @@ beforeAll(async () => {
 describe('Generated libraries across conversations', () => {
   it('recovers old data paths only after a verified product-root migration', async () => {
     const { migrateLegacyProductDataRoot, markLegacyProductDataMigrationVerified, resolveMigratedDataFile } = await import('../server/config/data_path');
-    const home = path.join(output, 'migration-home'), oldData = path.join(home, 'LumiOS', 'data');
+    const home = path.join(output, 'migration-home'), oldData = path.join(home, PRODUCT_VARIANT.runtime.legacyDataDirectoryName, 'data');
     fs.mkdirSync(oldData, { recursive: true });
     const original = path.join(oldData, 'old-result.txt'); fs.writeFileSync(original, 'historical output');
     fs.writeFileSync(path.join(oldData, 'lumi.db'), 'isolated fixture');
     const migrated = migrateLegacyProductDataRoot(() => ({ releaseAt: () => true }), home);
     expect(resolveMigratedDataFile(original, migrated)).toBe(original);
-    markLegacyProductDataMigrationVerified({ quickCheck: 'ok', userCount: 1, conversationCount: 1, interactionCount: 1 }, migrated);
+    expect(markLegacyProductDataMigrationVerified({ quickCheck: 'ok', userCount: 1, conversationCount: 1, interactionCount: 1 }, migrated)).toBe(true);
     const resolved = resolveMigratedDataFile(original, migrated);
     expect(resolved).toBe(path.join(migrated, 'data', 'old-result.txt'));
     expect(fs.readFileSync(resolved, 'utf8')).toBe('historical output');
