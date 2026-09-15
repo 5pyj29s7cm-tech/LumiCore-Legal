@@ -43,6 +43,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify native Node dependencies
+        run: node -e "require('sqlite3'); require('sharp'); console.log('Native Node dependencies loaded')"
+
       - name: Build unsigned Windows NSIS installer
         run: npm run tauri:build -- --bundles nsis
 
@@ -94,6 +97,10 @@ jobs:
             signedPublicRelease = $false
           } | ConvertTo-Json | Set-Content -LiteralPath 'windows-build-report.json' -Encoding utf8
           Get-Content -LiteralPath 'windows-build-report.json'
+
+      - name: Diagnose failed build inputs
+        if: failure()
+        run: git status --short
 
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -152,6 +159,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Verify native Node dependencies
+        run: node -e "require('sqlite3'); require('sharp'); console.log('Native Node dependencies loaded')"
 
       - name: Build ad-hoc signed macOS DMG
         run: npm run tauri:build -- --target ${{ matrix.target }} --bundles dmg
@@ -221,6 +231,10 @@ jobs:
             codesign -dv --verbose=4 "$app_path" 2>&1 | grep -E '^(Identifier|Signature|TeamIdentifier|Authority)=' || true
           } > "macos-${{ matrix.artifact_arch }}-build-report.txt"
           cat "macos-${{ matrix.artifact_arch }}-build-report.txt"
+
+      - name: Diagnose failed build inputs
+        if: failure()
+        run: git status --short
 
       - name: Upload verified macOS installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
