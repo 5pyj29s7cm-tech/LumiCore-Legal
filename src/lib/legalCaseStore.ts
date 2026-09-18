@@ -1,4 +1,5 @@
 import { getLocale } from '../i18n/runtime';
+import type { LegalWorkflowRun } from '../../shared/legal_workflow_receipts';
 import { chinaLegalCopy } from '../i18n/regions/cn/legal';
 import { normalizeAssetTraceWorkflow, type AssetTraceWorkflow } from './legalAssetTraceWorkflow';
 
@@ -32,6 +33,9 @@ export interface LegalCaseFile {
   appealDeadline: string;
   enforcementDeadline: string;
   notes: string;
+  clientRole?: string;
+  objective?: string;
+  workflowRuns?: LegalWorkflowRun[];
   materials: LegalCaseMaterial[];
   assetTraceWorkflow?: AssetTraceWorkflow;
   createdAt: string;
@@ -111,6 +115,9 @@ function normalizeCaseFile(value: any): LegalCaseFile | null {
     appealDeadline: String(value.appealDeadline || ''),
     enforcementDeadline: String(value.enforcementDeadline || ''),
     notes: String(value.notes || ''),
+    clientRole: String(value.clientRole || ''),
+    objective: String(value.objective || ''),
+    workflowRuns: Array.isArray(value.workflowRuns) ? value.workflowRuns : undefined,
     materials: Array.isArray(value.materials) ? value.materials.map((item: any) => ({
       id: String(item?.id || newId('mat')),
       type: (['consultation', 'evidence', 'pleading', 'judgment', 'contract', 'note'].includes(item?.type) ? item.type : 'note') as LegalCaseMaterialType,
@@ -211,6 +218,9 @@ export function addLegalCaseMaterial(
     title: material.title,
     createdAt: material.createdAt || new Date().toISOString(),
     content: material.content,
+    fileName: material.fileName,
+    localPath: material.localPath,
+    createdBy: material.createdBy,
     source: material.source || 'manual',
   };
   updateLegalCase(caseId, { materials: [nextMaterial, ...(current.materials || [])] });
@@ -235,16 +245,18 @@ export function mergePersonalLegalCaseRuntimeSnapshot(snapshot: unknown): LegalC
   const cases = readLegalCaseFiles();
   const current = cases.find(item => item.id === incoming.id) || null;
   if (!current) {
-    writeLegalCaseFiles([incoming, ...cases], incoming.id);
+    writeLegalCaseFiles([incoming, ...cases]);
     return incoming;
   }
 
+  const runtimeIsNewer = incoming.updatedAt >= current.updatedAt;
   const currentById = new Map(current.materials.map(material => [material.id, material]));
   const runtimeById = new Map(incoming.materials.map(material => [material.id, material]));
   const mergedMaterials = [
     ...incoming.materials.map(material => {
       const existing = currentById.get(material.id);
       if (!existing) return material;
+      if (!runtimeIsNewer && existing.source !== 'tool') return existing;
       return {
         ...existing,
         ...material,
@@ -254,9 +266,11 @@ export function mergePersonalLegalCaseRuntimeSnapshot(snapshot: unknown): LegalC
     }),
     ...current.materials.filter(material => !runtimeById.has(material.id)),
   ];
-  if (JSON.stringify(mergedMaterials) === JSON.stringify(current.materials)) return current;
-  const merged = { ...current, materials: mergedMaterials };
-  writeLegalCaseFiles(cases.map(item => item.id === current.id ? merged : item), current.id);
+  // A reply from another case must not switch the user's current selection.
+  // Preserve edits made locally after this runtime snapshot was produced.
+  const merged = { ...current, ...(runtimeIsNewer ? incoming : {}), materials: mergedMaterials };
+  if (JSON.stringify(merged) === JSON.stringify(current)) return current;
+  writeLegalCaseFiles(cases.map(item => item.id === current.id ? merged : item));
   return merged;
 }
 
@@ -265,7 +279,7 @@ export async function syncPersonalLegalCaseToRuntime(caseFile: LegalCaseFile): P
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ case: caseFile }),
+    body: JSON.stringify({ case: caseFile, activate: getActiveLegalCaseId() === caseFile.id }),
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));

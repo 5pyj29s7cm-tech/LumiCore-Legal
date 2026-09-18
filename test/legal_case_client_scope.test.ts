@@ -10,6 +10,8 @@ import {
   setActiveLegalCaseId,
   setLegalConsultationCaseId,
   writeLegalCaseFiles,
+  mergePersonalLegalCaseRuntimeSnapshot,
+  addLegalCaseMaterial,
 } from '../src/lib/legalCaseStore';
 
 class MemoryStorage implements Storage {
@@ -54,6 +56,17 @@ afterAll(() => {
 });
 
 describe('legal case client scope', () => {
+  it('merges runtime case fields and artifacts without switching to a background case', () => {
+    usePersonalDomain();
+    const first = { ...createEmptyLegalCase(), id: 'first', title: 'First', updatedAt: '2026-01-01' };
+    const active = { ...createEmptyLegalCase(), id: 'active', title: 'Active' };
+    writeLegalCaseFiles([first, active], active.id);
+    mergePersonalLegalCaseRuntimeSnapshot({ ...first, title: 'Updated first', clientRole: '被告', updatedAt: '2026-09-18', materials: [] });
+    expect(readLegalCaseFiles().find(c => c.id === first.id)).toMatchObject({ title: 'Updated first', clientRole: '被告' });
+    expect(getActiveLegalCaseId()).toBe('active');
+    const material = addLegalCaseMaterial(first.id, { type: 'evidence', title: 'attachment', fileName: 'proof.pdf', localPath: 'D:/fixtures/proof.pdf' });
+    expect(material).toMatchObject({ fileName: 'proof.pdf', localPath: 'D:/fixtures/proof.pdf' });
+  });
   it('does not expose or overwrite the personal case database in work domain', () => {
     usePersonalDomain();
     const personalCase = { ...createEmptyLegalCase(), id: 'personal-case', title: 'Personal case' };

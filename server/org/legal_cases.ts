@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { legalCaseSourceFingerprint, type LegalWorkflowRun } from '../../shared/legal_workflow_receipts';
+import type { LegalReasoningLink } from '../regions/packs/cn/legal_reasoning_links';
 import { getDataPath } from '../config/data_path';
 import * as EDB from './db';
 import { inspectLegalReasoningStructure } from '../regions/packs/cn/legal_reasoning_structure';
@@ -40,6 +42,8 @@ export interface OrgLegalCaseMaterial {
   source: 'manual' | 'meeting' | 'feishu' | 'wecom' | 'wechat' | 'tool' | 'import';
   createdBy: string;
   createdAt: string;
+  reasoningLinks?: LegalReasoningLink[];
+  reasoningBasis?: string;
 }
 
 export interface OrgLegalCaseFile {
@@ -57,6 +61,9 @@ export interface OrgLegalCaseFile {
   appealDeadline: string;
   enforcementDeadline: string;
   notes: string;
+  clientRole?: string;
+  objective?: string;
+  workflowRuns?: LegalWorkflowRun[];
   materials: OrgLegalCaseMaterial[];
   assetTraceWorkflow?: Record<string, unknown>;
   createdBy: string;
@@ -203,6 +210,9 @@ export function upsertCaseSnapshot(
     appealDeadline: normalizeText(input.appealDeadline),
     enforcementDeadline: normalizeText(input.enforcementDeadline),
     notes: normalizeText(input.notes),
+    clientRole: normalizeText(input.clientRole) || current?.clientRole,
+    objective: normalizeText(input.objective) || current?.objective,
+    workflowRuns: current?.workflowRuns,
     materials,
     assetTraceWorkflow: input.assetTraceWorkflow && typeof input.assetTraceWorkflow === 'object'
       ? input.assetTraceWorkflow
@@ -212,6 +222,9 @@ export function upsertCaseSnapshot(
     createdAt: normalizeText(input.createdAt) || current?.createdAt || ts,
     updatedAt: ts,
   };
+  // A sync acknowledgement causes the client to refresh its snapshot. Avoid
+  // turning that refresh into an endless write -> new timestamp -> sync loop.
+  if (current && JSON.stringify({ ...caseFile, updatedAt: current.updatedAt }) === JSON.stringify(current)) return current;
   if (index >= 0) store.cases[index] = caseFile;
   else store.cases.unshift(caseFile);
   writeStore(store);
@@ -331,6 +344,8 @@ export function createCase(orgId: string, userId: string, input: Partial<OrgLega
     appealDeadline: normalizeText(input.appealDeadline),
     enforcementDeadline: normalizeText(input.enforcementDeadline),
     notes: normalizeText(input.notes),
+    clientRole: normalizeText(input.clientRole),
+    objective: normalizeText(input.objective),
     materials: Array.isArray(input.materials) ? input.materials : [],
     assetTraceWorkflow: input.assetTraceWorkflow && typeof input.assetTraceWorkflow === 'object'
       ? input.assetTraceWorkflow
@@ -367,6 +382,8 @@ export function updateCase(orgId: string, userId: string, caseId: string, patch:
   const next: OrgLegalCaseFile = {
     ...current,
     ...patch,
+    // Browser snapshots and case updates cannot manufacture verification receipts.
+    workflowRuns: current.workflowRuns,
     id: current.id,
     orgId: current.orgId,
     materials: patch.materials || current.materials || [],
@@ -384,6 +401,18 @@ export function updateCase(orgId: string, userId: string, caseId: string, patch:
     details: { fields: Object.keys(patch) },
   });
   return next;
+}
+
+export function recordWorkflowRun(orgId: string, userId: string, caseId: string,
+  run: Omit<LegalWorkflowRun, 'basis' | 'checkedAt'>): void {
+  if (!getCase(orgId, caseId, userId, 'write')) return;
+  const store = readStore();
+  const item = store.cases.find(value => value.orgId === orgId && value.id === caseId);
+  if (!item) return;
+  item.workflowRuns = [{ ...run, checkedAt: now(), basis: legalCaseSourceFingerprint(item) }, ...(item.workflowRuns || [])].slice(0, 100);
+  item.updatedAt = now();
+  item.updatedBy = userId;
+  writeStore(store);
 }
 
 export function deleteCase(orgId: string, userId: string, caseId: string): OrgLegalCaseFile | null {
@@ -436,6 +465,8 @@ export function addMaterial(
     fileName: material.fileName,
     localPath: material.localPath,
     source: material.source,
+    reasoningLinks: material.reasoningLinks,
+    reasoningBasis: material.reasoningBasis,
     createdBy: userId,
     createdAt: now(),
   };

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { evaluateLegalCaseWorkflow } from '../shared/legal_case_workflow';
+import { legalCaseSourceFingerprint } from '../shared/legal_workflow_receipts';
 
 describe('legal case workflow consistency', () => {
   it('derives a stable workflow from persisted case evidence', () => {
@@ -30,10 +31,10 @@ describe('legal case workflow consistency', () => {
     expect(workflow.steps.find(step => step.key === 'evidence')?.state).toBe('done');
     expect(workflow.steps.find(step => step.key === 'reasoning')?.state).toBe('ready');
     expect(workflow.steps.find(step => step.key === 'reasoning')?.summary).toBe('尚未形成完整法律分析底稿');
-    expect(workflow.steps.find(step => step.key === 'current-law')?.state).toBe('done');
-    expect(workflow.steps.find(step => step.key === 'drafts')?.state).toBe('done');
-    expect(workflow.steps.find(step => step.key === 'delivery')?.state).toBe('done');
-    expect(workflow.readyForFormalDelivery).toBe(true);
+    expect(workflow.steps.find(step => step.key === 'current-law')?.state).not.toBe('done');
+    expect(workflow.steps.find(step => step.key === 'drafts')?.state).not.toBe('done');
+    expect(workflow.steps.find(step => step.key === 'delivery')?.state).not.toBe('done');
+    expect(workflow.readyForFormalDelivery).toBe(false);
   });
 
   it('lets a blocking authority override otherwise completed work products', () => {
@@ -45,7 +46,7 @@ describe('legal case workflow consistency', () => {
         title: '合同审查报告',
         content: '正式交付包已生成\n现行有效法律硬门槛：未通过\n引用法条已废止',
       }],
-    });
+    }, { currentLawGate: 'blocked' });
 
     expect(workflow.steps.find(step => step.key === 'current-law')?.state).toBe('blocked');
     expect(workflow.steps.find(step => step.key === 'delivery')?.state).toBe('blocked');
@@ -70,5 +71,16 @@ describe('legal case workflow consistency', () => {
     };
 
     expect(LegalCases.evaluateCaseWorkflow(input)).toEqual(evaluateLegalCaseWorkflow(input));
+  });
+
+  it('uses the latest verified check, expires it, and does not treat a research plan as retrieved sources', () => {
+    const input = { title: 'test', materials: [{ id: 'draft', source: 'tool', type: 'pleading', content: '旧失败：正式交付包未生成。已废止。外部检索行动单：人民法院案例库。' }] };
+    const basis = legalCaseSourceFingerprint(input);
+    const runs = [{ tool: 'legal_finalize_delivery_package', ok: true, status: 'generated', basis, checkedAt: new Date().toISOString(), materialIds: ['draft'], artifacts: ['file.docx'], currentLawGate: 'passed' as const, reasoningLinked: true },
+      { tool: 'legal_finalize_delivery_package', ok: false, status: 'blocked', basis, checkedAt: new Date().toISOString(), materialIds: [], artifacts: [], currentLawGate: 'blocked' as const }];
+    const evaluated = evaluateLegalCaseWorkflow({ ...input, workflowRuns: runs });
+    expect(evaluated.steps.find(s => s.key === 'current-law')?.state).toBe('done');
+    expect(evaluated.steps.find(s => s.key === 'sources')?.state).not.toBe('done');
+    expect(evaluateLegalCaseWorkflow({ ...input, workflowRuns: [{ ...runs[0], checkedAt: '2000-01-01' }] }).steps.find(s => s.key === 'current-law')?.state).not.toBe('done');
   });
 });

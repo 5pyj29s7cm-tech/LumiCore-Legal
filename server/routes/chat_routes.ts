@@ -33,6 +33,12 @@ import {
   verifyDesktopSessionProof,
 } from "../config/desktop_bootstrap";
 import { redactDiagnosticSecrets } from "../client/diagnostic_sanitizer";
+import * as LegalCases from '../org/legal_cases';
+import { bindIndustryWorkspaceContext, getActiveIndustryWorkspaceContext, listIndustryWorkspaceContexts } from '../industry/workspace_context';
+import { PRODUCT_VARIANT } from '../../shared/product_variant';
+import { CN_LEGAL_WORKFLOW_MESSAGES } from '../regions/packs/cn/skill_messages';
+import { legalToolCaseIdentity, legalToolEntryId } from '../../shared/legal_tool_entry';
+import { getIndustryWorkflowTask, recordIndustryWorkflowExecution, blockIndustryWorkflowExecution } from '../industry/workflow_service';
 import {
   chatPublicErrorCodeForException,
   sanitizeChatAgentErrorPayload,
@@ -639,6 +645,36 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
   router.post("/ai/chat", optionalAuth, handleChat);
   router.post("/chat", optionalAuth, handleChat);
 
+  router.post('/legal/client-case-sync', requireAuth, asyncHandler(async (req, res) => {
+    const scope = resolveDomain(req.user!);
+    if (scope.domain !== 'personal') return res.status(403).json({ error: 'Use the organization case workspace for work cases.' });
+    const input = req.body?.case;
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+      || typeof input.id !== 'string' || !/^[a-zA-Z0-9_.:@-]{1,200}$/.test(input.id)) {
+      return res.status(400).json({ error: 'A valid case snapshot is required.' });
+    }
+    const orgId = resolveLegalCaseworkOrgId({ domain: 'personal', userOrgId: '', userId: req.user!.uid });
+    const caseFile = LegalCases.upsertCaseSnapshot(orgId, req.user!.uid, input);
+    if (req.body.activate === true && PRODUCT_VARIANT.productLine === 'legal') {
+      const selectionScope = { userId: req.user!.uid, domain: 'personal' as const, orgId: '' };
+      const active = getActiveIndustryWorkspaceContext(selectionScope);
+      if (active?.attributes.caseId !== caseFile.id || active.name !== caseFile.title) {
+        const existing = listIndustryWorkspaceContexts(selectionScope).find(item => item.attributes.caseId === caseFile.id);
+        bindIndustryWorkspaceContext(selectionScope, { id: existing?.id, name: caseFile.title,
+          attributes: { caseId: caseFile.id, caseName: caseFile.title, caseNumber: caseFile.caseNumber, clientName: caseFile.party, court: caseFile.court, stage: caseFile.stage } });
+      }
+    }
+    return res.json({ case: caseFile });
+  }));
+
+  router.delete('/legal/client-case-sync/:caseId', requireAuth, asyncHandler(async (req, res) => {
+    const scope = resolveDomain(req.user!);
+    if (scope.domain !== 'personal') return res.status(403).json({ error: 'Use the organization case workspace for work cases.' });
+    const orgId = resolveLegalCaseworkOrgId({ domain: 'personal', userOrgId: '', userId: req.user!.uid });
+    const removed = LegalCases.deleteCase(orgId, req.user!.uid, String(req.params.caseId));
+    return res.json({ deleted: Boolean(removed) });
+  }));
+
   router.post("/legal/tool/:toolName", requireAuth, asyncHandler(async (req, res) => {
     const toolName = String(req.params?.toolName || '').trim();
     if (!DIRECT_LEGAL_TOOL_ALLOWLIST.has(toolName)) {
@@ -677,6 +713,18 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
       return res.status(404).json({ error: `Legal tool "${toolName}" is not registered` });
     }
 
+    const industryTaskId = String(req.body?.industryWorkflowTaskId || '').trim();
+    const workflowScope = { userId, domain, orgId };
+    if (industryTaskId) {
+      const task = getIndustryWorkflowTask(workflowScope, industryTaskId);
+      const metadata = task?.metadata?.industryWorkflow;
+      if (!task || metadata?.entryId !== legalToolEntryId(toolName)
+        || metadata?.context?.caseIdentity !== legalToolCaseIdentity(args)
+        || !['queued', 'in_progress', 'waiting_confirmation'].includes(task.status)) {
+        return res.status(409).json({ error: 'The legal workflow no longer matches this case and entry. Reopen the requested workflow.' });
+      }
+    }
+
     const request = createRequestAbortController(req, res);
     try {
       const record = await executeToolCall({
@@ -697,10 +745,27 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
           localExecution: false,
         } as any,
       });
-      if (request.signal.aborted || res.destroyed) return;
+      if (request.signal.aborted || res.destroyed) {
+        if (industryTaskId) blockIndustryWorkflowExecution({ ...workflowScope, taskId: industryTaskId,
+          reason: CN_LEGAL_WORKFLOW_MESSAGES.cancelled, source: 'legal-direct-tool' });
+        return;
+      }
       if (record.error) throw new Error(record.error);
-      return res.json({ text: record.result, toolName, receipt: record.receipt || {}, verification: record.terminalVerification });
+      const receipt: Record<string, any> = record.receipt && typeof record.receipt === 'object' ? record.receipt : {};
+      const changedIds = Array.isArray(receipt.changedCaseIds) ? receipt.changedCaseIds : [];
+      const caseUpdates = [...new Set(changedIds)].filter((id): id is string => typeof id === 'string')
+        .map(id => LegalCases.getCase(legalOrgId, id, userId, 'read')).filter(Boolean);
+      const incomplete = receipt.ok !== true || ['template', 'mixed'].includes(receipt.draftMode)
+        || (toolName === 'legal_case_reasoning_matrix' && receipt.reasoningLinked !== true);
+      const industryWorkflow = industryTaskId ? (incomplete
+        ? blockIndustryWorkflowExecution({ ...workflowScope, taskId: industryTaskId, resultText: record.result, toolRecords: [record], source: 'legal-direct-tool',
+          reason: CN_LEGAL_WORKFLOW_MESSAGES.incomplete, blockerStatus: receipt.status || 'needs_review' })
+        : recordIndustryWorkflowExecution({ ...workflowScope, taskId: industryTaskId, resultText: record.result, toolRecords: [record], source: 'legal-direct-tool' })) : undefined;
+      return res.json({ text: record.result, toolName, receipt, verification: record.terminalVerification,
+        caseUpdates, artifacts: Array.isArray(receipt.artifacts) ? receipt.artifacts : [], industryWorkflow });
     } catch (err: any) {
+      if (industryTaskId) blockIndustryWorkflowExecution({ ...workflowScope, taskId: industryTaskId,
+        reason: request.signal.aborted ? CN_LEGAL_WORKFLOW_MESSAGES.cancelled : CN_LEGAL_WORKFLOW_MESSAGES.failed, source: 'legal-direct-tool' });
       if (request.signal.aborted || res.destroyed) return;
       console.warn('[LegalDirectTool] Execution failed:', redactDiagnosticSecrets(err?.message || err).slice(0, 500));
       return res.status(500).json({

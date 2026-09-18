@@ -33,6 +33,19 @@ function trustedLocalContext(userId: string, overrides: Record<string, unknown> 
   };
 }
 
+async function traceableDeliveryInput(orgId: string, conclusion: string, caseId?: string, caseName = '有来源的交付测试案') {
+  const cases = await import('../server/org/legal_cases');
+  const { verifyCitation } = await import('../server/legal/kb');
+  const caseFile = caseId ? cases.getCase(orgId, caseId)! : cases.createCase(orgId, 'vitest', { title: caseName });
+  const source = cases.addMaterial(orgId, 'vitest', caseFile.id, { type: 'evidence', title: '虚构原始合同及签收记录', source: 'manual',
+    content: '虚构合同及签收记录记载原告已经供货，被告签收后尚未支付剩余货款，违约金需要另行核算。' })!;
+  return { caseId: caseFile.id, reasoningLinks: [{ issue: '虚构交易欠付款项与违约金的审查', ruleCitation: '《民法典》第五百八十五条',
+    ruleQuote: verifyCitation('《民法典》第五百八十五条').sourceText!, fact: source.content,
+    evidence: [{ materialId: source.id, quote: source.content, locator: '测试材料第1段' }],
+    application: '需要结合合同约定及实际损失核算，付款及违约责任须以完整证据核实为条件。', conclusion,
+    limitations: '仅测试关联来源，不判断法律适用或证据真实性；实际意见需要律师复核。' }] };
+}
+
 describe('legal case identity isolation', () => {
   it('recovers explicitly labelled case slots when the planner omits them', async () => {
     const registry = createLegalRegistry();
@@ -503,6 +516,7 @@ describe('semi-automated legal workflows', () => {
       expect(filing).toContain('法律成果预检');
 
       const delivery = await registry.execute('legal_finalize_delivery_package', {
+        ...await traceableDeliveryInput(orgId, '被告应承担违约责任。', caseId),
         orgId,
         userId: 'vitest',
         caseId,
@@ -1050,6 +1064,7 @@ describe('semi-automated legal workflows', () => {
         orgId,
         userId: 'vitest',
         caseName: '正式交付测试案',
+        ...await traceableDeliveryInput(orgId, '被告应支付货款并承担违约责任。', undefined, '正式交付测试案'),
         documentType: '代理词',
         caseType: '买卖合同纠纷',
         role: '原告',
@@ -1220,6 +1235,7 @@ describe('semi-automated legal workflows', () => {
         orgId,
         userId: 'vitest',
         caseName: '本案案号豁免测试案',
+        ...await traceableDeliveryInput(orgId, '被告应承担违约责任。', undefined, '本案案号豁免测试案'),
         caseNumber: '（2026）沪0101民初888号',
         documentType: '代理词',
         outputDir: dir,
@@ -1255,6 +1271,7 @@ describe('semi-automated legal workflows', () => {
 
     try {
       await registry.execute('legal_case_reasoning_matrix', {
+        ...await traceableDeliveryInput(orgId, '原告请求被告支付货款并承担违约责任。', undefined, caseName),
         orgId,
         userId: 'vitest',
         caseName,

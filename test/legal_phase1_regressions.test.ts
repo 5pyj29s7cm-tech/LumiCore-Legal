@@ -36,9 +36,33 @@ beforeAll(async () => {
   registerLegalTools(registry);
 });
 afterAll(() => app.cleanup());
-afterEach(() => { vi.clearAllMocks(); resetStatuteAuthorityRefreshStateForTest(); });
+afterEach(() => { vi.clearAllMocks(); vi.restoreAllMocks(); resetStatuteAuthorityRefreshStateForTest(); });
 
 describe('legal phase one regressions', () => {
+  it('reports a partial packet when DOCX output fails despite successful Markdown files', async () => {
+    const original = fs.writeFileSync.bind(fs);
+    vi.spyOn(fs, 'writeFileSync').mockImplementation(((file: any, ...args: any[]) => {
+      if (String(file).endsWith('.docx')) throw new Error('Synthetic DOCX writer failure');
+      return (original as any)(file, ...args);
+    }) as any);
+    const result = await run('legal_generate_litigation_packet', { role: '原告', facts: '虚构甲公司已交货，对方尚未付款。', caseName: 'DOCX失败验收' });
+    expect(result.receipt).toMatchObject({ ok: false, status: 'partial' });
+    expect(result.result).toContain('DOCX 生成异常');
+    expect((result.receipt as any).artifacts.some((p: string) => p.endsWith('.md'))).toBe(true);
+  });
+  it('writes model-generated pleadings into the actual individual DOCX files', async () => {
+    vi.mocked(makeLLMCall).mockResolvedValueOnce({ text: JSON.stringify({ summary: '# 总稿\n逐项分析见独立文书。', documents: [
+      { baseName: '20_statement-of-defense', markdown: '# 答辩状\n对于九万元诉请，已有银行凭据显示支付七万元，请核对剩余本金和质量争议；该结论仅为测试草稿。' },
+      { baseName: '21_cross-examination-opinion', markdown: '# 质证意见\n对方主张应与银行付款凭据逐项核对，检验报告需核实原件、形成过程及检测范围；不得将未核对内容视为承认。' },
+      { baseName: '23_argument-outline', markdown: '# 代理词\n首先核实付款金额及时间，再核对交付质量与对方诉请，保留不足材料的补证事项；本段仅测试正文文件写入。' },
+    ] }), toolCalls: [] } as any);
+    const result = await run('legal_generate_litigation_packet', { role: '被告', caseName: '独立正文验收', facts: '对方主张九万元，我方已付七万元。', evidence: '银行转账凭据。' }, { llmGetters: {} });
+    expect(result.receipt).toMatchObject({ ok: true, draftMode: 'model' });
+    const total = (result.receipt as any).artifacts.find((p: string) => p.endsWith('00_litigation-packet.md'));
+    const document = await parseDocument(path.join(path.dirname(total), '20_statement-of-defense.docx'));
+    expect(document?.text).toContain('已有银行凭据显示支付七万元');
+    expect(document?.text).not.toContain('按对方每项诉讼请求');
+  });
   it('verifies real paragraphs and rejects fabricated paragraphs, items, inserted articles, and quotations', () => {
     installCivilCodeFixture();
     const valid = verifyCitation('《民法典》第五百八十五条第二款');

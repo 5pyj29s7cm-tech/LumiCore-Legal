@@ -1,3 +1,4 @@
+import { legalToolEntryId as inferLegalEntryId, legalToolCaseIdentity as legalCaseIdentity } from '../../shared/legal_tool_entry';
 import { getDesktopSessionProof } from '../services/authService';
 import { getIndustryWorkflowTaskRef, startIndustryWorkflow } from './industryWorkflowClient';
 import { mergePersonalLegalCaseRuntimeSnapshot } from './legalCaseStore';
@@ -27,23 +28,6 @@ function activeLegalIndustrySelection(): LegalIndustrySelection | null {
   } catch {
     return null;
   }
-}
-
-function inferLegalEntryId(toolName: string): string {
-  if (/bid/i.test(toolName)) return 'bid';
-  if (/contract/i.test(toolName)) return 'contract-review';
-  if (/(?:asset|equity|company)/i.test(toolName)) return 'asset-trace';
-  if (/(?:citation|verify|final)/i.test(toolName)) return 'verify';
-  if (/(?:statute|search_case|case_search|research|external_search)/i.test(toolName)) return 'research';
-  if (/(?:packet|strategy|opinion|document|draft)/i.test(toolName)) return 'packet';
-  return 'workspace';
-}
-
-function legalCaseIdentity(args: Record<string, any>): string {
-  const caseId = String(args.caseId || '').trim();
-  if (caseId) return `id:${caseId}`;
-  const caseName = String(args.caseName || args.title || '').trim();
-  return caseName ? `name:${caseName.toLocaleLowerCase()}` : 'standalone';
 }
 
 function taskMatchesLegalSelection(
