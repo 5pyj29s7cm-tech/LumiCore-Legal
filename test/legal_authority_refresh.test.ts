@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import './helpers';
+import { Document, Packer, Paragraph } from 'docx';
+import { civilCodeText } from './fixtures/legal_authority_fixture';
 import { initDatabase } from '../db_layer';
 import {
   listStatuteVerificationCatalog,
@@ -76,7 +78,7 @@ describe('Authoritative statute source refresh', () => {
 
     const citation = verifyCitation('《公司法》第五十条', undefined, { asOf: '2026-11-01' });
     expect(citation.isEffective).toBe(true);
-    expect(citation.verificationStatus).toBe('verified');
+    expect(citation.verificationStatus).toBe('metadata_only');
     expect(citation.reviewAfter).toBe('2026-12-30');
   });
 
@@ -155,7 +157,7 @@ describe('Authoritative statute source refresh', () => {
     });
 
     expect(result.verified).toBe(1);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     const retryHeaders = new Headers(fetchMock.mock.calls[1][1]?.headers);
     expect(retryHeaders.get('Cookie')).toBe('wzws_cid=test-session');
   });
@@ -163,5 +165,40 @@ describe('Authoritative statute source refresh', () => {
   it('extracts the final article from both object and array outlines', () => {
     expect(extractOfficialArticleMax({ children: [{ title: '第一百条' }] })).toBe(100);
     expect(extractOfficialArticleMax([{ title: '第九十九条' }, { title: '第一百零一条' }])).toBe(101);
+  });
+
+  it('downloads pinned official text, checks structure, and never persists a signed download URL', async () => {
+    const entry = listStatuteVerificationCatalog().find(item => item.key === '民法典')!;
+    let document = await Packer.toBuffer(new Document({ sections: [{ children: civilCodeText().split(/\n\s*\n/).map(text => new Paragraph(text)) }] }));
+    const downloadUrl = 'https://flkoss.obs-bj2.cucloud.cn/official/company-law.docx?Signature=private-test-signature';
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/flfgDetails')) return officialDetail(entry, { content: { children: [{ title: '第一千二百六十条' }] } });
+      if (url.includes('/download/pc')) return new Response(JSON.stringify({ code: 200, data: { url: downloadUrl } }));
+      if (url === downloadUrl) return new Response(new Uint8Array(document));
+      throw new Error('Unexpected URL');
+    }) as unknown as typeof fetch;
+    const result = await refreshAuthoritativeStatuteSources({ catalog: [entry], fetchImpl, requestDelayMs: 0, writeHistory: false });
+    expect(result.checks[0].originalText?.provisions['585'].paragraphs).toHaveLength(3);
+    expect(verifyCitation('《民法典》第585条第二款')).toMatchObject({ provisionVerified: true, verificationStatus: 'verified' });
+    expect(JSON.stringify(loadStatuteAuthorityRefreshState())).not.toContain('private-test-signature');
+    document = await Packer.toBuffer(new Document({ sections: [{ children: civilCodeText().replace('当事人可以约定一方违约', '当事人不得约定一方违约').split(/\n\s*\n/).map(text => new Paragraph(text)) }] }));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const changed = await refreshAuthoritativeStatuteSources({ catalog: [entry], fetchImpl, requestDelayMs: 0, writeHistory: false });
+      expect(changed.checks[0].status).toBe('changed');
+      expect(verifyCitation('《民法典》第585条第二款').verificationStatus).toBe('changed');
+    }
+  });
+
+  it('refuses an unrelated text download host and does not mark metadata-only results as provision verified', async () => {
+    const entry = companyLawCatalogEntry();
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => String(input).includes('/flfgDetails')
+      ? officialDetail(entry)
+      : new Response(JSON.stringify({ code: 200, data: { url: 'http://127.0.0.1/internal.docx' } }))) as unknown as typeof fetch;
+    const result = await refreshAuthoritativeStatuteSources({ catalog: [entry], fetchImpl, requestDelayMs: 0, writeHistory: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(result.checks[0].originalText).toBeUndefined();
+    expect(result.checks[0].originalTextError).toBeTruthy();
+    expect(verifyCitation('《公司法》第50条')).toMatchObject({ provisionVerified: false, verificationStatus: 'metadata_only' });
   });
 });

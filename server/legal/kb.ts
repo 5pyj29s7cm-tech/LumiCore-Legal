@@ -1,3 +1,4 @@
+import { checkStatuteProvision, extractStatuteReferences, statuteTextCopy } from '../regions/packs/cn/statute_provisions';
 /**
  * Legal Knowledge Base Engine — extends org KB with legal-specific capabilities:
  * case similarity search, statute validation, citation tracking, legal-aware chunking.
@@ -721,7 +722,11 @@ export interface CitationCheck {
   isEffective: boolean | null;
   source: string;
   detail: string;
-  verificationStatus?: 'verified' | 'expired' | 'missing' | 'repealed' | 'not_found' | 'changed';
+  verificationStatus?: 'verified' | 'expired' | 'missing' | 'repealed' | 'not_found' | 'changed' | 'metadata_only' | 'text_mismatch';
+  provisionVerified?: boolean;
+  quotationVerified?: boolean | null;
+  sourceText?: string;
+  applicabilityStatus?: 'needs_case_review' | 'historical_review_required';
   authorityRefreshStatus?: StatuteAuthorityCheck['status'];
   sourceUrl?: string;
   verifiedAt?: string;
@@ -729,6 +734,8 @@ export interface CitationCheck {
 }
 
 export interface CitationVerificationOptions {
+  quotedText?: string;
+  factDate?: string;
   asOf?: string | Date;
   actorUserId?: string;
 }
@@ -837,16 +844,22 @@ export function verifyCitation(
         };
       }
 
+      const original = resolved.authorityCheck?.originalText;
+      const snapshot = original && !resolved.authorityCheck?.originalTextError && original.recordId === resolved.authorityCheck?.observed?.recordId
+        && original.versionDate === verification?.versionDate ? original : undefined;
+      const directQuote = extractStatuteReferences(citation)[0]?.quotedText;
+      const provision = checkStatuteProvision(citation, snapshot, options.quotedText ?? directQuote);
+      const factDate = options.factDate || (options.asOf ? new Date(options.asOf).toISOString().slice(0, 10) : '');
+      const historical = Boolean(factDate && verification?.effectiveDate && factDate < verification.effectiveDate);
       return {
-        citation,
-        type: 'statute',
-        exists: true,
-        isEffective: true,
+        citation, type: 'statute', exists: provision.verificationStatus !== 'not_found',
+        isEffective: historical ? null : true,
         source: verification ? verificationSource(verification) : '内置法名状态表（非实时权威核验）',
-        detail: articleNumber === null
-          ? `${found.title} 已按所列权威来源核验。`
-          : `${found.title} 第${articleNumber}条位于已核验权威文本条文范围内。${resolved.authorityCheck?.status === 'unavailable' ? ' 本次自动巡检暂不可用，当前结论沿用最近一次仍在复核期限内的成功快照。' : ''}`,
-        verificationStatus: verification ? 'verified' : 'missing',
+        ...provision,
+        detail: provision.detail + (historical
+          ? statuteTextCopy.historical
+          : statuteTextCopy.applicability),
+        applicabilityStatus: historical ? 'historical_review_required' : 'needs_case_review',
         authorityRefreshStatus: resolved.authorityCheck?.status,
         ...snapshotMetadata(verification),
       };
@@ -911,11 +924,8 @@ export function verifyMultipleCitations(
 ): CitationCheck[] {
   const checks: CitationCheck[] = [];
 
-  // Find all 《...》 statute citations
-  const statuteRe = /《[^》]+》(?:第[零〇一二两三四五六七八九十百千万\d]+条(?:之[零〇一二两三四五六七八九十百千万\d]+)?(?:第[零〇一二两三四五六七八九十百千万\d]+款)?(?:第[零〇一二两三四五六七八九十百千万\d]+项)?)?/g;
-  let m: RegExpExecArray | null;
-  while ((m = statuteRe.exec(text)) !== null) {
-    checks.push(verifyCitation(m[0], orgId, options));
+  for (const reference of extractStatuteReferences(text)) {
+    checks.push(verifyCitation(reference.citation, orgId, { ...options, quotedText: reference.quotedText ?? options.quotedText }));
   }
 
   // Find all case number patterns

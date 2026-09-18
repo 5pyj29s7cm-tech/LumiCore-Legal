@@ -7,7 +7,7 @@ import { runWithTools } from "../llm/adapter";
 import { createRequestAbortController } from '../http/request_abort';
 import { makeLLMCall } from "../llm/providers";
 import { toolRegistry } from "../tools/registry";
-import { executeToolCallOrThrow } from "../tools/execution_engine";
+import { executeToolCall, executeToolCallOrThrow } from "../tools/execution_engine";
 import { recordLatency } from "../monitor/latency_store";
 import { optionalAuth, requireAuth, resolveDomain } from "../middleware/auth";
 import { getUserPreferredLLMConfig } from "../llm/user_preferences";
@@ -677,8 +677,9 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
       return res.status(404).json({ error: `Legal tool "${toolName}" is not registered` });
     }
 
+    const request = createRequestAbortController(req, res);
     try {
-      const text = await executeToolCallOrThrow({
+      const record = await executeToolCall({
         registry: toolRegistry,
         name: toolName,
         arguments: args,
@@ -688,20 +689,25 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
           orgId,
           llmGetters: llm,
           source: 'legal-direct-tool',
+          executionSignal: request.signal,
+          isCancelled: () => request.signal.aborted,
           authenticated: true,
           authRole: req.user!.role,
           orgRole: req.user!.orgRole,
           localExecution: false,
         } as any,
       });
-      return res.json({ text, toolName });
+      if (request.signal.aborted || res.destroyed) return;
+      if (record.error) throw new Error(record.error);
+      return res.json({ text: record.result, toolName, receipt: record.receipt || {}, verification: record.terminalVerification });
     } catch (err: any) {
+      if (request.signal.aborted || res.destroyed) return;
       console.warn('[LegalDirectTool] Execution failed:', redactDiagnosticSecrets(err?.message || err).slice(0, 500));
       return res.status(500).json({
         error: 'Legal tool execution failed',
         code: 'LEGAL_TOOL_EXECUTION_FAILED',
       });
-    }
+    } finally { request.dispose(); }
   }));
 
   router.post("/legal/contract-review", requireAuth, asyncHandler(async (req, res) => {
@@ -735,8 +741,8 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
       });
     }
     const request = createRequestAbortController(req, res);
-    const deepSignal = AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]);
-    const llmReview = executeToolCallOrThrow({
+    const deepSignal = AbortSignal.any([request.signal, AbortSignal.timeout(95_000)]);
+    const llmReview = executeToolCall({
       registry: toolRegistry,
       name: 'legal_review_contract',
       arguments: args,
@@ -757,10 +763,11 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
     llmReview.catch(() => undefined);
 
     try {
-      const text = await llmReview;
+      const record = await llmReview;
+      if (record.error) throw new Error(record.error);
       request.signal.throwIfAborted();
 
-      return res.json({ text, degraded: false });
+      return res.json({ text: record.result, receipt: record.receipt || {}, degraded: (record.receipt as any)?.ok === false });
     } catch (err: any) {
       if (request.signal.aborted || res.destroyed) return;
       console.warn('[LegalContractReview] Deep review unavailable:', redactDiagnosticSecrets(err?.message || err).slice(0, 500));
@@ -768,7 +775,7 @@ export function mountChatRoutes(router: Router, _jwtSecret: string, llm: {
         const fallback = await executeToolCallOrThrow({
           registry: toolRegistry,
           name: 'legal_review_contract',
-          arguments: args,
+          arguments: { ...args, sourceOnly: true },
           context: {
             userId,
             domain,

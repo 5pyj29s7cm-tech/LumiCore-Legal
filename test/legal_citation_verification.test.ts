@@ -3,7 +3,7 @@ import './helpers';
 import { verifyCitation, verifyMultipleCitations } from '../server/legal/kb';
 
 describe('Authoritative legal citation verification', () => {
-  it('accepts a Civil Code article inside the sourced official snapshot range', () => {
+  it('recognizes Civil Code metadata without claiming provision verification', () => {
     const check = verifyCitation('《民法典》第五百八十五条');
     expect(check.exists).toBe(true);
     expect(check.isEffective).toBe(true);
@@ -18,13 +18,13 @@ describe('Authoritative legal citation verification', () => {
     expect(check.detail).toContain('超出已核验条文范围');
   });
 
-  it('accepts a Company Law article inside its independently sourced current snapshot', () => {
+  it('recognizes Company Law metadata without original provision text', () => {
     const check = verifyCitation('《公司法》第五十条');
     expect(check.exists).toBe(true);
     expect(check.isEffective).toBe(true);
     expect(check.source).toContain('国家法律法规数据库');
     expect(check.source).toContain('2023-12-29');
-    expect(check.verificationStatus).toBe('verified');
+    expect(check.verificationStatus).toBe('metadata_only');
   });
 
   it.each([
@@ -49,11 +49,12 @@ describe('Authoritative legal citation verification', () => {
     ['《合同编通则解释》第六十九条', 69],
     ['《担保制度解释》第七十一条', 71],
     ['《买卖合同司法解释》第三十三条', 33],
-  ])('verifies the final article in a sourced current-law snapshot: %s', (citation, articleMax) => {
+  ])('does not treat an in-range article number as verified original text: %s', (citation, articleMax) => {
     const check = verifyCitation(citation);
     expect(check.exists).toBe(true);
     expect(check.isEffective).toBe(true);
-    expect(check.detail).toContain(`第${articleMax}条`);
+    expect(check.provisionVerified).toBe(false);
+    expect(check.verificationStatus).toBe('metadata_only');
     expect(check.sourceUrl).toMatch(/^https:\/\//);
     expect(check.reviewAfter).toBe('2026-10-10');
   });
@@ -70,7 +71,7 @@ describe('Authoritative legal citation verification', () => {
     const valid = verifyCitation('《民法典合同编》第五百八十五条');
     const outsideBook = verifyCitation('《民法典合同编》第一百八十八条');
     expect(valid.isEffective).toBe(true);
-    expect(valid.verificationStatus).toBe('verified');
+    expect(valid.verificationStatus).toBe('metadata_only');
     expect(outsideBook.exists).toBe(false);
     expect(outsideBook.detail).toContain('463-988条');
   });

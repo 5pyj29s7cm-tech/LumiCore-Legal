@@ -1,3 +1,4 @@
+import type { StatuteTextSnapshot } from '../regions/packs/cn/statute_provisions';
 import { readDB, writeDB } from '../../db_layer';
 
 export const STATUTE_AUTHORITY_REFRESH_SETTING_KEY = 'legal_statute_authority_refresh_v1';
@@ -33,6 +34,8 @@ export interface StatuteAuthorityCheck {
   previousFingerprint?: string;
   reasons: string[];
   consecutiveFailures: number;
+  originalText?: StatuteTextSnapshot;
+  originalTextError?: string;
 }
 
 export interface StatuteAuthorityRefreshRun {

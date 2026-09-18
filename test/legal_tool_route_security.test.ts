@@ -4,6 +4,7 @@ import { makeApp, JWT_SECRET } from './helpers';
 import { mountChatRoutes } from '../server/routes/chat_routes';
 import { toolRegistry } from '../server/tools/registry';
 import { addMember, createOrg } from '../server/org/db';
+import { encodeToolResult } from '../server/tools/result_envelope';
 
 let url: string;
 let cleanup: () => void;
@@ -43,6 +44,7 @@ function registerLegalStub(name: string): void {
     },
     handler: async (args, context) => {
       observedCalls.push({ name, args, context: { ...(context as any) } });
+      if (args?.contract === 'partial-review') return encodeToolResult('Section one reviewed; section two pending.', { ok: false, status: 'partial' });
       if (args?.securityFailureTest === true || String(args?.contract || '').includes('security-failure-test')) {
         throw new Error('private legal runtime failed api_key=sk-legal-private-secret at C:\\private\\legal');
       }
@@ -111,6 +113,16 @@ describe('direct legal tool route security', () => {
     });
     expect(response.status).toBe(401);
     expect(await response.json()).toMatchObject({ error: 'Authentication required' });
+  });
+
+  it('preserves incomplete review content and its negative receipt across both HTTP entrances', async () => {
+    for (const endpoint of ['legal/tool/legal_review_contract', 'legal/contract-review']) {
+      const response = await fetch(`${url}/api/${endpoint}`, {
+        method: 'POST', headers: bearer(userToken), body: JSON.stringify({ contract: 'partial-review', persistCase: false }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ text: 'Section one reviewed; section two pending.', receipt: { ok: false, status: 'partial' } });
+    }
   });
 
   it('allows a personal authenticated user and passes verified auth context to the tool', async () => {

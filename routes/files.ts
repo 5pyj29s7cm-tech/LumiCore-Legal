@@ -23,6 +23,8 @@ import { buildKnowledgeIngestionManifest, evaluateKnowledgeManifest, hashKnowled
 import { getDataPath, getGeneratedOutputDir } from '../server/config/data_path';
 import { collectChatArtifacts } from '../server/conversation/chat_artifacts';
 import { sameArtifactPath } from '../server/tools/artifact_evidence';
+import { parseDocument } from '../server/legal/parser';
+import { PdfPasswordError } from '../server/utils/pdf_text';
 import { readDocumentPreview } from '../server/files/document_preview';
 import { getPersonalKnowledgeDirectory } from '../server/files/knowledge_directory';
 import { listGeneratedArchive, reconcileGeneratedArchive, mutateGeneratedArchiveFile, registerGeneratedKnowledgeFile } from '../server/files/generated_archive';
@@ -1390,6 +1392,8 @@ async function saveKnowledgeFile(
     input.assertAuthorized?.();
     extractedContent = extraction.content;
     if (extractedContent) {
+      entry.contentTruncated = extractedContent.length > 50000;
+      entry.extractedCharacters = extractedContent.length;
       entry.content = extractedContent.slice(0, 50000); // cap at 50KB for chat context
       entry.preview = extractedContent.slice(0, 1000);
       entry.extracted = true;
@@ -2251,6 +2255,30 @@ router.post('/files/upload', requireAuth, upload.array('files', MAX_UPLOAD_FILES
       try { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); } catch {}
     }
   }
+});
+
+// Full source extraction for review; never use a chat preview as the document.
+router.post('/files/text/:id', requireAuth, async (req: Request, res: Response) => {
+  const request = createRequestAbortController(req, res);
+  try {
+    const filePath = resolveKnowledgeFilePath(req, req.params.id);
+    const assertSourceCurrent = captureKnowledgeSource(filePath);
+    if (!/\.(pdf|docx|txt|md|rtf|csv|xlsx|xls|pptx)$/i.test(filePath)) {
+      return res.status(422).json({ error: 'This format requires a separate extraction/OCR step.', code: 'DOCUMENT_TEXT_UNAVAILABLE' });
+    }
+    const document = await parseDocument(filePath, { password: typeof req.body?.password === 'string' ? req.body.password : undefined });
+    request.signal.throwIfAborted();
+    // Recheck permissions after asynchronous extraction; never serve a stale grant.
+    if (resolveKnowledgeFilePath(req, req.params.id) !== filePath) throw new Error('File changed during extraction');
+    assertSourceCurrent();
+    if (!document?.text?.trim()) return res.status(422).json({ error: 'No readable text extracted; OCR or document repair is required.', code: 'DOCUMENT_TEXT_UNAVAILABLE' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ text: document.text, characters: document.text.length, truncated: false, format: document.format });
+  } catch (error) {
+    if (request.signal.aborted) return;
+    if (error instanceof PdfPasswordError) return res.status(422).json({ code: error.code, error: error.code });
+    sendRouteError(res, error);
+  } finally { request.dispose(); }
 });
 
 // ── POST /files/import-paths — import local files dropped into the desktop widget ──

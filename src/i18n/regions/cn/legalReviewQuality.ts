@@ -1,0 +1,22 @@
+export const legalReviewQualityCopy = {
+  zh: {
+    coverage: '全文分段审查，报告会标明未完成段落；请一并上传附件。',
+    password: 'PDF 打开密码（仅本次使用）',
+    retry: '重试读取原文件',
+    pending: '以下文件尚未读入，不能作为已审材料：',
+    required: '需要 PDF 打开密码',
+    incorrect: 'PDF 密码不正确',
+    failed: '未能读取完整文本，请检查原文件或先进行 OCR。',
+    partial: '部分文件上传失败，请重新选择失败文件；本次未完成全文导入。',
+  },
+  en: {
+    coverage: 'Full text is reviewed in sections; unfinished sections are reported. Include attachments.',
+    password: 'PDF open password (this request only)',
+    retry: 'Retry reading original files',
+    pending: 'These files have not been read and cannot count as reviewed:',
+    required: 'PDF open password required',
+    incorrect: 'Incorrect PDF password',
+    failed: 'Full text could not be read. Check the original document or run OCR first.',
+    partial: 'Some uploads failed. Select the failed files again; full import is incomplete.',
+  },
+};

@@ -1,3 +1,4 @@
+import { legalReviewQualityCopy } from '../../i18n/regions/cn/legalReviewQuality';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, AlertTriangle, Check, FileText, HelpCircle, Loader2, Shield, Upload } from 'lucide-react';
 import { toast } from 'sonner';
@@ -22,6 +23,7 @@ export function LegalContractReview({
 }) {
   const t = useT();
   const isZh = t.langCode !== 'en';
+  const qualityCopy = legalReviewQualityCopy[isZh ? 'zh' : 'en'];
   const ui = (zh: string, en: string) => (isZh ? zh : en);
   const defaultContract = useMemo(() => (
     (caseFile?.materials || []).find(material => material.type === 'contract' && material.content)?.content || ''
@@ -33,62 +35,106 @@ export function LegalContractReview({
   const [uploading, setUploading] = useState(false);
   const [selectedRisk, setSelectedRisk] = useState<RiskItem | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [password, setPassword] = useState('');
+  const [pendingFiles, setPendingFiles] = useState<Array<{ id: string; name: string; error?: string }>>([]);
+  const [uploadFailures, setUploadFailures] = useState<string[]>([]);
+  const caseRevision = useRef(0);
+  const loadedCaseId = useRef(caseFile?.id);
 
   useEffect(() => {
+    if (loadedCaseId.current === caseFile?.id) return;
+    loadedCaseId.current = caseFile?.id;
+    caseRevision.current++;
+    setPassword('');
+    setPendingFiles([]);
+    setUploadFailures([]);
     setContract(defaultContract);
     setResult('');
     setRisks([]);
     setSelectedRisk(null);
-  }, [caseFile?.id]);
+  }, [caseFile?.id, defaultContract]);
+
+  const readFullFiles = async (files: Array<{ id: string; name: string }>, revision: number) => {
+    const pending: Array<{ id: string; name: string; error?: string }> = [];
+    const sections: string[] = [];
+    for (const file of files) {
+      try {
+        const response = await fetch(`/api/files/text/${encodeURIComponent(file.id)}`, {
+          method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: password || undefined }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.truncated !== false || !data.text?.trim()) {
+          throw new Error(data.code === 'PDF_PASSWORD_REQUIRED' ? qualityCopy.required
+            : data.code === 'PDF_PASSWORD_INCORRECT' ? qualityCopy.incorrect : qualityCopy.failed);
+        }
+        sections.push(`# ${file.name}\n${data.text}`);
+      } catch (error: any) { pending.push({ ...file, error: error?.message || qualityCopy.failed }); }
+    }
+    if (revision !== caseRevision.current) return;
+    if (sections.length) setContract(prev => [prev, ...sections].filter(Boolean).join('\n\n'));
+    setPendingFiles(pending);
+    setPassword('');
+    if (pending.length) toast.error(qualityCopy.pending);
+  };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
-    if (!files || files.length === 0) return;
+    if (!files?.length) return;
+    const revision = caseRevision.current;
     setUploading(true);
     try {
       const formData = new FormData();
       Array.from(files).forEach(file => formData.append('files', file));
       const res = await fetch('/api/files/upload', { method: 'POST', body: formData, credentials: 'include' });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || uiMessage('legal-contract-review.file-upload-parsing-failed.2381d47571'));
-      const text = (data.files || [])
-        .map((file: any) => String(file.content || file.preview || '').trim())
-        .filter(Boolean)
-        .join('\n\n');
-      if (!text) throw new Error(uiMessage('legal-contract-review.no-reviewable-text-extracted.a5b8b434b8'));
-      setContract(prev => [prev, text].filter(Boolean).join('\n\n'));
-      toast.success(uiMessage('legal-contract-review.file-parsed-into-contract-text.c0159991c0'));
-    } catch (err: any) {
-      const message = err?.message || uiMessage('legal-contract-review.file-upload-parsing-failed.2381d47571');
-      setResult(`${uiMessage('legal-contract-review.error.1d47687da7')}: ${message}`);
-      toast.error(message);
+      if (!res.ok) throw new Error(data.error || qualityCopy.failed);
+      if (revision !== caseRevision.current) return;
+      const selectedNames = new Set(Array.from(files).map(file => file.name));
+      setUploadFailures(previous => [...previous.filter(name => !selectedNames.has(name)), ...(data.failed || []).map((file: any) => String(file.fileName))]);
+      await readFullFiles([...pendingFiles, ...(data.files || [])], revision);
+      if (data.failed?.length && revision === caseRevision.current) {
+        const message = qualityCopy.partial + ' ' + data.failed.map((file: any) => file.fileName).join(', ');
+        setResult(message);
+        toast.error(message);
+      }
+    } catch (error: any) {
+      if (revision === caseRevision.current) { setResult(error.message); toast.error(error.message); }
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = '';
     }
   };
 
+  const retryRead = async () => {
+    setUploading(true);
+    try { await readFullFiles(pendingFiles, caseRevision.current); }
+    finally { setUploading(false); }
+  };
+
   const review = async () => {
-    if (!contract.trim() || loading) return;
+    if (!contract.trim() || loading || uploading || pendingFiles.length || uploadFailures.length) return;
+    const revision = caseRevision.current;
     setLoading(true);
     setResult('');
     setRisks([]);
     setSelectedRisk(null);
     try {
       const text = await runLegalTool('legal_review_contract', {
-        contract: contract.slice(0, 10000),
+        contract,
         caseId: caseFile?.id,
         caseName: caseFile ? (caseFile.title || caseFile.party || caseFile.caseNumber || undefined) : undefined,
         caseType: caseFile?.cause || chinaLegalCopy('zh').contractReviewCaseType,
         court: caseFile?.court,
         persistCase: Boolean(caseFile),
       });
+      if (revision !== caseRevision.current) return;
       const parsedRisks = parseChinaContractRisks(text);
       setResult(text);
       setRisks(parsedRisks);
       setSelectedRisk(parsedRisks[0] || null);
     } catch (e: any) {
-      setResult(`${uiMessage('legal-contract-review.error.1d47687da7')}: ${e.message}`);
+      if (revision === caseRevision.current) setResult(`${uiMessage('legal-contract-review.error.1d47687da7')}: ${e.message}`);
     } finally {
       setLoading(false);
     }
@@ -132,8 +178,18 @@ export function LegalContractReview({
                 {uploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
                 {uiMessage('legal-contract-review.upload.b6fb916ac9')}
               </button>
-              <input ref={fileRef} type="file" accept=".pdf,.docx,.txt,.md" onChange={handleFileUpload} className="hidden" />
+              <input ref={fileRef} type="file" multiple accept=".pdf,.docx,.txt,.md" onChange={handleFileUpload} className="hidden" />
             </div>
+            <label className="mb-3 flex flex-col gap-1 text-xs text-white/60">
+              {qualityCopy.password}
+              <input type="password" autoComplete="off" value={password} onChange={event => setPassword(event.target.value)} disabled={uploading || loading} className="rounded border border-white/10 bg-black/20 px-3 py-2" />
+            </label>
+            {pendingFiles.length > 0 && <div className="mb-3 text-sm text-amber-200" role="status">
+              <p>{qualityCopy.pending}</p>
+              {pendingFiles.map(file => <p key={file.id}>{file.name}: {file.error}</p>)}
+              <button onClick={retryRead} disabled={uploading || loading} className="mt-2 underline disabled:opacity-50">{qualityCopy.retry}</button>
+            </div>}
+            {uploadFailures.length > 0 && <p role="status" className="mb-3 text-sm text-amber-200">{qualityCopy.partial} {uploadFailures.join(', ')}</p>}
             <textarea
               value={contract}
               onChange={event => setContract(event.target.value)}
@@ -141,10 +197,10 @@ export function LegalContractReview({
               className="min-h-[420px] flex-1 resize-none rounded-lg border border-white/10 bg-black/20 px-3 py-3 font-mono text-sm leading-6 text-white outline-none placeholder:text-white/35 focus:border-blue-400/35"
             />
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-              <p className="text-xs text-white/40">{uiMessage('legal-contract-review.the-first-10-000-characters.9326837798')}</p>
+              <p className="text-xs text-white/40">{qualityCopy.coverage}</p>
               <button
                 onClick={review}
-                disabled={loading || !contract.trim()}
+                disabled={loading || uploading || pendingFiles.length > 0 || uploadFailures.length > 0 || !contract.trim()}
                 className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-blue-500/15 px-4 py-2.5 text-sm font-medium text-blue-100 transition hover:bg-blue-500/25 disabled:opacity-50"
               >
                 {loading ? <Loader2 size={16} className="animate-spin" /> : <Shield size={16} />}

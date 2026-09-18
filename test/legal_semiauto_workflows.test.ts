@@ -1,3 +1,4 @@
+import { installCivilCodeFixture } from './fixtures/legal_authority_fixture';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
@@ -16,6 +17,7 @@ beforeAll(async () => {
   process.env.OPENAI_API_KEY = '';
   const app = await makeApp();
   cleanup = app.cleanup;
+  installCivilCodeFixture();
   ({ registerLegalTools } = await import('../server/tools/definitions/legal_tools'));
   ({ registerWebLoginTools } = await import('../server/tools/definitions/web_login_tools'));
 });
@@ -696,7 +698,7 @@ describe('semi-automated legal workflows', () => {
       projectName: '测试工程投标项目',
       requirements: '招标要求：提交商务标、技术标、项目管理机构、施工组织设计、授权委托书和报价清单。',
     });
-    expect(bid).toContain('投标书');
+    expect(bid).toContain('投标响应工作底稿');
     expect(bid).toContain('案件空间：已归档');
     expect(bid).toContain('三段论核心基础');
 
