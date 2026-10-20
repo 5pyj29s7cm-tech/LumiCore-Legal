@@ -1,3 +1,4 @@
+import { readImplementationSource } from './implementation_source';
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -27,6 +28,21 @@ afterEach(() => {
 });
 
 describe('accepted action-turn durability fence', () => {
+  it.each(['ok', 'okay', '行', '没问题', '开始吧', '确认', '好的'])('binds %s only to the exact durable pending action, once', async userText => {
+    const channelScope = buildTransportNeutralConfirmationScope({ domain: 'personal', conversationId: 'shared-confirmation' });
+    const taskScope = buildTransportNeutralConfirmationScope({ domain: 'personal', conversationId: 'shared-confirmation', taskId: 'reviewed-task' });
+    recordPendingConfirmation('confirmation-user', 'desktop_open', { target: 'Notepad' }, 'chat', taskScope);
+    const admission = await admitAcceptedUserTurnDurably({ persistAcceptedUserTurn: () => 'message-id', flush: async () => undefined, onPersistenceUnknown: vi.fn() });
+    const input = { admission: admission!, userId: 'confirmation-user', userText, taskScope, channelScope };
+    const wrong = await resolveAcceptedTurnConfirmation({ ...input, taskScope: { ...taskScope, taskId: 'another-task' } });
+    expect(wrong.pending).toBeNull();
+    const resolution = await resolveAcceptedTurnConfirmation(input);
+    expect(resolution.pending).toMatchObject({ toolName: 'desktop_open', taskId: 'reviewed-task' });
+    const pending = resolution.pending!;
+    expect(await consumePendingConfirmationDurably('confirmation-user', pending.id, pending.toolName, pending.exactArgs, taskScope)).toBe(true);
+    expect((await resolveAcceptedTurnConfirmation(input)).pending).toBeNull();
+  });
+
   it('does not admit the executor when the accepted transcript flush fails', async () => {
     const executor = vi.fn(async () => 'should-never-run');
     const onPersistenceUnknown = vi.fn();
@@ -332,24 +348,33 @@ describe('accepted action-turn durability fence', () => {
   });
 
   it.each([
-    ['chat.ts', 'const chatAdmission = await admitAcceptedUserTurnDurably({', 'chatExecutionQueue.reserve(', 'beginChatExecutionDurably('],
+    ['chat.ts', 'const chatAdmission = await admitAcceptedUserTurnDurably({', 'reserveConversationExecution(', 'beginChatExecutionDurably('],
     ['voice.ts', 'const voiceAdmission = await admitAcceptedUserTurnDurably({', 'resolveAcceptedTurnConfirmation({', 'beginChatExecutionDurably('],
-    ['task.ts', 'const taskAdmission = await admitAcceptedUserTurnDurably({', 'taskExecutionQueue.reserve(', 'beginChatExecutionDurably('],
   ])('places the %s source-order fence before confirmation, reservation, replacement and routing', (
     fileName,
     admissionMarker,
     reservationMarker,
     durableBeginMarker,
   ) => {
-    const source = fs.readFileSync(path.resolve('server/socket', fileName), 'utf8');
+    const source = readImplementationSource(path.resolve('server/socket', fileName), 'utf8');
     const admission = source.indexOf(admissionMarker);
     const persist = source.indexOf('persistAcceptedUserTurn:', admission);
     const flush = source.indexOf('flush: flushDBOrThrow', persist);
     const confirmation = source.indexOf('resolveAcceptedTurnConfirmation({', flush);
     const reservation = source.indexOf(reservationMarker, flush);
     const durableBegin = source.indexOf(durableBeginMarker, flush);
-    const consume = source.indexOf('consumePendingConfirmationDurably(', flush);
-    const routing = source.indexOf('buildLumiExecutionPipeline({', flush);
+    const consume = source.indexOf('executeConfirmedToolStep({', flush);
+    const confirmedOwner = fs.readFileSync(path.resolve('server/tools/confirmed_step.ts'), 'utf8');
+    const durableConsume = confirmedOwner.indexOf('consumePendingConfirmationDurably(');
+    const execute = confirmedOwner.indexOf('executeToolCall({');
+    expect(durableConsume).toBeGreaterThanOrEqual(0);
+    expect(execute).toBeGreaterThan(durableConsume);
+    expect(confirmedOwner).toContain('preflight: () => consumed');
+    expect(confirmedOwner).toContain("executionOrigin: 'confirmed_action_resume'");
+    const routing = source.indexOf('await runLumiEntryTurn<void>({', flush);
+    const core = fs.readFileSync(path.resolve('server/cognition/turn_execution.ts'), 'utf8');
+    expect(core.indexOf('await admission?.waitForTurn();')).toBeLessThan(core.indexOf('buildLumiExecutionPipeline({'));
+    expect(core.indexOf('buildLumiExecutionPipeline({')).toBeLessThan(core.indexOf('await input.assemble(execution)'));
     expect(admission).toBeGreaterThanOrEqual(0);
     expect(persist).toBeGreaterThan(admission);
     expect(flush).toBeGreaterThan(persist);

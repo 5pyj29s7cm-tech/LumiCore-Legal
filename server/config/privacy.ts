@@ -5,9 +5,8 @@
  * operating-system firewall and does not control other applications.
  */
 
-import { loadKeys } from './keys';
 import fs from 'node:fs';
-import crypto from 'node:crypto';
+import { writeJsonAtomic } from './atomic_json';
 import { isIP } from 'node:net';
 import { getDataPath } from './data_path';
 
@@ -44,23 +43,11 @@ export function savePrivacyMode(mode: PrivacyMode): void {
   getPrivacyMode(); // Freeze the active mode before changing the saved one.
   if (isPrivacyModeLocked()) throw new Error('Privacy mode is enforced by the environment.');
   const destination = getDataPath('privacy.json');
-  const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
-  try {
-    const descriptor = fs.openSync(temporary, 'wx', 0o600);
-    try {
-      fs.writeFileSync(descriptor, `${JSON.stringify({ version: 1, mode })}\n`, 'utf8');
-      fs.fsyncSync(descriptor);
-    } finally { fs.closeSync(descriptor); }
-    fs.renameSync(temporary, destination);
-  } finally {
-    try { fs.unlinkSync(temporary); } catch (error: any) {
-      if (error?.code !== 'ENOENT') throw error;
-    }
-  }
+  writeJsonAtomic(destination, { version: 1, mode });
 }
 
-export function requireLocalEndpoint(value: string, operation = 'Local AI processing'): void {
-  if (!isStrictPrivacy()) return;
+export function requireLocalEndpoint(value: string, operation = 'Local AI processing', forceLocalOnly = false): void {
+  if (!forceLocalOnly && !isStrictPrivacy()) return;
   let url: URL;
   try { url = new URL(value); } catch { throw new Error(`[Privacy] ${operation}: invalid local endpoint.`); }
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
@@ -68,16 +55,17 @@ export function requireLocalEndpoint(value: string, operation = 'Local AI proces
     || (isIP(host) === 4 && host.startsWith('127.'))
     || /^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(host);
   if (!local || !['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol) || url.username || url.password) {
-    throw new Error(`[Privacy] ${operation}: strict mode requires an endpoint on this computer.`);
+    throw new Error(`[Privacy] ${operation}: local-only processing requires an endpoint on this computer.`);
   }
 }
 
 /** Local SDKs may follow redirects by default. Check every request and prevent
  * a local endpoint from redirecting a prompt to a remote service. */
-export const localPrivacyFetch: typeof fetch = (input, init) => {
-  requireLocalEndpoint(input instanceof Request ? input.url : String(input));
-  return fetch(input, { ...init, ...(isStrictPrivacy() ? { redirect: 'error' as const } : {}) });
-};
+export function localPrivacyFetch(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1], forceLocalOnly = false): ReturnType<typeof fetch> {
+  const localOnly = forceLocalOnly || isStrictPrivacy();
+  requireLocalEndpoint(input instanceof Request ? input.url : String(input), 'Local AI request', localOnly);
+  return fetch(input, { ...init, ...(localOnly ? { redirect: 'error' as const } : {}) });
+}
 
 export function isStrictPrivacy(): boolean {
   return getPrivacyMode() === 'strict';
@@ -101,21 +89,5 @@ export function requireNotStrict(operation: string): void {
     throw new Error(
       `[Privacy] Strict mode: "${operation}" is unavailable under the current privacy policy.`
     );
-  }
-}
-
-export function listActiveCloudProviders(): string[] {
-  try {
-    const keys = loadKeys();
-    const providers: string[] = [];
-    if (keys.OPENAI_API_KEY) providers.push('openai');
-    if (keys.ANTHROPIC_API_KEY) providers.push('anthropic');
-    if (keys.DASHSCOPE_API_KEY || keys.QWEN_API_KEY) providers.push('qwen');
-    if (keys.DEEPSEEK_API_KEY) providers.push('deepseek');
-    if (keys.GEMINI_API_KEY) providers.push('gemini');
-    if (keys.ALIYUN_AK_ID) providers.push('aliyun');
-    return providers;
-  } catch {
-    return [];
   }
 }

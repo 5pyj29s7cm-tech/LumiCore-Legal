@@ -1,3 +1,4 @@
+import { cosineSimilarity } from '../lib/vectorSimilarity';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { releaseSensorStream, requestMicrophoneStream } from '@/services/sensorPermissionService';
 import { closeAudioContext } from '@/lib/audioContextLifecycle';
@@ -164,19 +165,6 @@ function extractMFCC(samples: Float32Array): number[] {
   return Array.from(mfcc);
 }
 
-// ── Cosine similarity ──
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  if (normA < 1e-10 || normB < 1e-10) return 0;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
 // ── RMS ──
 
 function computeRMS(samples: Float32Array): number {
@@ -226,7 +214,6 @@ export function useVoiceprint(options?: UseVoiceprintOptions) {
     source: 'none',
   });
   const [enrolledCount, setEnrolledCount] = useState(0);
-  const [templateFrameCount, setTemplateFrameCount] = useState(0);
   const [usableTemplateCount, setUsableTemplateCount] = useState(0);
   const [templatesLoaded, setTemplatesLoaded] = useState(false);
 
@@ -276,7 +263,6 @@ export function useVoiceprint(options?: UseVoiceprintOptions) {
       if (!res.ok) {
         templatesRef.current = [];
         setEnrolledCount(0);
-        setTemplateFrameCount(0);
         setUsableTemplateCount(0);
         return;
       }
@@ -290,12 +276,10 @@ export function useVoiceprint(options?: UseVoiceprintOptions) {
       }));
       templatesRef.current = templates;
       setEnrolledCount(templates.length);
-      setTemplateFrameCount(templates.reduce((sum: number, tpl: VoiceprintTemplate) => sum + tpl.mfccFrames.length, 0));
       setUsableTemplateCount(templates.filter((tpl: VoiceprintTemplate) => tpl.hasEmbedding || tpl.mfccFrames.length > 0).length);
     } catch {
       templatesRef.current = [];
       setEnrolledCount(0);
-      setTemplateFrameCount(0);
       setUsableTemplateCount(0);
     } finally {
       setTemplatesLoaded(true);
@@ -483,9 +467,7 @@ export function useVoiceprint(options?: UseVoiceprintOptions) {
         const data = await res.json();
         const source = data.source === 'speechbrain'
           ? 'speechbrain'
-          : data.source === 'local'
-            ? 'server-local'
-            : 'server-local';
+          : 'server-local';
         matchResult = {
           isOwnerSpeaking: data.isOwnerSpeaking === true,
           confidence: Math.round(Number(data.confidence || 0) * 100) / 100,
@@ -650,7 +632,6 @@ export function useVoiceprint(options?: UseVoiceprintOptions) {
           hasEmbedding: data.voiceprint.embeddingReady === true,
         });
         setEnrolledCount(templatesRef.current.length);
-        setTemplateFrameCount(prev => prev + frames.length);
         setUsableTemplateCount(templatesRef.current.filter(tpl => tpl.hasEmbedding || tpl.mfccFrames.length > 0).length);
         return { success: true, voiceprintId: data.voiceprint.id };
       }

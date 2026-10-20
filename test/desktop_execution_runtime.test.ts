@@ -22,21 +22,57 @@ function verifiedRecord(name: string, result: string): ToolExecutionRecord {
 }
 
 describe('desktop execution runtime', () => {
+  it('keeps client state actions outside the external player window lease', () => {
+    const tracker = new DesktopExecutionTracker(buildDesktopExecutionPlan({
+      text: '进入壁纸模式，继续当前优酷的视频播放',
+      lane: 'desktop_control',
+      taskId: 'wallpaper-with-player',
+    }));
+    const client = { lane: 'client', operation: 'mutate', sideEffects: [{ type: 'desktop_control' }] } as any;
+    expect(tracker.authorize('client_action', client).allowed).toBe(true);
+    tracker.record({
+      ...verifiedRecord('client_action', JSON.stringify({ ok: true, verification: { status: 'verified' } })),
+      arguments: { action: 'set_wallpaper_mode', enabled: true },
+      capability: client,
+    });
+    expect(tracker.toToolExecutionRecord()).toBeNull();
+    expect(tracker.authorize('computer_use').allowed).toBe(false);
+    tracker.record(verifiedRecord('desktop_active_window', JSON.stringify({ title: '优酷', process_name: 'Youku.exe', pid: 4567 })));
+    expect(tracker.authorize('computer_use').allowed).toBe(true);
+    tracker.record(verifiedRecord('desktop_active_window', JSON.stringify({ title: 'WPS', process_name: 'wps.exe', pid: 100 })));
+    expect(tracker.authorize('computer_use').allowed).toBe(false);
+    expect(tracker.authorize('client_action', client).allowed).toBe(true);
+  });
+
+  it('binds default content snapshots to the identified window without renewing input authority', () => {
+    const tracker = new DesktopExecutionTracker(buildDesktopExecutionPlan({ text: 'open Google Chrome', lane: 'desktop_control', taskId: 'browser-read' }));
+    tracker.record(verifiedRecord('desktop_active_window', JSON.stringify({ title: 'DeepSeek - Google Chrome', process_name: 'chrome.exe', pid: 42, window_id: 123 })));
+    expect(tracker.bindSnapshotArguments({ maxDepth: 4 })).toEqual({ maxDepth: 4, root: 'desktop', processId: 42, nativeWindowHandle: 123 });
+    for (const explicit of [{ root: 'focused' }, { root: 'desktop' }, { processId: 90 }, { nameContains: 'Other' }]) {
+      expect(tracker.bindSnapshotArguments(explicit)).toBe(explicit);
+    }
+    const before = tracker.receipt();
+    tracker.record(verifiedRecord('desktop_capture_screen', JSON.stringify({ imageBase64: 'content-only' })));
+    tracker.record(verifiedRecord('desktop_ui_snapshot', JSON.stringify({ status: 'ok', tree: { name: 'DeepSeek', processId: 42, nativeWindowHandle: 123 } })));
+    expect(tracker.receipt()).toEqual(before);
+    tracker.record(verifiedRecord('desktop_keyboard_type', JSON.stringify({ status: 'verified' })));
+    tracker.record(verifiedRecord('desktop_ui_snapshot', JSON.stringify({ status: 'ok', tree: { name: 'DeepSeek' } })));
+    expect(tracker.authorize('desktop_keyboard_type').allowed).toBe(false);
+  });
+  it('does not apply a foreground lease to background Office file creation', () => {
+    const plan = buildDesktopExecutionPlan({ text: '用 WPS 制作一份文档', lane: 'desktop_control', taskId: 'background-office' });
+    const tracker = new DesktopExecutionTracker(plan);
+    for (const name of ['create_docx', 'create_xlsx']) {
+      expect(tracker.authorize(name, { lane: 'office', operation: 'mutate', sideEffects: [{ type: 'local_write' }] } as any).allowed).toBe(true);
+    }
+    expect(tracker.authorize('desktop_keyboard_type').allowed).toBe(false);
+  });
   function externalWechatPlan(taskId: string) {
     return buildDesktopExecutionPlan({
       text: '微信发送消息给 Alice',
       lane: 'messaging',
       taskId,
-      capabilityExecutionPlan: {
-        schemaVersion: 1,
-        planId: `cap-${taskId}`,
-        taskId,
-        intent: { kind: 'messaging_send', operation: 'mutate', subject: 'user', target: 'Alice', payload: 'hello', sideEffectClass: 'external_commit', relation: 'new', confidence: 1, rule: 'test' },
-        nodes: [], edges: [], expectedEvidence: [], contextRefs: [],
-        risk: { sideEffectClass: 'external_commit', requiresConfirmation: true, failClosed: true, reasons: [] },
-        fallbackPolicy: { retryClass: 'none', maxRetries: 0, jitter: false, reconcileUnknownOutcome: true, allowLegacyRoute: false, onTargetMismatch: 'stop', onUnknownOutcome: 'reconcile_then_stop' },
-        decisionAuthority: 'semantic_planner', scriptAuthority: 'adapter_only',
-      },
+      actionIntent: { kind: 'messaging_send', operation: 'mutate', subject: 'user', target: 'Alice', payload: 'hello', sideEffectClass: 'external_commit', relation: 'new', confidence: 1, rule: 'test' },
     });
   }
 

@@ -1,19 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as database from '../db_layer';
+import { listMemoryRows } from '../server/memory/repository';
+import { listConversationHeaders, listUserInteractions } from '../server/conversation/history_repository';
+afterEach(() => vi.restoreAllMocks());
 import {
   buildScheduledExecutionId,
   buildScheduledProactiveInteractionId,
   buildScheduledTaskExecutionPlan,
   resolveScheduledUserIds,
 } from '../server/scheduler';
-import {
-  compactLegacyScheduledCapabilityExecutions,
-  getScheduledCapabilityExecutionStatus,
-  persistScheduledCapabilityExecution,
-} from '../server/conversation/action_ledger';
+import { compactLegacyScheduledCapabilityExecutions, getScheduledCapabilityExecutionStatus, persistScheduledCapabilityExecution } from "../server/conversation/ledger/scheduler";
 import { evaluateCapabilityRollout } from '../server/cognition/capability_rollout';
 import type { ToolExecutionRecord } from '../server/tools/types';
+import { extractSourceExpression } from './source_expression';
+import { createScheduledBuiltinTasks } from '../server/scheduler/builtins';
+import { providerGetterArguments } from '../server/llm/provider_getters';
 
 function verifiedRecord(plan: ReturnType<typeof buildScheduledTaskExecutionPlan>): ToolExecutionRecord {
   const node = plan.nodes.find(candidate => candidate.toolName === 'scheduler_task_handler')!;
@@ -44,6 +47,50 @@ function verifiedRecord(plan: ReturnType<typeof buildScheduledTaskExecutionPlan>
 }
 
 describe('scheduler capability execution protocol', () => {
+  it.each([
+    ['weekly', 'every_7d', 7, 400, 10, 0.95, 'week_2026-10-02'],
+    ['monthly', '1 0 1 * *', 30, 600, 15, 0.97, 'month_2026-10'],
+    ['yearly', '0 0 1 1 *', 365, 800, 20, 1, 'year_2026'],
+  ] as const)('keeps %s review scope, budgets, metadata and per-user failure isolation', async (depth, cron, days, maxTokens, topicLimit, importance, keyword) => {
+    const now = Date.parse('2026-10-02T10:00:00Z'), cutoff = now - days * 86400000;
+    class Clock extends Date { constructor(value: any = now) { super(value); } static now() { return now; } }
+    const tasks: any[] = [], prompts: any[] = [], calls: any[] = [], saved: any[] = [];
+    const rows = [{}, { createdAt: new Date(cutoff - 1).toISOString(), type: 'preference' }, { domain: 'work' }, { orgId: 'organization' }, { userId: 'other' }, { agentId: 'memory_avatar_private' }]
+      .map(override => ({ userId: 'owner', createdAt: new Date(cutoff).toISOString(), type: 'fact', keywords: Array.from({ length: 25 }, (_, i) => `topic-${i}`), ...override }));
+    const fixture = { memories: rows, interactions: rows.map(row => ({ ...row, timestamp: row.createdAt })), conversations: [{ userId: 'owner', status: 'active' }, { userId: 'owner', domain: 'work', status: 'active' }] };
+    vi.spyOn(database, 'readDatabaseTables').mockReturnValue(fixture as any);
+    const getters = Array.from({ length: 12 }, () => () => null);
+    const register = extractSourceExpression('server/scheduler/builtins/growth.ts', 'createGrowthTasks', {
+      providerGetterArguments,
+      scheduler: { register: (task: any) => tasks.push(task) }, createReminderCheckTask: () => ({ id: 'reminder-fixture' }), Date: Clock,
+      resolveScheduledUserIds: () => ['failed', 'owner', 'no-config', 'empty'],
+      readDB: () => ({ memories: rows, interactions: rows.map(row => ({ ...row, timestamp: row.createdAt })), conversations: [{ userId: 'owner', status: 'active' }, { userId: 'owner', domain: 'work', status: 'active' }] }),
+      personalityRegistry: { getForUser: (_: string, uid: string) => uid === 'no-config' ? null : { name: uid, version: '3' }, getEvolutionHistory: () => [{ timestamp: new Date(cutoff).toISOString() }, { timestamp: new Date(cutoff - 1).toISOString() }] },
+      listMemoryRows, listConversationHeaders, listUserInteractions, loadEmotionalState: () => ({ connection: 0.8 }),
+      generateReviewPrompt: (context: any) => { prompts.push(context); return context.personalityName; },
+      getUserPreferredLLMConfig: (userId: string, options: any) => ({ userId, ...options }),
+      makeLLMCall: async (_messages: any, _tools: any, config: any, ...actualGetters: any[]) => {
+        expect(actualGetters).toEqual(getters); calls.push(config);
+        if (config.userId === 'failed') throw new Error('synthetic provider failure');
+        return { text: config.userId === 'empty' ? '   ' : '  Review narrative.  ' };
+      },
+      require: (name: string) => { expect(name).toBe('../../memory'); return { addMemory: (...args: any[]) => saved.push(args) }; },
+      console: { log: () => {}, error: () => {} }, redactSchedulerDiagnostic: String,
+    });
+    tasks.push(...register({ scheduler: {},
+      getters: Object.fromEntries(['getDeepSeek','getGemini','getOpenAI','getAnthropic','getQwen','getOllama','getLmStudio','getArk','getXiaomi','getKimi','getGlm','getRelay'].map((key, i) => [key, getters[i]])),
+      getAllUserIds: () => ['failed', 'owner', 'no-config', 'empty'], redactSchedulerDiagnostic: String,
+    }));
+    const task = tasks.find(candidate => candidate.id === `${depth}_review`);
+    expect(task).toMatchObject({ cron, quiet: true, lastRun: null, executionClass: 'maintenance' });
+    expect(await task.handler()).toBe('[owner] Review narrative.');
+    expect(calls.map(call => call.userId)).toEqual(['failed', 'owner', 'empty']);
+    expect(calls.every(call => call.maxTokens === maxTokens && call.domain === 'personal' && call.orgId === '' && call.source === `scheduler_${depth}_review`)).toBe(true);
+    expect(prompts.find(context => context.personalityName === 'owner')).toMatchObject({ depth, newMemoryCount: 1, newInteractionCount: 2, totalFacts: 1, totalPreferences: 1, activeConversations: 1, topMemoryTopics: rows[0].keywords.slice(0, topicLimit), evolutionSteps: [{ timestamp: new Date(cutoff).toISOString() }] });
+    expect(saved).toEqual([[expect.objectContaining({ userId: 'owner', type: 'knowledge', content: `[${depth[0].toUpperCase() + depth.slice(1)} Review 2026-10-02] Review narrative.`, keywords: [`${depth}_review`, keyword], sourceInteractionId: `${depth}_review_scheduler` }),
+      { tier: 'growth', perspective: 'lumi_self', importance, domain: 'personal', orgId: '', source: 'system', privacyClass: 'private' }]]);
+  });
+
   it('runs proactive/background work only for registered users', () => {
     const db = {
       users: [
@@ -348,14 +395,11 @@ describe('scheduler capability execution protocol', () => {
   });
 
   it('plans and persists before invoking a handler and requires policy on every built-in task', () => {
-    const source = fs.readFileSync(path.join(process.cwd(), 'server', 'scheduler.ts'), 'utf8');
-    const runStart = source.indexOf('private async runTask');
-    const runEnd = source.indexOf('private async executeTaskHandler', runStart);
-    const run = source.slice(runStart, runEnd);
+    const run = fs.readFileSync(path.join(process.cwd(), 'server', 'scheduler', 'run_execution.ts'), 'utf8');
     expect(run.indexOf('buildScheduledTaskExecutionPlan(task, startedAt)'))
-      .toBeLessThan(run.indexOf('await this.executeTaskHandler(task, plan, execution)'));
+      .toBeLessThan(run.indexOf('await owner.executeTaskHandler(task, plan, execution)'));
     expect(run.indexOf("status: authorization.allowed ? 'executing' : 'blocked'"))
-      .toBeLessThan(run.indexOf('await this.executeTaskHandler(task, plan, execution)'));
+      .toBeLessThan(run.indexOf('await owner.executeTaskHandler(task, plan, execution)'));
     expect(run).toContain("authorizeCapabilityPlanTool(plan, 'scheduler_task_handler')");
     expect(run).toContain("previousStatus === 'executing'");
     expect(run).toContain("const compactAudit = task.auditMode !== 'full'");
@@ -363,13 +407,15 @@ describe('scheduler capability execution protocol', () => {
     expect(run).toContain('automatic replay for this slot is disabled');
     expect(run).toContain('durability');
     expect(run.indexOf("lastStatus: 'completed'"))
-      .toBeLessThan(run.indexOf('this.persistDbWithRuntimeState(completedDb, completedTask, userDeliveryDeclared, execution)'));
-    expect(run.indexOf('this.persistDbWithRuntimeState(completedDb, completedTask, userDeliveryDeclared, execution)'))
+      .toBeLessThan(run.indexOf('owner.context.persistence.strict(completedDb, completedTask, userDeliveryDeclared, execution)'));
+    expect(run.indexOf('owner.context.persistence.strict(completedDb, completedTask, userDeliveryDeclared, execution)'))
       .toBeLessThan(run.indexOf('task.lastStatus = completedTask.lastStatus'));
 
-    const registrations = source.match(/scheduler\.register\((?:\{|createReminderCheckTask\(\))/g) || [];
-    const declarations = source.match(/executionClass:\s*'(?:maintenance|proactive_delivery|client_probe|autonomous_orchestration)'/g) || [];
-    expect(registrations.length).toBeGreaterThan(0);
-    expect(declarations).toHaveLength(registrations.length);
+    const tasks = createScheduledBuiltinTasks({ scheduler: { io: null }, getters: { getDeepSeek: () => null, getGemini: () => null },
+      getAllUserIds: () => [], getSystemAdminUserIds: () => [],
+      createReminderCheckTask: () => ({ id: 'reminder_check', cron: 'every_1m', lastRun: null, executionClass: 'proactive_delivery', handler: async () => null }),
+      redactSchedulerDiagnostic: String });
+    expect(tasks).toHaveLength(27);
+    expect(tasks.every(task => ['maintenance', 'proactive_delivery', 'client_probe', 'autonomous_orchestration'].includes(task.executionClass))).toBe(true);
   });
 });

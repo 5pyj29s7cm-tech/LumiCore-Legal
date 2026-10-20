@@ -40,6 +40,7 @@ describe('two fictional cases through actual HTTP routes and artifact writers', 
   it('synchronizes a selected client case without accepting forged progress', async () => {
     const synced = await call('legal/client-case-sync', { case: {
       id: 'fictional-plaintiff', title: '虚构甲公司诉乙公司', party: '甲公司、乙公司', clientRole: '原告',
+      factDate: '2026-09-01',
       objective: '请求支付未付货款二万元，并核对约定违约金。', cause: '买卖合同纠纷',
       notes: '2026年甲公司向乙公司供货，乙公司已经签收，尚欠货款二万元。',
       workflowRuns: [{ ok: true, tool: 'legal_finalize_delivery_package' }],
@@ -72,7 +73,8 @@ describe('two fictional cases through actual HTTP routes and artifact writers', 
     for (const [c, expected, forbidden] of [[plaintiff, '二万元', '九万元'], [defendant, '七万元', '二万元']] as const) {
       const result = await tool('legal_generate_litigation_packet', { caseId: c.id });
       expect(result.status).toBe(200);
-      expect(result.data.receipt).toMatchObject({ ok: true, status: 'generated' });
+      // Offline getters can write scoped templates, but cannot finish the body.
+      expect(result.data.receipt).toMatchObject({ ok: false, status: 'partial', draftMode: 'template' });
       expect(result.data.caseUpdates.map((item: any) => item.id)).toEqual([c.id]);
       expect(result.data.artifacts.length).toBeGreaterThan(0);
       const packet = result.data.artifacts.find((p: string) => p.endsWith('00_litigation-packet.md'));
@@ -86,8 +88,11 @@ describe('two fictional cases through actual HTTP routes and artifact writers', 
       expect(document?.text).not.toContain(forbidden);
       const matrix = fs.readFileSync(path.join(directory, '03_evidence-review-matrix.md'), 'utf8');
       if (c.clientRole === '被告') {
-        expect(matrix).toContain('付款事实、欠款金额');
-        expect(matrix).toContain('质量异议、验收状态');
+        expect(matrix).toContain('银行流水：已转账七万元');
+        expect(matrix).toContain('验收报告：发现三处质量不符');
+        expect(matrix).toContain('提供材料正文第1行');
+        expect(matrix).toContain('材料原句与拟议关联（未核准）');
+        expect(matrix).toContain('待律师确认证明目的');
       }
     }
   }, 45000);
@@ -106,7 +111,7 @@ describe('two fictional cases through actual HTTP routes and artifact writers', 
   it('blocks heading-only reasoning, wrong-case sources, fabricated quotes and historical-law misuse', async () => {
     const source = LegalCases.getCase(orgId, plaintiff.id, uid)!;
     links = [{ issue: '本案欠付款项及违约金如何核实', ruleCitation: '《民法典》第585条',
-      ruleQuote: verifyCitation('《民法典》第585条').sourceText!, fact: '乙公司签收货物后尚欠货款二万元。',
+      ruleQuote: verifyCitation('《民法典》第585条').sourceText!, fact: '乙公司于2026年9月1日签收货物，欠付货款二万元。',
       evidence: [{ materialId: 'plaintiff-source', quote: '乙公司于2026年9月1日签收货物，欠付货款二万元。', locator: '材料正文第2句' }],
       application: '需结合约定和实际损失核算违约金；签收和欠付记载仅作为待核实的付款事实依据。',
       conclusion: '本案约定违约金仍需核算并结合损失复核，不能直接确定支持金额。',

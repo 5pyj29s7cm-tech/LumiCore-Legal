@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { readDB, writeDB } from "../../db_layer";
+import { readDatabaseTables, commitDatabaseTables } from "../../db_layer";
 import { requireAuth } from "../middleware/auth";
 import { sendDurableMutation } from './durable_mutation';
 
@@ -21,7 +21,7 @@ export function pushNotification(userId: string, item: {
   type: string; title: string; message: string;
 }) {
   try {
-    const db = readDB();
+    const db = readDatabaseTables(["notifications"]);
     ensureNotifications(db);
     (db.notifications as NotificationRecord[]).push({
       id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -38,14 +38,14 @@ export function pushNotification(userId: string, item: {
       const toRemove = userNotifs.slice(0, userNotifs.length - 200).map((n: NotificationRecord) => n.id);
       db.notifications = db.notifications.filter((n: NotificationRecord) => !toRemove.includes(n.id));
     }
-    writeDB(db);
+    commitDatabaseTables(db);
   } catch {}
 }
 
 export function mountNotificationRoutes(router: Router) {
   router.get("/notifications", requireAuth, (req: Request, res: Response) => {
     try {
-      const db = readDB();
+      const db = readDatabaseTables(["notifications"]);
       ensureNotifications(db);
       const userNotifs = (db.notifications as NotificationRecord[])
         .filter(n => n.userId === req.user!.uid)
@@ -57,32 +57,20 @@ export function mountNotificationRoutes(router: Router) {
     }
   });
 
-  router.post("/notifications/read-all", requireAuth, async (req: Request, res: Response) => {
+  const update = (clear: boolean) => async (req: Request, res: Response) => {
     try {
-      const db = readDB();
+      const db = readDatabaseTables(["notifications"]);
       ensureNotifications(db);
-      let count = 0;
-      for (const n of (db.notifications as NotificationRecord[])) {
-        if (n.userId === req.user!.uid && !n.read) { n.read = true; count++; }
-      }
-      writeDB(db);
-      return await sendDurableMutation(req, res, { success: true, marked: count });
+      const owned = (db.notifications as NotificationRecord[]).filter(n => n.userId === req.user!.uid);
+      const marked = owned.filter(n => !n.read).length;
+      if (clear) db.notifications = (db.notifications as NotificationRecord[]).filter(n => n.userId !== req.user!.uid);
+      else owned.forEach(n => { n.read = true; });
+      commitDatabaseTables(db);
+      return await sendDurableMutation(req, res, { success: true, ids: owned.map(n => n.id), ...(clear ? {} : { marked }) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
-  });
-
-  router.delete("/notifications", requireAuth, async (req: Request, res: Response) => {
-    try {
-      const db = readDB();
-      ensureNotifications(db);
-      db.notifications = (db.notifications as NotificationRecord[]).filter(
-        n => n.userId !== req.user!.uid,
-      );
-      writeDB(db);
-      return await sendDurableMutation(req, res, { success: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+  };
+  router.post("/notifications/read-all", requireAuth, update(false));
+  router.delete("/notifications", requireAuth, update(true));
 }

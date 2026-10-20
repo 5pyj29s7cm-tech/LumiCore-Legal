@@ -1,3 +1,4 @@
+import { useLegalDocument, useLegalDocumentScope } from '../../hooks/useLegalDocument';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
@@ -200,17 +201,16 @@ function buildWorkflowReport(workflow: AssetTraceWorkflow, copy: TraceCopy, loca
   return lines.join('\n');
 }
 
-export function LegalAssetTrace({
-  caseFile,
-  orgId,
-  onAddMaterial,
-  onUpdateCase,
-}: {
+type Props = {
   caseFile?: LegalCaseFile | null;
   orgId?: string;
-  onAddMaterial?: (type: LegalCaseMaterial['type'], title: string, content?: string, source?: LegalCaseMaterial['source']) => void;
+  onAddMaterial?: (type: LegalCaseMaterial['type'], title: string, content?: string, source?: LegalCaseMaterial['source']) => boolean | Promise<boolean>;
   onUpdateCase?: (patch: Partial<LegalCaseFile>) => void;
-}) {
+};
+export function LegalAssetTrace(props: Props) {
+  return <AssetTrace key={useLegalDocumentScope(props.caseFile?.id, props.orgId)} {...props} />;
+}
+function AssetTrace({ caseFile, orgId, onAddMaterial, onUpdateCase }: Props) {
   const t = useT();
   const isZh = t.langCode !== 'en';
   const locale = isZh ? 'zh-CN' : 'en-US';
@@ -222,7 +222,8 @@ export function LegalAssetTrace({
   const [terminationDate, setTerminationDate] = useState('');
   const [workflow, setWorkflow] = useState<AssetTraceWorkflow | null>(null);
   const [result, setResult] = useState<TraceResult | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { busy, generate, save } = useLegalDocument('', { error: uiMessage('legal-asset-trace.error.1d47687da7') });
+  const loading = Boolean(busy);
   const [activeTab, setActiveTab] = useState<TraceTab>('workflow');
   const [selectedStepId, setSelectedStepId] = useState('');
   const [manualNote, setManualNote] = useState('');
@@ -253,7 +254,8 @@ export function LegalAssetTrace({
     setResult(combined ? parseTraceResult(combined) : null);
   };
 
-  const executeStep = async (base: AssetTraceWorkflow, stepId: string): Promise<AssetTraceWorkflow> => {
+  const executeStep = async (base: AssetTraceWorkflow, stepId: string, signal: AbortSignal): Promise<AssetTraceWorkflow> => {
+    signal.throwIfAborted();
     const step = base.steps.find(item => item.id === stepId);
     if (!step) return base;
     const running = patchAssetTraceStep(base, stepId, { status: 'running', error: undefined });
@@ -271,10 +273,12 @@ export function LegalAssetTrace({
         const execution = await runLegalToolExecution(
           step.tool || '',
           buildTraceToolArgs(running, step, copy, caseFile, orgId),
+          signal,
         );
         output = execution.text;
         receiptStatus = String(execution.receipt?.status || '').trim().toLowerCase();
       }
+      signal.throwIfAborted();
       const needsSource = receiptStatus === 'needs_source';
       const next = patchAssetTraceStep(running, stepId, {
         status: needsSource || step.executionMode === 'assisted' ? 'needs_action' : 'completed',
@@ -287,6 +291,7 @@ export function LegalAssetTrace({
       commitWorkflow(next);
       return next;
     } catch (error: any) {
+      signal.throwIfAborted();
       const next = patchAssetTraceStep(running, stepId, {
         status: 'failed',
         error: error?.message || String(error),
@@ -296,48 +301,29 @@ export function LegalAssetTrace({
     }
   };
 
-  const startInvestigation = async () => {
+  const startInvestigation = () => {
     if (!name.trim() || loading) return;
     if (workflow && typeof window !== 'undefined' && !window.confirm(copy.restartConfirm)) return;
-    setLoading(true);
-    setActiveTab('workflow');
-    setManualNote('');
-    let next = createAssetTraceWorkflow({
-      subjectName: name,
-      subjectType,
-      runMode,
-      claimAmount,
-      terminationDate,
-      caseId: caseFile?.id,
-      orgId,
+    return generate(async signal => {
+      setActiveTab('workflow');
+      setManualNote('');
+      let next = createAssetTraceWorkflow({ subjectName: name, subjectType, runMode, claimAmount, terminationDate, caseId: caseFile?.id, orgId });
+      next = await executeStep(next, 'source-preflight', signal);
+      if (next.steps.find(step => step.id === 'source-preflight')?.status === 'completed') next = await executeStep(next, 'quick-scan', signal);
+      return combineAssetTraceOutputs(next);
     });
-    commitWorkflow(next);
-    try {
-      next = await executeStep(next, 'source-preflight');
-      if (next.steps.find(step => step.id === 'source-preflight')?.status !== 'completed') return;
-      await executeStep(next, 'quick-scan');
-    } finally {
-      setLoading(false);
-    }
   };
-
-  const continueWorkflow = async () => {
+  const continueWorkflow = () => {
     if (!workflow || loading) return;
     const nextStep = getNextAssetTraceStep(workflow);
     if (!nextStep) return;
     if (nextStep.executionMode === 'manual') {
-      const next = patchAssetTraceStep(workflow, nextStep.id, { status: 'needs_action' });
-      commitWorkflow(next);
+      commitWorkflow(patchAssetTraceStep(workflow, nextStep.id, { status: 'needs_action' }));
       setSelectedStepId(nextStep.id);
       setManualNote(nextStep.note || '');
       return;
     }
-    setLoading(true);
-    try {
-      await executeStep(workflow, nextStep.id);
-    } finally {
-      setLoading(false);
-    }
+    return generate(async signal => combineAssetTraceOutputs(await executeStep(workflow, nextStep.id, signal)));
   };
 
   const enterDeepInvestigation = () => {
@@ -367,24 +353,15 @@ export function LegalAssetTrace({
     }
   };
 
-  const retrySelectedStep = async () => {
+  const retrySelectedStep = () => {
     if (!workflow || !selectedStepId || loading) return;
-    setLoading(true);
-    try {
-      await executeStep(patchAssetTraceStep(workflow, selectedStepId, { status: 'pending', error: undefined }), selectedStepId);
-    } finally {
-      setLoading(false);
-    }
+    return generate(async signal => combineAssetTraceOutputs(await executeStep(
+      patchAssetTraceStep(workflow, selectedStepId, { status: 'pending', error: undefined }), selectedStepId, signal,
+    )));
   };
-
   const archive = () => {
-    if (!workflow || !onAddMaterial) {
-      toast.info(copy.archiveUnavailable);
-      return;
-    }
-    const report = buildWorkflowReport(workflow, copy, locale);
-    onAddMaterial('evidence', `${workflow.subjectName} - ${copy.reportLabels.title}`, report, 'tool');
-    toast.success(copy.archived);
+    if (!workflow || !onAddMaterial) { toast.info(copy.archiveUnavailable); return; }
+    return save(() => onAddMaterial('note', workflow.subjectName + ' - ' + copy.reportLabels.title, buildWorkflowReport(workflow, copy, locale), 'tool'), copy.archived);
   };
 
   const completion = workflow ? getAssetTraceCompletion(workflow) : { done: 0, total: 0, percent: 0 };

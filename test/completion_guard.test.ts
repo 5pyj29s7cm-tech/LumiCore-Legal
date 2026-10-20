@@ -16,9 +16,20 @@ function expectCustomerReadableGuard(text: string): void {
 }
 
 describe('completion guard desktop action handling', () => {
+  it('uses the current read contract before generic promise-tool lists', () => {
+    const input = { task: '查看 Lumi 客户端当前界面状态，介绍当前页面和各个分区。只读取客户端状态，不做桌面控制，也不切换页面。',
+      response: '我先读取客户端状态，再介绍当前界面。当前客户端在个人主页。', requestId: 'client-observation', taskId: 'client-task' };
+    const record = { name: 'client_get_state', arguments: {}, requestId: input.requestId, taskId: input.taskId,
+      result: '{"state":{"activeTab":"home"}}', terminalVerification: { status: 'verified' as const, strategy: 'terminal_receipt' as const, reason: 'returned current state' } };
+    expect(guardCompletionClaims({ ...input, toolCalls: [record] })).toMatchObject({ blocked: false, text: input.response });
+    expect(guardCompletionClaims({ ...input, toolCalls: [] }).blocked).toBe(true);
+    expect(guardCompletionClaims({ ...input, toolCalls: [{ ...record, name: 'client_health_check' }] }).blocked).toBe(true);
+    expect(guardCompletionClaims({ ...input, toolCalls: [{ ...record, requestId: 'stale' }] }).blocked).toBe(true);
+  });
+
   it('does not mistake a source-access instruction inside verified legal research for an open claim', () => {
-    const task = '律师版实机验收·法条与类案：基于四号案件ID d2789373-effc-404c-aff6-25f101267790，只使用当前已配置且可核验的权威来源，输出检索问题、来源状态、可核验结果与缺口。若来源未配置或结果无法核验，必须明确写无法完成检索，禁止凭模型记忆编造法条、案号、法院或裁判规则。不要登录外部网站，不要发送、提交或签署。完成后告诉我实际使用了什么能力以及任务回执状态。';
-    const response = '法条候选来自本地权威快照。未配置来源只能由律师打开授权网页人工核验；本轮未自动登录任何外部网站。实际使用能力：legal_search_statute、legal_search_case。任务回执状态：已验证。';
+    const task = '律师版实机验收·法条与类案：基于案件ID case-001，只使用可核验来源输出结果；禁止凭模型记忆编造法条，不要登录外部网站。';
+    const response = '法条候选来自本地权威快照。未配置来源只能由律师打开授权网页人工核验；本轮未自动登录任何外部网站。任务回执状态：已验证。';
     const result = guardCompletionClaims({
       task,
       response,
@@ -32,51 +43,6 @@ describe('completion guard desktop action handling', () => {
 
     expect(result.blocked).toBe(false);
     expect(result.text).toBe(response);
-  });
-
-  it('keeps a verified read-only delivery assessment even when its next step mentions generating a file', () => {
-    const task = '针对案件工作台中已归档的律师复核草稿执行交付核验，不要重新生成文书，输出是否可正式交付和任务回执状态。';
-    const response = [
-      '# 已归档文书交付核验',
-      '- 草稿文件状态：数据库正文存在，但不能证明 DOCX/PDF 交付文件已生成。',
-      '- 不可正式交付；本轮只完成核验，没有重新生成文书。',
-      '- 下一步：生成可核对的本地交付文件，并由承办律师完成复核确认。',
-      '- 任务回执状态：核验已完成并形成结构化回执。',
-    ].join('\n');
-    const result = guardCompletionClaims({
-      task,
-      response,
-      toolCalls: [{
-        id: 'delivery-verification',
-        name: 'legal_verify_archived_delivery',
-        arguments: { caseId: 'case-1' },
-        result: response,
-        receipt: { ok: true, status: 'verified', persisted: false },
-        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'read-only assessment' },
-      } as any],
-    });
-    expect(result.blocked).toBe(false);
-    expect(result.text).toBe(response);
-  });
-
-  it('accepts an idempotently verified existing local legal handoff artifact', () => {
-    const task = '请基于当前矩衡律师版验收案，为人民法院在线服务准备登录后由律师人工操作的协同工作区。只准备本地工作区，不要登录、不要上传、不要提交、不要缴费。';
-    const result = guardCompletionClaims({
-      task,
-      response: '已读取并确认现有本地协同工作区内容完整，可供律师后续人工操作。',
-      toolCalls: [{
-        name: 'read_file',
-        arguments: { path: 'D:\\lumi_output\\矩衡律师版验收案_人民法院在线服务协同工作区.md' },
-        result: `# 矩衡律师版验收案·人民法院在线服务协同工作区\n${'x'.repeat(100)}`,
-        terminalVerification: {
-          status: 'verified',
-          strategy: 'terminal_receipt',
-          reason: 'The existing local artifact was read successfully.',
-        },
-      }],
-    });
-
-    expect(result.blocked).toBe(false);
   });
 
   it('does not replace an attempted desktop action with a file-reading guard', () => {
@@ -152,6 +118,17 @@ describe('completion guard desktop action handling', () => {
         name: 'desktop_active_window',
         arguments: {},
         result: '{"title":"LumiCore","process_name":"lumi-core.exe","pid":3928}',
+        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'Current native window observed.' },
+      }, {
+        name: 'desktop_running_processes',
+        arguments: {},
+        result: '{"processes":[{"process_name":"lumi-core.exe","pid":3928}]}',
+        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'Current native processes observed.' },
+      }, {
+        name: 'desktop_idle_time',
+        arguments: {},
+        result: '{"idle_seconds":0}',
+        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'Current native idle state observed.' },
       }],
     });
 
@@ -235,6 +212,7 @@ describe('completion guard generic execution claims', () => {
       response,
       toolCalls: [{
         name: 'work_takeover_task_create',
+        capability: { ...stateDiffCapability, capabilityId: 'work-task.create', lane: 'agents', operation: 'create' },
         arguments: { title: '青穹客户跟进闭环', category: 'customer', source: 'chat' },
         result: JSON.stringify({
           ok: true,
@@ -276,7 +254,7 @@ describe('completion guard generic execution claims', () => {
 
   it('does not turn a successful handler return into a completed action without terminal verification', () => {
     const result = guardCompletionClaims({
-      task: 'launch an external desktop program',
+      task: 'Perform the requested desktop operation.',
       response: 'The task is completed successfully.',
       toolCalls: [{
         name: 'unclassified_desktop_adapter',
@@ -298,7 +276,7 @@ describe('completion guard generic execution claims', () => {
   it('allows a generic completion claim after the same capability receipt is verified', () => {
     const response = 'The task is completed successfully.';
     const result = guardCompletionClaims({
-      task: 'launch an external desktop program',
+      task: 'Perform the requested desktop operation.',
       response,
       toolCalls: [{
         name: 'unclassified_desktop_adapter',
@@ -604,7 +582,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.text).toContain(expectedDetail);
+    expect(result.text).not.toContain(expectedDetail);
     expect(result.text).not.toContain('desktop_active_window');
     expectCustomerReadableGuard(result.text);
   });

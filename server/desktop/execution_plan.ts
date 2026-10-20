@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { CapabilityExecutionPlan } from '../cognition/capability_execution_plan';
+import type { NormalizedActionIntent } from '../cognition/normalized_action_intent';
 import type { LumiCapabilityLane } from '../cognition/capability_selection';
 import { isVideoPlaybackRequest } from '../cognition/media_intent';
 import { parsePlaybackGoal } from '../cognition/playback_verification';
@@ -13,6 +13,7 @@ export type DesktopApplicationFamily =
   | 'browser'
   | 'office'
   | 'messaging'
+  | 'media'
   | 'cad'
   | 'desktop_ai'
   | 'utility'
@@ -275,6 +276,11 @@ const CERTIFICATION_POLICIES = {
     publisherPatterns: ['tencent', 'tencent technology'],
     productNamePatterns: ['wechat', 'weixin'],
   }),
+  neteaseMusic: certificationPolicy({
+    requiredSignals: ['process_name'],
+    requireValidSignature: false,
+    versionPolicy: 'unconstrained',
+  }),
   autocad: certificationPolicy({
     publisherPatterns: ['autodesk'],
     productNamePatterns: ['autocad'],
@@ -481,6 +487,22 @@ export const DESKTOP_APPLICATION_REGISTRY: readonly ApplicationIdentity[] = [
     certification: 'conditional',
     certificationPolicy: CERTIFICATION_POLICIES.wechat,
     controlLayers: ['dedicated_adapter', 'windows_uia', 'vision'],
+  },
+  {
+    id: 'netease-cloud-music',
+    family: 'media',
+    displayName: 'NetEase Cloud Music',
+    // i18n-allow: Reviewed multilingual application aliases for exact target matching.
+    aliases: ['netease cloud music', 'netease music', 'cloudmusic', '网易云音乐', '网易云'],
+    processPatterns: ['cloudmusic'],
+    // A playing track may replace the product name in the window title, so
+    // the native process identity is the authoritative signal.
+    // i18n-allow: Reviewed multilingual application fingerprints for exact target matching.
+    windowTitlePatterns: ['netease cloud music', 'cloudmusic', '网易云音乐'],
+    executablePatterns: ['cloudmusic.exe'],
+    certification: 'conditional',
+    certificationPolicy: CERTIFICATION_POLICIES.neteaseMusic,
+    controlLayers: ['windows_uia', 'vision'],
   },
   {
     id: 'autocad-desktop',
@@ -883,7 +905,7 @@ function toolsForLayer(layer: DesktopControlLayer, family: DesktopApplicationFam
 export function buildDesktopExecutionPlan(input: {
   text: string;
   lane: LumiCapabilityLane;
-  capabilityExecutionPlan?: CapabilityExecutionPlan;
+  actionIntent?: NormalizedActionIntent;
   taskId?: string;
   recoveredCurrentAppEdit?: boolean;
 }): DesktopExecutionPlan {
@@ -892,20 +914,20 @@ export function buildDesktopExecutionPlan(input: {
   // the existing unknown-application boundary while observing the actual
   // explicitly selected player, rather than looking for the whole sentence.
   const playbackPlayer = isVideoPlaybackRequest(input.text) ? parsePlaybackGoal(input.text).player : '';
-  const requestedTarget = String(playbackPlayer || input.capabilityExecutionPlan?.intent.target || input.text || '').trim();
-  const sideEffectClass = input.capabilityExecutionPlan?.risk.sideEffectClass || 'none';
-  const operation = input.capabilityExecutionPlan?.intent.operation || 'mutate';
+  const requestedTarget = String(playbackPlayer || input.actionIntent?.target || input.text || '').trim();
+  const sideEffectClass = input.actionIntent?.sideEffectClass || 'none';
+  const operation = input.actionIntent?.operation || 'mutate';
   const verificationProfile = desktopVerificationProfile({
     text: input.text,
     operation,
-    intentKind: input.capabilityExecutionPlan?.intent.kind,
+    intentKind: input.actionIntent?.kind,
     sideEffectClass,
   });
   const layers = input.recoveredCurrentAppEdit
     ? application.controlLayers.filter(layer => layer === 'windows_uia')
     : application.controlLayers;
   const effectiveLayers = layers.length ? layers : ['windows_uia' as const];
-  const taskId = input.taskId || input.capabilityExecutionPlan?.taskId || '';
+  const taskId = input.taskId || '';
   const steps: DesktopActionStep[] = [{
     stepId: 'observe-target',
     operation: 'observe',

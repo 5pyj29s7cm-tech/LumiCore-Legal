@@ -1,7 +1,8 @@
+import { providerGetterArguments } from "../llm/provider_getters";
+import { runtimeFaults } from './fault_state';
 import { repairTestMemoryProvenance, repairRuntimeLearningEvidence } from '../memory/provenance';
 import {
-  readDB,
-  writeDB,
+  readDatabaseTables,
   flushDB,
   closeDatabase,
   ensureDatabaseInitialized,
@@ -11,7 +12,9 @@ import {
 } from "../../db_layer";
 import { toolRegistry } from "../tools/registry";
 import { registerProductVariantTools } from "../tools/definitions/index";
-import { mcpManager, registerMCPTools } from "../mcp";
+import { activateInstalledSkill, mcpManager, registerMCPTools } from "../mcp";
+import { createBundledSkillIdentity } from "../marketplace/official_identity";
+import { isStrictPrivacy } from "../config/privacy";
 import { scheduler, registerScheduledTasks } from "../scheduler";
 import {
   isFirstBootComplete,
@@ -50,7 +53,6 @@ import {
   UnifiedRuntimeSupervisor,
 } from "./unified_supervisor";
 import { enforceProductVariantSkillBaseline } from "./product_variant_skills";
-import { reconcileInterruptedIndustryWorkflowTasks } from "../industry/workflow_service";
 import {
   initializeChatExecutionRegistryPersistence,
   waitForChatExecutionPersistence,
@@ -62,6 +64,7 @@ import path from 'path';
 import { ensurePendingConfirmationPersistenceInitialized } from '../tools/pending_confirmation_repository';
 import { RuntimeShutdownCoordinator, registerShutdownSignals, type ShutdownIngress } from './shutdown';
 import { runtimeBackgroundWork, runtimeShutdownCancellation, waitUntilRuntimeIdle } from './shutdown_work';
+import { stopLayaShadow } from './laya_shadow';
 
 interface BootstrapContext {
   server: any;
@@ -82,7 +85,8 @@ interface BootstrapContext {
 let unifiedRuntimeSupervisor: UnifiedRuntimeSupervisor | null = null;
 const startupTimers = new Set<ReturnType<typeof setTimeout>>();
 
-function ensureProductVariantSkills(): string[] {
+async function ensureProductVariantSkills(): Promise<string[]> {
+  if (isStrictPrivacy()) return [];
   const configured = mcpManager.getConfig();
   const installedNow: string[] = [];
   for (const skillName of PRODUCT_VARIANT.runtime.defaultSkills) {
@@ -90,7 +94,10 @@ function ensureProductVariantSkills(): string[] {
     const bundledPath = path.join(process.cwd(), 'server', 'skills', 'bundled', skillName);
     if (!fs.existsSync(path.join(bundledPath, 'package.json'))) continue;
     try {
-      mcpManager.installSkill(skillName, bundledPath, true);
+      await mcpManager.installSkillValidated(skillName, bundledPath, {
+        managedSkill: createBundledSkillIdentity(`skill-${skillName}`, bundledPath),
+      });
+      await activateInstalledSkill(skillName, { rollbackInstallOnFailure: true });
       installedNow.push(skillName);
     } catch (error: any) {
       console.warn(`[Variant] Could not install default skill "${skillName}": ${error?.message || String(error)}`);
@@ -154,7 +161,7 @@ export async function bootstrap(ctx: BootstrapContext) {
     await ensureDatabaseInitialized();
     repairTestMemoryProvenance();
     repairRuntimeLearningEvidence();
-    const initializedDb = readDB();
+    const initializedDb = readDatabaseTables(["conversations","interactions","users"]);
     const migrationCounts = {
       quickCheck: requireDatabaseStartupQuickCheck(),
       // A migrated database must expose all three durable collections. Using
@@ -198,10 +205,6 @@ export async function bootstrap(ctx: BootstrapContext) {
     if (recoveredTasks > 0) {
       console.warn(`[Bootstrap] Recovered ${recoveredTasks} orphaned conversation task lease(s)`);
     }
-    const reconciledIndustryTasks = reconcileInterruptedIndustryWorkflowTasks();
-    if (reconciledIndustryTasks > 0) {
-      console.warn(`[Bootstrap] Reconciled ${reconciledIndustryTasks} interrupted industry workflow task(s) without replaying tools`);
-    }
     if (llm.refreshLocalModels) {
       const localModels = await llm.refreshLocalModels();
       console.log(`[LLM] Local runtime ready — Ollama=${localModels.ollama}, LM Studio=${localModels.lmstudio}`);
@@ -228,7 +231,7 @@ export async function bootstrap(ctx: BootstrapContext) {
   // Recovered work starts only after MCP discovery settles, so a task that
   // depended on an MCP/CAD tool is not failed merely because startup discovery
   // was still in flight.
-  const defaultSkillsInstalled = ensureProductVariantSkills();
+  const defaultSkillsInstalled = await ensureProductVariantSkills();
   const inheritedSkillsDisabled = enforceProductVariantSkillBaseline();
   if (defaultSkillsInstalled.length > 0) {
     console.log(`[Variant] Installed default ${PRODUCT_VARIANT.productLine} skills: ${defaultSkillsInstalled.join(', ')}`);
@@ -270,7 +273,7 @@ export async function bootstrap(ctx: BootstrapContext) {
       timeoutMs: 1_000,
       run: () => ({
         registeredTools: toolRegistry.list().length,
-        databaseReadable: Boolean(readDB()),
+        databaseReadable: Boolean(readDatabaseTables(["conversations","interactions","users"])),
         readOnlyCache: readOnlyContextCache.metrics(),
         gptSovits: getGptSovitsRuntimeStatus(),
         voiceprint: getVoiceprintRuntimeStatus(),
@@ -300,7 +303,7 @@ export async function bootstrap(ctx: BootstrapContext) {
       console.warn('[Messaging] Long-connection startup failed:', err?.message || err);
     });
     scheduler.setIO(io);
-    registerScheduledTasks(llm.getDeepSeek, llm.getGemini, llm.getOpenAI, llm.getAnthropic, llm.getQwen, llm.getOllama, llm.getLmStudio, llm.getArk, llm.getXiaomi, llm.getKimi, llm.getGlm, llm.getRelay);
+    registerScheduledTasks(...providerGetterArguments(llm));
 
     scheduleFirstBootExploration(__dirname);
     schedulePostStartupFlush(5_000);
@@ -314,6 +317,7 @@ export async function bootstrap(ctx: BootstrapContext) {
       for (const timer of startupTimers) clearTimeout(timer);
       startupTimers.clear();
       stopSystemExplorationWorker();
+      stopLayaShadow();
       scheduler.stop({ drainSettledHandlers: true });
       unifiedRuntimeSupervisor?.stop();
     },
@@ -343,7 +347,7 @@ export async function bootstrap(ctx: BootstrapContext) {
       setUnifiedRuntimeSupervisor(null);
       console.log('[Shutdown] Database saved and closed');
     },
-    exit: () => process.exit(0),
+    exit: () => process.exit(runtimeFaults.snapshot().degraded ? 1 : 0),
   });
   ctx.shutdownIngress.configure(shutdown);
   registerShutdownSignals(shutdown);

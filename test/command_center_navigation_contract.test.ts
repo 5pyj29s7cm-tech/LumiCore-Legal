@@ -1,8 +1,9 @@
+import { readImplementationSource } from './implementation_source';
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const source = (relativePath: string) => fs.readFileSync(path.resolve(process.cwd(), relativePath), 'utf8');
+const source = (relativePath: string) => readImplementationSource(path.resolve(process.cwd(), relativePath), 'utf8');
 
 describe('command center navigation contract', () => {
   it('keeps office chat visible without a floating-window toggle', () => {
@@ -33,7 +34,7 @@ describe('command center navigation contract', () => {
 
   it('returns from an OS core opened by the command center back to the office', () => {
     const desktop = source('src/components/DesktopUI.tsx');
-    expect(desktop).toContain("setNexusReturnTarget('command-center')");
+    expect(desktop).toContain("openSurface('nexus', 'command-center')");
     expect(desktop).toContain("if (nexusReturnTarget === 'command-center') openCommandCenter('office')");
   });
 

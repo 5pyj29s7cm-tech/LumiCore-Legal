@@ -13,8 +13,12 @@ vi.mock('../server/llm/providers', async () => {
 });
 
 import { runWithTools } from '../server/llm/adapter';
+import { createModelTurnState } from '../server/llm/model_turn_state';
 import { encodeToolResult } from '../server/tools/result_envelope';
 import { ToolRegistry } from '../server/tools/registry';
+import { CN_COMPLETION_GUARD_MESSAGES } from '../server/regions/messages/completion_guard_messages';
+import { withCloudResilience } from '../server/cloud/resilience';
+import { getCircuitStatus, resetCircuit } from '../server/cloud/circuit_breaker';
 
 const getters = [
   () => null,
@@ -69,6 +73,7 @@ function deadlineRegistry(verifiedDelayMs = 0) {
 }
 
 beforeEach(() => {
+  resetCircuit();
   // Reset queued one-shot implementations as well as call history. If a
   // cancellation/deadline test exits before consuming its last mocked model
   // response, clearAllMocks would leak that response into the next case.
@@ -81,6 +86,93 @@ afterEach(() => {
 });
 
 describe('bounded cumulative model-wait lifecycle', () => {
+  it.each(['Create D:/work/meeting.docx with a meeting agenda.', 'Explain a mathematical theorem.'])(
+    'keeps the same provider wait policy for task %s', async task => {
+      vi.useFakeTimers();
+      const { registry } = deadlineRegistry();
+      mocks.makeLLMCallStreaming.mockImplementationOnce(async (_messages, _tools, config) => {
+        await new Promise(resolve => setTimeout(resolve, 30000));
+        return { text: 'Virtual completion after thirty seconds.', toolCalls: null };
+      });
+      const pending = runWithTools([{ role: 'user', content: task }], registry,
+        { provider: 'relay', model: 'primary', selectionMode: 'ordered_fallback', fallbackCandidates: [{ provider: 'relay', model: 'backup' }] },
+        undefined, 1, ...getters, () => {});
+      await vi.advanceTimersByTimeAsync(30001); await pending;
+      expect(mocks.makeLLMCallStreaming).toHaveBeenCalledOnce();
+      expect(mocks.makeLLMCallStreaming.mock.calls[0][2].attemptTimeouts).toMatchObject({ semanticContentMs: 120000, absoluteMs: 120000 });
+    });
+  it('retains explicitly configured provider deadlines without task-category overrides', async () => {
+    const { registry } = deadlineRegistry();
+    mocks.makeLLMCallStreaming.mockResolvedValueOnce({ text: 'Virtual explicit wait configuration.', toolCalls: null });
+    await runWithTools([{ role: 'user', content: 'Create D:/work/meeting.docx with a meeting agenda.' }], registry,
+      { provider: 'relay', model: 'primary', selectionMode: 'ordered_fallback', fallbackCandidates: [{ provider: 'relay', model: 'backup' }], attemptTimeouts: { semanticContentMs: 90000, absoluteMs: 100000 } },
+      undefined, 1, ...getters, () => {});
+    expect(mocks.makeLLMCallStreaming).toHaveBeenCalledOnce();
+    expect(mocks.makeLLMCallStreaming.mock.calls[0][2].attemptTimeouts).toMatchObject({ semanticContentMs: 90000, absoluteMs: 100000 });
+  });
+
+  it('stops queued calls and model recovery at a missing required source, but permits a new attempt', async () => {
+    const { registry, late } = deadlineRegistry();
+    const read = vi.fn().mockRejectedValueOnce(new Error('XLSX file not found: D:/orders.xlsx'))
+      .mockResolvedValueOnce(encodeToolResult('source supplied', { ok: true, status: 'verified', verified: true }));
+    registry.register({ name: 'read_xlsx', description: 'Read the source workbook',
+      parameters: { type: 'object', properties: { filePath: { type: 'string' } }, required: ['filePath'] },
+      permission: 'public', securityLevel: 'safe', handler: read });
+    const call = { id: 'required-source', name: 'read_xlsx', arguments: { filePath: 'D:/orders.xlsx' } };
+    mocks.makeLLMCallStreaming.mockResolvedValueOnce({ text: '', toolCalls: [call, { id: 'late-write', name: 'late_tool', arguments: {} }] });
+    const messages = [{ role: 'user' as const, content: '把 D:/orders.xlsx 数量改成4，另存为 D:/result.xlsx。' }];
+    const config = { provider: 'deepseek', model: 'test-model' };
+    const result = await runWithTools(messages, registry, config, undefined, 5, ...getters, () => {});
+    expect(result.completionGuard).toMatchObject({ blocked: true, reason: 'required_input_file_missing' });
+    expect(result.text).toContain('D:/orders.xlsx');
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(late).not.toHaveBeenCalled();
+    expect(mocks.makeLLMCallStreaming).toHaveBeenCalledTimes(1);
+    mocks.makeLLMCallStreaming.mockResolvedValueOnce({ text: '', toolCalls: [{ ...call, id: 'new-read' }] })
+      .mockResolvedValueOnce({ text: 'Source available, still needs saving.', toolCalls: null });
+    const next = await runWithTools(messages, registry, config, undefined, 2, ...getters, () => {},
+      { priorToolRecords: result.toolCalls });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(next.completionGuard?.reason).not.toBe('required_input_file_missing');
+  });
+
+  it('does not grant a fresh model-wait budget to a second recovery loop', async () => {
+    vi.useFakeTimers();
+    const { registry } = deadlineRegistry();
+    const state = createModelTurnState();
+    const config = { provider: 'deepseek', model: 'test-model', modelWaitBudgetMs: 40, modelTurnState: state };
+    mocks.makeLLMCallStreaming
+      .mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve({ text: 'Known context.', toolCalls: null }), 30)))
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const first = runWithTools([{ role: 'user', content: 'Explain the context.' }], registry, config, undefined, 1, ...getters, () => {});
+    await vi.advanceTimersByTimeAsync(30);
+    await first;
+    expect(state.modelWaitMs).toBe(30);
+    const recovery = runWithTools([{ role: 'user', content: 'Explain the context.' }], registry, config, undefined, 1, ...getters, () => {});
+    const assertion = expect(recovery).rejects.toMatchObject({ name: 'ToolLoopModelBudgetError' });
+    await vi.advanceTimersByTimeAsync(10);
+    await assertion;
+    expect(state.modelWaitMs).toBe(40);
+    const exhausted = runWithTools([{ role: 'user', content: 'Explain the context.' }], registry, config, undefined, 1, ...getters, () => {});
+    await expect(exhausted).rejects.toMatchObject({ name: 'ToolLoopModelBudgetError' });
+    expect(mocks.makeLLMCallStreaming).toHaveBeenCalledTimes(2);
+  });
+  it('does not disable local inference when only the parent turn budget expires', async () => {
+    vi.useFakeTimers();
+    const { registry } = deadlineRegistry();
+    mocks.makeLLMCallStreaming.mockImplementation((_messages, _tools, config) => withCloudResilience(
+      () => new Promise(() => {}),
+      { provider: 'lmstudio', model: 'test-local', maxRetries: 0,
+        signal: config.signal, timeoutMs: config.attemptTimeouts.absoluteMs },
+    ));
+    const pending = runWithTools([{ role: 'user', content: 'Read current context.' }], registry,
+      { provider: 'lmstudio', model: 'test-local', modelWaitBudgetMs: 797,
+        attemptTimeouts: { absoluteMs: 60000 } }, undefined, 2, ...getters, () => {});
+    const assertion = expect(pending).rejects.toMatchObject({ name: 'ToolLoopModelBudgetError' });
+    await vi.advanceTimersByTimeAsync(800);
+    await assertion;
+    expect(getCircuitStatus().filter(row => row.key.startsWith('lmstudio'))).toEqual([]);
+  });
   it('returns a verified checkpoint when the model never settles after a completed tool', async () => {
     vi.useFakeTimers();
     let modelStalled!: () => void;
@@ -124,8 +216,9 @@ describe('bounded cumulative model-wait lifecycle', () => {
     expect(result.usageRecords).toEqual([
       expect.objectContaining({ provider: 'deepseek', model: 'test-model', totalTokens: 16 }),
     ]);
-    expect(result.text).toContain('青穹跟进：目标是完成客户回访');
-    expect(result.text).toContain('当前进度与回执仍可用于继续');
+    expect(result.text).toBe(CN_COMPLETION_GUARD_MESSAGES.blockedGeneric(true));
+    expect(result.text).not.toContain('青穹跟进：目标是完成客户回访');
+    expect(result.completionGuard?.blocked).toBe(true);
   });
 
   it('aborts the turn and quarantines late chunks and tool calls after cancellation', async () => {
@@ -171,7 +264,7 @@ describe('bounded cumulative model-wait lifecycle', () => {
     expect(late).not.toHaveBeenCalled();
   });
 
-  it('clips every model attempt to the remaining policy-configured model budget', async () => {
+  it('keeps provider health deadlines separate from the remaining turn budget', async () => {
     const { registry } = deadlineRegistry();
     let now = 10_000;
     vi.spyOn(Date, 'now').mockImplementation(() => now);
@@ -185,7 +278,7 @@ describe('bounded cumulative model-wait lifecycle', () => {
         };
       })
       .mockImplementationOnce(async (_messages, _tools, config) => {
-        expect(config.attemptTimeouts.absoluteMs).toBe(50);
+        expect(config.attemptTimeouts.absoluteMs).toBe(90);
         return { text: '已根据核验结果整理完成。', toolCalls: null };
       });
 

@@ -1,14 +1,8 @@
+import { consumeFixtureBindingCode } from './messaging_binding_fixture';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import jwt from 'jsonwebtoken';
 import { JWT_SECRET, makeApp } from './helpers';
-import {
-  authorizeMessagingGroup,
-  consumeBindingCode,
-  createBindingCode,
-  getBinding,
-  listActiveBindingCodesForUser,
-  resetMessagingBindingsForTest,
-} from '../server/messaging/bindings';
+import { authorizeMessagingGroup, createBindingCode, getBinding, listActiveBindingCodesForUser, resetMessagingBindingsForTest } from '../server/messaging/bindings';
 import { resetDeliveryLedgerForTest } from '../server/messaging/delivery_ledger';
 import {
   evaluateMessagingIngress,
@@ -30,6 +24,26 @@ import { resetVolatileExternalCommitJournalForTests } from '../server/tools/exte
 
 let cleanup = () => {};
 let baseUrl = '';
+
+it('bounds private ingress history without evicting an active limit and reclaims expired buckets', () => {
+  resetMessagingIngressPolicyForTest();
+  const now = Date.now();
+  const first = incoming({ chatType: 'private', chatId: 'bounded-0' });
+  for (let i = 0; i < 20; i++) expect(evaluateMessagingIngress(first, now).allowed).toBe(true);
+  for (let i = 1; i < 4096; i++) expect(evaluateMessagingIngress(incoming({ chatType: 'private', chatId: `bounded-${i}` }), now).allowed).toBe(true);
+  expect(evaluateMessagingIngress(incoming({ chatType: 'private', chatId: 'overflow' }), now).allowed).toBe(false);
+  expect(evaluateMessagingIngress(first, now).allowed).toBe(false);
+  expect(evaluateMessagingIngress(incoming({ chatType: 'private', chatId: 'next-day', timestamp: new Date(now + 86_400_000).toISOString() }), now + 86_400_000).allowed).toBe(true);
+  expect(evaluateMessagingIngress({ ...first, timestamp: new Date(now + 86_400_000).toISOString() }, now + 86_400_000).allowed).toBe(true);
+});
+
+it('keeps delimiter-containing chat and user identities separate', () => {
+  resetMessagingIngressPolicyForTest();
+  const now = Date.now();
+  const first = incoming({ chatType: 'private', chatId: 'a:b', userId: 'c' });
+  for (let i = 0; i < 20; i++) evaluateMessagingIngress(first, now);
+  expect(evaluateMessagingIngress(incoming({ chatType: 'private', chatId: 'a', userId: 'b:c' }), now).allowed).toBe(true);
+});
 
 function incoming(partial: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
@@ -79,9 +93,9 @@ describe('Feishu group governance and delivery safety', () => {
     addMember(org.id, memberId, 'member');
 
     const code = createBindingCode('feishu', memberId, org.id);
-    expect(consumeBindingCode('feishu', code.code, 'ou-governed-member', 'oc-governed-group', 'group')).toBeNull();
+    expect(consumeFixtureBindingCode('feishu', code.code, 'ou-governed-member', 'oc-governed-group', 'group')).toBeNull();
     expect(listActiveBindingCodesForUser(memberId, 'feishu')).toHaveLength(1);
-    expect(consumeBindingCode('feishu', code.code, 'ou-governed-member', 'oc-private-member', 'private')).toMatchObject({
+    expect(consumeFixtureBindingCode('feishu', code.code, 'ou-governed-member', 'oc-private-member', 'private')).toMatchObject({
       lumiUserId: memberId,
       chatType: 'private',
     });
@@ -113,6 +127,7 @@ describe('Feishu group governance and delivery safety', () => {
   });
 
   it('requires a proven bot mention, exact group authorization and per-member rate budget', () => {
+    const now = Date.now();
     const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const ownerId = `mention-owner-${suffix}`;
     const memberId = `mention-member-${suffix}`;
@@ -120,7 +135,7 @@ describe('Feishu group governance and delivery safety', () => {
     addMember(org.id, ownerId, 'owner');
     addMember(org.id, memberId, 'member');
     const code = createBindingCode('feishu', memberId, org.id);
-    consumeBindingCode('feishu', code.code, 'ou-governed-member', 'oc-private-member', 'private');
+    consumeFixtureBindingCode('feishu', code.code, 'ou-governed-member', 'oc-private-member', 'private');
     authorizeMessagingGroup({
       platform: 'feishu',
       chatId: 'oc-governed-group',
@@ -133,13 +148,13 @@ describe('Feishu group governance and delivery safety', () => {
       reason: 'group_not_mentioned',
     });
     for (let index = 0; index < 10; index += 1) {
-      expect(evaluateMessagingIngress(incoming(), 1_000)).toMatchObject({ allowed: true });
+      expect(evaluateMessagingIngress(incoming(), now)).toMatchObject({ allowed: true });
     }
-    expect(evaluateMessagingIngress(incoming(), 1_000)).toMatchObject({
+    expect(evaluateMessagingIngress(incoming(), now)).toMatchObject({
       allowed: false,
       reason: 'rate_limited',
     });
-    expect(evaluateMessagingIngress(incoming({ chatId: 'oc-unapproved' }), 1_000)).toMatchObject({
+    expect(evaluateMessagingIngress(incoming({ chatId: 'oc-unapproved' }), now)).toMatchObject({
       allowed: false,
       reason: 'group_not_authorized',
     });
@@ -211,7 +226,8 @@ describe('Feishu group governance and delivery safety', () => {
     await expect(adapter.replyMessage('om-unknown-reply', 'same immutable reply'))
       .rejects.toThrow(/automatic resend was stopped/i);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(String(fetchMock.mock.calls[1][0])).toContain('uuid=');
+    expect(new URL(String(fetchMock.mock.calls[1][0])).searchParams.has('uuid')).toBe(false);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).uuid).toMatch(/^[a-f0-9]{32}$/);
   });
 
   it('requires exact confirmation and an immutable idempotency key for manual external sends', async () => {

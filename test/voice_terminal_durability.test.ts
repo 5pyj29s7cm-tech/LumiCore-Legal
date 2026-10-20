@@ -1,3 +1,5 @@
+import { countImplementationCalls } from './implementation_source';
+import { readVoiceImplementationSource } from './voice_implementation_source';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -145,13 +147,13 @@ describe('voice durability', () => {
   });
 
   it('routes every in-turn terminal through the strict fence before speech', () => {
-    const source = readFileSync(path.join(process.cwd(), 'server/socket/voice.ts'), 'utf8');
+    const source = readVoiceImplementationSource();
 
-    expect(source.match(/await commitVoiceTerminal\(\{/g)?.length || 0).toBeGreaterThanOrEqual(10);
+    expect(source.match(/await (?:commitVoiceTerminal|finishVoiceTerminal)\(\{/g)?.length || 0).toBeGreaterThanOrEqual(10);
     expect(source).not.toMatch(/emitAgent\(["']agent:response["']/);
     expect(source).not.toMatch(/emitAgent\(["']agent:error["']/);
-    expect(source.match(/persistVoiceAssistantMessage\(/g)?.length || 0).toBe(1);
-    expect(source.match(/queueFinalizedSpeech\(/g)?.length || 0).toBe(1);
+    expect(countImplementationCalls(source, 'persistVoiceAssistantMessage')).toBe(1);
+    expect(countImplementationCalls(source, 'queueFinalizedSpeech')).toBe(1);
     expect(source).toContain('flush: flushDBOrThrow');
     expect(source).toContain('recordChatExecutionTerminalEventDurably(');
     expect(source).toContain('recordChatExecutionPersistenceUnknownDurably(');
@@ -160,7 +162,7 @@ describe('voice durability', () => {
     expect(source).not.toContain('socket.emit("audio:error", { message: err.message });');
     const strictHelper = source.slice(
       source.indexOf('const commitVoiceTerminal = async'),
-      source.indexOf('const maxIterations =', source.indexOf('const commitVoiceTerminal = async')),
+      source.indexOf('const releaseVoiceTransportResources =', source.indexOf('const commitVoiceTerminal = async')),
     );
     const dispositionAt = strictHelper.indexOf('terminalTaskDisposition: input.blocked');
     expect(dispositionAt).toBeGreaterThan(strictHelper.indexOf('persistVoiceAssistantMessage('));
@@ -172,7 +174,7 @@ describe('voice durability', () => {
   });
 
   it('keeps the immediate voice-switch acknowledgement path intact', () => {
-    const source = readFileSync(path.join(process.cwd(), 'server/socket/voice.ts'), 'utf8');
+    const source = readVoiceImplementationSource();
     const handler = source.slice(
       source.indexOf("socket.on('audio:switch-voice'"),
       source.indexOf('let chunkCount', source.indexOf("socket.on('audio:switch-voice'")),

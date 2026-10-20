@@ -1,4 +1,6 @@
+import { getActionAuthorizationRules } from './action_authorization_rules';
 import { getGateConfig } from '../autonomy/safety_gate';
+import { getStoredDesktopExecutionPreference } from '../cognition/operation_mode_store';
 import type { CapabilityManifestEntry, SecurityLevel, ToolContext } from './types';
 
 export type ActionDomain = 'observe' | 'draft' | 'local_write' | 'local_state' | 'desktop_control' | 'external_app' | 'messaging' | 'system' | 'network' | 'destructive';
@@ -73,17 +75,25 @@ export function getActionConstitutionPolicy(): ActionConstitutionPolicy {
   return {
     destructivePatterns: ['rm -rf', 'format', 'shutdown', 'reg delete', 'drop table', 'delete from'],
     confirmationDomains: ['local_write', 'desktop_control', 'external_app', 'messaging', 'system', 'destructive'],
-    rules: [
-      'Observation, reading, search, and analysis tools may run automatically when tool policy allows them.',
-      'Low- and medium-risk desktop control, browser/external app preparation, and clipboard handoff may run under the active chat/assistant/autonomy tool policy without a per-step prompt.',
-      'Every external commit, including ordinary messages, comments, replies, and non-commercial posts, requires one exact one-time confirmation bound to its destination and payload.',
-      'Market watch actions such as stock quotes, watchlists, alerts, K-line/news/sector checks, risk plans, and paper trading are observational or simulated and may run when tools are allowed.',
-      'Local writes and file generation may run automatically only when the current turn explicitly requests a local deliverable or a narrower trusted policy exists.',
-      'Payments, purchases, transfers, real brokerage orders, buy/sell/cancel-order clicks, order/price/inventory/ad-spend changes, first-time login/security verification/credential storage/account switching, legal filings/signatures, system commands, installs, package changes, git mutations, and destructive actions require confirmation or are forbidden.',
-      'Background autonomous work must run under semi or full autonomy and still obey high-consequence and destructive-action boundaries.',
-      'Lumi should prefer explicit client actions and adapters over raw mouse/keyboard control.',
-    ],
+    rules: getActionAuthorizationRules(),
   };
+}
+
+/** Execution preference changes the handoff question, never risk or permissions. */
+export function requiresExternalDesktopConfirmation(
+  toolName: string, args: Record<string, any>,
+  context?: Pick<ToolContext, 'userId' | 'domain' | 'orgId' | 'autonomous'>,
+  capability?: CapabilityManifestEntry,
+): boolean {
+  return Boolean(context?.userId && context.autonomous !== true
+    && requiresDesktopPresentationHandoff(toolName, args, capability)
+    && getStoredDesktopExecutionPreference(context.userId) !== 'external');
+}
+
+/** The host-owned desktop effect also needs presentation when preference is already external. */
+export function requiresDesktopPresentationHandoff(toolName: string, args: Record<string, any>, capability?: CapabilityManifestEntry): boolean {
+  return toolName !== 'client_action' && capability?.lane !== 'client' && classifyAction(toolName, args, capability) === 'desktop_control'
+    && capability?.operation !== 'observe' && capability?.operation !== 'test';
 }
 
 export function evaluateActionConstitution(
@@ -125,6 +135,10 @@ export function evaluateActionConstitution(
         requiresUserConfirmation: true,
       };
     }
+  }
+
+  if (requiresExternalDesktopConfirmation(toolName, args, context, capability)) {
+    return confirm(domain, 'Internal execution requires confirmation before switching to external desktop work.');
   }
 
   if (isLowFrictionAuthorizedWebLoginAction(toolName, args)) {
@@ -252,7 +266,8 @@ export function classifyActionRisk(
   return 'low';
 }
 
-export function canAutoApproveAction(toolName: string, args: Record<string, any> = {}, context?: Pick<ToolContext, 'actionIntent'>): boolean {
+export function canAutoApproveAction(toolName: string, args: Record<string, any> = {}, context?: Pick<ToolContext, 'actionIntent' | 'userId' | 'domain' | 'orgId' | 'autonomous' | 'allowLocalFileWrites'>, capability?: CapabilityManifestEntry): boolean {
+  if (requiresExternalDesktopConfirmation(toolName, args, context, capability)) return false;
   // A self-improvement mandate and a supervised proposal may only be widened
   // or released by the user. Autonomous workers may create proposals and may
   // stage changes already covered by an autonomous-low-risk mandate, but they
@@ -262,11 +277,12 @@ export function canAutoApproveAction(toolName: string, args: Record<string, any>
     || toolName === 'self_improvement_queue'
     || toolName === 'self_improvement_activate'
   ) return false;
-  const domain = classifyAction(toolName, args);
+  const domain = classifyAction(toolName, args, capability);
+  if (domain === 'local_write' && context?.allowLocalFileWrites === false) return false;
   const instruction = String(context?.actionIntent || '').trim();
   if (hasReadConfirmationBoundary(instruction)) return false;
   if (hasExplicitConfirmationBoundary(context) && !hasWriteOnlyConfirmationBoundary(toolName, instruction)) return false;
-  const risk = classifyActionRisk(toolName, args, context);
+  const risk = classifyActionRisk(toolName, args, context, capability);
   if (risk === 'high') return false;
   const actionText = buildActionText(toolName, args, context);
   if (
@@ -389,7 +405,7 @@ function allow(domain: ActionDomain, reason: string): ActionConstitutionDecision
 }
 
 function buildActionText(toolName: string, args: Record<string, any> = {}, context?: Pick<ToolContext, 'actionIntent'>): string {
-  return `${toolName} ${JSON.stringify(args || {})} ${context?.actionIntent || ''}`.toLowerCase();
+  return toolName === 'desktop_open' || toolName === 'generate_video' ? toolName : `${toolName} ${JSON.stringify(args || {})} ${context?.actionIntent || ''}`.toLowerCase();
 }
 
 function isExternalStateChangingDomain(domain: ActionDomain): boolean {
@@ -483,6 +499,7 @@ export function isExplicitSensitiveClientActionRequest(
   const action = String(args.action || '').trim();
   const mode = String(args.mode || '').trim();
   if (action === 'set_wallpaper_mode') {
+    // i18n-allow: Existing sensitive wallpaper action aliases, not displayed text.
     return /壁纸|桌面融合|桌面陪伴|wallpaper/i.test(intent);
   }
   const meetingAction = action === 'start_meeting_mode'

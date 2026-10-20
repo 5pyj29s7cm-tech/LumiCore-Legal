@@ -1,34 +1,15 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import vm from 'node:vm';
-import ts from 'typescript';
-import { describe, expect, it } from 'vitest';
+import { extractSourceExpression } from './source_expression';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { shouldReloadPersistedConversation } from '../src/lib/conversationSync';
 import { ChatViewWorkRegistry } from '../src/lib/chatViewWork';
-import { ChatAttachmentUploads } from '../src/lib/chatAttachmentUploads';
+import { ChatRequestLedger } from '../src/lib/chatEventReceipts';
+import { ChatAttachmentUploads, listenForNativeChatFileDrop } from '../src/lib/chatAttachmentUploads';
 import { chatAttachmentCopy } from '../src/i18n/locales/chatAttachments';
-import { createChatAttachmentReference, mergeChatAttachmentReferences, MAX_CHAT_ATTACHMENTS } from '../src/lib/chatAttachmentReferences';
+import { createChatAttachmentReference, mergeChatAttachmentReferences, mergePendingChatAttachments, MAX_CHAT_ATTACHMENTS } from '../src/lib/chatAttachmentReferences';
 
 // Run the actual mounted page callbacks against delayed transport responses.
 // No backend, desktop application, or real user profile is involved.
-const source = fs.readFileSync(path.resolve('src/components/AgentChatPage.tsx'), 'utf8');
-const ast = ts.createSourceFile('AgentChatPage.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-function callback(name: string, deps: Record<string, unknown>) {
-  let expression: ts.Expression | undefined;
-  const visit = (node: ts.Node) => {
-    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name && node.initializer) {
-      expression = ts.isCallExpression(node.initializer) && node.initializer.expression.getText(ast) === 'useCallback'
-        ? node.initializer.arguments[0] : node.initializer;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(ast);
-  if (!expression) throw new Error(`Current callback missing: ${name}`);
-  const js = ts.transpileModule(`(${expression.getText(ast)})`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText;
-  return vm.runInNewContext(js, deps);
-}
+const callback = extractSourceExpression.bind(null, 'src/components/AgentChatPage.tsx');
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(r => { resolve = r; });
@@ -37,30 +18,83 @@ function deferred<T>() {
 const settle = () => new Promise(resolve => setImmediate(resolve));
 const noop = () => {};
 
-function historyHarness() {
+const nativeDrop = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDropEvent: nativeDrop }) }));
+afterEach(() => { vi.unstubAllGlobals(); nativeDrop.mockReset(); });
+
+describe('native file drop listener ownership', () => {
+  it('skips browsers and a view closed before native registration', async () => {
+    vi.stubGlobal('window', {});
+    expect(listenForNativeChatFileDrop(noop, { current: 0 }, async () => {})).toBeUndefined();
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    listenForNativeChatFileDrop(noop, { current: 0 }, async () => {})?.();
+    await settle(); expect(nativeDrop).not.toHaveBeenCalled();
+  });
+
+  it('imports paths once, records the native drop, and ignores events after cleanup', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const unlisten = vi.fn(), dragging = vi.fn(), imports = vi.fn(async () => {}), lastDrop = { current: 0 };
+    nativeDrop.mockResolvedValue(unlisten);
+    const cleanup = listenForNativeChatFileDrop(dragging, lastDrop, imports)!;
+    await settle(); const receive = nativeDrop.mock.calls[0][0];
+    for (const type of ['enter', 'over', 'leave']) receive({ payload: { type } });
+    expect(dragging.mock.calls.map(args => args[0])).toEqual([true, true, false]);
+    receive({ payload: { type: 'drop', paths: ['D:/synthetic/report.txt'] } });
+    expect(imports.mock.calls).toEqual([[['D:/synthetic/report.txt']]]);
+    expect(lastDrop.current).toBeGreaterThan(0); expect(dragging).toHaveBeenLastCalledWith(false);
+    receive({ payload: { type: 'drop', paths: null } }); expect(imports).toHaveBeenLastCalledWith([]);
+    cleanup(); receive({ payload: { type: 'drop', paths: ['D:/synthetic/stale.txt'] } });
+    expect(unlisten).toHaveBeenCalledTimes(1); expect(imports).toHaveBeenCalledTimes(2);
+  });
+
+  it('disposes a late registration and safely handles native registration failure', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const registration = deferred<() => void>(), unlisten = vi.fn(), imports = vi.fn(async () => {});
+    nativeDrop.mockReturnValueOnce(registration.promise).mockRejectedValueOnce(new Error('Unavailable'));
+    const cleanup = listenForNativeChatFileDrop(noop, { current: 0 }, imports)!;
+    await settle(); cleanup(); nativeDrop.mock.calls[0][0]({ payload: { type: 'drop', paths: ['stale'] } });
+    registration.resolve(unlisten); await settle();
+    expect(unlisten).toHaveBeenCalledTimes(1); expect(imports).not.toHaveBeenCalled();
+    const failedCleanup = listenForNativeChatFileDrop(noop, { current: 0 }, imports)!;
+    await settle(); expect(failedCleanup).not.toThrow(); expect(nativeDrop).toHaveBeenCalledTimes(2);
+  });
+});
+
+function historyHarness(isCreationWorkspace = false) {
   const requests: Array<ReturnType<typeof deferred<any>>> = [];
   const current = { current: 'conversation-a' };
   const messagesRef = { current: [{ id: 'old-visible' }] as any[] };
   const messagesRevisionRef = { current: 0 };
   const work = new ChatViewWorkRegistry();
+  const ledger = new ChatRequestLedger();
   const setMessages = callback('setMessages', { messagesRef, messagesRevisionRef, setMessageState: noop });
   const handler = callback('onConversationUpdated', {
-    agentId: 'lumi', attachmentConversationIdRef: current,
+    agentId: 'lumi', attachmentConversationIdRef: current, isCreationWorkspace, CREATION_EXECUTION_SOURCE: 'ai-creation',
     bindAttachmentContextToConversation: (id: string) => { current.current = id; work.invalidate(); },
     shouldReloadPersistedConversation, socket: { id: 'current-client' },
-    activeChatRequestIdRef: { current: null }, textChatActiveRef: { current: false },
+    chatRequestLedgerRef: { current: ledger },
     streamingMsgIdsRef: { current: new Map() }, streamingRawTextRef: { current: new Map() },
     chatViewWorkRef: { current: work }, messagesRevisionRef, historyRefreshRevisionRef: { current: 0 },
     scopedConversationUrl: (url: string) => url, CHAT_HISTORY_LIMIT: 60,
     fetch: () => { const response = deferred<any>(); requests.push(response); return response.promise; },
     normalizePersistedMessages: (rows: any[]) => rows, setMessages,
   });
-  return { handler, current, requests, work, setMessages, messages: () => messagesRef.current };
+  return { handler, current, requests, work, ledger, setMessages, messages: () => messagesRef.current };
 }
 const event = { agentId: 'lumi', conversationId: 'conversation-a', source: 'voice' };
 const reply = (id: string) => ({ json: async () => ({ messages: [{ id }] }) });
 
 describe('chat view asynchronous history ownership', () => {
+  it('ignores the other workspace even before a conversation has been selected', () => {
+    for (const creation of [false, true]) {
+      const h = historyHarness(creation);
+      h.current.current = '';
+      h.handler({ ...event, conversationId: 'other-surface', source: creation ? 'chat' : 'ai-creation' });
+      expect(h.current.current).toBe('');
+      expect(h.requests).toHaveLength(0);
+    }
+  });
+
   it('applies history when the conversation and its messages are unchanged', async () => {
     const h = historyHarness();
     h.handler(event);
@@ -98,6 +132,20 @@ describe('chat view asynchronous history ownership', () => {
     expect(h.messages().map(row => row.id)).toEqual(['old-visible', 'new-user-turn', 'stream']);
   });
 
+  it('reads the canonical request ledger when a live request begins during a history fetch', async () => {
+    const h = historyHarness();
+    h.handler(event);
+    h.ledger.begin('live-request');
+    h.requests[0].resolve(reply('stale-history'));
+    await settle();
+    expect(h.messages()).toEqual([{ id: 'old-visible' }]);
+    h.ledger.settle('live-request');
+    h.handler(event);
+    h.requests[1].resolve(reply('settled-history'));
+    await settle();
+    expect(h.messages()).toEqual([{ id: 'settled-history' }]);
+  });
+
   it('keeps the latest history response when two refreshes finish out of order', async () => {
     const h = historyHarness();
     h.handler(event);
@@ -119,12 +167,12 @@ function uploadHarness() {
   let signal: AbortSignal | undefined;
   const toast = { error: noop, success: noop, info: noop };
   const appendPendingAttachments = callback('appendPendingAttachments', {
-    conversationAttachmentsRef, pendingAttachmentsRef, mergeChatAttachmentReferences,
+    conversationAttachmentsRef, pendingAttachmentsRef, mergePendingChatAttachments,
     setPendingAttachments: noop, toast, uiMessage: (key: string) => key,
     formatUiMessage: (key: string) => key, MAX_CHAT_ATTACHMENTS,
   });
   const acceptImportedChatFiles = callback('acceptImportedChatFiles', {
-    mapImportedFilesToAttachments: (files: any[]) => files.map(createChatAttachmentReference),
+    mapImportedChatAttachments: (files: any[]) => files.map(createChatAttachmentReference), scopedFileUrl: (url: string) => url,
     appendPendingAttachments, setOptimizationProgress: noop, setIsOptimizing: noop,
     window: { setTimeout: noop }, draftTextRef: { current: draft },
     setDraftText: (value: string) => { draft = value; }, toast,
@@ -160,10 +208,12 @@ describe('chat uploads stay attached to their originating view', () => {
     const pending = registry.begin();
     const current = { current: 'conversation-a' };
     const previews: unknown[] = [];
-    const bind = callback('bindAttachmentContextToConversation', {
+    const onConversationChange = callback('resetAttachmentConversationView', {
+      invalidateChatViewWork: () => registry.invalidate(), setPreviewFile: (value: unknown) => previews.push(value),
+    });
+    const bind = extractSourceExpression('src/hooks/useConversationAttachments.ts', 'bindAttachmentContextToConversation', {
       attachmentConversationIdRef: current,
-      invalidateChatViewWork: () => registry.invalidate(),
-      setPreviewFile: (value: unknown) => previews.push(value),
+      onConversationChange,
       attachmentContextStoragePrefix: 'synthetic-user:lumi:personal',
       setAttachmentContextStorageKey: noop, conversationAttachmentsRef: { current: [] },
       setConversationAttachments: noop, localStorage: { getItem: () => null, removeItem: noop },
@@ -222,4 +272,64 @@ describe('chat uploads stay attached to their originating view', () => {
       expect(imported).toEqual([]);
     });
   }
+});
+
+describe('chat screenshot clipboard delivery', () => {
+  function pasteHarness(focus: 'input' | 'body' | 'other' = 'input') {
+    const h = uploadHarness();
+    const input = { value: 'Existing draft', focus: vi.fn() }, body = {}, other = {};
+    const setDraftText = vi.fn();
+    const upload = vi.fn((_kind: string, files: File[]) => h.upload(files));
+    const paste = callback('pasteIntoCommandInput', {
+      document: { activeElement: focus === 'input' ? input : focus === 'body' ? body : other, body, documentElement: {} },
+      messageInputRef: { current: input }, setDraftText, runChatAttachmentUpload: upload,
+    });
+    return { ...h, paste, upload, input, setDraftText };
+  }
+  const image = () => new File(['synthetic screenshot'], 'image.png', { type: 'image/png' });
+  const event = (files: File[] = [], items: unknown[] = [], text = '') => ({
+    clipboardData: { files, items, getData: vi.fn(() => text) }, preventDefault: vi.fn(),
+  });
+  const received = () => ({ ok: true, json: async () => ({ files: [{
+    fileId: 'synthetic-screenshot', fileName: 'image.png', kind: 'image', path: 'C:/audit-synthetic/image.png',
+  }] }) });
+
+  it.each(['input', 'body'] as const)('attaches a screenshot through the existing upload from %s without duplicating the clipboard item', async focus => {
+    const h = pasteHarness(focus), file = image(), item = { kind: 'file', getAsFile: vi.fn(() => file) };
+    const e = event([file], [item], 'image alt text');
+    h.paste(e);
+    expect(h.upload).toHaveBeenCalledTimes(1); expect(h.upload).toHaveBeenCalledWith('files', [file]);
+    expect(item.getAsFile).not.toHaveBeenCalled(); expect(e.preventDefault).toHaveBeenCalledOnce();
+    expect(h.setDraftText).not.toHaveBeenCalled(); expect(h.input.value).toBe('Existing draft');
+    h.response.resolve(received()); await settle();
+    expect(h.pendingAttachmentsRef.current).toMatchObject([{ fileId: 'synthetic-screenshot', kind: 'image' }]);
+  });
+
+  it('accepts file items when the screenshot is absent from clipboardData.files', async () => {
+    const h = pasteHarness(), file = image();
+    h.paste(event([], [{ kind: 'string', getAsFile: () => { throw Error('Text is not a file'); } },
+      { kind: 'file', getAsFile: () => null }, { kind: 'file', getAsFile: () => file }]));
+    expect(h.upload).toHaveBeenCalledWith('files', [file]);
+    h.response.resolve(received()); await settle(); expect(h.pendingAttachmentsRef.current).toHaveLength(1);
+  });
+
+  it('preserves native text paste and selection in the focused input, and keeps unfocused text paste', () => {
+    const focused = pasteHarness(), e = event([], [], 'New text'); focused.paste(e);
+    expect(e.preventDefault).not.toHaveBeenCalled(); expect(focused.setDraftText).not.toHaveBeenCalled();
+    const unfocused = pasteHarness('body'), background = event([], [], 'New text'); unfocused.paste(background);
+    expect(unfocused.setDraftText).toHaveBeenCalledWith('Existing draftNew text');
+    expect(unfocused.input.focus).toHaveBeenCalledOnce(); expect(unfocused.upload).not.toHaveBeenCalled();
+  });
+
+  it('leaves paste in another focused control alone', () => {
+    const h = pasteHarness('other'), e = event([image()]); h.paste(e);
+    expect(h.upload).not.toHaveBeenCalled(); expect(e.preventDefault).not.toHaveBeenCalled();
+    expect(h.input.focus).not.toHaveBeenCalled();
+  });
+
+  it('does not attach a late pasted screenshot to another conversation', async () => {
+    const h = pasteHarness(); h.paste(event([image()])); h.registry.invalidate();
+    expect(h.signal()?.aborted).toBe(true); h.response.resolve(received()); await settle();
+    expect(h.pendingAttachmentsRef.current).toHaveLength(0);
+  });
 });

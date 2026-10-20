@@ -1,7 +1,7 @@
 import { makeLLMCall, NormalizedMessage } from '../llm/providers';
 import { getUnconsolidatedEpisodic, markConsolidated, addMemory, queryMemories } from './store';
 import { Memory, MemoryPerspective } from './types';
-import { readDB } from '../../db_layer';
+import { getMemoryRow } from './repository';
 import type { UserLLMProvider } from '../llm/user_preferences';
 
 interface ConsolidateResult {
@@ -94,6 +94,7 @@ export interface ConsolidationContext {
   /** Optional explicit Memory Avatar lane; omitted means the Lumi lane. */
   agentId?: string;
   source?: string;
+  signal?: AbortSignal;
 }
 
 function sourceIdentity(memory: Memory): string {
@@ -103,11 +104,15 @@ function sourceIdentity(memory: Memory): string {
 
 /** Capture before the model call; source objects may be edited in place. */
 function sourceStillCurrent(memories: Memory[]): () => boolean {
-  const identities = memories.map(sourceIdentity);
-  return () => {
-    const current = new Set((readDB().memories || []).map(sourceIdentity));
-    return identities.every(identity => current.has(identity));
-  };
+  const sources = memories.map(memory => ({
+    id: memory.id, identity: sourceIdentity(memory),
+    scope: { userId: memory.userId, domain: memory.domain === 'work' ? 'work' as const : 'personal' as const,
+      orgId: memory.orgId || '', agentId: memory.agentId || '' },
+  }));
+  return () => sources.every(({ id, identity, scope }) => {
+    const current = getMemoryRow(scope, id);
+    return current !== undefined && sourceIdentity(current) === identity;
+  });
 }
 
 /**
@@ -156,7 +161,7 @@ export async function consolidateEpisodic(
     const response = await makeLLMCall(
       messages,
       [],
-      { provider: ctx.provider, model: ctx.model, maxTokens: 512, userId: ctx.userId, domain: ctx.domain, orgId: ctx.orgId, source: ctx.source || 'memory_consolidation' },
+      { provider: ctx.provider, model: ctx.model, maxTokens: 1024, thinkingMode: 'disabled', responseFormat: 'json_object', signal: ctx.signal, userId: ctx.userId, domain: ctx.domain, orgId: ctx.orgId, source: ctx.source || 'memory_consolidation' },
       getDeepSeek,
       getGemini,
       getOpenAI,
@@ -179,7 +184,7 @@ export async function consolidateEpisodic(
 
     if (!parsed.content || typeof parsed.content !== 'string') return null;
 
-    if (!sourcesCurrent()) return null;
+    if (ctx.signal?.aborted || !sourcesCurrent()) return null;
     const consolidated = addMemory(
       {
         userId: ctx.userId,
@@ -261,7 +266,7 @@ export async function selfReflect(
     const response = await makeLLMCall(
       messages,
       [],
-      { provider: ctx.provider, model: ctx.model, maxTokens: 512, userId: ctx.userId, domain: ctx.domain, orgId: ctx.orgId, source: ctx.source || 'memory_self_reflection' },
+      { provider: ctx.provider, model: ctx.model, maxTokens: 1024, thinkingMode: 'disabled', responseFormat: 'json_object', signal: ctx.signal, userId: ctx.userId, domain: ctx.domain, orgId: ctx.orgId, source: ctx.source || 'memory_self_reflection' },
       getDeepSeek,
       getGemini,
       getOpenAI,
@@ -284,7 +289,7 @@ export async function selfReflect(
 
     if (!parsed.content || typeof parsed.content !== 'string') return null;
 
-    if (!sourcesCurrent()) return null;
+    if (ctx.signal?.aborted || !sourcesCurrent()) return null;
     const reflection = addMemory(
       {
         userId: ctx.userId,
@@ -374,7 +379,7 @@ export async function consolidateNarrative(
     const response = await makeLLMCall(
       messages,
       [],
-      { provider: ctx.provider, model: ctx.model, maxTokens: 512, userId: ctx.userId, domain: ctx.domain, orgId: ctx.orgId, source: ctx.source || 'memory_narrative_consolidation' },
+      { provider: ctx.provider, model: ctx.model, maxTokens: 1024, thinkingMode: 'disabled', responseFormat: 'json_object', signal: ctx.signal, userId: ctx.userId, domain: ctx.domain, orgId: ctx.orgId, source: ctx.source || 'memory_narrative_consolidation' },
       getDeepSeek,
       getGemini,
       getOpenAI,
@@ -400,7 +405,7 @@ export async function consolidateNarrative(
     const title = parsed.title || `叙事记忆 ${new Date().toISOString().slice(0, 10)}`;
     const content = `[${title}] ${parsed.narrative.trim().slice(0, 500)}`;
 
-    if (!sourcesCurrent()) return null;
+    if (ctx.signal?.aborted || !sourcesCurrent()) return null;
     const narrative = addMemory(
       {
         userId: ctx.userId,

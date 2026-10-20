@@ -2,7 +2,6 @@ import './helpers';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { PRODUCT_VARIANT } from '../shared/product_variant';
 import {
-  getIndustryWorkflowContract,
   getIndustryWorkflowContracts,
 } from '../server/industry/workflow_contracts';
 import {
@@ -20,6 +19,8 @@ beforeAll(async () => {
   const { initDatabase } = await import('../db_layer');
   await initDatabase();
 });
+
+const getIndustryWorkflowContract = (line: string, entry: string) => getIndustryWorkflowContracts(line).find(item => item.entryId === entry);
 
 const EXPECTED_ENTRY_IDS: Record<string, string[]> = {
   ecommerce: ['today-operations', 'trend-discovery', 'store-data', 'listing-automation', 'ai-customer-service'],
@@ -87,7 +88,7 @@ describe('industry workflow contracts', () => {
       domain: 'personal',
       orgId: '',
       entryId: 'not-an-entry',
-    })).toThrow(/not available/i);
+    })).toThrow(/Unknown business workflow/i);
 
     const started = startIndustryWorkflow({
       userId: 'industry_owner_user',
@@ -126,7 +127,7 @@ describe('industry workflow contracts', () => {
     ))).toBe(false);
   });
 
-  it('settles the linked action ledger only after the canonical verification tool passes', async () => {
+  it('records generic inspection without settling the linked industry ledger or claiming delivery', async () => {
     const userId = 'industry_canonical_verifier_user';
     const entryId = EXPECTED_ENTRY_IDS[PRODUCT_VARIANT.productLine][0];
     const contract = getIndustryWorkflowContract(PRODUCT_VARIANT.productLine, entryId)!;
@@ -169,14 +170,14 @@ describe('industry workflow contracts', () => {
     } as any);
     const result = JSON.parse(raw);
     expect(result.verification.passed).toBe(true);
-    expect(result.task.status).toBe('delivered');
+    expect(result.task.status).toBe('in_progress');
 
     const db = readDB();
     const actionTask = db.conversationActionTasks.find((task: any) => task.id === started.conversationTaskId);
-    expect(actionTask.status).toBe('completed');
+    expect(actionTask.status).toBe('executing');
     expect(db.conversationActionReceipts.some((receipt: any) => (
       receipt.taskId === started.conversationTaskId && receipt.outcome === 'verified_success'
-    ))).toBe(true);
+    ))).toBe(false);
   });
 
   it('requires a real accepted file for file-mandatory workflows', () => {

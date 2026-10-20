@@ -17,6 +17,8 @@ import * as WorkRouting from './work_routing';
 import * as ResourceACL from './resource_acl';
 import { Server as SocketIOServer } from 'socket.io';
 import { getJwtSecret } from '../config/local_identity';
+import { getAuthCookieOptions } from '../middleware/client_origin';
+import { durableOrganizationRouter, afterOrganizationSave } from './durable_routes';
 
 function respondResourceAuthorizationError(res: Response, error: unknown): void {
   const status = error instanceof ResourceACL.OrganizationResourceAuthorizationError
@@ -42,7 +44,18 @@ function canReadOrganizationResource(input: {
   }).allowed;
 }
 
-export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
+export function mountOrgRoutes(baseRouter: Router, io?: SocketIOServer) {
+  const router = durableOrganizationRouter(baseRouter);
+  mountOrganizationIdentityRoutes(router);
+  mountOrganizationWorkRoutingRoutes(router);
+  mountOrganizationResourceRoutes(router);
+  mountOrganizationKnowledgeRoutes(router);
+  mountOrganizationLegalRoutes(router);
+  mountOrganizationInvitationRoutes(io, router);
+  mountOrganizationAuditRoutes(io, router);
+}
+
+function mountOrganizationIdentityRoutes(router: ReturnType<typeof durableOrganizationRouter>) {
   // ── Health / status ──────────────────────────────────────────────────
 
   router.get('/org/status', optionalAuth, (_req: Request, res: Response) => {
@@ -69,6 +82,7 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       return;
     }
     const org = Org.createOrganization(name, slug, req.user!.uid);
+    res.locals.organizationMutationScope = org.id;
     // Re-sign JWT with orgId so the user's current session picks it up immediately
     const JWT_SECRET = getJwtSecret();
     const newToken = jwt.sign(
@@ -76,7 +90,7 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       JWT_SECRET,
       { expiresIn: '24h' },
     );
-    res.cookie('token', newToken, { httpOnly: true, secure: false, sameSite: 'lax', maxAge: 24 * 60 * 60 * 1000 });
+    res.cookie('token', newToken, getAuthCookieOptions());
     res.status(201).json({ ...org, token: newToken, orgRole: 'owner' });
   });
 
@@ -124,6 +138,12 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
     res.json(orgs);
   });
 
+  router.post('/org/org/:orgId/ownership', requireAuth, requireOrgRole('owner'), (req: Request, res: Response) => {
+    const newOwnerId = String(req.body?.newOwnerUserId || '').trim();
+    if (!newOwnerId) { res.status(400).json({ error: 'newOwnerUserId is required' }); return; }
+    res.json(Org.transferOrganizationOwnership(req.params.orgId, req.user!.uid, newOwnerId));
+  });
+
   // ── Members ──────────────────────────────────────────────────────────
 
   router.get('/org/org/:orgId/members', requireAuth, requireOrgMember, (req: Request, res: Response) => {
@@ -163,7 +183,9 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
     }
     res.json(m);
   });
+}
 
+function mountOrganizationWorkRoutingRoutes(router: ReturnType<typeof durableOrganizationRouter>) {
   // ── Departments ──────────────────────────────────────────────────────
 
   router.get('/org/org/:orgId/departments', requireAuth, requireOrgMember, (req: Request, res: Response) => {
@@ -348,7 +370,9 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
     }
     res.json(result);
   });
+}
 
+function mountOrganizationResourceRoutes(router: ReturnType<typeof durableOrganizationRouter>) {
   // ── Knowledge Base ───────────────────────────────────────────────────
 
   router.get('/org/org/:orgId/resources/:resourceType/:resourceId/policy', requireAuth, requireOrgRole('owner', 'admin'), (req: Request, res: Response) => {
@@ -456,7 +480,9 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       respondResourceAuthorizationError(res, error);
     }
   });
+}
 
+function mountOrganizationKnowledgeRoutes(router: ReturnType<typeof durableOrganizationRouter>) {
   router.get('/org/kb/stats', requireAuth, requireOrgMember, (req: Request, res: Response) => {
     const visible = new Set(KB.listArticles(req.user!.orgId!, undefined, req.user!.uid)
       .filter(article => canReadOrganizationResource({
@@ -522,7 +548,7 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       req.user!.orgId!,
       req.user!.uid,
       { title, content, category, tags, status },
-      { index: req.body?.index !== false },
+      { index: false },
     );
     if (req.body?.access) {
       try {
@@ -541,6 +567,13 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
         respondResourceAuthorizationError(res, error);
         return;
       }
+    }
+    if (req.body?.index !== false) {
+      afterOrganizationSave(res, () => {
+        void KB.indexArticle(req.user!.orgId!, article.id, req.user!.uid).catch(error => {
+          console.error('[Organization] Committed article indexing failed:', error);
+        });
+      });
     }
     res.status(201).json({
       ...article,
@@ -567,10 +600,17 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       respondResourceAuthorizationError(res, error);
       return;
     }
-    const article = KB.updateArticle(req.user!.orgId!, req.user!.uid, req.params.articleId, req.body);
+    const article = KB.updateArticle(req.user!.orgId!, req.user!.uid, req.params.articleId, req.body, { index: false });
     if (!article) {
       res.status(404).json({ error: 'Article not found' });
       return;
+    }
+    if (req.body.content || req.body.title || req.body.category || req.body.tags) {
+      afterOrganizationSave(res, () => {
+        void KB.indexArticle(req.user!.orgId!, article.id, req.user!.uid).catch(error => {
+          console.error('[Organization] Committed article re-indexing failed:', error);
+        });
+      });
     }
     res.json({
       ...article,
@@ -588,7 +628,7 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
   });
 
   router.post('/org/kb/articles/:articleId/index', requireAuth, requireOrgRole('owner', 'admin'), (req: Request, res: Response) => {
-    KB.indexArticle(req.user!.orgId!, req.params.articleId, req.user!.uid).then(count => {
+    return KB.indexArticle(req.user!.orgId!, req.params.articleId, req.user!.uid).then(count => {
       res.json({
         success: true,
         indexedChunks: count,
@@ -604,7 +644,7 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       res.status(400).json({ error: 'cases must contain at least one golden question with a reference answer and expected chunk indexes' });
       return;
     }
-    KB.verifyArticleKnowledge(
+    return KB.verifyArticleKnowledge(
       req.user!.orgId!,
       req.params.articleId,
       req.user!.uid,
@@ -643,7 +683,9 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       res.status(500).json({ error: err.message });
     });
   });
+}
 
+function mountOrganizationLegalRoutes(router: ReturnType<typeof durableOrganizationRouter>) {
   router.get('/org/legal/cases', requireAuth, requireOrgMember, (req: Request, res: Response) => {
     const query = String(req.query.query || '');
     const limit = Math.min(parseInt(String(req.query.limit || '50'), 10) || 50, 200);
@@ -772,7 +814,9 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
     }
     res.status(201).json(material);
   });
+}
 
+function mountOrganizationInvitationRoutes(io: SocketIOServer | undefined, router: ReturnType<typeof durableOrganizationRouter>) {
   // ── Invitations ──────────────────────────────────────────────────────
 
   router.post('/org/org/:orgId/invitations', requireAuth, requireOrgRole('owner', 'admin'), (req: Request, res: Response) => {
@@ -811,15 +855,17 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
     }
     // Emit member.joined event via WebSocket if available
     if (io) {
-      io.to(`org:${result.orgId}`).emit('member:joined', {
+      afterOrganizationSave(res, () => io.to(`org:${result.orgId}`).emit('member:joined', {
         userId: req.user!.uid,
         username: req.user!.username,
         orgId: result.orgId,
-      });
+      }));
     }
     res.json({ success: true, orgId: result.orgId, membership: result.membership });
   });
+}
 
+function mountOrganizationAuditRoutes(io: SocketIOServer | undefined, router: ReturnType<typeof durableOrganizationRouter>) {
   // ── Audit Log (admin only) ───────────────────────────────────────────
 
   router.get('/org/audit', requireAuth, requireOrgRole('owner', 'admin'), (req: Request, res: Response) => {
@@ -873,10 +919,10 @@ export function mountOrgRoutes(router: Router, io?: SocketIOServer) {
       return;
     }
     if (io) {
-      io.to(`org:${req.params.orgId}`).emit('member:left', {
+      afterOrganizationSave(res, () => io.to(`org:${req.params.orgId}`).emit('member:left', {
         userId: req.params.userId,
         orgId: req.params.orgId,
-      });
+      }));
     }
     res.json({ success: true });
   });

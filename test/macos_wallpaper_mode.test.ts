@@ -1,9 +1,9 @@
+import { readImplementationSource } from './implementation_source';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const source = (relativePath: string) => fs
-  .readFileSync(path.join(process.cwd(), relativePath), 'utf8')
+const source = (relativePath: string) => readImplementationSource(path.join(process.cwd(), relativePath), 'utf8')
   .replace(/\r\n/g, '\n');
 
 describe('macOS wallpaper mode recovery', () => {
@@ -15,7 +15,7 @@ describe('macOS wallpaper mode recovery', () => {
 
   it('keeps native recovery paths available while the main window is click-through', () => {
     const rust = source('src-tauri/src/lib.rs');
-    expect(rust).toMatch(/#\[cfg\(target_os = "macos"\)\]\r?\n\s*let _ = window\.set_skip_taskbar\(false\);/);
+    expect(rust).toMatch(/#\[cfg\(target_os = "macos"\)\]\n\s+let _ = window\.set_skip_taskbar\(false\);/);
     expect(rust).toContain('"Exit Wallpaper Mode"');
     expect(rust).toContain('tauri::RunEvent::Reopen { .. }');
     expect(rust).toContain('show_main_window_impl(app, "macos_reopen");');
@@ -46,15 +46,12 @@ describe('macOS wallpaper mode recovery', () => {
     expect(rust).toContain('workspace: WallpaperWorkspace');
   });
 
-  it('synchronizes native restoration and keeps the visible label in English', () => {
+  it('synchronizes native restoration', () => {
     const desktop = source('src/components/DesktopUI.tsx');
     const service = source('src/services/systemService.ts');
-    const messages = JSON.parse(source('src/i18n/locales/ui.generated.json'));
 
     expect(service).toContain("invoke<WallpaperModeState>('get_wallpaper_mode')");
     expect(desktop).toContain("}>('lumi:wallpaper-mode-changed'");
     expect(desktop).toContain('workspace?: WallpaperWorkspace;');
-    expect(desktop).toContain("isWallpaperMode ? 'Fusion' : 'Wallpaper'");
-    expect(messages['desktop-ui.wallpaper.b2aa8da019'].zh).toBe('Wallpaper');
   });
 });

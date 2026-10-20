@@ -1,21 +1,24 @@
+import { readImplementationSource } from './implementation_source';
+import { readVoiceImplementationSource } from './voice_implementation_source';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('chat and voice finalized delivery paths', () => {
   const root = process.cwd();
-  const chat = readFileSync(path.join(root, 'server/socket/chat.ts'), 'utf8');
-  const voice = readFileSync(path.join(root, 'server/socket/voice.ts'), 'utf8');
+  const chat = readImplementationSource(path.join(root, 'server/socket/chat.ts'), 'utf8');
+  const voice = readVoiceImplementationSource();
 
-  it('keeps special workflow adapters out of main chat and isolated on voice', () => {
+  it('keeps workflow adapters out of both interactive transports', () => {
     expect(chat).not.toContain('executeSkillWorkflowAdapter');
     expect(chat).not.toContain('const finalizedWorkflow = finalizeLumiResponse({');
     expect(chat).not.toContain('estimateSkillWorkflowChatSpeechMs');
 
-    expect(voice).toContain('speak: async () => 0');
-    expect(voice).toContain('speechText: workflowSpeechText');
+    expect(voice).not.toContain('executeSkillWorkflowAdapter');
+    expect(voice).not.toContain('finalizedWorkflowSpeech');
     expect(voice).toContain('queueFinalizedSpeech(input.speechText!)');
-    expect(voice).toContain('source: specialWorkflow.source');
+    expect(voice).toContain('await runLumiEntryTurn<void>({');
+    expect(readFileSync(path.join(root, 'server/cognition/turn_execution.ts'), 'utf8')).toContain('await runPreparedLumiTurn({');
   });
 
   it('does not run named workflow regex shortcuts in main chat', () => {
@@ -24,10 +27,8 @@ describe('chat and voice finalized delivery paths', () => {
     expect(chat).not.toContain('finalizedWorkflowQuick');
   });
 
-  it('does not forward background orchestrator chunks before finalization', () => {
-    expect(chat).not.toContain(
-      '(message) => emitBackground("agent:chunk", { text: message, agentName: "Lumi Orchestrator" })',
-    );
+  it('does not expose a parallel background response stream before finalization', () => {
+    expect(chat).not.toContain('emitBackground(');
   });
 
   it('filters tool progress that carries terminal success wording', () => {
@@ -60,11 +61,11 @@ describe('chat and voice finalized delivery paths', () => {
     }
   });
 
-  it('keeps ordinary voice replies complete and summarizes only the self-intro workflow', () => {
+  it('speaks the complete finalized reply without a second workflow summary', () => {
     expect(voice).not.toContain('maxCharacters: 280');
     expect(voice).not.toContain('maxSpokenCharacters');
-    expect(voice).toContain('workflowSpeechSummary');
-    expect(voice).toContain('finalizedWorkflowSpeech');
+    expect(voice).not.toContain('workflowSpeechSummary');
+    expect(voice).toContain('speechText: responseText');
   });
 
   it('answers receipt-backed status follow-ups deterministically in both chat and voice', () => {

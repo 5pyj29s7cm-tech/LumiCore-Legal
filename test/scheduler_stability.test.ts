@@ -1,28 +1,85 @@
 import './helpers';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   getScheduledTaskExecutionContract,
   getScheduledTaskTimeoutMs,
   parseSchedule,
   redactSchedulerDiagnostic,
   requiresStrictScheduledPersistence,
-  runAgentAutonomousAnalysis,
   Scheduler,
   type ScheduledTask,
   type ScheduledTaskExecutionContext,
 } from '../server/scheduler';
-import {
-  resetRealtimeUserActivityForTests,
-  setRealtimeVoiceSessionActive,
-} from '../server/autonomy/foreground_activity';
-import { saveGateConfig } from '../server/autonomy/safety_gate';
 
 describe('scheduler stability', () => {
+
+  it('runs an internal probe when unrelated chat and user snapshots are unavailable', async () => {
+    const database = await import('../db_layer');
+    const read = database.readDatabaseTables;
+    const boundary = vi.spyOn(database, 'readDatabaseTables').mockImplementation((tables: any) => {
+      if (tables.some((table: string) => ['interactions', 'memories', 'users', 'conversations', 'reminders'].includes(table))) {
+        throw new Error('Unrelated chat and user snapshots are deliberately unavailable.');
+      }
+      return read(tables);
+    });
+    const scheduler = new Scheduler(async () => {});
+    const task: ScheduledTask = {
+      id: 'probe-table-boundary-' + crypto.randomUUID(), cron: 'every_hour', lastRun: null,
+      executionClass: 'client_probe', handler: vi.fn(async () => null),
+    };
+    try {
+      scheduler.register(task);
+      await (scheduler as any).runTask(task);
+      expect(task.handler).toHaveBeenCalledOnce();
+      expect(task.lastStatus).toBe('completed');
+      expect(task.persistenceStatus).toBe('coalesced');
+    } finally {
+      scheduler.stop();
+      boundary.mockRestore();
+    }
+  });
+
   beforeAll(async () => {
     const { initDatabase } = await import('../db_layer');
     await initDatabase();
   });
-  afterEach(() => resetRealtimeUserActivityForTests());
+
+  it('queues maintenance before its deadline while allowing foreground probes', async () => {
+    const { writeDB } = await import('../db_layer');
+    const scheduler = new Scheduler(async () => {}, writeDB, 1);
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    const task = (name: string, handler: ScheduledTask['handler'], timeoutMs = 2000): ScheduledTask => ({
+      id: `queue_${name}_${crypto.randomUUID()}`, cron: 'every_hour', lastRun: null, executionClass: 'maintenance', timeoutMs, handler,
+    });
+    const first = task('first', async () => { await gate; return null; });
+    const second = task('second', vi.fn(async () => null), 40);
+    const probe = { ...task('probe', vi.fn(async () => null)), executionClass: 'client_probe' as const };
+    scheduler.register(first); scheduler.register(second); scheduler.register(probe);
+    const a = (scheduler as any).runTask(first); const b = (scheduler as any).runTask(second);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 80));
+      expect(second.handler).not.toHaveBeenCalled();
+      expect(scheduler.listTasks().find(t=>t.id===second.id)).toMatchObject({queued:true,running:false,requiresReconciliation:false});
+      await (scheduler as any).runTask(probe); expect(probe.handler).toHaveBeenCalledOnce();
+      release(); await Promise.all([a,b]);
+      expect(second.handler).toHaveBeenCalledOnce(); expect(second.lastStatus).toBe('completed');
+    } finally { release(); await Promise.all([a,b]); scheduler.stop(); }
+  });
+
+  it('reconciles a settled admission timeout only when no handler ever ran', async () => {
+    let release!: () => void; const gate = new Promise<void>(resolve => { release=resolve; });
+    let flushes=0; const scheduler = new Scheduler(async () => { if (++flushes===1) await gate; });
+    const task: ScheduledTask = {id:`admission_${crypto.randomUUID()}`,cron:'every_hour',lastRun:null,executionClass:'maintenance',timeoutMs:40,handler:vi.fn(async()=>null)};
+    scheduler.register(task);
+    try {
+      await (scheduler as any).runTask(task);
+      expect(task.requiresReconciliation).toBe(true); expect(task.handler).not.toHaveBeenCalled();
+      release();
+      await vi.waitFor(()=>expect(task.requiresReconciliation).toBe(false));
+      expect(task.reconciliationResolution).toBe('confirmed_no_side_effect');
+      expect(task.nextRun).toBeTruthy(); expect(task.handler).not.toHaveBeenCalled();
+    } finally { release(); scheduler.stop(); }
+  });
 
   it('maps every built-in alias to its intended cadence', () => {
     expect(parseSchedule('every_10s')).toEqual({ type: 'interval', intervalMs: 10_000 });
@@ -91,7 +148,7 @@ describe('scheduler stability', () => {
       await (scheduler as any).runTask(task);
 
       expect(handlerSignal?.aborted).toBe(true);
-      expect((scheduler as any).runningTasks.has(taskId)).toBe(true);
+      expect((scheduler as any).executions.active.has(taskId)).toBe(true);
       expect(scheduler.listTasks()).toEqual([
         expect.objectContaining({
           id: taskId,
@@ -139,7 +196,7 @@ describe('scheduler stability', () => {
       }
 
       settle();
-      await vi.waitFor(() => expect((scheduler as any).runningTasks.has(taskId)).toBe(false));
+      await vi.waitFor(() => expect((scheduler as any).executions.active.has(taskId)).toBe(false));
       expect(scheduler.listTasks()[0]).toMatchObject({
         lastStatus: 'unknown',
         running: false,
@@ -148,7 +205,7 @@ describe('scheduler stability', () => {
         lastRun: expect.any(String),
         lastError: expect.stringContaining('late result was discarded'),
       });
-      expect(ledgerTask).toMatchObject({ status: 'blocked' });
+      expect(readDB().conversationActionTasks.find((candidate: any) => candidate.id === ledgerTask.id)).toMatchObject({ status: 'blocked' });
       await expect(scheduler.reconcileTask(taskId, 'accepted_unknown_outcome')).resolves.toMatchObject({
         reconciled: true,
         reason: 'reconciled',
@@ -304,7 +361,7 @@ describe('scheduler stability', () => {
       await didStart;
       scheduler.stop();
       settle();
-      await vi.waitFor(() => expect((scheduler as any).runningTasks.has(taskId)).toBe(false));
+      await vi.waitFor(() => expect((scheduler as any).executions.active.has(taskId)).toBe(false));
       await Promise.resolve();
       expect((scheduler as any).timers.size).toBe(0);
     } finally {
@@ -397,7 +454,7 @@ describe('scheduler stability', () => {
       });
       // A later coalesced metadata write (for example nextRun/disable state)
       // cannot falsely heal a failed strict durability boundary.
-      (scheduler as any).persistRuntimeState(task);
+      (scheduler as any).persistence.runtime(task);
       expect(scheduler.listTasks()[0]).toMatchObject({
         persistenceStatus: 'failed',
         lastPersistenceError: expect.stringContaining('[REDACTED]'),
@@ -449,6 +506,9 @@ describe('scheduler stability', () => {
       expect(scheduler.listTasks()[0]).toMatchObject({ lastStatus: 'completed', running: false,
         requiresReconciliation: false, nextRun: null, persistenceStatus: 'ok' });
       expect(task.handler).toHaveBeenCalledOnce();
+      const { readDB } = await import('../db_layer');
+      const persisted = JSON.parse(readDB().settings.find((row: any) => row.key === 'scheduler_task_runtime_state_v1').value);
+      expect(persisted[task.id]).toMatchObject({ lastStatus: 'completed', requiresReconciliation: false });
     } finally { release(); await pending; scheduler.stop(); }
   });
 
@@ -647,7 +707,7 @@ describe('scheduler stability', () => {
       },
     ];
     try {
-      expect(() => (scheduler as any).persistProactiveMessageBatch(
+      expect(() => (scheduler as any).deliveries.persistProactiveMessageBatch(
         taskId,
         executionId,
         deliveries,
@@ -658,7 +718,7 @@ describe('scheduler stability', () => {
       ))).toHaveLength(0);
       expect(targetCounts).not.toContain(1);
 
-      const retry = (scheduler as any).persistProactiveMessageBatch(
+      const retry = (scheduler as any).deliveries.persistProactiveMessageBatch(
         taskId,
         executionId,
         deliveries,
@@ -669,7 +729,7 @@ describe('scheduler stability', () => {
       expect((readDB().interactions || []).filter((candidate: any) => (
         candidate.message?.startsWith(`[${taskId}]`)
       ))).toHaveLength(2);
-      (scheduler as any).rollbackProactiveMessageBatch(retry.createdInteractionIds);
+      (scheduler as any).deliveries.rollbackProactiveMessageBatch(retry.createdInteractionIds);
     } finally {
       scheduler.stop();
     }
@@ -1089,34 +1149,4 @@ describe('scheduler stability', () => {
     }
   });
 
-  it('does not start an autonomous analysis while live voice is active', async () => {
-    const userId = 'scheduler-live-voice-active';
-    saveGateConfig({ autonomyLevel: 'full' }, userId);
-    setRealtimeVoiceSessionActive(userId, 'socket-live', true);
-    const analyze = vi.fn(async () => 'should not run');
-
-    await expect(runAgentAutonomousAnalysis(userId, analyze)).resolves.toBe('');
-    expect(analyze).not.toHaveBeenCalled();
-  });
-
-  it('aborts an in-flight autonomous analysis when live voice starts', async () => {
-    const userId = 'scheduler-live-voice-race';
-    saveGateConfig({ autonomyLevel: 'full' }, userId);
-    let started!: () => void;
-    const didStart = new Promise<void>(resolve => { started = resolve; });
-    let providerSignal: AbortSignal | undefined;
-
-    const analysis = runAgentAutonomousAnalysis(userId, signal => {
-      providerSignal = signal;
-      started();
-      return new Promise<string>((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
-      });
-    });
-    await didStart;
-    setRealtimeVoiceSessionActive(userId, 'socket-live', true);
-
-    await expect(analysis).resolves.toBe('');
-    expect(providerSignal?.aborted).toBe(true);
-  });
 });

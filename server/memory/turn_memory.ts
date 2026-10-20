@@ -1,4 +1,5 @@
-import { readDB, writeDB, flushDBOrThrow } from '../../db_layer';
+import { providerGetterArguments } from "../llm/provider_getters";
+import { readDatabaseTables, commitDatabaseTables, flushDBOrThrow } from '../../db_layer';
 import { addMemory, queryMemories, refreshMemoryEmbedding, removeMemory } from './store';
 import type { Memory, MemoryPerspective } from './types';
 import { makeLLMCall } from '../llm/providers';
@@ -10,7 +11,7 @@ import { runtimeBackgroundWork } from '../runtime/shutdown_work';
 import { runAuthorizedEnrichment, type RequestAuthorization } from '../conversation/lifecycle';
 import { lightweightEvolve } from '../personality/evolution';
 import { personalityRegistry } from '../personality/registry';
-import { MEMORY_TURN_MESSAGES as copy } from '../i18n/memory_turn_messages';
+import { MEMORY_TURN_MESSAGES as copy } from "../regions/messages/memory_turn_messages";
 import { isSupportedUserIdentityMemory } from './extractor';
 
 // i18n-allow: intent recognition and localized memory operation receipts.
@@ -83,15 +84,14 @@ USER TEXT (data): ${JSON.stringify(input.userText)}`;
       [{ role: 'user', content: prompt }], [],
       { ...getUserPreferredLLMConfig(input.userId, { domain: input.domain, orgId: input.orgId, source: 'memory_turn', requestId: input.requestId, conversationId: input.conversationId, maxTokens: 1600 }),
         signal: input.signal, thinkingMode: 'disabled' },
-      getters.getDeepSeek, getters.getGemini, getters.getOpenAI, getters.getAnthropic, getters.getQwen,
-      getters.getOllama, getters.getLmStudio, getters.getArk, getters.getXiaomi, getters.getKimi, getters.getGlm, getters.getRelay);
+      ...providerGetterArguments(getters));
     current();
     const plan = input.generatePlan ? raw : JSON.parse(String((raw as any).text || '').replace(/^```(?:json)?\s*|\s*```$/g, ''));
     const changes = validatePlan(plan, input, candidates, explicit);
     if (!changes.length) return { status: 'unchanged', text: copy.unchanged, ids: [] };
     return await runSerializedMutation(`memory:${JSON.stringify([input.userId,input.domain,input.orgId])}`, async () => {
       current();
-      const db = readDB();
+      const db = readDatabaseTables(["memories","settings"]);
       // Validate every target before any write, including edits during the model call.
       for (const c of changes.filter(c => c.operation !== 'save')) {
         const row = db.memories.find(m => m.id === c.targetId && m.userId === input.userId
@@ -125,7 +125,7 @@ USER TEXT (data): ${JSON.stringify(input.userText)}`;
           ids.push(row.id);
         }
       }
-      writeDB(db);
+      commitDatabaseTables(db);
       await (input.flush || flushDBOrThrow)();
       current();
       if (!input.generatePlan && !isTestLearningSource(input.source)) scheduleMemoryEvolution(input);

@@ -1,3 +1,4 @@
+import { cloneDatabaseValue } from '../server/db/snapshot_changes';
 import './helpers';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { initDatabase, readDB, writeDB } from '../db_layer';
@@ -211,7 +212,7 @@ describe('manager conversation action-turn integration', () => {
 
   it('uses pendingActionContinuation only as a projection, never as the lock', () => {
     const { userId, conversation } = scope('legacy-projection');
-    conversation.pendingActionContinuation = {
+    readDB().conversations.find((row: any) => row.id === conversation.id).pendingActionContinuation = {
       userText: 'orphaned legacy text',
       messageId: 'missing-message',
       requestId: 'orphaned-request',
@@ -227,7 +228,7 @@ describe('manager conversation action-turn integration', () => {
       requestId,
       userMessageId: messageId,
     })).toMatchObject({ requestId });
-    expect(conversation.pendingActionContinuation).toMatchObject({ requestId, messageId });
+    expect(readDB().conversations.find((row: any) => row.id === conversation.id).pendingActionContinuation).toMatchObject({ requestId, messageId });
     persistAssistant({ userId, conversationId: conversation.id, requestId });
   });
 
@@ -637,7 +638,7 @@ describe('manager conversation action-turn integration', () => {
       // A future debounced full snapshot sees the already-quarantined live
       // object. It cannot resurrect the text or completion projection staged
       // before the failed strict flush.
-      const delayedSnapshot = structuredClone(readDB());
+      const delayedSnapshot = cloneDatabaseValue(readDB());
       const serialized = JSON.stringify(delayedSnapshot);
       expect(serialized).not.toContain(`FALSE_${channel.toUpperCase()}_SUCCESS`);
       const assistant = delayedSnapshot.interactions.find((row: any) => (

@@ -1,4 +1,4 @@
-; Reviewed installer hook; copy-webview2-dll.mjs stages only the WebView2 DLL.
+; Stable installer hooks. copy-webview2-dll.mjs only prepares the optional DLL.
 ; Refuses an ambiguous in-place upgrade from the legacy product name.
 ; Never executes an uninstall command read from the registry.
 ; User data lives outside the application directory and is migrated by the backend under its data lease.
@@ -7,11 +7,11 @@
 !macro NSIS_HOOK_PREINSTALL
   ReadRegStr $R8 HKCU "${LUMI_LEGACY_UNINSTKEY}" "UninstallString"
   ${If} $R8 != ""
-    Abort "A legacy Lumi desktop installation is registered. Close this installer, uninstall the legacy app from Windows Settings, then run the Lumi Legal installer again. Your user data is preserved."
+    Abort "A legacy Lumi desktop installation is registered. Close this installer, uninstall the legacy app from Windows Settings, then run the LumiCore installer again. Your user data is preserved."
   ${EndIf}
 !macroend
 
 ; Installs WebView2Loader.dll alongside the new EXE.
 !macro NSIS_HOOK_POSTINSTALL
-  File "/oname=$INSTDIR\WebView2Loader.dll" "${LUMI_INSTALLER_HOOK_DIR}\..\..\desktop-resources\WebView2Loader.dll"
+  File /nonfatal "/oname=$INSTDIR\WebView2Loader.dll" "${LUMI_INSTALLER_HOOK_DIR}\..\..\desktop-resources\WebView2Loader.dll"
 !macroend

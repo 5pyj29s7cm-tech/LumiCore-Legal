@@ -86,6 +86,8 @@ describe('direct legal tool route security', () => {
     registerLegalStub('legal_authority_source_status');
     registerLegalStub('legal_case_workspace');
     registerLegalStub('legal_review_contract');
+    registerLegalStub('legal_prepare_external_browser_workspace');
+    registerLegalStub('legal_case_strategy');
   });
 
   afterAll(() => {
@@ -102,6 +104,29 @@ describe('direct legal tool route security', () => {
     });
     expect(response.status).toBe(401);
     expect(await response.json()).toMatchObject({ error: 'Authentication required' });
+  });
+
+  it('exposes the existing browser workspace tool to an authenticated personal user', async () => {
+    const response = await fetch(`${url}/api/legal/tool/legal_prepare_external_browser_workspace`, {
+      method: 'POST', headers: bearer(userToken), body: JSON.stringify({ persistCase: false }),
+    });
+    expect(response.status).toBe(200);
+    expect(observedCalls.at(-1)?.name).toBe('legal_prepare_external_browser_workspace');
+  });
+
+  it('exposes the registered strategy workflow to personal users and denies organization viewers', async () => {
+    const endpoint = `${url}/api/legal/tool/legal_case_strategy`;
+    const personal = await fetch(endpoint, {
+      method: 'POST', headers: bearer(userToken), body: JSON.stringify({ facts: 'Synthetic strategy facts', persistCase: false }),
+    });
+    expect(personal.status).toBe(200);
+    expect(observedCalls.at(-1)?.name).toBe('legal_case_strategy');
+    const before = observedCalls.length;
+    const viewer = await fetch(endpoint, {
+      method: 'POST', headers: bearer(viewerToken), body: JSON.stringify({ facts: 'Synthetic strategy facts', persistCase: false }),
+    });
+    expect(viewer.status).toBe(403);
+    expect(observedCalls).toHaveLength(before);
   });
 
   it('requires authentication for the dedicated contract-review route', async () => {
@@ -197,7 +222,7 @@ describe('direct legal tool route security', () => {
       signal: AbortSignal.timeout(5000),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ text: 'legal_review_contract:ok', degraded: false });
+    expect(await response.json()).toMatchObject({ text: 'legal_review_contract:ok' });
     expect(observedCalls.at(-1)).toMatchObject({
       name: 'legal_review_contract',
       args: { userId: viewerId, orgId, persistCase: false },
@@ -222,7 +247,7 @@ describe('direct legal tool route security', () => {
     });
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({
-      error: 'Organization viewers may only run contract review without case persistence.',
+      error: 'Organization viewers may only use read-only legal tools.',
     });
     expect(observedCalls).toHaveLength(callCount);
   });
@@ -253,6 +278,7 @@ describe('direct legal tool route security', () => {
     expect(directPayload).toEqual({
       error: 'Legal tool execution failed',
       code: 'LEGAL_TOOL_EXECUTION_FAILED',
+      requestId: observedCalls.at(-1)?.context.requestId,
     });
 
     const contract = await fetch(`${url}/api/legal/contract-review`, {
@@ -264,8 +290,9 @@ describe('direct legal tool route security', () => {
     expect(contract.status).toBe(500);
     const contractPayload = await contract.json();
     expect(contractPayload).toEqual({
-      error: 'Contract review failed',
-      code: 'LEGAL_CONTRACT_REVIEW_FAILED',
+      error: 'Legal tool execution failed',
+      code: 'LEGAL_TOOL_EXECUTION_FAILED',
+      requestId: observedCalls.at(-1)?.context.requestId,
     });
 
     const payload = JSON.stringify({ directPayload, contractPayload });

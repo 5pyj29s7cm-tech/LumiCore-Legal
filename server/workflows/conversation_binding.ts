@@ -1,5 +1,5 @@
-import { readDB } from '../../db_layer';
-import type { ConversationActionReceiptRow, ConversationActionTaskRow } from '../conversation/action_ledger';
+import { readDatabaseTables } from '../../db_layer';
+import type { ConversationActionReceiptRow, ConversationActionTaskRow } from "../conversation/ledger/contracts";
 import { inspectPersistedToolExecutionReceipt } from '../tools/persisted_execution_receipt';
 import { parseReceiptObject } from '../tools/receipt_payload';
 import type { ToolContext } from '../tools/types';
@@ -10,7 +10,7 @@ import { getWorkflowRun, type WorkflowRun } from './runtime';
  * This is an observation target, not permission to approve or replay a step. */
 export function resolveConversationWorkflowRun(
   context: Pick<ToolContext, 'userId' | 'conversationId' | 'taskId' | 'domain' | 'orgId'> | undefined,
-  db = readDB(),
+  db = readDatabaseTables(["conversationActionReceipts","conversationActionTasks"]),
   lookup = getWorkflowRun,
 ): WorkflowRun | null {
   if (!context?.userId || !context.conversationId || !context.taskId) return null;

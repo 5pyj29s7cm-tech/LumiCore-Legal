@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Download, ExternalLink, X } from 'lucide-react';
 import { apiFetch } from '@/services/apiClient';
@@ -6,6 +6,8 @@ import { localFileResourcePath, saveFileResource } from '@/services/fileResource
 import { useFileResource } from '@/hooks/useFileResource';
 import { chatArtifactKind, type ChatDocumentPreview } from '../../shared/chat_artifacts';
 import { chatPreviewCopy } from '@/i18n/locales/chatPreview';
+import { VideoPlayer } from './VideoPlayer';
+import { FileLocationActions } from './FileLocationActions';
 
 export type ChatPreviewFile = { fileName: string; url: string; path?: string; kind?: string };
 
@@ -29,6 +31,7 @@ export function ChatFilePreview({ file, isZh, onClose, onOpenSystem }: {
     const previous = document.activeElement as HTMLElement | null;
     dialog.current?.focus();
     const onKey = (event: KeyboardEvent) => {
+      if (document.querySelector('[data-video-expanded="true"]')) return;
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close.current(); }
       if (event.key !== 'Tab') return;
       const items = [...(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], video[controls], audio[controls], [tabindex="0"]') || [])];
@@ -67,20 +70,21 @@ export function ChatFilePreview({ file, isZh, onClose, onOpenSystem }: {
   return createPortal(
     <div className="fixed inset-0 z-[20000] flex items-center justify-center bg-black/65 p-3 backdrop-blur-sm sm:p-6" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div ref={dialog} tabIndex={-1} role="dialog" aria-modal="true" aria-label={`${copy.preview}: ${file.fileName}`}
-        className="flex max-h-[90vh] min-h-[240px] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-black/10 bg-white text-slate-800 shadow-2xl outline-none dark:border-white/15 dark:bg-slate-950 dark:text-slate-100">
-        <div className="flex flex-wrap items-center gap-3 border-b border-slate-500/20 p-4">
+        className="flex h-full max-h-[calc(100dvh-1.5rem)] min-h-0 w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-black/10 bg-white text-slate-800 shadow-2xl outline-none dark:border-white/15 dark:bg-slate-950 dark:text-slate-100 sm:max-h-[calc(100dvh-3rem)]">
+        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-slate-500/20 p-4">
           <div className="min-w-0 flex-1"><div className="text-xs opacity-60">{copy.preview}</div><div className="truncate font-semibold" title={file.path}>{file.fileName}</div></div>
           <button type="button" className="flex items-center gap-1 rounded-lg border border-slate-500/25 px-3 py-2 text-xs" onClick={() => void save()} disabled={saving}><Download size={14} />{copy.download}</button>
           {onOpenSystem && <button type="button" className="flex items-center gap-1 rounded-lg border border-slate-500/25 px-3 py-2 text-xs" onClick={() => { void onOpenSystem().catch(() => setError(true)); }}><ExternalLink size={14} />{copy.open}</button>}
           <button type="button" className="rounded-lg p-2 hover:bg-slate-500/15" aria-label={copy.close} onClick={onClose}><X size={20} /></button>
         </div>
+        <div className="shrink-0 border-b border-slate-500/20 px-4 pb-3"><FileLocationActions url={file.url} path={file.path} isZh={isZh} /></div>
         <div className="min-h-0 flex-1 overflow-auto p-4">
           {(error || resource.error) && <div role="alert" className="mb-4 rounded-xl bg-amber-500/10 p-4 text-sm">{media && !resource.error ? copy.mediaFailed : copy.failed}
             {!media && <button type="button" onClick={() => setAttempt(value => value + 1)} className="ml-3 underline">{copy.retry}</button>}
           </div>}
           {!error && !resource.error && (media ? !resource.url : !preview) && <p role="status">{copy.loading}</p>}
           {kind === 'image' && resource.url && <button type="button" className="block min-h-0 w-full" aria-label={copy.zoom} onClick={() => setZoom(value => !value)}><img src={resource.url} alt={file.fileName} onError={() => setError(true)} className={zoom ? 'mx-auto max-w-none' : 'mx-auto max-h-[68vh] max-w-full object-contain'} /></button>}
-          {kind === 'video' && resource.url && <video src={resource.url} controls playsInline preload="metadata" onError={() => setError(true)} className="mx-auto max-h-[68vh] w-full rounded-xl bg-black" aria-label={file.fileName} />}
+          {kind === 'video' && resource.url && <VideoPlayer isZh={isZh} src={resource.url} controls playsInline preload="metadata" onError={() => setError(true)} className="mx-auto max-h-[68vh] w-full rounded-xl bg-black" aria-label={file.fileName} />}
           {kind === 'audio' && resource.url && <audio src={resource.url} controls preload="metadata" onError={() => setError(true)} className="w-full" aria-label={file.fileName} />}
           {preview?.extracted && <p className="mb-3 text-xs opacity-60">{copy.extracted}</p>}
           {preview?.kind === 'text' && <pre className="whitespace-pre-wrap break-words font-mono text-sm leading-7">{preview.text?.trim() ? preview.text : copy.empty}</pre>}

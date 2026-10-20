@@ -1,3 +1,4 @@
+import type { ActionIntentAnalysis } from './normalized_action_intent';
 import type { ToolPolicy } from '../personality/types';
 import type { WorkTakeoverTurnSurface } from '../work_takeover/continuity';
 import type { LumiExecutionDecision } from './execution_decision';
@@ -63,7 +64,7 @@ export interface LumiIntentTrace {
     selfRepairTurn: boolean;
     autoPromoteToAssistant: boolean;
     workTakeover: boolean;
-    specialWorkflow: string | null;
+    workflowHint: string | null;
     completionEvidenceNeeded: boolean;
   };
   matchedRules: LumiIntentTraceRule[];
@@ -78,6 +79,8 @@ export interface LumiIntentTrace {
 export interface BuildLumiIntentTraceInput {
   dispatch: LumiTurnDispatch;
   execution: LumiExecutionDecision;
+  /** The shared pipeline decision; text may contain only a short continuation. */
+  normalizedActionIntent?: NormalizedActionIntent;
   text: string;
   source?: string;
 }
@@ -138,7 +141,7 @@ function buildReasons(input: {
   if (flow.selfRepairTurn) reasons.push('self-repair turn should inspect, repair once when safe, then verify');
   if (flow.autoPromoteToAssistant) reasons.push('work wording requested assistant execution');
   if (flow.workTakeover.shouldResumeTask) reasons.push('active work takeover context is being resumed');
-  if (flow.specialWorkflow) reasons.push(`skill workflow matched:${flow.specialWorkflow.id}`);
+  if (flow.workflowHint) reasons.push(`skill workflow matched:${flow.workflowHint.id}`);
   if (flow.completionEvidenceNeeded) reasons.push('completion evidence is needed before claiming done');
   if (flow.executionGovernance.verificationIntent !== 'none') {
     reasons.push(`verification:${flow.executionGovernance.verificationIntent}`);
@@ -152,13 +155,13 @@ function buildReasons(input: {
   return unique(reasons);
 }
 
-export function buildLumiIntentTrace(input: BuildLumiIntentTraceInput): LumiIntentTrace {
+export function buildLumiIntentTrace(input: BuildLumiIntentTraceInput, analysis?: ActionIntentAnalysis): LumiIntentTrace {
   const { dispatch, execution } = input;
   const flow = dispatch.flow;
   const source = input.source || dispatch.source || dispatch.channel;
   const text = input.text || '';
-  const normalizedActionIntent = normalizeActionIntent(text);
-  const toolIntent = traceToolIntentDecision(text, source, flow.effectiveOperationMode);
+  const normalizedActionIntent = input.normalizedActionIntent ?? normalizeActionIntent(text, analysis);
+  const toolIntent = traceToolIntentDecision(text, source, flow.effectiveOperationMode, analysis);
   const toolRoute = compactRoute(execution.toolRoute);
   const routeSummary = toolRoute
     ? `${toolRoute.toolNames.length}/${toolRoute.totalAvailable}:${toolRoute.categories.join(',') || 'fallback'}`
@@ -176,7 +179,7 @@ export function buildLumiIntentTrace(input: BuildLumiIntentTraceInput): LumiInte
     flow.clientActionOnlyTurn ? { layer: 'turn_flow', name: 'client-action-only-turn' } : null,
     flow.selfRepairTurn ? { layer: 'turn_flow', name: 'self-repair-turn' } : null,
     flow.workTakeover.shouldResumeTask ? { layer: 'turn_flow', name: 'work-takeover-resume' } : null,
-    flow.specialWorkflow ? { layer: 'turn_flow', name: `skill-workflow:${flow.specialWorkflow.id}` } : null,
+    flow.workflowHint ? { layer: 'turn_flow', name: `skill-workflow:${flow.workflowHint.id}` } : null,
     toolRoute ? { layer: 'tool_route', name: `categories:${toolRoute.categories.join(',') || 'fallback'}` } : null,
   ].filter(Boolean) as LumiIntentTraceRule[]);
 
@@ -208,7 +211,7 @@ export function buildLumiIntentTrace(input: BuildLumiIntentTraceInput): LumiInte
       selfRepairTurn: flow.selfRepairTurn,
       autoPromoteToAssistant: flow.autoPromoteToAssistant,
       workTakeover: flow.workTakeover.shouldResumeTask,
-      specialWorkflow: flow.specialWorkflow?.id || null,
+      workflowHint: flow.workflowHint?.id || null,
       completionEvidenceNeeded: flow.completionEvidenceNeeded,
     },
     matchedRules,

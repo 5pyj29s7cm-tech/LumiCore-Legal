@@ -11,6 +11,8 @@ import path from 'path';
 import crypto from 'crypto';
 import { getKey } from '../config/keys';
 import { getDataDirectory } from '../config/data_path';
+import { requireLocalEndpoint } from '../config/privacy';
+import { mcpManager } from '../mcp/client';
 import {
   CN_ASSET_TRACE_OFFICIAL_CAPABILITIES,
   CN_ASSET_TRACE_SOURCE_COPY,
@@ -24,7 +26,7 @@ function ensureCacheDir() {
 }
 
 function cacheKey(source: string, query: string): string {
-  return `${source}_${Buffer.from(query).toString('base64').replace(/[/+=]/g, '_').slice(0, 80)}.json`;
+  return `${source}_${crypto.createHash('sha256').update(query).digest('hex')}.json`;
 }
 
 function readCache(key: string, ttlMs = 24 * 60 * 60 * 1000): any | null {
@@ -65,14 +67,14 @@ function readSecret(name: keyof import('../config/keys').KeyStore): string {
 }
 
 function qichachaConfig() {
-  const appKey = readSecret('QICHACHA_APP_KEY') || readSecret('QICHACHA_API_KEY');
+  const apiKey = readSecret('QICHACHA_API_KEY');
+  const appKey = readSecret('QICHACHA_APP_KEY');
   const secretKey = readSecret('QICHACHA_SECRET_KEY');
   const baseUrl = (readSecret('QICHACHA_BASE_URL') || 'https://api.qichacha.com').replace(/\/+$/, '');
   return {
-    appKey,
-    secretKey,
-    baseUrl,
-    configured: Boolean(appKey && secretKey),
+    apiKey, appKey, secretKey, baseUrl,
+    configured: Boolean(apiKey || (appKey && secretKey)),
+    mcpConfigured: Boolean(apiKey),
   };
 }
 
@@ -143,17 +145,17 @@ export function listLegalSourceCapabilities(): LegalSourceCapability[] {
   return [
     {
       id: 'qichacha',
-      label: '企查查',
+      label: CN_ASSET_TRACE_SOURCE_COPY.qichacha.label,
       accessMode: 'api',
       configured: qcc.configured,
       canAutoQuery: qcc.configured,
       requiresAuthorization: true,
       boundary: qcc.configured
-        ? '已配置官方 API 凭证时，可按授权额度查询企业信息；不得超出合同、套餐和用途限制。'
-        : '尚未配置官方 API 凭证，只能使用授权网页登录协作。不能承诺自动抓取或批量同步。',
+        ? (qcc.mcpConfigured ? CN_ASSET_TRACE_SOURCE_COPY.qichacha.mcpBoundary : CN_ASSET_TRACE_SOURCE_COPY.qichacha.legacyBoundary)
+        : CN_ASSET_TRACE_SOURCE_COPY.qichacha.unconfiguredBoundary,
       nextAction: qcc.configured
-        ? '可直接调用 legal_trace_assets / legal_equity_penetration 进行 API 查询，并保存来源时间。'
-        : '配置 QICHACHA_APP_KEY 与 QICHACHA_SECRET_KEY，或使用 web_login_run 打开 qichacha 登录页。',
+        ? CN_ASSET_TRACE_SOURCE_COPY.nextActions.qccConfigured
+        : CN_ASSET_TRACE_SOURCE_COPY.nextActions.qccUnconfigured,
     },
     {
       id: 'tianyancha',
@@ -166,7 +168,7 @@ export function listLegalSourceCapabilities(): LegalSourceCapability[] {
         ? '已配置天眼查官方 API 凭证时，可按套餐和授权用途查询企业主体信息；不得超出合同、频控和用途限制。'
         : '尚未配置天眼查 API 凭证；当前只能通过授权网页登录或材料导入协作，不承诺自动抓取或批量同步。',
       nextAction: tyc.configured
-        ? '可通过 legal_company_database_lookup / legal_trace_assets 查询企业信息，并将律师确认结果入库。'
+        ? CN_ASSET_TRACE_SOURCE_COPY.nextActions.tycConfigured
         : '配置 TIANYANCHA_API_KEY；如供应商提供专属网关，可同时配置 TIANYANCHA_BASE_URL。',
     },
     {
@@ -208,7 +210,7 @@ export function listLegalSourceCapabilities(): LegalSourceCapability[] {
         ? '已配置北大法宝授权 API 网关，可按合同范围检索法规、案例和法条依据；MCP 仅作为授权工具通道，不复制平台数据库。'
         : '尚未配置可调用的北大法宝 API 网关；可配置 PKULAW_API_KEY + PKULAW_BASE_URL，或使用 MCP/网页登录协作。',
       nextAction: pkulaw.configured
-        ? '可调用 legal_search_external_authorities 检索权威法律依据，并把结果写入来源登记。'
+        ? CN_ASSET_TRACE_SOURCE_COPY.nextActions.pkulawConfigured
         : '联系供应商开通 API/MCP 权限后配置 PKULAW_API_KEY、PKULAW_BASE_URL；仅有网页账号时继续用授权浏览器。',
     },
     {
@@ -224,7 +226,7 @@ export function listLegalSourceCapabilities(): LegalSourceCapability[] {
           ? '已发现阿里云 AK，但尚未配置 FARUI_BASE_URL；当前不直接构造签名请求，避免误调未授权接口。'
           : '尚未配置法睿 API 凭证或网关；当前不能承诺自动查询。',
       nextAction: farui.configured
-        ? '可调用 legal_search_external_authorities 检索法规/案例；结果进入来源登记和引用核验。'
+        ? CN_ASSET_TRACE_SOURCE_COPY.nextActions.faruiConfigured
         : '配置 FARUI_BASE_URL + FARUI_API_KEY，或配置受控代理网关；没有接口授权时继续网页登录/人工检索。',
     },
     {
@@ -235,7 +237,7 @@ export function listLegalSourceCapabilities(): LegalSourceCapability[] {
       canAutoQuery: false,
       requiresAuthorization: true,
       boundary: '未发现稳定公开 API 配置；当前按律所账号授权网页登录协作，不复制平台数据库。',
-      nextAction: '使用 web_login_profile_save_from_preset / web_login_run 打开 Alpha，律师确认结果后导入 Lumi 知识库。',
+      nextAction: CN_ASSET_TRACE_SOURCE_COPY.nextActions.alpha,
     },
     {
       id: 'fachan',
@@ -255,7 +257,7 @@ export function listLegalSourceCapabilities(): LegalSourceCapability[] {
       canAutoQuery: false,
       requiresAuthorization: true,
       boundary: '当前不作为平台数据 API 接入；只做官方网页授权会话、检索辅助和人工确认后的材料导入。',
-      nextAction: '使用授权浏览器检索、下载或复制材料，再调用 legal_import_materials_to_kb 入库。',
+      nextAction: CN_ASSET_TRACE_SOURCE_COPY.nextActions.wenshu,
     },
     {
       id: 'people-court-case-library',
@@ -391,16 +393,20 @@ export interface ExternalLegalSearchResult {
   court?: string;
   caseNumber?: string;
   raw?: any;
+  queriedAt?: string;
+  sourceTool?: string;
+  sourceText?: string;
+  sourceEndpoint?: string;
 }
 
 function mapExternalLegalResult(raw: any, sourceId: string, sourceName: string): ExternalLegalSearchResult {
   const title = firstString(raw, [
     'title', 'Title', 'name', 'Name', 'docTitle', 'lawTitle', 'caseTitle',
-    'fullName', 'caption', 'subject',
-  ]) || `${sourceName} result`;
+    'fullName', 'caption', 'subject', '案例标题', '案件名称', '法规名称', // i18n-allow: official provider JSON property names, not display copy.
+  ]);
   const summary = firstString(raw, [
     'summary', 'Summary', 'digest', 'Digest', 'abstract', 'content', 'Content',
-    'text', 'Text', 'reason', 'judgementResult', '裁判要旨',
+    'text', 'Text', 'reason', 'judgementResult', '裁判要旨', '案例摘要', '法规摘要', '命中片段', // i18n-allow: official provider JSON property names, not display copy.
   ]);
   return {
     sourceId,
@@ -410,7 +416,7 @@ function mapExternalLegalResult(raw: any, sourceId: string, sourceName: string):
     url: firstString(raw, ['url', 'Url', 'link', 'Link', 'sourceUrl', 'detailUrl', 'viewUrl']),
     effectiveStatus: firstString(raw, ['status', 'Status', 'effectiveness', 'validity', 'isEffective']),
     publishDate: firstString(raw, ['publishDate', 'pubDate', 'date', 'judgmentDate', 'trialDate']),
-    court: firstString(raw, ['court', 'courtName', 'Court', '法院']),
+    court: firstString(raw, ['court', 'courtName', 'Court', '法院', '法院名称']), // i18n-allow: official provider JSON property names, not display copy.
     caseNumber: firstString(raw, ['caseNumber', 'caseNo', '案号', 'no']),
     raw,
   };
@@ -465,11 +471,20 @@ export async function searchLegalAuthorityDatabase(params: {
   sourceIds?: string[];
   limit?: number;
   includeOfficialWeb?: boolean;
+  localOnly?: boolean;
 }): Promise<ExternalLegalSearchResult[]> {
   const query = params.query.trim();
   if (!query) return [];
+  requireLocalEndpoint('https://agent.qcc.com', 'External legal authority query', params.localOnly);
   const limit = Math.max(1, Math.min(Number(params.limit) || 5, 20));
   const results: ExternalLegalSearchResult[] = [];
+
+  if (qichachaConfig().mcpConfigured && params.sourceIds?.length && isSelectedSource(params.sourceIds, 'qichacha', ['qcc', CN_ASSET_TRACE_SOURCE_COPY.qichacha.label]) && ['case', 'law'].includes(params.type || '')) {
+    const lane = params.type === 'case' ? 'case' : 'regulation';
+    const receipt = await callQichachaMcp(lane, lane === 'case' ? 'get_judicial_case_search' : 'get_legal_regulation_search', { keyword: query }, params.localOnly);
+    if (receipt) results.push(...normalizeApiRows(JSON.parse(receipt.text)).map(row => ({ ...mapExternalLegalResult(row, 'qichacha', receipt.sourceName),
+      queriedAt: receipt.queriedAt, sourceTool: receipt.sourceTool, sourceEndpoint: receipt.sourceEndpoint, sourceText: JSON.stringify(row) })).filter(row => row.title || row.summary).slice(0, limit));
+  }
 
   const pkulaw = pkulawConfig();
   if (pkulaw.configured && isSelectedSource(params.sourceIds, 'pkulaw', ['beidafabao', 'pku-law', '北大法宝'])) {
@@ -508,40 +523,6 @@ export async function searchLegalAuthorityDatabase(params: {
   }
 
   return results.slice(0, limit);
-}
-
-// ── 中国裁判文书网 (wenshu.court.gov.cn) ───────────────────────────────
-
-export interface JudgmentSearchParams {
-  keyword?: string;
-  caseNumber?: string;
-  court?: string;
-  causeOfAction?: string;
-  party?: string;
-  dateFrom?: string;
-  dateTo?: string;
-}
-
-export interface JudgmentResult {
-  title: string;
-  caseNumber: string;
-  court: string;
-  date: string;
-  causeOfAction: string;
-  parties: string;
-  url: string;
-}
-
-export async function searchWenshu(params: JudgmentSearchParams): Promise<JudgmentResult[]> {
-  const ck = cacheKey('wenshu', JSON.stringify(params));
-  const cached = readCache(ck, 6 * 60 * 60 * 1000); // 6-hour TTL
-  if (cached) return cached;
-
-  const results: JudgmentResult[] = [];
-  // 中国裁判文书网当前按授权网页登录协作处理，不作为平台数据 API 接入。
-  // 律师确认后的下载文件或摘录由 legal_import_materials_to_kb 入库。
-  writeCache(ck, results);
-  return results;
 }
 
 // ── 国家法律法规数据库 (flk.npc.gov.cn) ───────────────────────────────
@@ -634,12 +615,15 @@ export interface CompanyInfo {
   shareholders: { name: string; ratio: number; type: string }[];
   branches: string[];
   riskInfo: {
-    enforcementCount: number;
-    dishonestyCount: number;
-    restrictionsCount: number;
+    enforcementCount: number | null;
+    dishonestyCount: number | null;
+    restrictionsCount: number | null;
   };
   url: string;
-  sourceMode?: 'api' | 'authorized_browser' | 'manual';
+  sourceMode?: 'api' | 'mcp' | 'authorized_browser' | 'manual';
+  sourceText?: string;
+  sourceTool?: string;
+  sourceEndpoint?: string;
   sourceName?: string;
   queriedAt?: string;
 }
@@ -666,19 +650,25 @@ function pickQichachaResult(data: any): any {
   return result || data;
 }
 
+function riskCount(raw: any, keys: string[]): number | null {
+  const value = firstString(raw, keys), count = Number(value);
+  return value && Number.isSafeInteger(count) && count >= 0 ? count : null;
+}
+
 function mapQichachaCompany(raw: any, keyword: string): CompanyInfo | null {
   if (!raw || typeof raw !== 'object') return null;
-  const name = raw.Name || raw.name || raw.CompanyName || raw.companyName || raw.KeyNo || keyword;
+  const name = firstString(raw, ['企业名称', 'Name', 'name', 'CompanyName', 'companyName']); // i18n-allow: official provider JSON property names, not display copy.
+  if (!name) return null;
   const keyNo = raw.KeyNo || raw.keyNo || raw.No || raw.id || encodeURIComponent(keyword);
   return {
     name,
-    legalPerson: raw.OperName || raw.legalPersonName || raw.LegalPerson || raw.operName || '',
-    registeredCapital: raw.RegistCapi || raw.registeredCapital || raw.RegisteredCapital || '',
-    status: raw.Status || raw.regStatus || raw.StatusCode || raw.status || '',
-    establishDate: raw.StartDate || raw.establishDate || raw.EstablishDate || '',
-    unifiedCode: raw.CreditCode || raw.unifiedCode || raw.CreditNo || raw.No || '',
-    address: raw.Address || raw.address || '',
-    businessScope: raw.Scope || raw.businessScope || raw.BusinessScope || '',
+    legalPerson: raw['法定代表人'] || raw.OperName || raw.legalPersonName || raw.LegalPerson || raw.operName || '', // i18n-allow: official provider JSON property names, not display copy.
+    registeredCapital: raw['注册资本'] || raw.RegistCapi || raw.registeredCapital || raw.RegisteredCapital || '', // i18n-allow: official provider JSON property names, not display copy.
+    status: raw['登记状态'] || raw.Status || raw.regStatus || raw.StatusCode || raw.status || '', // i18n-allow: official provider JSON property names, not display copy.
+    establishDate: raw['成立日期'] || raw.StartDate || raw.establishDate || raw.EstablishDate || '', // i18n-allow: official provider JSON property names, not display copy.
+    unifiedCode: raw['统一社会信用代码'] || raw.CreditCode || raw.unifiedCode || raw.CreditNo || raw.No || '', // i18n-allow: official provider JSON property names, not display copy.
+    address: raw['注册地址'] || raw.Address || raw.address || '', // i18n-allow: official provider JSON property names, not display copy.
+    businessScope: raw['经营范围'] || raw.Scope || raw.businessScope || raw.BusinessScope || '', // i18n-allow: official provider JSON property names, not display copy.
     shareholders: (raw.Shareholders || raw.shareholders || raw.Partners || []).map((s: any) => ({
       name: s.Name || s.name || s.StockName || '',
       ratio: Number.parseFloat(String(s.Ratio || s.ratio || s.StockPercent || 0)) || 0,
@@ -686,9 +676,9 @@ function mapQichachaCompany(raw: any, keyword: string): CompanyInfo | null {
     })),
     branches: raw.Branches || raw.branches || [],
     riskInfo: {
-      enforcementCount: Number(raw.EnforcementCount || raw.enforcementCount || raw.ZhiXingCount || 0),
-      dishonestyCount: Number(raw.DishonestyCount || raw.dishonestyCount || raw.ShiXinCount || 0),
-      restrictionsCount: Number(raw.RestrictionsCount || raw.restrictionsCount || raw.XianGaoCount || 0),
+      enforcementCount: riskCount(raw, ['EnforcementCount', 'enforcementCount', 'ZhiXingCount']),
+      dishonestyCount: riskCount(raw, ['DishonestyCount', 'dishonestyCount', 'ShiXinCount']),
+      restrictionsCount: riskCount(raw, ['RestrictionsCount', 'restrictionsCount', 'XianGaoCount']),
     },
     url: `https://www.qcc.com/firm/${keyNo}.html`,
     sourceMode: 'api',
@@ -697,13 +687,56 @@ function mapQichachaCompany(raw: any, keyword: string): CompanyInfo | null {
   };
 }
 
-async function searchQichachaCompany(keyword: string): Promise<CompanyInfo | null> {
-  const ck = cacheKey('qcc', keyword);
+export const QICHACHA_QUERY_TOOLS = {
+  registration: ['company', 'get_company_registration_info'], shareholders: ['company', 'get_shareholder_info'],
+  controller: ['company', 'get_actual_controller'], risk: ['risk', 'get_company_risk_scan'],
+  enforcement: ['risk', 'get_judgment_debtor_info'], dishonesty: ['risk', 'get_dishonest_info'],
+  restrictions: ['risk', 'get_high_consumption_restriction'],
+} as const;
+export type QichachaQueryType = keyof typeof QICHACHA_QUERY_TOOLS;
+export type ExternalSourceReceipt = { sourceName: string; sourceEndpoint: string; sourceTool: string; queriedAt: string; text: string };
+
+async function callQichachaMcp(lane: 'company' | 'risk' | 'case' | 'regulation', tool: string, args: Record<string, unknown>, localOnly = false): Promise<ExternalSourceReceipt | null> {
+  const apiKey = qichachaConfig().apiKey;
+  if (!apiKey) return null;
+  const sourceEndpoint = 'https://agent.qcc.com/mcp/' + lane + '/stream';
+  requireLocalEndpoint(sourceEndpoint, 'Qichacha MCP', localOnly);
+  try {
+    const text = await mcpManager.callToolForServer('qcc-' + lane, tool, args, { timeoutMs: 15000,
+      configuration: { enabled: true, source: 'external', transport: 'http', url: sourceEndpoint,
+        headers: { Authorization: /^Bearer\s/i.test(apiKey) ? apiKey : 'Bearer ' + apiKey } } });
+    let data; try { data = JSON.parse(text); } catch { return null; }
+    const code = data?.code ?? data?.Code ?? data?.Status;
+    if (!data || data.error || data.Error || data.isError === true || (code !== undefined && !['0', '200'].includes(String(code)))) return null;
+    const payload = data.Result ?? data.result ?? data.Data ?? data.data ?? data;
+    const meaningful = Array.isArray(payload) ? payload.some(item => item && typeof item === 'object' && Object.keys(item).length)
+      : typeof payload === 'object' && Object.keys(payload).some(key => !['code', 'status', 'message', 'msg'].includes(key.toLowerCase()));
+    if (!meaningful) return null;
+    return { sourceName: CN_ASSET_TRACE_SOURCE_COPY.qichacha.mcpSourceName, sourceEndpoint, sourceTool: tool, queriedAt: new Date().toISOString(), text };
+  } catch { return null; }
+}
+
+export async function queryQichachaMcp(searchKey: string, kind: QichachaQueryType = 'registration', localOnly = false): Promise<ExternalSourceReceipt | null> {
+  const target = Object.hasOwn(QICHACHA_QUERY_TOOLS, kind) ? QICHACHA_QUERY_TOOLS[kind] : undefined;
+  return target ? callQichachaMcp(target[0], target[1], { searchKey }, localOnly) : null;
+}
+
+async function searchQichachaCompany(keyword: string, localOnly = false): Promise<CompanyInfo | null> {
+  const settings = qichachaConfig();
+  if (settings.mcpConfigured) {
+    const receipt = await queryQichachaMcp(keyword, 'registration', localOnly);
+    if (!receipt) return null;
+    const info = mapQichachaCompany(pickQichachaResult(JSON.parse(receipt.text)), keyword);
+    return info ? { ...info, sourceMode: 'mcp', sourceName: receipt.sourceName, sourceTool: receipt.sourceTool,
+      sourceEndpoint: receipt.sourceEndpoint, queriedAt: receipt.queriedAt, sourceText: receipt.text, url: 'https://www.qcc.com/' } : null;
+  }
+  if (!settings.appKey || !settings.secretKey) return null;
+  const ck = cacheKey('qcc-risk-v2', keyword);
   const cached = readCache(ck, 6 * 60 * 60 * 1000);
   if (cached) return cached;
 
   const config = qichachaConfig();
-  if (config.configured) {
+  if (config.appKey && config.secretKey) {
     try {
       const endpoint = `${config.baseUrl}/ECIV4/GetBasicDetailsByName?key=${encodeURIComponent(keyword)}`;
       const res = await fetch(endpoint, {
@@ -745,7 +778,8 @@ function tianyanchaEndpoint(baseUrl: string): string {
 
 function mapTianyanchaCompany(raw: any, keyword: string): CompanyInfo | null {
   if (!raw || typeof raw !== 'object') return null;
-  const name = raw.name || raw.companyName || raw.Name || keyword;
+  const name = firstString(raw, ['name', 'companyName', 'Name']);
+  if (!name) return null;
   const id = raw.id || raw.companyId || raw.cid || encodeURIComponent(keyword);
   return {
     name,
@@ -763,9 +797,9 @@ function mapTianyanchaCompany(raw: any, keyword: string): CompanyInfo | null {
     })),
     branches: raw.branches || raw.branchList || [],
     riskInfo: {
-      enforcementCount: Number(raw.zhixingCount || raw.enforcementCount || raw.executeCount || 0),
-      dishonestyCount: Number(raw.shixinCount || raw.dishonestyCount || 0),
-      restrictionsCount: Number(raw.xiangaoCount || raw.restrictionsCount || 0),
+      enforcementCount: riskCount(raw, ['zhixingCount', 'enforcementCount', 'executeCount']),
+      dishonestyCount: riskCount(raw, ['shixinCount', 'dishonestyCount']),
+      restrictionsCount: riskCount(raw, ['xiangaoCount', 'restrictionsCount']),
     },
     url: raw.url || `https://www.tianyancha.com/company/${id}`,
     sourceMode: 'api',
@@ -777,7 +811,7 @@ function mapTianyanchaCompany(raw: any, keyword: string): CompanyInfo | null {
 async function searchTianyanchaCompany(keyword: string): Promise<CompanyInfo | null> {
   const config = tianyanchaConfig();
   if (!config.configured) return null;
-  const ck = cacheKey('tianyancha', keyword);
+  const ck = cacheKey('tianyancha-risk-v2', keyword);
   const cached = readCache(ck, 6 * 60 * 60 * 1000);
   if (cached) return cached;
 
@@ -800,7 +834,8 @@ async function searchTianyanchaCompany(keyword: string): Promise<CompanyInfo | n
 
 function mapQixinbaoCompany(raw: any, keyword: string): CompanyInfo | null {
   if (!raw || typeof raw !== 'object') return null;
-  const name = firstString(raw, ['name', 'Name', 'companyName', 'CompanyName', 'entName']) || keyword;
+  const name = firstString(raw, ['name', 'Name', 'companyName', 'CompanyName', 'entName']);
+  if (!name) return null;
   const id = firstString(raw, ['id', 'Id', 'companyId', 'entId', 'eid']) || encodeURIComponent(keyword);
   const shareholders = raw.shareholders || raw.Shareholders || raw.partners || raw.investors || [];
   const branches = raw.branches || raw.Branches || raw.branchList || [];
@@ -822,9 +857,9 @@ function mapQixinbaoCompany(raw: any, keyword: string): CompanyInfo | null {
       typeof branch === 'string' ? branch : firstString(branch, ['name', 'Name', 'branchName'])
     )).filter(Boolean),
     riskInfo: {
-      enforcementCount: Number(raw.enforcementCount || raw.zhixingCount || raw.executeCount || 0),
-      dishonestyCount: Number(raw.dishonestyCount || raw.shixinCount || 0),
-      restrictionsCount: Number(raw.restrictionsCount || raw.xiangaoCount || 0),
+      enforcementCount: riskCount(raw, ['enforcementCount', 'zhixingCount', 'executeCount']),
+      dishonestyCount: riskCount(raw, ['dishonestyCount', 'shixinCount']),
+      restrictionsCount: riskCount(raw, ['restrictionsCount', 'xiangaoCount']),
     },
     url: firstString(raw, ['url', 'detailUrl', 'sourceUrl']) || `https://www.qixin.com/company/${encodeURIComponent(id)}`,
     sourceMode: 'api',
@@ -865,10 +900,11 @@ async function searchQixinbaoCompany(keyword: string): Promise<CompanyInfo | nul
   return info;
 }
 
-export async function searchCompanySources(keyword: string, sourceIds?: string[]): Promise<CompanyInfo[]> {
+export async function searchCompanySources(keyword: string, sourceIds?: string[], options: { localOnly?: boolean } = {}): Promise<CompanyInfo[]> {
+  requireLocalEndpoint('https://agent.qcc.com', 'External company query', options.localOnly);
   const results: CompanyInfo[] = [];
   if (isSelectedSource(sourceIds, 'qichacha', ['qcc', '企查查'])) {
-    const qcc = await searchQichachaCompany(keyword);
+    const qcc = await searchQichachaCompany(keyword, options.localOnly);
     if (qcc) results.push(qcc);
   }
   if (isSelectedSource(sourceIds, 'tianyancha', ['tyc', '天眼查'])) {
@@ -889,8 +925,8 @@ export async function searchCompanySources(keyword: string, sourceIds?: string[]
   });
 }
 
-export async function searchCompany(keyword: string): Promise<CompanyInfo | null> {
-  const results = await searchCompanySources(keyword);
+export async function searchCompany(keyword: string, options: { localOnly?: boolean } = {}): Promise<CompanyInfo | null> {
+  const results = await searchCompanySources(keyword, undefined, options);
   return results[0] || null;
 }
 
@@ -974,7 +1010,7 @@ export async function searchTenderSources(params: {
   return rows;
 }
 
-// ── 全国法院被执行人信息 (zhixing.court.gov.cn) ───────────────────────
+// ── Enforcement records: authorized webpage evidence ───────────────────
 
 export interface EnforcementRecord {
   caseNumber: string;
@@ -987,39 +1023,8 @@ export interface EnforcementRecord {
   url: string;
 }
 
-export async function searchEnforcementRecords(subjectName: string): Promise<EnforcementRecord[]> {
-  const ck = cacheKey('zhixing', subjectName);
-  const cached = readCache(ck, 6 * 60 * 60 * 1000);
-  if (cached) return cached;
-
-  const results: EnforcementRecord[] = [];
-  const html = await fetchWithUA(
-    `https://zhixing.court.gov.cn/search/?searchType=1&name=${encodeURIComponent(subjectName)}`,
-    12000,
+export async function searchEnforcementRecords(_subjectName: string): Promise<EnforcementRecord[]> {
+  throw new Error(
+    'Enforcement records require an authorized webpage query and imported source evidence; no enforcement source has been obtained. An empty result cannot be inferred.',
   );
-
-  if (html) {
-    try {
-      const dataRe = /(?:var|const|let)\s+\w+\s*=\s*(\[[\s\S]*?\]);/;
-      const match = html.match(dataRe);
-      if (match) {
-        const list = JSON.parse(match[1]);
-        for (const item of list) {
-          results.push({
-            caseNumber: item.caseCode || item.caseNumber || '',
-            court: item.courtName || '',
-            filingDate: item.filingDate || item.executionDate || '',
-            subjectName: item.name || item.partyName || subjectName,
-            subjectType: item.type || item.partyType || '',
-            executionTarget: item.executionTarget || item.enforceAmount || '',
-            status: item.status || '',
-            url: `https://zhixing.court.gov.cn/detail?id=${item.id || ''}`,
-          });
-        }
-      }
-    } catch { /* parse failed */ }
-  }
-
-  writeCache(ck, results);
-  return results;
 }

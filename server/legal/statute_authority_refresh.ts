@@ -1,4 +1,4 @@
-import { statuteTextCopy, createStatuteTextSnapshot, type StatuteTextSnapshot } from '../regions/packs/cn/statute_provisions';
+import { statuteTextCopy, createStatuteTextSnapshot, extractReviewedStatuteHtml, type StatuteTextSnapshot, type ReviewedStatuteHtmlSource } from '../regions/packs/cn/statute_provisions';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -313,11 +313,52 @@ function changedReasons(
   return reasons;
 }
 
+async function fetchReviewedHtmlText(
+  observed: StatuteAuthorityObservedVersion, source: ReviewedStatuteHtmlSource,
+  articleMax: number, fetchImpl: typeof fetch, timeoutMs: number, fetchedAt: string,
+): Promise<StatuteTextSnapshot> {
+  if (source.url !== statuteTextCopy.saleContractHtml.url || source.recordId !== observed.recordId
+    || source.versionDate !== observed.versionDate || source.effectiveDate !== observed.effectiveDate
+    || source.articleMax !== articleMax
+    || normalizeTitle(source.sectionBoundary + source.sectionHeading) !== normalizeTitle(observed.title)) {
+    throw new Error('Reviewed official HTML source identity mismatch');
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(source.url, { redirect: 'error', signal: controller.signal,
+      headers: { Accept: 'text/html' } });
+    if (!response.ok || !response.body || !/text\/html/i.test(response.headers.get('content-type') || '')) {
+      throw new Error('Reviewed official HTML download failed');
+    }
+    const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const item = await reader.read(); if (item.done) break;
+        size += item.value.byteLength;
+        if (size > 2 * 1024 * 1024) throw new Error('Reviewed official HTML exceeds download limit');
+        chunks.push(item.value);
+      }
+    } finally { await reader.cancel().catch(() => undefined); }
+    const html = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+    return createStatuteTextSnapshot(extractReviewedStatuteHtml(html, source), articleMax, {
+      recordId: observed.recordId, versionDate: observed.versionDate, fetchedAt, sourceUrl: source.url,
+    });
+  } finally { clearTimeout(timer); }
+}
+
 async function fetchOriginalText(
   observed: StatuteAuthorityObservedVersion, fetchImpl: typeof fetch,
-  timeoutMs: number, session: OfficialFetchSession, fetchedAt: string,
+  timeoutMs: number, session: OfficialFetchSession, fetchedAt: string, expectedArticleMax?: number,
+  reviewedHtml?: ReviewedStatuteHtmlSource,
 ): Promise<StatuteTextSnapshot> {
-  if (!observed.wordPath || !observed.articleMax) throw new Error('Official DOCX or article count unavailable');
+  // Some official records have no outline. The already-reviewed catalog bound
+  // still requires every article and the final article to match the real text.
+  const articleMax = observed.articleMax ?? expectedArticleMax;
+  if (typeof articleMax !== 'number' || !Number.isInteger(articleMax) || articleMax < 1) throw new Error('Official article count unavailable');
+  if (reviewedHtml) return fetchReviewedHtmlText(observed, reviewedHtml, articleMax, fetchImpl, timeoutMs, fetchedAt);
+  if (!observed.wordPath) throw new Error('Official DOCX unavailable');
   const download = await fetchJson(fetchImpl,
     `${OFFICIAL_BASE_URL}/law-search/download/pc?format=docx&bbbs=${encodeURIComponent(observed.recordId)}&fileId=`,
     {}, timeoutMs, session);
@@ -349,7 +390,7 @@ async function fetchOriginalText(
     if (!normalizeTitle(document.value.slice(0, 2000)).includes(normalizeTitle(observed.title))) {
       throw new Error('Official document title mismatch');
     }
-    return createStatuteTextSnapshot(document.value, observed.articleMax, {
+    return createStatuteTextSnapshot(document.value, articleMax, {
       recordId: observed.recordId, versionDate: observed.versionDate, fetchedAt,
       sourceUrl: observed.sourceUrl,
     });
@@ -375,7 +416,7 @@ async function checkOne(
     let originalTextError: string | undefined;
     if (verified) {
       try {
-        originalText = await fetchOriginalText(observed, fetchImpl, timeoutMs, session, checkedAt);
+        originalText = await fetchOriginalText(observed, fetchImpl, timeoutMs, session, checkedAt, entry.verification.articleMax, entry.verification.originalHtml);
         if (previous?.originalText && previous.originalText.recordId === originalText.recordId
           && previous.originalText.sha256 !== originalText.sha256) {
           reasons.push(statuteTextCopy.changed);
@@ -532,7 +573,7 @@ export function formatStatuteAuthorityRefreshReport(
     `- 已检查：${checks.length}`,
     `- 权威版本一致：${verified.length}`,
     `- 待人工复核：${pending.length}`,
-    `- 本次不可用：${unavailable.length}`,
+    `- 本次不可用：${checks.filter(check => check.status === 'unavailable' || check.originalTextError).length}`,
     '',
     '## 待人工复核',
     ...(pending.length
@@ -543,7 +584,7 @@ export function formatStatuteAuthorityRefreshReport(
     ...(unavailable.length || checks.some(check => check.originalTextError)
       ? [
         ...unavailable.map(check => `- ${check.title}：${check.reasons.join('；')}（连续失败 ${check.consecutiveFailures} 次）`),
-        ...checks.filter(check => check.originalTextError).map(check => `- ${check.title}：${check.originalTextError}`),
+        ...checks.filter(check => check.originalTextError && check.status !== 'unavailable').map(check => `- ${check.title}：${check.originalTextError}`),
       ]
       : ['- 无']),
     '',

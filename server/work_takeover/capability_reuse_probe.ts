@@ -1,21 +1,9 @@
-import {
-  executeWorkTakeoverPlanStep,
-  getWorkTakeoverExecutionProgress,
-  planWorkTakeoverExecution,
-  type WorkTakeoverCapabilitySelection,
-  type WorkTakeoverExecutionMode,
-  type WorkTakeoverExecutionPlan,
-  type WorkTakeoverStepExecutionResult,
-} from './execution_planner';
-import { analyzeWechatIntake, type WechatIntakeResult } from './wechat_intake';
-import {
-  createWorkTakeoverTaskFromWechatIntake,
-  getWorkTakeoverTask,
-  listWorkTakeoverTasks,
-  updateWorkTakeoverTask,
-  type WorkTakeoverStatus,
-  type WorkTakeoverTask,
-} from './tasks';
+import { resolveWorkTakeoverIntakeTask } from './intake';
+import { boundedWorkTakeoverSteps, runWorkTakeoverPreparation } from './preparation_loop';
+import { recordWorkTakeoverPacket } from './packet_recording';
+import { getWorkTakeoverExecutionProgress, planWorkTakeoverExecution, normalizeWorkTakeoverExecutionMode, type WorkTakeoverCapabilitySelection, type WorkTakeoverExecutionMode, type WorkTakeoverExecutionPlan, type WorkTakeoverStepExecutionResult } from './execution_planner';
+import { type WechatIntakeResult } from './wechat_intake';
+import { updateWorkTakeoverTask, type WorkTakeoverStatus, type WorkTakeoverTask } from './tasks';
 import { exportWorkTakeoverPacket, type WorkTakeoverPacket } from './task_packet';
 import { verifyWorkTakeoverResult, type WorkTakeoverResultVerification } from './result_verifier';
 import { buildSelfExtensionPlan, type SelfExtensionPlan } from '../self_extension/pipeline';
@@ -110,12 +98,6 @@ function compact(value: unknown): string {
 
 function uniqueStrings(values: Array<string | undefined>): string[] {
   return Array.from(new Set(values.map(compact).filter(Boolean)));
-}
-
-function executionMode(value: unknown): WorkTakeoverExecutionMode {
-  return ['plan_only', 'prepare_work', 'visible_external_work'].includes(String(value || ''))
-    ? String(value) as WorkTakeoverExecutionMode
-    : 'prepare_work';
 }
 
 function toolNames(tools: ToolDefinition[] = []): string[] {
@@ -233,80 +215,6 @@ function buildCapabilityReuseAudit(
   return { items, summary: summarizeAudit(items) };
 }
 
-function executionHistory(task: WorkTakeoverTask, execution: WorkTakeoverStepExecutionResult): any[] {
-  const current = task?.metadata?.workTakeoverExecution?.history;
-  return [...(Array.isArray(current) ? current.slice(-20) : []), execution];
-}
-
-function recordStepExecution(
-  userId: string,
-  task: WorkTakeoverTask,
-  plan: WorkTakeoverExecutionPlan,
-  execution: WorkTakeoverStepExecutionResult,
-): WorkTakeoverTask {
-  let updatedTask = updateWorkTakeoverTask(userId, task.id, {
-    status: execution.status === 'blocked'
-      ? 'blocked'
-      : execution.status === 'waiting_confirmation'
-      ? 'waiting_confirmation'
-      : 'in_progress',
-    allowedNow: uniqueStrings([...task.allowedNow, ...plan.safeActions]),
-    confirmationRequired: uniqueStrings([...task.confirmationRequired, ...execution.confirmationRequired]),
-    blockedBy: execution.blockers.length ? uniqueStrings([...task.blockedBy, ...execution.blockers]) : undefined,
-    result: execution.nextInstruction,
-    metadata: {
-      workTakeoverExecution: {
-        lastPlan: plan,
-        lastExecution: execution,
-        history: executionHistory(task, execution),
-        updatedAt: execution.executedAt,
-      },
-    },
-    note: execution.summary,
-  } as any) || task;
-
-  for (const artifact of execution.artifacts) {
-    updatedTask = updateWorkTakeoverTask(userId, updatedTask.id, {
-      artifact,
-    } as any) || updatedTask;
-  }
-
-  if (execution.draftReply && !updatedTask.drafts.some(draft => draft.text === execution.draftReply)) {
-    updatedTask = updateWorkTakeoverTask(userId, updatedTask.id, {
-      draftReply: execution.draftReply,
-    } as any) || updatedTask;
-  }
-
-  return updatedTask;
-}
-
-function recordPacket(
-  userId: string,
-  task: WorkTakeoverTask,
-  plan: WorkTakeoverExecutionPlan,
-  packet: WorkTakeoverPacket,
-): WorkTakeoverTask {
-  return updateWorkTakeoverTask(userId, task.id, {
-    status: task.status === 'queued' ? 'in_progress' : task.status,
-    artifact: {
-      type: 'file',
-      label: '工作接管任务包',
-      path: packet.folderPath,
-      content: packet.summary,
-      status: 'prepared',
-    },
-    metadata: {
-      workTakeoverExecution: {
-        ...(task.metadata?.workTakeoverExecution || {}),
-        lastPlan: plan,
-        updatedAt: packet.createdAt,
-      },
-      workTakeoverPacket: packet,
-    },
-    note: packet.summary,
-  } as any) || task;
-}
-
 function expectedContentTerms(task: WorkTakeoverTask): string[] {
   const params = task.metadata?.industryParameters;
   return uniqueStrings([
@@ -392,85 +300,23 @@ function renderProbeRecord(input: {
   ].join('\n').trim();
 }
 
-async function resolveTask(options: WorkTakeoverCapabilityReuseProbeOptions): Promise<{
-  task: WorkTakeoverTask;
-  intake?: WechatIntakeResult;
-  createdTask: boolean;
-}> {
-  const userId = options.userId || 'anonymous';
-  const domain = options.domain || 'personal';
-  const orgId = options.orgId || '';
-  let task = options.id ? getWorkTakeoverTask(userId, String(options.id)) : null;
-  let message = compact(options.message);
-
-  if (!task && options.fromClipboard === true) {
-    if (!options.desktopRelay) throw new Error('Capability reuse probe from clipboard requires the Lumi desktop client relay.');
-    message = compact(await options.desktopRelay('desktop_clipboard_read', {}) || '');
-    if (!message) throw new Error('Clipboard is empty. Copy the customer/WeChat message first.');
-  }
-
-  if (!task && message) {
-    const intake = analyzeWechatIntake({
-      message,
-      contact: options.contact,
-      source: options.source || (options.fromClipboard ? 'clipboard' : 'manual'),
-      takeoverMode: options.takeoverMode ? options.takeoverMode as any : 'auto',
-      userRules: options.userRules,
-    });
-    task = createWorkTakeoverTaskFromWechatIntake(userId, intake, {
-      domain,
-      orgId,
-      sourceMessage: message,
-      title: options.title,
-    });
-    return { task, intake, createdTask: true };
-  }
-
-  if (!task) {
-    task = listWorkTakeoverTasks({ userId, domain, orgId, status: 'active', limit: 1 })[0] || null;
-  }
-  if (!task) throw new Error('No work takeover task found. Provide id, message, fromClipboard, or create a task first.');
-  return { task, createdTask: false };
-}
-
 export async function runWorkTakeoverCapabilityReuseProbe(
   options: WorkTakeoverCapabilityReuseProbeOptions,
 ): Promise<WorkTakeoverCapabilityReuseProbeResult> {
   const userId = options.userId || 'anonymous';
-  const mode = executionMode(options.mode);
+  const mode = normalizeWorkTakeoverExecutionMode(options.mode);
   const shouldRecord = options.record !== false;
-  const runSafeLoop = options.runSafeLoop !== false;
-  const stopOnConfirmation = options.stopOnConfirmation !== false;
-  const maxSteps = Math.max(0, Math.min(Number(options.maxSteps) || 2, 5));
-  const { task, intake, createdTask } = await resolveTask(options);
-
-  let currentTask = task;
-  let plan = planWorkTakeoverExecution(currentTask, { mode });
-  let progress = getWorkTakeoverExecutionProgress(currentTask, plan);
-  const executions: WorkTakeoverStepExecutionResult[] = [];
-
-  if (runSafeLoop) {
-    for (let i = 0; i < maxSteps; i++) {
-      plan = planWorkTakeoverExecution(currentTask, { mode });
-      progress = getWorkTakeoverExecutionProgress(currentTask, plan);
-      if (progress.complete) break;
-      const execution = executeWorkTakeoverPlanStep(currentTask, plan, {
-        stepId: progress.nextStep?.id,
-      });
-      executions.push(execution);
-      if (shouldRecord) currentTask = recordStepExecution(userId, currentTask, plan, execution);
-      if (execution.status === 'blocked') break;
-      if (stopOnConfirmation && execution.status === 'waiting_confirmation') break;
-    }
-  }
-
-  plan = planWorkTakeoverExecution(currentTask, { mode });
-  progress = getWorkTakeoverExecutionProgress(currentTask, plan);
+  const maxSteps = options.runSafeLoop === false ? 0 : boundedWorkTakeoverSteps(options.maxSteps, 2, 5);
+  const { task, intake, createdTask } = await resolveWorkTakeoverIntakeTask({ userId, domain: options.domain || 'personal', orgId: options.orgId || '' }, options, options.desktopRelay, 'Capability reuse probe from clipboard');
+  const preparation = runWorkTakeoverPreparation(task, { mode, maxSteps, record: shouldRecord, stopOnConfirmation: options.stopOnConfirmation !== false });
+  let currentTask = preparation.task;
+  let { plan, progress } = preparation;
+  const { executions } = preparation;
 
   let packet: WorkTakeoverPacket | undefined;
   if (shouldRecord && options.exportPacket !== false) {
     packet = exportWorkTakeoverPacket(currentTask, { outputDirectory: options.outputDirectory, plan });
-    currentTask = recordPacket(userId, currentTask, plan, packet);
+    currentTask = recordWorkTakeoverPacket(userId, currentTask, plan, packet);
     plan = planWorkTakeoverExecution(currentTask, { mode });
     progress = getWorkTakeoverExecutionProgress(currentTask, plan);
   }

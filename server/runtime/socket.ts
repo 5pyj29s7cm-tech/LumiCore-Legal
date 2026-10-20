@@ -1,8 +1,8 @@
+import { type ProviderGetters as SharedProviderGetters } from "../llm/provider_getters";
 // Socket aggregator — mounts all Socket.IO handlers
 import { Server } from "socket.io";
 import { decodeUserSessionToken } from '../middleware/auth';
 import { registerChatHandler } from "../socket/chat";
-import { registerTaskHandler } from "../socket/task";
 import { registerVoiceHandlers } from "../socket/voice";
 import { registerDeviceHandlers } from "../socket/device";
 import { registerPerceptionHandlers } from "../socket/perception";
@@ -30,9 +30,7 @@ import { setOfficeBroadcast } from '../tools/definitions/office_tools';
 interface SocketContext {
   io: Server;
   jwtSecret: string;
-  llm: {
-    getDeepSeek: any; getGemini: any; getOpenAI: any; getAnthropic: any; getQwen: any; getArk: any; getOllama: any; isOllamaAvailable: any; getLmStudio: any; isLmStudioAvailable: any; getXiaomi: any; getKimi: any; getGlm: any; getRelay: any;
-  };
+  llm: SharedProviderGetters & Required<Pick<SharedProviderGetters, 'getOpenAI' | 'getAnthropic' | 'getQwen' | 'getArk' | 'getOllama' | 'isOllamaAvailable' | 'getLmStudio' | 'isLmStudioAvailable' | 'getXiaomi' | 'getKimi' | 'getGlm' | 'getRelay'>>;
 }
 
 export function getSocketAuth(socket: any, jwtSecret: string): {
@@ -210,10 +208,10 @@ export function initSocketRuntime({ io, jwtSecret, llm }: SocketContext) {
     registerDesktopRelayRecoveryHandlers(socket, () => getUserId(socket));
 
     // Optional diagnostics. Event payloads may contain private user content.
-    socket.onAny((event, ...args) => {
+    socket.onAny(async (event, ...args) => {
       if (event.startsWith('tool:desktop_result:')) {
         const correlationId = event.slice('tool:desktop_result:'.length);
-        const accepted = handleDesktopRelayResult(correlationId, args[0] || {}, socket.id);
+        const accepted = await handleDesktopRelayResult(correlationId, args[0] || {}, socket.id);
         const acknowledge = args.at(-1);
         if (typeof acknowledge === 'function') acknowledge({ accepted });
       }
@@ -272,7 +270,6 @@ export function initSocketRuntime({ io, jwtSecret, llm }: SocketContext) {
       return getSensory(requestedUid, undefined, scope);
     };
     registerChatHandler(socket, llmGetters, scopedSensory, getUserId, io);
-    registerTaskHandler(socket, llmGetters, scopedSensory, getUserId, io);
     registerVoiceHandlers(socket, llmGetters, scopedSensory, getUserId, io);
   });
 }

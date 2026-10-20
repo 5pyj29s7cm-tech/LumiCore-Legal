@@ -1,0 +1,167 @@
+{
+  "source": "Exact current canonical tool record from one successful original-task status query, not a regenerated video",
+  "taskText": "查询原任务：get_video_generation_status，参数 {\"recoveryId\":\"bee39cdb8f6cc96ef860c582915098e8febf5283135c370f1f80c77743057115\"}。",
+  "requestId": "chat-song-query-exact-7d62e599-7dfe-4e20-bcf5-899eb0f9763b",
+  "taskId": "task_b91b9796-f326-4e54-ac51-a48861a71ea7",
+  "record": {
+    "id": "call_62630c7ea1d3484f87168be8",
+    "resolutionId": "resolution:chat-song-query-exact-7d62e599-7dfe-4e20-bcf5-899eb0f9763b",
+    "taskId": "task_b91b9796-f326-4e54-ac51-a48861a71ea7",
+    "requestId": "chat-song-query-exact-7d62e599-7dfe-4e20-bcf5-899eb0f9763b",
+    "turnRowId": "action_turn_eddd83ae975355c6fe5b951ac95f4da2",
+    "turnId": "chat-song-query-exact-7d62e599-7dfe-4e20-bcf5-899eb0f9763b",
+    "executionOrigin": "model_selected",
+    "name": "get_video_generation_status",
+    "arguments": {
+      "recoveryId": "bee39cdb8f6cc96ef860c582915098e8febf5283135c370f1f80c77743057115"
+    },
+    "result": "{\"ok\":true,\"status\":\"generated\",\"success\":true,\"verified\":true,\"verificationStatus\":\"verified\",\"verification\":{\"strategy\":\"container_and_video_samples\",\"decoded\":false},\"actualSettings\":{\"size\":\"1080x1920\",\"duration\":15,\"hasAudio\":true},\"settingsMatch\":true,\"requestedSettings\":{\"size\":\"1080x1920\",\"duration\":15},\"provider\":\"relay\",\"model\":\"aliyun/wan3.0-video\",\"prompt\":\"\",\"taskId\":\"4978b257-2cb2-4eec-b180-f502673b3949\",\"generationMode\":\"text_to_video\",\"inputReferenceAccepted\":false,\"selectionReason\":\"configured_text_to_video_role\",\"artifactDurability\":\"local_file\",\"outputPath\":\"C:\\\\Users\\\\Administrator\\\\LumiCore-Legal\\\\data\\\\generated\\\\official_video_1792223175324_644ca62a-c705-4b13-ae03-e79814c65003.mp4\",\"artifacts\":[{\"type\":\"video\",\"path\":\"C:\\\\Users\\\\Administrator\\\\LumiCore-Legal\\\\data\\\\generated\\\\official_video_1792223175324_644ca62a-c705-4b13-ae03-e79814c65003.mp4\"}],\"tip\":\"Video saved; measured size and duration match the request. An audio track was detected; its speech, music and content are not verified.\",\"recoveryId\":\"bee39cdb8f6cc96ef860c582915098e8febf5283135c370f1f80c77743057115\",\"reconciliationStatus\":\"committed\"}",
+    "evidence": {
+      "capability": "media.video.status",
+      "operation": "observe",
+      "assurance": "verified",
+      "scope": [
+        "bee39cdb8f6cc96ef860c582915098e8febf5283135c370f1f80c77743057115"
+      ],
+      "limitations": [
+        "Container validation does not certify content, prompt fidelity, or subjective video quality."
+      ]
+    },
+    "capability": {
+      "capabilityId": "media.video.status",
+      "lane": "media",
+      "operation": "observe",
+      "risk": "low",
+      "sideEffects": [
+        {
+          "type": "network_read",
+          "scope": "original persisted official video task",
+          "reversible": true
+        },
+        {
+          "type": "local_write",
+          "scope": "verified recovered video artifact",
+          "reversible": true
+        }
+      ],
+      "verification": {
+        "strategy": "artifact",
+        "required": true,
+        "requiredFields": [
+          "status",
+          "verified",
+          "verificationStatus"
+        ],
+        "requiredValues": {
+          "verified": true,
+          "verificationStatus": "verified"
+        },
+        "successStatuses": [
+          "generated"
+        ],
+        "failureStatuses": [
+          "unknown",
+          "pending",
+          "failed",
+          "rejected",
+          "cancelled"
+        ],
+        "requiredArtifactCollections": [
+          "artifacts"
+        ],
+        "successSignals": [
+          "original task completed and its video container was validated and saved"
+        ],
+        "limitations": [
+          "Recovery never submits generation; a segment does not prove the complete composition."
+        ]
+      },
+      "reconciliation": {
+        "reconcilesCapabilityIds": [
+          "media.video.generate"
+        ],
+        "outcomeField": "reconciliationStatus",
+        "committedValues": [
+          "committed"
+        ],
+        "notCommittedValues": []
+      }
+    },
+    "idempotencyKey": "7e4d782422e598a21013d80e5a8f9cb55e34d965da4ff0c12f78ec535f1a4211",
+    "adapterStarted": true,
+    "adapterSettlements": [
+      {
+        "name": "get_video_generation_status",
+        "attempt": 1,
+        "status": "fulfilled",
+        "timedOut": false,
+        "settledAt": "2026-10-17T07:46:15.510Z"
+      }
+    ],
+    "terminalVerification": {
+      "status": "verified",
+      "strategy": "artifact",
+      "reason": "The declared artifact exists and is non-empty."
+    },
+    "envelope": {
+      "version": 1,
+      "status": "verified_success",
+      "toolName": "get_video_generation_status",
+      "resolutionId": "resolution:chat-song-query-exact-7d62e599-7dfe-4e20-bcf5-899eb0f9763b",
+      "taskId": "task_b91b9796-f326-4e54-ac51-a48861a71ea7",
+      "requestId": "chat-song-query-exact-7d62e599-7dfe-4e20-bcf5-899eb0f9763b",
+      "turnRowId": "action_turn_eddd83ae975355c6fe5b951ac95f4da2",
+      "turnId": "chat-song-query-exact-7d62e599-7dfe-4e20-bcf5-899eb0f9763b",
+      "idempotencyKey": "7e4d782422e598a21013d80e5a8f9cb55e34d965da4ff0c12f78ec535f1a4211",
+      "targetIdentity": "",
+      "startedAt": "2026-10-17T07:46:11.000Z",
+      "completedAt": "2026-10-17T07:46:15.604Z",
+      "durationMs": 4604,
+      "result": {
+        "ok": true,
+        "status": "generated",
+        "success": true,
+        "verified": true,
+        "verificationStatus": "verified",
+        "verification": {
+          "strategy": "container_and_video_samples",
+          "decoded": false
+        },
+        "actualSettings": {
+          "size": "1080x1920",
+          "duration": 15,
+          "hasAudio": true
+        },
+        "settingsMatch": true,
+        "requestedSettings": {
+          "size": "1080x1920",
+          "duration": 15
+        },
+        "provider": "relay",
+        "model": "aliyun/wan3.0-video",
+        "prompt": "",
+        "taskId": "4978b257-2cb2-4eec-b180-f502673b3949",
+        "generationMode": "text_to_video",
+        "inputReferenceAccepted": false,
+        "selectionReason": "configured_text_to_video_role",
+        "artifactDurability": "local_file",
+        "outputPath": "C:\\Users\\Administrator\\LumiCore-Legal\\data\\generated\\official_video_1792223175324_644ca62a-c705-4b13-ae03-e79814c65003.mp4",
+        "artifacts": [
+          {
+            "type": "video",
+            "path": "C:\\Users\\Administrator\\LumiCore-Legal\\data\\generated\\official_video_1792223175324_644ca62a-c705-4b13-ae03-e79814c65003.mp4"
+          }
+        ],
+        "tip": "Video saved; measured size and duration match the request. An audio track was detected; its speech, music and content are not verified.",
+        "recoveryId": "bee39cdb8f6cc96ef860c582915098e8febf5283135c370f1f80c77743057115",
+        "reconciliationStatus": "committed"
+      },
+      "verification": {
+        "status": "verified",
+        "basis": "terminal_verification",
+        "reason": "The declared artifact exists and is non-empty."
+      }
+    },
+    "modelRoutingReceiptId": "cb33c4f8-de39-440c-9aaf-0b57a76c08ee"
+  }
+}

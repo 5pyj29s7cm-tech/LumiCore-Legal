@@ -1,11 +1,13 @@
+import { consumeFixtureBindingCode } from './messaging_binding_fixture';
 import './helpers';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { initDatabase } from '../db_layer';
+import { initDatabase, readDB } from '../db_layer';
+import * as cases from '../server/org/legal_cases';
 import { addMember, createOrg } from '../server/org/db';
 import * as bindings from '../server/messaging/bindings';
 import { captureMessagingBinding } from '../server/messaging/turn_authorization';
 import { toolRegistry } from '../server/tools/registry';
-import { handleRemoteLegalNoticeIntake } from '../server/messaging/legal_notice_intake';
+import { handleRemoteLegalNoticeIntake } from '../server/regions/packs/cn/legal_notice_intake';
 import type { IncomingMessage } from '../server/messaging/types';
 
 const execution = vi.hoisted(() => ({ call: vi.fn() }));
@@ -19,7 +21,7 @@ function fixture() {
   const orgId = createOrg('Synthetic', `notice-revoke-org-${sequence}`, userId).id;
   addMember(orgId, userId, 'owner');
   const code = bindings.createBindingCode('feishu', userId, orgId, 'work');
-  const binding = bindings.consumeBindingCode('feishu', code.code, `platform-${sequence}`, `chat-${sequence}`)!;
+  const binding = consumeFixtureBindingCode('feishu', code.code, `platform-${sequence}`, `chat-${sequence}`)!;
   const message: IncomingMessage = { platform: 'feishu', userId: binding.platformUserId, chatId: binding.chatId!,
     userName: 'Synthetic', chatType: 'private', messageId: `notice-${sequence}`, raw: {}, timestamp: new Date().toISOString(),
     text: '请新建案件并归档：人民法院送达通知，张三诉李四合同纠纷。',
@@ -58,5 +60,15 @@ describe('legal notice shortcut authorization', () => {
     const { message } = fixture();
     await expect(handleRemoteLegalNoticeIntake(message, { isCancelled: () => true })).rejects.toMatchObject({ name: 'MessagingAuthorizationRevokedError' });
     expect(execution.call).not.toHaveBeenCalled();
+  });
+
+  it('does not write an existing case reminder from an opaque ID in prose without a canonical mutation receipt', async () => {
+    const { message } = fixture();
+    const caseFile = cases.createCase(message.boundOrgId!, message.boundUserId!, { title: 'Synthetic no-receipt case', caseNumber: '（2027）沪0101民初876号', hearingDate: '2027-08-15 09:30' });
+    message.text = '请归档已有案件：（2027）沪0101民初876号开庭通知，开庭日期2027年8月15日。';
+    vi.spyOn(toolRegistry, 'get').mockReturnValue({ name: 'legal_message_intake_to_case' } as any);
+    execution.call.mockResolvedValue('已归档。案件ID：' + caseFile.id + '\n开庭日期2027年8月15日。');
+    await handleRemoteLegalNoticeIntake(message);
+    expect((readDB().reminders || []).some((reminder: any) => String(reminder.sourceInteractionId || '').includes(caseFile.id))).toBe(false);
   });
 });

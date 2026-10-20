@@ -1,3 +1,4 @@
+import { readSettingRecord, writeSetting } from "../persistence/settings_repository";
 /**
  * HIM (Homeostatic Intrinsic Motivation / 猫智能论) — comfort-driven intrinsic drive engine.
  *
@@ -13,8 +14,8 @@
  * When L_t << max(W_buffer), hope activates → agent seeks to recover peak state.
  */
 
-import { EmotionalState } from './state';
-import { readDB, writeDB } from '../../db_layer';
+import type { EmotionalState } from './state';
+
 
 // ── Types ──
 
@@ -156,11 +157,8 @@ export function himTick(
     ? Math.min(0.5, (hopeGap - HOPE_THRESHOLD) * 2.5)
     : 0;
 
-  // 5c. Positive-drive: ΔL is rising — initiative relaxes, curiosity stays high
-  const positiveDrive = him.deltaL > 0.03 ? 0 : 0;
-
   // Combined drive
-  const drive = flatDrive + hopeDrive + positiveDrive;
+  const drive = flatDrive + hopeDrive;
 
   // Initiative = base + drive, capped
   const initiative = Math.min(1, 0.08 + drive);
@@ -171,35 +169,11 @@ export function himTick(
   return { initiative, curiosityBias, him };
 }
 
-/**
- * Get the best historical peak for prompting.
- * Returns the peak with highest connection+intimacy combination.
- */
-export function getBestPeak(him: HIMState): HIMPeak | null {
-  if (him.peakBuffer.length === 0) return null;
-  return stableTopK(him.peakBuffer, 1, p => p.connection + p.intimacy)[0];
-}
-
-/** Format a peak as a memory prompt hint */
-export function formatPeakForPrompt(peak: HIMPeak): string {
-  const date = new Date(peak.timestamp).toLocaleDateString('zh-CN', {
-    month: 'long', day: 'numeric',
-  });
-  let hint = `On ${date}, I felt deeply connected (connection ${peak.connection.toFixed(2)}, intimacy ${peak.intimacy.toFixed(2)}).`;
-  if (peak.topicHint) {
-    hint += ` We were discussing "${peak.topicHint}".`;
-  }
-  hint += ' This is a memory worth cherishing.';
-  return hint;
-}
-
 // ── Persistence ──
 
 export function loadHIMState(userId: string): HIMState {
   try {
-    const db = readDB();
-    if (!db.settings) return createDefaultHIMState();
-    const setting = db.settings.find((s: any) => s.key === `him_${userId}`);
+    const setting = readSettingRecord(`him_${userId}`);
     if (!setting) return createDefaultHIMState();
     return { ...createDefaultHIMState(), ...JSON.parse(setting.value) };
   } catch {
@@ -208,15 +182,5 @@ export function loadHIMState(userId: string): HIMState {
 }
 
 export function saveHIMState(userId: string, him: HIMState): void {
-  try {
-    const db = readDB();
-    if (!db.settings) db.settings = [];
-    const existing = db.settings.findIndex((s: any) => s.key === `him_${userId}`);
-    if (existing >= 0) {
-      db.settings[existing].value = JSON.stringify(him);
-    } else {
-      db.settings.push({ key: `him_${userId}`, value: JSON.stringify(him) });
-    }
-    writeDB(db);
-  } catch {}
+  try { writeSetting(`him_${userId}`, JSON.stringify(him)); } catch {}
 }

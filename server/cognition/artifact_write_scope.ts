@@ -1,4 +1,5 @@
-import { buildTaskTargetAnchorProjection, canonicalPathIdentity, type AcceptedTaskTarget } from '../conversation/task_target_anchor';
+import type { ActionIntentAnalysis } from './normalized_action_intent';
+import { buildTaskTargetAnchorProjection, canonicalPathIdentity, outputDocumentInstruction, type AcceptedTaskTarget } from '../conversation/task_target_anchor';
 import { normalizeActionIntent } from './normalized_action_intent';
 import path from 'node:path';
 
@@ -10,10 +11,10 @@ function mixedTaskOutputPath(text: string): string {
   // Only an affirmative output clause with one filename can select a result.
   // i18n-allow: multilingual file-output clause and same-directory recognition.
   for (const clause of text.split(/[，,。！？!?；;\n]/u)) {
-    if (!/(?:生成|创建|写入|导出|另存|保存到)|\b(?:create|write|export|save)\b/iu.test(clause)
+    if (!/(?:生成|创建|写入|导出|另存|保存(?:到|为|成))|\b(?:create|write|export|save)\b/iu.test(clause)
       || /(?:不要|别|禁止|不必|无需)|\b(?:do not|don't|never)\b/iu.test(clause)) continue; // i18n-allow: negated output recognition.
     if ((clause.match(/\.(?:xlsx?|docx?|pptx?|pdf|txt|md|csv|json)(?![a-z])/giu) || []).length !== 1) continue;
-    const absolute = buildTaskTargetAnchorProjection({ taskText: clause }).target.path;
+    const absolute = buildTaskTargetAnchorProjection({ taskText: outputDocumentInstruction(clause) || clause }).target.path;
     if (/^(?:[A-Za-z]:[\\/]|\\\\|\/)/u.test(absolute)) { outputs.push(absolute); continue; }
     if (!/(?:同目录|同一目录|同一文件夹)|\bsame\s+(?:directory|folder)\b/iu.test(clause)) continue; // i18n-allow: explicit output directory relation.
     const filename = clause.match(/(?:^|\s|["'“])([^\s/\\:"'“”<>，,。；;]+\.(?:xlsx?|docx?|pptx?|pdf|txt|md|csv|json))(?=$|[\s"'”])/iu)?.[1];
@@ -29,10 +30,10 @@ function mixedTaskOutputPath(text: string): string {
 const OUTPUT_TOOLS = new Set(['write_file', 'desktop_write_text_file', 'create_xlsx', 'modify_xlsx', 'create_docx', 'create_ppt', 'create_pdf']);
 
 /** A single explicitly named deliverable retains its format throughout the loop. */
-export function requestedSingleArtifact(text: string): { path: string; producer: string; reader: string } | null {
+export function requestedSingleArtifact(text: string, analysis?: ActionIntentAnalysis): { path: string; producer: string; reader: string } | null {
   const fileCount = (text.match(/\.(?:xlsx?|docx?|pptx?|pdf|txt|md|csv|json)(?![a-z])/giu) || []).length;
   const mixedOutput = fileCount > 1 ? mixedTaskOutputPath(text) : '';
-  const intent = mixedOutput ? { operation: 'create', sideEffectClass: 'local_write', target: mixedOutput } : normalizeActionIntent(text);
+  const intent = mixedOutput ? { operation: 'create', sideEffectClass: 'local_write', target: mixedOutput } : normalizeActionIntent(text, analysis);
   if (intent.operation !== 'create' || intent.sideEffectClass !== 'local_write' || !/^(?:[A-Za-z]:[\\/]|\\\\|\/)/u.test(intent.target)) return null;
   // Mixed source/output or multi-deliverable requests need their full plan;
   // do not reinterpret the first filename as the only requested output.
@@ -48,20 +49,27 @@ export function requestedSingleArtifact(text: string): { path: string; producer:
   return selected ? { path: intent.target, producer: selected[0], reader: selected[1] } : null;
 }
 
-export function matchesRequestedArtifactOutput(text: string, outputPath: string): boolean {
-  const requested = requestedSingleArtifact(text);
-  return !requested || canonicalPathIdentity(outputPath) === canonicalPathIdentity(requested.path);
+export function matchesRequestedArtifactOutput(text: string, outputPath: string, analysis?: ActionIntentAnalysis): boolean {
+  const requested = requestedSingleArtifact(text, analysis)?.path || requestedArtifactSaveAsPath(text);
+  return !requested || canonicalPathIdentity(outputPath) === canonicalPathIdentity(requested);
 }
 
-export function requestedArtifactFormatBlockReason(text: string, toolName: string, args: Record<string, unknown>): string | null {
-  const artifact = requestedSingleArtifact(text);
+export function requestedArtifactSaveAsPath(text: string): string {
+  const destination = outputDocumentInstruction(text);
+  if (!destination) return '';
+  const target = buildTaskTargetAnchorProjection({ taskText: destination }).target.path;
+  return /^(?:[A-Za-z]:[\\/]|\\\\|\/)/u.test(target) ? target : '';
+}
+
+export function requestedArtifactFormatBlockReason(text: string, toolName: string, args: Record<string, unknown>, analysis?: ActionIntentAnalysis): string | null {
+  const artifact = requestedSingleArtifact(text, analysis);
   const producers = new Set(['write_file', 'desktop_write_text_file', 'create_xlsx', 'create_docx', 'create_ppt', 'create_pdf']);
   if (!artifact || !producers.has(toolName)) return null;
   if (toolName === artifact.producer || (artifact.producer === 'write_file' && toolName === 'desktop_write_text_file')) {
-    const actualOutput = toolName === 'create_xlsx' ? args.outputPath
+    const actualOutput = ['create_xlsx', 'create_docx'].includes(toolName) ? args.outputPath
       : toolName === 'write_file' ? args.path || args.filePath
         : toolName === 'desktop_write_text_file' ? args.path : undefined;
-    if (['create_xlsx', 'write_file', 'desktop_write_text_file'].includes(toolName)
+    if (['create_xlsx', 'create_docx', 'write_file', 'desktop_write_text_file'].includes(toolName)
       && (!actualOutput || canonicalPathIdentity(String(actualOutput)) !== canonicalPathIdentity(artifact.path))) {
       return `The output must use the exact file path requested in this turn: ${artifact.path}.`;
     }
@@ -121,7 +129,7 @@ export function preservedSourceWriteBlockReason(input: {
       ? input.arguments.path
       : input.toolName === 'create_ppt'
         ? input.arguments.filename
-        : ['create_xlsx', 'modify_xlsx'].includes(input.toolName)
+        : ['create_xlsx', 'modify_xlsx', 'create_docx'].includes(input.toolName)
           ? input.arguments.outputPath
           : undefined;
   const target = String(targetValue || '');

@@ -1,13 +1,13 @@
+import { readSettingRecord, writeSetting } from "../persistence/settings_repository";
 // Time-space utilities — all local computation, zero LLM cost, zero npm deps
 
-import { readDB, writeDB } from '../../db_layer';
+
 
 // ── User timezone ──
 
 export function getUserTimezone(userId: string): string {
   try {
-    const db = readDB();
-    const setting = (db.settings || []).find((s: any) => s.key === `timezone_${userId}`);
+    const setting = readSettingRecord(`timezone_${userId}`);
     return setting?.value || 'Asia/Shanghai';
   } catch {
     return 'Asia/Shanghai';
@@ -16,15 +16,7 @@ export function getUserTimezone(userId: string): string {
 
 export function setUserTimezone(userId: string, tz: string): void {
   new Intl.DateTimeFormat('en', { timeZone: tz }).format();
-  const db = readDB();
-  if (!db.settings) db.settings = [];
-  const existing = db.settings.findIndex((s: any) => s.key === `timezone_${userId}`);
-  if (existing >= 0) {
-    db.settings[existing].value = tz;
-  } else {
-    db.settings.push({ key: `timezone_${userId}`, value: tz });
-  }
-  writeDB(db);
+  writeSetting(`timezone_${userId}`, tz);
 }
 
 function zonedParts(userId: string, instant: Date): number[] {
@@ -39,8 +31,8 @@ function zonedParts(userId: string, instant: Date): number[] {
 }
 
 /** Wall-clock calendar fields for display. Use Date.now() for elapsed time. */
-export function getUserNow(userId: string): Date {
-  const [year, month, day, hour, minute, second] = zonedParts(userId, new Date());
+export function getUserNow(userId: string, instant = new Date()): Date {
+  const [year, month, day, hour, minute, second] = zonedParts(userId, instant);
   return new Date(year, month - 1, day, hour, minute, second);
 }
 
@@ -62,8 +54,8 @@ export function getUserDayRange(userId: string, instant = new Date()): { after: 
 
 // ── Date queries ──
 
-export function getDateString(userId: string): string {
-  const now = getUserNow(userId);
+export function getDateString(userId: string, instant = new Date()): string {
+  const now = getUserNow(userId, instant);
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
@@ -87,18 +79,10 @@ export function isWeekend(userId: string): boolean {
   return day === 0 || day === 6;
 }
 
-export function getCurrentYear(userId: string): number {
-  return getUserNow(userId).getFullYear();
-}
-
 // ── Time intervals ──
 
 export function hoursSince(isoString: string): number {
   return (Date.now() - new Date(isoString).getTime()) / (1000 * 60 * 60);
-}
-
-export function daysSince(isoString: string): number {
-  return hoursSince(isoString) / 24;
 }
 
 export function minutesSince(isoString: string): number {
@@ -118,12 +102,6 @@ export function formatDuration(hours: number): string {
   const months = Math.floor(days / 30);
   if (months < 12) return `${months}个月前`;
   return `${Math.floor(months / 12)}年前`;
-}
-
-export function formatMinutesAgo(minutes: number): string {
-  if (minutes < 1) return '刚刚';
-  if (minutes < 60) return `${Math.round(minutes)}分钟前`;
-  return formatDuration(minutes / 60);
 }
 
 export function getTimeOfDay(userId: string): 'morning' | 'afternoon' | 'evening' | 'night' {
@@ -264,49 +242,4 @@ export function getNearbyHoliday(userId: string): HolidayResult | null {
   }
 
   return best;
-}
-
-export function getHolidayForDate(date: Date): HolidayResult | null {
-  const year = date.getFullYear();
-  const month = date.getMonth() + 1;
-  const day = date.getDate();
-
-  const allHolidays: HolidayEntry[] = [
-    ...GREGORIAN_HOLIDAYS,
-    ...(LUNAR_HOLIDAYS_BY_YEAR[year] || []),
-  ];
-
-  for (const h of allHolidays) {
-    if (h.month === month && h.day === day) {
-      return {
-        name: h.name,
-        nameCN: h.nameCN,
-        mood: h.mood,
-        daysUntil: 0,
-        isToday: true,
-      };
-    }
-  }
-
-  return null;
-}
-
-// ── Same-month-day helper (for "this day in history" queries) ──
-
-export function getMonthDayFromISO(isoString: string): string {
-  const d = new Date(isoString);
-  return `${d.getMonth() + 1}-${d.getDate()}`;
-}
-
-export function getSameMonthDayPast(userId: string): { after: string; before: string; label: string } {
-  const now = getUserNow(userId);
-  const month = now.getMonth() + 1;
-  const day = now.getDate();
-  const year = now.getFullYear();
-
-  const pastYear = year - 1;
-  const after = `${pastYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T00:00:00.000Z`;
-  const before = `${pastYear}-${String(month).padStart(2, '0')}-${String(day + 1).padStart(2, '0')}T00:00:00.000Z`;
-
-  return { after, before, label: `${pastYear}年${month}月${day}日` };
 }

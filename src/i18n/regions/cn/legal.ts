@@ -36,6 +36,7 @@ export const CHINA_LEGAL_DATA_SOURCES: ChinaLegalDataSourceDefinition[] = [
     id: 'qichacha',
     mode: 'api',
     fields: [
+      { keyName: 'QICHACHA_API_KEY', label: 'API Key', kind: 'secret', placeholder: 'QICHACHA_API_KEY', required: true },
       { keyName: 'QICHACHA_APP_KEY', label: 'App Key', kind: 'secret', placeholder: 'QICHACHA_APP_KEY', required: true },
       { keyName: 'QICHACHA_SECRET_KEY', label: 'Secret Key', kind: 'secret', placeholder: 'QICHACHA_SECRET_KEY', required: true },
       { keyName: 'QICHACHA_BASE_URL', label: 'Base URL', kind: 'url', placeholder: 'https://api.qichacha.com' },
@@ -106,6 +107,7 @@ const CHINA_LEGAL_COPY = {
   en: {
     material: 'Material',
     unnamedCase: 'Untitled case',
+    clientPartyName: 'Represented client name',
     assetTraceCaseType: 'Enforcement / asset preservation',
     bidCaseType: 'Tender / bid response',
     contractReviewCaseType: 'Contract review',
@@ -117,12 +119,23 @@ const CHINA_LEGAL_COPY = {
       standaloneResultNotice: 'Results from this run will not be saved to a case',
       legalResearch: 'Legal Research',
       caseFlow: 'Case flow',
+      caseOverview: 'Case overview',
+      advancedOptions: 'Advanced options',
+      strategyAnalysis: 'Strategy analysis',
+      documentCheck: 'Document review',
+      documentCheckDesc: 'Check citations, supporting evidence and delivery conditions. Review the findings before external use.',
+      citationOnly: 'Citations only',
+      toolMode: 'Work content',
+      documentSource: 'Document source',
+      customText: 'Custom text',
+      navigationHint: 'Use each tool as needed. Results remain on their tool pages; archived materials are managed in the overview.',
+      selectMaterial: 'Select a material to read its full text or manage its case record.',
       standaloneLegalTools: 'Legal deliverables',
       caseWorkspace: 'Case workspace',
       documentGeneration: 'Document drafting',
       lawAndCases: 'Statutes & precedents',
       assetClues: 'Asset leads',
-      deliveryVerification: 'Delivery verification',
+      deliveryVerification: 'Citation verification',
       bidProduction: 'Bid production',
       comicDramaCreation: 'Yijing AI Comic Drama',
       externalToolOpenFailed: 'Unable to open the external tool',
@@ -226,7 +239,7 @@ const CHINA_LEGAL_COPY = {
       },
     },
     dataSources: {
-      qichacha: { label: 'Qichacha', boundary: 'Official API integration; falls back to authorized browser collaboration when unconfigured.' },
+      qichacha: { label: 'Qichacha', boundary: 'Official MCP uses only API Key and the fixed provider endpoint. Existing saved keys are reused; no App ID or custom Base URL is required. MCP takes priority when configured.', legacyApi: 'Legacy Open API (separate product)', legacyBoundary: 'Only the legacy API requires App Key plus Secret Key; Base URL is optional. It is used only when no MCP API Key is configured.' },
       tianyancha: { label: 'Tianyancha', boundary: 'Official API integration for company profiles, registry records, and risk lookup.' },
       qixinbao: { label: 'Qixinbao', boundary: 'Configurable authorized API gateway for company profiles; when blank, use the signed-in website only.' },
       tenderData: { label: 'Tender data gateway', boundary: 'Configurable authorized tender/project data gateway; no endpoint or credential is assumed by default.' },
@@ -265,6 +278,7 @@ const CHINA_LEGAL_COPY = {
   zh: {
     material: '材料',
     unnamedCase: '未命名案件',
+    clientPartyName: '我方委托人全称',
     assetTraceCaseType: '执行/财产保全',
     bidCaseType: '投标/招标文件响应',
     contractReviewCaseType: '合同审查',
@@ -275,13 +289,24 @@ const CHINA_LEGAL_COPY = {
       noCaseSelected: '未选择案件',
       standaloneResultNotice: '本次结果不会写入任何案件',
       legalResearch: '法律检索',
-      caseFlow: '案件流程',
+      caseFlow: '案件办理',
+      caseOverview: '案件总览',
+      advancedOptions: '高级选项',
+      strategyAnalysis: '策略分析',
+      documentCheck: '文书核验',
+      documentCheckDesc: '核对文书引用、证据依据和交付条件，核验结果由承办人确认。',
+      citationOnly: '仅检查引用',
+      toolMode: '工作内容',
+      documentSource: '文书来源',
+      customText: '自行填写正文',
+      navigationHint: '各环节按需办理，无需依次执行；结果保留在对应功能页，已归档材料在总览统一管理。',
+      selectMaterial: '选择一份材料查看全文、记录复核或从案件移除。',
       standaloneLegalTools: '法律成果入口',
       caseWorkspace: '案件工作台',
       documentGeneration: '文书生成',
       lawAndCases: '法条与类案',
       assetClues: '财产线索',
-      deliveryVerification: '交付核验',
+      deliveryVerification: '引用校验',
       bidProduction: '标书制作',
       comicDramaCreation: '一镜AI漫剧',
       externalToolOpenFailed: '无法打开外部工具',
@@ -385,7 +410,7 @@ const CHINA_LEGAL_COPY = {
       },
     },
     dataSources: {
-      qichacha: { label: '企查查', boundary: '官方 API 接入；未配置时使用授权网页登录协作。' },
+      qichacha: { label: '企查查', boundary: '官方 MCP 只需 API Key，使用固定官方端点；直接复用已保存密钥，无需 App ID 或自填 Base URL。已配置 MCP 时优先使用。', legacyApi: '旧版开放 API（另一产品）', legacyBoundary: '仅旧版 API 需要 App Key 与 Secret Key，Base URL 可选；只有未配置 MCP API Key 时使用。' },
       tianyancha: { label: '天眼查', boundary: '官方 API 接入；用于企业主体、工商和风险信息查询。' },
       qixinbao: { label: '启信宝', boundary: '预留授权 API 网关；接口和凭证为空时仅使用已登录网页协作，不假定供应商接口。' },
       tenderData: { label: '招投标数据网关', boundary: '预留律所采购的招投标/项目数据接口；未填写端点和凭证时只生成官方网页核验清单。' },
@@ -461,66 +486,6 @@ export function inferChinaLegalDocumentType(title: string, type?: string): strin
   if (/标书|投标|tender|bid/i.test(title)) return '投标书';
   if (/证据目录|evidence\s+(?:index|catalog)/i.test(title) || type === 'evidence') return '证据目录';
   return '法律工作底稿';
-}
-
-export interface ChinaContractRisk {
-  level: 'high' | 'medium' | 'low';
-  clause: string;
-  reason: string;
-  suggestion: string;
-  statuteRef: string;
-}
-
-function inferContractRiskLevel(text: string): ChinaContractRisk['level'] {
-  if (/高风险|重大|无效|违法|解除|赔偿|High/i.test(text)) return 'high';
-  if (/低风险|轻微|提示|Low/i.test(text)) return 'low';
-  return 'medium';
-}
-
-function extractContractField(block: string, labels: string[]): string {
-  for (const label of labels) {
-    const pattern = new RegExp(`(?:^|\\n)\\s*(?:[-*]\\s*)?(?:\\*\\*)?${label}(?:\\*\\*)?\\s*[:：]\\s*([^\\n]+)`, 'i');
-    const match = block.match(pattern);
-    if (match?.[1]) return match[1].trim();
-  }
-  return '';
-}
-
-export function parseChinaContractRisks(text: string): ChinaContractRisk[] {
-  const risks: ChinaContractRisk[] = [];
-  const blocks = text
-    .split(/\n(?=\s*(?:[-*]\s*)?(?:\d+[.、)]\s*)?(?:\[?(?:高风险|中风险|低风险|High Risk|Medium Risk|Low Risk)|风险等级|风险条款|⚠️))/i)
-    .map(item => item.trim())
-    .filter(Boolean);
-
-  for (const block of blocks) {
-    const clause = extractContractField(block, ['条款', '问题', 'Clause'])
-      || block.split('\n')[0].replace(/^\s*(?:[-*]\s*)?(?:\d+[.、)]\s*)?/, '').replace(/^⚠️\s*/, '').slice(0, 120);
-    if (clause.length < 6) continue;
-    risks.push({
-      level: inferContractRiskLevel(block),
-      clause,
-      reason: extractContractField(block, ['理由', '原因', '法律依据', 'Reason']),
-      suggestion: extractContractField(block, ['建议', '修改建议', 'Suggestion']),
-      statuteRef: extractContractField(block, ['法条', '依据', 'Law']),
-    });
-  }
-
-  if (risks.length === 0) {
-    const lines = text.split('\n').map(line => line.trim())
-      .filter(line => /风险|违约|无效|解除|赔偿|管辖|仲裁|责任|瑕疵|Risk/i.test(line))
-      .slice(0, 20);
-    for (const line of lines) {
-      risks.push({
-        level: inferContractRiskLevel(line),
-        clause: line.replace(/^\s*(?:[-*]\s*)?(?:\d+[.、)]\s*)?/, '').replace(/^⚠️\s*/, '').slice(0, 120),
-        reason: '',
-        suggestion: '',
-        statuteRef: '',
-      });
-    }
-  }
-  return risks.slice(0, 20);
 }
 
 export interface ChinaCaseSearchResult {

@@ -80,7 +80,7 @@ async function mapWithConcurrency<T, R>(
 }
 
 /**
- * Ingest a document into an agent's private memory.
+ * Ingest a document into LumiCore-scoped private memory.
  * Each chunk becomes an internalized memory with source citation metadata.
  */
 export async function ingestDocument(
@@ -236,7 +236,7 @@ export async function ingestDocument(
     assertSourceCurrent();
   }
 
-  console.log(`[RAG] Ingested "${documentTitle}" -> ${chunks.length} chunks for agent ${agentId}`);
+  console.log(`[RAG] Ingested "${documentTitle}" -> ${chunks.length} chunks for Lumi scope ${agentId}`);
   return { chunkCount: chunks.length, memoryIds, manifest };
 }
 
@@ -246,7 +246,7 @@ export async function verifyIngestedDocument(
   agentId: string,
   manifest: KnowledgeIngestionManifest,
   cases: KnowledgeGoldenCaseDefinition[],
-  scope: { domain?: string; orgId?: string; signal?: AbortSignal } = {},
+  scope: { domain?: string; orgId?: string; signal?: AbortSignal; semanticTimeoutMs?: number } = {},
 ): Promise<KnowledgeIngestionManifest> {
   const retrieval = await runKnowledgeGoldenEvaluation({
     cases,
@@ -286,7 +286,7 @@ function buildSourceMetadataKeywords(metadata?: MarkdownKnowledgeMetadata): stri
 }
 
 /**
- * Retrieve relevant chunks for a query from agent-scoped knowledge.
+ * Retrieve relevant chunks for a query from LumiCore-scoped knowledge.
  * Each result includes a citation string tracking source document and chunk position.
  */
 export async function retrieveChunks(
@@ -294,7 +294,7 @@ export async function retrieveChunks(
   agentId: string,
   query: string,
   limit = 5,
-  scope: { domain?: string; orgId?: string; signal?: AbortSignal } = {},
+  scope: { domain?: string; orgId?: string; signal?: AbortSignal; semanticTimeoutMs?: number } = {},
 ): Promise<Array<Memory & { citation: string }>> {
   const requestedLimit = Math.max(1, Math.min(50, Number(limit) || 5));
   const memories = await queryMemoriesVector({
@@ -310,6 +310,7 @@ export async function retrieveChunks(
     orgId: scope.orgId,
     useVector: true,
     signal: scope.signal,
+    semanticTimeoutMs: scope.semanticTimeoutMs,
   });
 
   return memories

@@ -1,11 +1,13 @@
-import { readDB, writeDB } from '../../db_layer';
-import { getCircuitStatus, type CircuitState } from '../cloud/circuit_breaker';
+import { readSettingJson, writeSetting } from '../persistence/settings_repository';
+import { createProviderRuntimeObservationReader, findProviderRuntimeObservation } from './model_routing_receipts';
+import { getCircuitStatus, getProviderConfigurationEpoch, type CircuitState } from '../cloud/circuit_breaker';
 
 export interface ProviderProbeRecord {
   provider: string;
   model: string;
   ok: boolean;
   testedAt: string;
+  configurationEpoch?: string;
   latencyMs?: number;
   error?: string;
   errorCategory?: string;
@@ -29,6 +31,7 @@ export interface ProviderRuntimeObservation {
   model: string;
   status: 'succeeded' | 'failed' | 'skipped';
   observedAt: string;
+  configurationEpoch?: string;
   durationMs?: number;
   reason?: string;
   errorCategory?: string;
@@ -42,59 +45,23 @@ function providerProbeKey(provider: string): string {
 }
 
 export function readProviderProbe(provider: string): ProviderProbeRecord | null {
-  try {
-    const db = readDB();
-    const setting = (db.settings || []).find((item: any) => item.key === providerProbeKey(provider));
-    return setting?.value ? JSON.parse(setting.value) : null;
-  } catch {
-    return null;
-  }
+  return readSettingJson<ProviderProbeRecord>(providerProbeKey(provider));
 }
 
-export function saveProviderProbe(probe: ProviderProbeRecord): void {
-  try {
-    const db = readDB();
-    if (!db.settings) db.settings = [];
-    const key = providerProbeKey(probe.provider);
-    const value = JSON.stringify(probe);
-    const setting = db.settings.find((item: any) => item.key === key);
-    if (setting) setting.value = value;
-    else db.settings.push({ key, value });
-    writeDB(db);
-  } catch {}
+export function saveProviderProbe(probe: ProviderProbeRecord): boolean {
+  const configurationEpoch = probe.configurationEpoch ?? getProviderConfigurationEpoch(probe.provider);
+  if (configurationEpoch !== getProviderConfigurationEpoch(probe.provider)) return false;
+  writeSetting(providerProbeKey(probe.provider), JSON.stringify({ ...probe, configurationEpoch }));
+  return true;
 }
 
 /** Latest durable model-attempt evidence, without prompt, response, or error text. */
 export function readProviderRuntimeObservation(provider: string, model: string): ProviderRuntimeObservation | null {
-  try {
-    const db = readDB();
-    const receipts = Array.isArray(db.modelRoutingReceipts) ? db.modelRoutingReceipts : [];
-    for (let receiptIndex = receipts.length - 1; receiptIndex >= 0; receiptIndex -= 1) {
-      const receipt = receipts[receiptIndex] as any;
-      const attempts = Array.isArray(receipt?.attempts) ? receipt.attempts : [];
-      for (let attemptIndex = attempts.length - 1; attemptIndex >= 0; attemptIndex -= 1) {
-        const attempt = attempts[attemptIndex];
-        if (String(attempt?.provider || '') !== provider || String(attempt?.model || '') !== model) continue;
-        // Policy/circuit skips and user cancellation did not test the model.
-        // They must not hide the actual failure (or recovery) behind them.
-        if (!['succeeded', 'failed'].includes(attempt.status) || attempt.reason === 'cancelled') continue;
-        return {
-          provider,
-          model,
-          status: attempt.status,
-          observedAt: String(attempt.completedAt || receipt.completedAt || ''),
-          ...(attempt.durationMs !== undefined ? { durationMs: Math.max(0, Math.trunc(Number(attempt.durationMs) || 0)) } : {}),
-          ...(attempt.reason ? { reason: String(attempt.reason).slice(0, 100) } : {}),
-          ...(attempt.errorCategory ? { errorCategory: String(attempt.errorCategory).slice(0, 64) } : {}),
-        };
-      }
-    }
-  } catch {}
-  return null;
+  return findProviderRuntimeObservation(provider, model);
 }
 
 function probeAppliesToModel(probe: ProviderProbeRecord | null, model: string): boolean {
-  if (!probe) return false;
+  if (!probe || probe.configurationEpoch !== getProviderConfigurationEpoch(probe.provider)) return false;
   const probedModel = String(probe.model || '').trim();
   return !probedModel || probedModel === String(model || '').trim();
 }
@@ -121,17 +88,32 @@ export function getProviderCircuitState(provider: string, model = ''): CircuitSt
  * Separate configuration from observed health. A key/client is necessary to
  * attempt a provider, but it is not proof that the provider can answer.
  */
-export function assessProviderAvailability(input: {
+type ProviderAvailabilityInput = {
   provider: string;
   model: string;
   configured: boolean;
   runtimeHealthy?: boolean;
   now?: number;
-}): ProviderAvailability {
+};
+
+/** A fresh request-scoped snapshot; never cache health across configuration changes. */
+export function createProviderAvailabilityReader(): (input: ProviderAvailabilityInput) => ProviderAvailability {
+  const readObservation = createProviderRuntimeObservationReader();
+  return input => assessProviderAvailabilityFromSnapshot(input, readObservation);
+}
+
+export function assessProviderAvailability(input: ProviderAvailabilityInput): ProviderAvailability {
+  return createProviderAvailabilityReader()(input);
+}
+
+function assessProviderAvailabilityFromSnapshot(input: ProviderAvailabilityInput, readObservation: typeof findProviderRuntimeObservation): ProviderAvailability {
   const now = input.now ?? Date.now();
   const lastProbe = readProviderProbe(input.provider);
-  const lastObservation = readProviderRuntimeObservation(input.provider, input.model);
+  const lastObservation = readObservation(input.provider, input.model);
   const applicableProbe = probeAppliesToModel(lastProbe, input.model) ? lastProbe : null;
+  const configurationEpoch = getProviderConfigurationEpoch(input.provider);
+  const observation = lastObservation?.configurationEpoch === configurationEpoch ? lastObservation
+    : readObservation(input.provider, input.model, configurationEpoch);
   const circuitState = getProviderCircuitState(input.provider, input.model);
 
   if (!input.configured) {
@@ -171,10 +153,10 @@ export function assessProviderAvailability(input: {
     };
   }
 
-  const observationAgeMs = lastObservation
-    ? timestampAgeMs(lastObservation.observedAt, now)
+  const observationAgeMs = observation
+    ? timestampAgeMs(observation.observedAt, now)
     : Number.POSITIVE_INFINITY;
-  if (lastObservation?.status === 'failed' && observationAgeMs < FAILED_PROBE_BACKOFF_MS) {
+  if (observation?.status === 'failed' && observationAgeMs < FAILED_PROBE_BACKOFF_MS) {
     return {
       configured: true,
       available: false,
@@ -188,7 +170,7 @@ export function assessProviderAvailability(input: {
   }
   const positiveEvidence = input.runtimeHealthy === true
     || Boolean(applicableProbe?.ok && probeAgeMs(applicableProbe, now) < POSITIVE_PROBE_FRESH_MS)
-    || Boolean(lastObservation?.status === 'succeeded' && observationAgeMs < POSITIVE_PROBE_FRESH_MS);
+    || Boolean(observation?.status === 'succeeded' && observationAgeMs < POSITIVE_PROBE_FRESH_MS);
   const successReason = input.runtimeHealthy
     ? 'runtime_detected'
     : applicableProbe?.ok && probeAgeMs(applicableProbe, now) < POSITIVE_PROBE_FRESH_MS

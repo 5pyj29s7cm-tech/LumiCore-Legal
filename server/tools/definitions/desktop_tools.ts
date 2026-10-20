@@ -4,6 +4,7 @@ import { assertValidCommandForHost } from '../command_platform';
 import { desktopFingerprintMatchesRequestedTarget } from '../../desktop/execution_plan';
 import { parseDesktopWindowFingerprint } from '../../desktop/execution_runtime';
 import crypto from 'node:crypto';
+import { assertTextFileFormat } from '../text_file_format';
 
 function parseRelayPayload(value: unknown): Record<string, any> | null {
   let current = value;
@@ -241,7 +242,7 @@ export function registerDesktopTools(registry: ToolRegistry): void {
   registry.register({
     name: 'desktop_capability_status',
     description:
-      'Read native desktop readiness by capability: app discovery and launch, screen capture, input control, and macOS Accessibility/Screen Recording authorization. Use this before diagnosing desktop permissions. There is no separate Lumi external-app automation switch.',
+      'Read native desktop readiness by capability: app discovery and launch, screen capture, input control, and macOS Accessibility/Screen Recording authorization. Use this before diagnosing desktop permissions. Internal/External is an execution preference independent of wallpaper and does not replace native desktop permissions or exact action confirmation.',
     parameters: {
       type: 'object',
       properties: {},
@@ -392,6 +393,7 @@ export function registerDesktopTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'desktop_write_text_file',
+    preflight: assertTextFileFormat,
     description:
       'Write an exact text payload to an exact path on the user\'s real desktop machine through the native client. This is the cross-platform file semantic for Desktop/Documents and other host paths; never replace it with a shell command. Choose fail_if_exists to protect an existing file or replace only when overwriting is explicitly intended. Returns a native byte-level read-back receipt. A one-time user confirmation is always required.',
     parameters: {
@@ -449,6 +451,9 @@ export function registerDesktopTools(registry: ToolRegistry): void {
         cwd: { type: 'string', description: 'Working directory for the command. Leave empty for default.' },
       },
       required: ['command'],
+    },
+    preflight: (args, context) => {
+      assertValidCommandForHost(args.command, context?.desktopPlatform || process.platform);
     },
     handler: desktopRunCommand,
     permission: 'user',

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   makeLLMCallStreamingDirect,
+  makeLLMCallDirect,
   type ModelAttemptTimeouts,
 } from '../server/llm/providers';
 import {
@@ -99,6 +100,12 @@ function callRelay(
   );
 }
 
+function callBufferedRelay(client: any, attemptTimeouts: Partial<ModelAttemptTimeouts>, signal?: AbortSignal) {
+  return makeLLMCallDirect([{ role: 'user', content: 'test' }], [],
+    { provider: 'relay', model: 'aliyun/qwen-plus', signal, attemptTimeouts: { ...generous, ...attemptTimeouts } },
+    () => null, () => null, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, () => client);
+}
+
 afterEach(() => {
   resetCircuit();
   setCircuitBreakerConfig({
@@ -116,12 +123,12 @@ describe('provider-independent streaming attempt supervision', () => {
       return { choices: [{ message: { role: 'assistant', content: 'complete official answer' } }] };
     });
     const chunks: string[] = [];
-    await expect(callRelay({ chat: { completions: { create } } }, {
+    await expect(callBufferedRelay({ chat: { completions: { create } } }, {
       requestMs: 10, semanticContentMs: 100,
-    }, { onChunk: chunk => chunks.push(chunk) })).resolves.toMatchObject({ text: 'complete official answer' });
+    })).resolves.toMatchObject({ text: 'complete official answer' });
     expect(create).toHaveBeenCalledTimes(1);
-    expect(create.mock.calls[0]?.[0]).toMatchObject({ stream: false });
-    expect(chunks).toEqual(['complete official answer']);
+    expect(create.mock.calls[0]?.[0].stream).not.toBe(true);
+    expect(chunks).toEqual([]);
   });
 
   it('still bounds a hung non-stream official answer and suppresses its late output', async () => {
@@ -132,9 +139,9 @@ describe('provider-independent streaming attempt supervision', () => {
       return new Promise(resolve => { complete = resolve; });
     });
     const onChunk = vi.fn();
-    await expect(callRelay({ chat: { completions: { create } } }, {
+    await expect(callBufferedRelay({ chat: { completions: { create } } }, {
       requestMs: 10, semanticContentMs: 25,
-    }, { onChunk })).rejects.toMatchObject({ stage: 'semantic_content' });
+    })).rejects.toMatchObject({ stage: 'semantic_content' });
     expect(signal.aborted).toBe(true);
     complete({ choices: [{ message: { content: 'too late' } }] });
     await delay(1);
@@ -146,7 +153,7 @@ describe('provider-independent streaming attempt supervision', () => {
     const controller = new AbortController();
     const create = vi.fn(async () => new Promise<never>(() => {}));
     const onChunk = vi.fn();
-    const pending = callRelay({ chat: { completions: { create } } }, {}, { signal: controller.signal, onChunk });
+    const pending = callBufferedRelay({ chat: { completions: { create } } }, {}, controller.signal);
     setTimeout(() => controller.abort(new DOMException('user stopped', 'AbortError')), 5);
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     expect(getCircuitStatus()).toEqual([]);
@@ -276,7 +283,7 @@ describe('provider-independent streaming attempt supervision', () => {
     expect(isCircuitHealthy('deepseek', 'generic-model')).toBe(true);
   });
 
-  it('falls back to one non-stream relay request when SSE fails before semantic output', async () => {
+  it('keeps one relay SSE attempt when transport fails before semantic output', async () => {
     const requests: any[] = [];
     const client = {
       chat: {
@@ -299,50 +306,19 @@ describe('provider-independent streaming attempt supervision', () => {
     const chunks: string[] = [];
 
     await expect(callRelay(client, {}, { relayStreaming: true, onChunk: chunk => chunks.push(chunk) }))
-      .resolves.toMatchObject({ text: 'relay answer', toolCalls: null });
-    expect(requests.map(request => request.stream)).toEqual([true, false]);
-    expect(chunks).toEqual(['relay answer']);
+      .rejects.toThrow('chat_stream_error');
+    expect(requests.map(request => request.stream)).toEqual([true]);
+    expect(chunks).toEqual([]);
   });
 
-  it('keeps structured tool calls from the relay non-stream fallback', async () => {
-    const requests: any[] = [];
-    const client = {
-      chat: {
-        completions: {
-          create: vi.fn(async (params: any) => {
-            requests.push(params);
-            if (params.stream) {
-              return (async function* () {
-                yield { choices: [{ delta: {} }] };
-                throw new Error('chat_stream_error');
-              })();
-            }
-            return {
-              choices: [{
-                message: {
-                  role: 'assistant',
-                  content: null,
-                  tool_calls: [{
-                    id: 'call-1',
-                    type: 'function',
-                    function: { name: 'lookup', arguments: '{"q":"lumi"}' },
-                  }],
-                },
-              }],
-            };
-          }),
-        },
-      },
-    };
-
-    const result = await callRelay(client, {}, {
-      relayStreaming: true,
-      toolDeclarations: [{
-        type: 'function',
-        function: { name: 'lookup', description: 'Lookup', parameters: { type: 'object' } },
-      }],
-    });
-    expect(requests.map(request => request.stream)).toEqual([true, false]);
+  it('keeps structured tool calls from the single successful relay stream', async () => {
+    const client = { chat: { completions: { create: vi.fn(async (_params: any) => (async function* () {
+      yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', function: { name: 'lookup', arguments: '{"q":"' } }] } }] };
+      yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'lumi"}' } }] }, finish_reason: 'tool_calls' }] };
+    })()) } } };
+    const result = await callRelay(client, {}, { toolDeclarations: [{ type: 'function', function: { name: 'lookup', description: 'Lookup', parameters: { type: 'object' } } }] });
+    expect(client.chat.completions.create).toHaveBeenCalledOnce();
+    expect(client.chat.completions.create.mock.calls[0][0]).toMatchObject({ stream: true });
     expect(result.text).toBeNull();
     expect(result.toolCalls).toEqual([{ id: 'call-1', name: 'lookup', arguments: { q: 'lumi' } }]);
   });
@@ -366,8 +342,8 @@ describe('provider-independent streaming attempt supervision', () => {
       },
     };
 
-    await expect(callRelay(client, {}, { relayStreaming: true })).resolves.toMatchObject({ text: 'in-band recovered' });
-    expect(requests.map(request => request.stream)).toEqual([true, false]);
+    await expect(callRelay(client, {}, { relayStreaming: true })).rejects.toThrow('stream unavailable');
+    expect(requests.map(request => request.stream)).toEqual([true]);
   });
 
   it('does not replay a relay request after visible output has started', async () => {
@@ -393,14 +369,14 @@ describe('provider-independent streaming attempt supervision', () => {
     expect(chunks).toEqual(['partial']);
   });
 
-  it('uses one non-stream relay request by default when the gateway SSE contract is not enabled', async () => {
+  it('uses the verified relay SSE contract by default with no transport replay', async () => {
     const requests: any[] = [];
     const client = {
       chat: {
         completions: {
           create: vi.fn(async (params: any) => {
             requests.push(params);
-            return { choices: [{ message: { role: 'assistant', content: 'default relay answer' } }] };
+            return (async function* () { yield { choices: [{ delta: { content: 'default relay answer' }, finish_reason: 'stop' }] }; })();
           }),
         },
       },
@@ -410,7 +386,7 @@ describe('provider-independent streaming attempt supervision', () => {
     await expect(callRelay(client, {}, { onChunk: chunk => chunks.push(chunk) }))
       .resolves.toMatchObject({ text: 'default relay answer', toolCalls: null });
     expect(requests).toHaveLength(1);
-    expect(requests[0].stream).toBe(false);
+    expect(requests[0].stream).toBe(true);
     expect(chunks).toEqual(['default relay answer']);
   });
 });

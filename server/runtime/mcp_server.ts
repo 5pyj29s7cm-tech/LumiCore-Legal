@@ -1,3 +1,4 @@
+import { type ProviderGetters as SharedProviderGetters } from "../llm/provider_getters";
 // MCP Server + LAP + remote device setup
 // Shared between personal and org servers
 import express from "express";
@@ -19,11 +20,7 @@ export function setupMcpServer(
   app: express.Express,
   server: http.Server,
   io: Server,
-  llm: {
-    getDeepSeek: any; getGemini: any; getOpenAI: any; getAnthropic: any; getQwen: any;
-    getOllama?: any; getLmStudio?: any; getArk?: any; getXiaomi?: any;
-    getKimi?: any; getGlm?: any; getRelay?: any;
-  },
+  llm: SharedProviderGetters & Required<Pick<SharedProviderGetters, 'getOpenAI' | 'getAnthropic' | 'getQwen'>>,
   __dirname: string,
 ): () => Promise<void> {
   const lifecycle = new McpCallLifecycle();
@@ -71,7 +68,7 @@ export function setupMcpServer(
   console.log('[MCP Server] Lumi MCP server ready at /mcp/sse + /mcp/ws');
 
   attachLAPWebSocket(server);
-  console.log('[LAP] Agent protocol ready at /lap');
+  console.log('[LAP] Protocol ready at /lap');
 
   // Connect to remote devices from the runtime MCP config in the user data dir.
   // Outbound devices keep a dedicated identity and therefore cannot inherit a

@@ -4,11 +4,14 @@ export type MediaArtifactReceipt = {
   version: 1;
   verified: true;
   verificationStatus: 'verified';
+  /** Container validation does not imply the requested size/duration matched. */
+  settingsMatch?: boolean;
   toolName: 'generate_image' | 'ai_edit_image' | 'generate_video';
   settings: {
     size?: string;
     count?: number;
     duration?: number;
+    hasAudio?: boolean;
     hasReference: boolean;
     hasSource?: boolean;
   };
@@ -83,10 +86,12 @@ export function sanitizeMediaArtifactReceipt(value: unknown): MediaArtifactRecei
     verified: true,
     verificationStatus: 'verified',
     toolName: candidate.toolName,
+    ...(typeof candidate.settingsMatch === 'boolean' ? { settingsMatch: candidate.settingsMatch } : {}),
     settings: {
       ...(size ? { size } : {}),
       ...(kind === 'image' && Number.isInteger(count) ? { count: Math.min(4, Math.max(1, count)) } : {}),
       ...(kind === 'video' && Number.isFinite(duration) ? { duration: Math.min(120, Math.max(1, duration)) } : {}),
+      ...(kind === 'video' && typeof rawSettings.hasAudio === 'boolean' ? { hasAudio: rawSettings.hasAudio } : {}),
       hasReference: rawSettings.hasReference === true,
       ...(candidate.toolName === 'ai_edit_image' && typeof rawSettings.hasSource === 'boolean'
         ? { hasSource: rawSettings.hasSource }
@@ -108,7 +113,9 @@ export function buildMediaArtifactReceipt(
   error?: unknown,
 ): MediaArtifactReceipt | undefined {
   const recoveringImage = toolName === 'get_image_generation_status';
+  const recoveringVideo = toolName === 'get_video_generation_status';
   if (recoveringImage) toolName = 'generate_image';
+  if (recoveringVideo) toolName = 'generate_video';
   const kind = MEDIA_TOOL_KIND.get(String(toolName || ''));
   if (!kind || error) return undefined;
   const payload = parseResult(result);
@@ -161,21 +168,25 @@ export function buildMediaArtifactReceipt(
     ? payload.generationSettings as Record<string, unknown> : undefined;
   const parameters: Record<string, unknown> = recoveringImage
     ? { size: storedSettings?.size, n: storedSettings?.count }
+    : recoveringVideo ? payload.requestedSettings || {}
     : args && typeof args === 'object' ? args as Record<string, unknown> : {};
-  const size = String(parameters.size || '').trim().slice(0, 40) || undefined;
+  const measured = kind === 'video' && typeof payload.settingsMatch === 'boolean';
+  const size = String((measured ? payload.actualSettings?.size : parameters.size) || '').trim().slice(0, 40) || undefined;
   const count = Number(parameters.n);
-  const duration = Number(parameters.duration);
+  const duration = Number(measured ? payload.actualSettings?.duration : parameters.duration);
 
   return sanitizeMediaArtifactReceipt({
     version: 1,
     verified: true,
     verificationStatus: 'verified',
     toolName: toolName as MediaArtifactReceipt['toolName'],
+    ...(measured ? { settingsMatch: payload.settingsMatch } : {}),
     settings: {
       ...(size ? { size } : {}),
       ...(kind === 'image' && Number.isInteger(count) ? { count } : {}),
       ...(kind === 'video' && Number.isFinite(duration) ? { duration } : {}),
-      hasReference: Boolean(String(parameters.first_frame_image || '').trim()),
+      ...(measured && typeof payload.actualSettings?.hasAudio === 'boolean' ? { hasAudio: payload.actualSettings.hasAudio } : {}),
+      hasReference: recoveringVideo ? payload.inputReferenceAccepted === true : Boolean(String(parameters.first_frame_image || '').trim()),
       ...(toolName === 'ai_edit_image'
         ? { hasSource: Boolean(String(parameters.filePath || '').trim()) }
         : {}),

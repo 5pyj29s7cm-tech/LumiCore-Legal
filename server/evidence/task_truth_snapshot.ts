@@ -1,5 +1,7 @@
+import { parseStoredObject as parseObject, parseStoredArray as parseArray } from '../tools/receipt_payload';
+import { cloneDatabaseValue } from '../db/snapshot_changes';
 import { createHash, randomUUID } from 'node:crypto';
-import { readDB } from '../../db_layer';
+import { readDatabaseTables } from '../../db_layer';
 import {
   buildTransportNeutralConfirmationScope,
   getPendingConfirmationDurably,
@@ -169,30 +171,6 @@ function iso(value: unknown, code: string): string {
   const text = required(value, code, 80);
   if (!Number.isFinite(Date.parse(text))) throw new Error(code);
   return new Date(text).toISOString();
-}
-
-function parseObject(value: unknown): Record<string, any> {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return value as Record<string, any>;
-  }
-  if (typeof value !== 'string' || !value.trim()) return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function parseArray(value: unknown): unknown[] {
-  if (Array.isArray(value)) return value;
-  if (typeof value !== 'string' || !value.trim()) return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
 }
 
 function exactRow<T extends Record<string, any>>(
@@ -722,7 +700,7 @@ export function buildTaskTruthSnapshotFromSources(
 }
 
 function cloneDb(value: any): any {
-  if (typeof structuredClone === 'function') return structuredClone(value);
+  if (typeof structuredClone === 'function') return cloneDatabaseValue(value);
   return JSON.parse(JSON.stringify(value));
 }
 
@@ -733,7 +711,7 @@ function cloneDb(value: any): any {
 export async function captureTaskTruthSnapshot(
   input: CaptureTaskTruthSnapshotInput,
 ): Promise<TaskTruthSnapshot> {
-  const db = cloneDb(readDB());
+  const db = cloneDb(readDatabaseTables(["conversationActionReceipts","conversationActionTasks","conversationActionTurns","conversations","interactions","modelRoutingReceipts"]));
   const task = exactRow<Record<string, any>>(
     db.conversationActionTasks,
     row => row.id === input.taskId
@@ -741,7 +719,7 @@ export async function captureTaskTruthSnapshot(
       && row.userId === input.userId,
     'task_truth_snapshot_task_missing',
   );
-  const turn = exactRow<Record<string, any>>(
+  exactRow<Record<string, any>>(
     db.conversationActionTurns,
     row => row.requestId === input.requestId
       && row.conversationId === input.conversationId

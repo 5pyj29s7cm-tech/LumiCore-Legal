@@ -1,7 +1,10 @@
+import { providerGetterArguments } from "../../llm/provider_getters";
 import { ToolRegistry } from '../registry';
 import { analyzeScreen } from '../../llm/adapter';
 import { DEFAULT_VISION_MODELS, getUserPreferredVision, type VisionProvider } from '../../llm/vision_preferences';
 import { getDataPath } from '../../config/data_path';
+import { listOfficialApiModels } from '../../llm/official_api';
+import { requireNotStrict } from '../../config/privacy';
 import {
   arbitrateCadVisualVerification,
   buildCadGeometryVerificationSvg,
@@ -189,20 +192,6 @@ function resolveVisionProvider(_args: Record<string, any>, context?: any): Visio
   return null;
 }
 
-function visionModelFor(provider: VisionProvider): string {
-  switch (provider) {
-    case 'qwen': return 'qwen-vl-max';
-    case 'ark': return 'doubao-1-5-vision-pro-32k';
-    case 'ollama': return 'qwen2.5vl:7b';
-    case 'lmstudio': return 'local-vision-model';
-    case 'relay': return DEFAULT_VISION_MODELS.relay;
-    case 'openai': return 'gpt-4o';
-    case 'gemini':
-    default:
-      return 'gemini-2.0-flash';
-  }
-}
-
 function resolveReadableImagePath(input: string): string {
   const raw = String(input || '').trim();
   if (!raw) throw new Error('imagePath is required.');
@@ -235,6 +224,10 @@ async function ocrScreen(args: Record<string, any>, context?: any): Promise<stri
     throw new Error('OCR tools require the Tauri desktop app');
   }
   const query = args.query || args.prompt || 'Describe what is visible on the screen in detail. Include all text, UI elements, error messages, and anything the user might need to know.';
+  // i18n-allow: Coordinate-query grammar; actual control uses the grounded desktop loop.
+  if (/(?:坐标|像素位置|coordinates?|bounding\s*box)/iu.test(query)) {
+    return JSON.stringify({ status: 'requires_grounded_desktop_control', nextTool: 'computer_use', note: 'ocr_screen reads visible text and state; its prose cannot ground click coordinates. Use desktop_ui_snapshot selectors if available, otherwise computer_use with the original task and target_application. That tool maps screenshot coordinates across monitors and verifies each action. Do not repeat coordinate OCR requests.' });
+  }
   const base64 = await context.desktopRelay('desktop_capture_screen', { quality: 70 });
 
   // Resolve vision-capable provider
@@ -244,10 +237,12 @@ async function ocrScreen(args: Record<string, any>, context?: any): Promise<stri
     return JSON.stringify({ format: 'screenshot_base64', data: base64, note: 'No configured visual-perception model is available. Configure one in Settings > World Model > Visual Perception.' });
   }
 
-  const model = getUserPreferredVision(context?.userId || 'anonymous').model || visionModelFor(provider);
+  const model = getUserPreferredVision(context?.userId || 'anonymous').model || DEFAULT_VISION_MODELS[provider];
   try {
-    const description = await analyzeScreen(base64, query, { provider, model, userId: context?.userId || 'anonymous' }, g.getDeepSeek, g.getGemini, g.getOpenAI, g.getAnthropic, g.getQwen, g.getOllama, g.getLmStudio, g.getArk, g.getXiaomi, g.getKimi, g.getGlm, g.getRelay);
-    return description;
+    const description = await analyzeScreen(base64, query, { provider, model, userId: context?.userId || 'anonymous', signal: context?.executionSignal, dataRoutingPolicy: context?.dataRoutingPolicy }, ...providerGetterArguments(g));
+    // Reading an error message is a successful observation. Keep the tool's
+    // outcome separate from arbitrary words in the observed page content.
+    return JSON.stringify({ status: 'observed', description, provider, model });
   } catch (err: any) {
     return JSON.stringify({ format: 'screenshot_base64', data: base64, error: err.message });
   }
@@ -267,10 +262,10 @@ async function ocrRegion(args: Record<string, any>, context?: any): Promise<stri
     return JSON.stringify({ format: 'screenshot_base64', data: base64, note: 'No configured visual-perception model is available. Configure one in Settings > World Model > Visual Perception.' });
   }
 
-  const model = getUserPreferredVision(context?.userId || 'anonymous').model || visionModelFor(provider);
+  const model = getUserPreferredVision(context?.userId || 'anonymous').model || DEFAULT_VISION_MODELS[provider];
   try {
-    const description = await analyzeScreen(base64, query, { provider, model, userId: context?.userId || 'anonymous' }, g.getDeepSeek, g.getGemini, g.getOpenAI, g.getAnthropic, g.getQwen, g.getOllama, g.getLmStudio, g.getArk, g.getXiaomi, g.getKimi, g.getGlm, g.getRelay);
-    return description;
+    const description = await analyzeScreen(base64, query, { provider, model, userId: context?.userId || 'anonymous', signal: context?.executionSignal, dataRoutingPolicy: context?.dataRoutingPolicy }, ...providerGetterArguments(g));
+    return JSON.stringify({ status: 'observed', description, provider, model });
   } catch (err: any) {
     return JSON.stringify({ format: 'screenshot_base64', data: base64, error: err.message });
   }
@@ -280,8 +275,17 @@ export async function ocrImageFile(args: Record<string, any>, context?: any): Pr
   const imagePath = resolveReadableImagePath(args.imagePath || args.path || args.filePath);
   const query = args.query || args.prompt || 'Analyze this image in detail. If it is a drawing, extract dimensions, layout, labels, and any structure that can guide a CAD draft.';
 
+  context?.executionSignal?.throwIfAborted();
+  const requestedModel = typeof args.model === 'string' ? args.model.trim() : '';
+  if (args.model !== undefined && (!requestedModel || requestedModel.length > 200)) throw new Error('model must be a nonempty model ID of at most 200 characters.');
   const g = context?.llmGetters || {};
   const provider = resolveVisionProvider(args, context);
+  if (requestedModel) {
+    requireNotStrict('OCR model selection');
+    if (provider !== 'relay' || context?.dataRoutingPolicy === 'local_only') throw new Error('An explicit OCR model requires the configured official cloud provider and cloud-allowed processing.');
+    const catalog = await listOfficialApiModels({ signal: context?.executionSignal });
+    if (!catalog.byRole.vision?.includes(requestedModel)) throw new Error('The requested model is not an admitted visual model of the configured provider.');
+  }
   if (!provider) {
     return JSON.stringify({
       path: imagePath,
@@ -294,13 +298,14 @@ export async function ocrImageFile(args: Record<string, any>, context?: any): Pr
   const buffer = await sharp(imagePath)
     .rotate()
     .resize({ width: 1800, height: 1800, fit: 'inside', withoutEnlargement: true })
-    .jpeg({ quality: 85 })
+    .png()
     .toBuffer();
   const base64 = buffer.toString('base64');
-  const model = getUserPreferredVision(context?.userId || 'anonymous').model || visionModelFor(provider);
+  const model = requestedModel || getUserPreferredVision(context?.userId || 'anonymous').model || DEFAULT_VISION_MODELS[provider];
   try {
-    const imagePayload = JSON.stringify({ image_base64: base64, format: 'jpeg', width: meta.width || null, height: meta.height || null });
-    const description = await analyzeScreen(imagePayload, query, { provider, model, userId: context?.userId || 'anonymous' }, g.getDeepSeek, g.getGemini, g.getOpenAI, g.getAnthropic, g.getQwen, g.getOllama, g.getLmStudio, g.getArk, g.getXiaomi, g.getKimi, g.getGlm, g.getRelay);
+    const imagePayload = JSON.stringify({ image_base64: base64, format: 'png', width: meta.width || null, height: meta.height || null });
+    const description = await analyzeScreen(imagePayload, query, { provider, model, userId: context?.userId || 'anonymous', signal: context?.executionSignal, dataRoutingPolicy: context?.dataRoutingPolicy,
+      noImplicitFailover: !!requestedModel, source: context?.source, requestId: context?.requestId, conversationId: context?.conversationId }, ...providerGetterArguments(g));
     return JSON.stringify({
       path: imagePath,
       width: meta.width || null,
@@ -728,18 +733,7 @@ async function runFloorplanVisionPass(input: {
         maxTokens: input.maxTokens,
         responseFormat,
       },
-      input.getters.getDeepSeek,
-      input.getters.getGemini,
-      input.getters.getOpenAI,
-      input.getters.getAnthropic,
-      input.getters.getQwen,
-      input.getters.getOllama,
-      input.getters.getLmStudio,
-      input.getters.getArk,
-      input.getters.getXiaomi,
-      input.getters.getKimi,
-      input.getters.getGlm,
-      input.getters.getRelay,
+      ...providerGetterArguments(input.getters),
     );
     try {
       analysis = await call('json_object');
@@ -779,7 +773,7 @@ export async function floorplanExtractGeometry(args: Record<string, any>, contex
   const preparedSource = await prepareFloorplanSourceImage(imagePath);
   const buffer = preparedSource.buffer;
   const base64 = buffer.toString('base64');
-  const model = getUserPreferredVision(context?.userId || 'anonymous').model || visionModelFor(provider);
+  const model = getUserPreferredVision(context?.userId || 'anonymous').model || DEFAULT_VISION_MODELS[provider];
   const projectName = String(args.projectName || args.title || '').trim();
   const knownScale = String(args.knownScale || args.scale || '').trim();
   const knownDimensions = String(args.knownDimensions || args.dimensions || '').trim();
@@ -1106,7 +1100,7 @@ export function registerOCRTools(registry: ToolRegistry): void {
   registry.register({
     name: 'ocr_screen',
     description:
-      'Capture a screenshot of the user\'s screen and analyze it with a vision AI model. Returns a text description of what is visible — including text, UI elements, error messages, and code. Use this when the user asks "what\'s on my screen?", "read this error", "look at this", or when you need to see what the user is working on.',
+      'Read visible text and state from a fresh screenshot using the vision model. Use for reading errors, page content, or login state. This does not provide grounded click coordinates. If a native accessibility tree lacks the controls needed for an action, call computer_use with the full original task and target_application; do not repeatedly ask OCR for button positions.',
     parameters: {
       type: 'object',
       properties: {
@@ -1149,6 +1143,7 @@ export function registerOCRTools(registry: ToolRegistry): void {
         imagePath: { type: 'string', description: 'Absolute or home-relative local image path.' },
         path: { type: 'string', description: 'Alias for imagePath.' },
         query: { type: 'string', description: 'What to extract from the image.' },
+        model: { type: 'string', minLength: 1, maxLength: 200, description: 'Optional exact model ID admitted by the configured official visual-model catalog for this call only. Omit to keep the user visual preference. Does not change provider or saved settings; no silent model fallback.' },
       },
       required: [],
     },

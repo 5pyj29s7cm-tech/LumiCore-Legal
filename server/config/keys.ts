@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { writeJsonAtomic } from './atomic_json';
 import { getDataPath } from './data_path';
 import { resetCircuit } from '../cloud/circuit_breaker';
 
@@ -98,23 +99,30 @@ const KEY_TO_CIRCUIT: Partial<Record<keyof KeyStore, string[]>> = {
   KIMI_BASE_URL: ['kimi'],
 };
 
+function parseKeysFile(file: string): KeyStore {
+  const loaded: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded)
+    || Object.values(loaded).some(value => value !== undefined && typeof value !== 'string')) {
+    throw new Error('Invalid key store shape.');
+  }
+  return loaded as KeyStore;
+}
+
 export function loadKeys(): KeyStore {
-  try {
-    if (fs.existsSync(KEYS_FILE)) {
-      const loaded = JSON.parse(fs.readFileSync(KEYS_FILE, 'utf-8')) as KeyStore;
-      const doubaoCredential = String(loaded.DOUBAO_SPEECH_KEY || '').trim();
-      if (doubaoCredential.includes(RETIRED_DOUBAO_CREDENTIAL_SEPARATOR)) {
-        delete loaded.DOUBAO_SPEECH_KEY;
-        try {
-          fs.writeFileSync(KEYS_FILE, JSON.stringify(loaded, null, 2));
-        } catch {
-          // Keep all other loaded keys available even if residue cleanup cannot persist.
-        }
-      }
-      return loaded;
-    }
-  } catch {}
-  return {};
+  let loaded: KeyStore;
+  try { loaded = parseKeysFile(KEYS_FILE); }
+  catch (error: any) {
+    if (error.code === 'ENOENT') return {};
+    throw new Error('Cannot read keys.json. Repair or explicitly recover the configuration before saving.');
+  }
+  // Filtering a retired credential is read-only; migration is committed by saveKeys.
+  if (String(loaded.DOUBAO_SPEECH_KEY || '').includes(RETIRED_DOUBAO_CREDENTIAL_SEPARATOR)) delete loaded.DOUBAO_SPEECH_KEY;
+  return loaded;
+}
+
+export function recoverKeysFromBackup(): void {
+  const backup = parseKeysFile(KEYS_FILE + '.bak');
+  writeJsonAtomic(KEYS_FILE, backup);
 }
 
 const BUILTIN_KEY_NAMES = [
@@ -147,6 +155,14 @@ const BUILTIN_KEY_NAMES = [
   'GLM_BASE_URL',
   'RELAY_API_KEY',
   'RELAY_BASE_URL',
+  'RELAY_REASONING_MODEL', 'RELAY_VISION_MODEL', 'RELAY_WORLD_MODEL',
+  'RELAY_IMAGE_MODEL', 'RELAY_IMAGE_EDIT_MODEL', 'RELAY_VIDEO_MODEL',
+  'RELAY_IMAGE_TO_VIDEO_MODEL', 'RELAY_EMBEDDING_MODEL', 'RELAY_RERANK_MODEL',
+  'RELAY_STT_MODEL', 'RELAY_TTS_MODEL',
+  'RELAY_IMAGE_PATH', 'RELAY_IMAGE_EDIT_PATH', 'RELAY_VIDEO_PATH',
+  'RELAY_VIDEO_STATUS_PATH', 'RELAY_VIDEO_CONTENT_PATH',
+  'RELAY_EMBEDDINGS_PATH', 'RELAY_EMBEDDING_PATH', 'RELAY_RERANK_PATH',
+  'RELAY_STT_STREAM_PATH', 'RELAY_TTS_PATH',
   'QICHACHA_API_KEY',
   'QICHACHA_APP_KEY',
   'QICHACHA_SECRET_KEY',
@@ -209,15 +225,19 @@ export function saveKeys(keys: Partial<KeyStore>): void {
   const dir = path.dirname(KEYS_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const existing = loadKeys();
+  for (const name of Object.keys(keys)) if (!isPersistableKeyName(name)) throw new Error('Invalid key name: ' + name);
   const merged = { ...existing, ...keys };
+  if (String(merged.DOUBAO_SPEECH_KEY || '').includes(RETIRED_DOUBAO_CREDENTIAL_SEPARATOR)) delete merged.DOUBAO_SPEECH_KEY;
   for (const [k, v] of Object.entries(merged)) {
     if (!v || (typeof v === 'string' && v.trim().length === 0)) {
       delete (merged as Record<string, unknown>)[k];
     }
   }
-  fs.writeFileSync(KEYS_FILE, JSON.stringify(merged, null, 2));
+  if (fs.existsSync(KEYS_FILE)) writeJsonAtomic(KEYS_FILE + '.bak', parseKeysFile(KEYS_FILE));
+  writeJsonAtomic(KEYS_FILE, merged);
 
-  for (const [key, value] of Object.entries(keys)) {
+  for (const key of Object.keys(keys)) {
+    const value = merged[key];
     if (value && typeof value === 'string' && value.trim().length > 0) {
       process.env[key] = value.trim();
     } else {
@@ -225,17 +245,12 @@ export function saveKeys(keys: Partial<KeyStore>): void {
     }
   }
 
-  // Reset circuit breakers for affected providers so updated keys take effect immediately
-  try {
-    for (const keyName of Object.keys(keys)) {
-      const circuits = KEY_TO_CIRCUIT[keyName as keyof KeyStore];
-      if (circuits) {
-        for (const c of circuits) {
-          resetCircuit(c);
-        }
-      }
-    }
-  } catch {}
+  const affected = new Set<string>();
+  for (const name of Object.keys(keys)) {
+    if (String(existing[name] || '').trim() === String(merged[name] || '').trim()) continue;
+    for (const provider of KEY_TO_CIRCUIT[name] || []) affected.add(provider);
+  }
+  for (const provider of affected) resetCircuit(provider);
 }
 
 export function getKey(name: keyof KeyStore): string | undefined {

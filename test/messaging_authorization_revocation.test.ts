@@ -1,3 +1,7 @@
+import { observedModelReplyText } from './organization_model_observer_fixture';
+import * as preparation from '../server/regions/packs/cn/messaging_turn/execution_preparation';
+import type { MessagingRouteOptions } from '../server/regions/packs/cn/messaging_finalization';
+import { consumeFixtureBindingCode } from './messaging_binding_fixture';
 import './helpers';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initDatabase, readDB, writeDB, flushDBOrThrow } from '../db_layer';
@@ -6,7 +10,14 @@ import * as bindings from '../server/messaging/bindings';
 import * as journal from '../server/messaging/message_journal';
 import type { IncomingMessage } from '../server/messaging/types';
 
-const model = vi.hoisted(() => ({ call: vi.fn() }));
+const model = vi.hoisted(() => ({ call: vi.fn(), pipeline: vi.fn() }));
+vi.mock('../server/cognition/execution_pipeline', async original => {
+  const actual = await original<typeof import('../server/cognition/execution_pipeline')>();
+  return { ...actual, buildLumiExecutionPipeline: (...args: Parameters<typeof actual.buildLumiExecutionPipeline>) => {
+    model.pipeline(...args);
+    return actual.buildLumiExecutionPipeline(...args);
+  } };
+});
 vi.mock('../server/llm/providers', async original => ({
   ...(await original<typeof import('../server/llm/providers')>()), makeLLMCall: model.call,
 }));
@@ -30,10 +41,10 @@ async function waitFor(check: () => boolean) {
   throw new Error('Message did not settle');
 }
 const done = () => ['ignored', 'completed', 'superseded'].includes(journal.getMessagingJournalEntry(message)?.status || '');
-const personalityRegistry = { buildSystemPrompt: () => ({
-  config: { id: 'lumi', toolPolicy: { allowedTools: [], requireConfirmation: [], forbiddenTools: ['*'], maxIterations: 0 } },
-  systemPrompt: 'Synthetic system',
-}) } as any;
+const personalityRegistry = {
+  getForUser: () => ({ id: 'lumi', toolPolicy: { allowedTools: [], requireConfirmation: [], forbiddenTools: ['*'], maxIterations: 0 } }),
+  getDefault: () => { throw new Error('Fixture configuration is supplied by getForUser'); },
+} as any;
 
 beforeAll(async () => {
   await initDatabase();
@@ -48,15 +59,38 @@ beforeEach(() => {
     chatId: `chat-${sequence}`, chatType: 'private', messageId: `revocation-message-${sequence}`, text: '你好', raw: {},
     timestamp: new Date().toISOString(), attachments: [{ id: 'attachment', type: 'file', fileName: 'synthetic.txt' }] };
   const code = bindings.createBindingCode('feishu', userId, orgId, 'work');
-  binding = bindings.consumeBindingCode('feishu', code.code, message.userId, message.chatId)!;
+  binding = consumeFixtureBindingCode('feishu', code.code, message.userId, message.chatId)!;
   readDB().memories.push({ id: `secret-${sequence}`, userId, orgId, domain: 'work', content: '你好 synthetic confidential memory',
     confidence: 0.8, type: 'episodic', source: 'manual', perspective: 'owner_trait', tier: 'episodic', importance: 0.8,
     agentId: 'lumi', nodeType: 'leaf', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), keywords: [] });
   writeDB(readDB());
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('No network permitted')));
   model.call.mockReset().mockRejectedValue(new Error('Unexpected model call'));
+  model.pipeline.mockClear();
 });
 afterEach(async () => { await flushDBOrThrow(); vi.unstubAllGlobals(); });
+
+const actualPrepare = preparation.prepareMessagingExecution;
+const observedOptions = new WeakMap<MessagingRouteOptions, NonNullable<MessagingRouteOptions['onMessage']>>();
+const observedRequests = new Map<string, { message: IncomingMessage; observe: NonNullable<MessagingRouteOptions['onMessage']>; execution: Parameters<typeof preparation.prepareMessagingExecution>[0]['executionPlan'] }>();
+function observedMessagingOptions(options: MessagingRouteOptions): MessagingRouteOptions {
+  const observe = options.onMessage;
+  if (!observe) throw new Error('An observation fixture is required');
+  const configured = { ...options, onMessage: undefined };
+  observedOptions.set(configured, observe);
+  vi.spyOn(preparation, 'prepareMessagingExecution').mockImplementation(async input => {
+    const result = await actualPrepare(input); const observer = input.options && observedOptions.get(input.options);
+    if (observer) observedRequests.set(input.requestId, { message: input.msg, observe: observer, execution: input.executionPlan });
+    return result;
+  });
+  model.call.mockImplementation(async (_messages, _tools, config) => {
+    const accepted = observedRequests.get(config.requestId);
+    if (!accepted) throw new Error('No real accepted request was observed');
+    const reply = await accepted.observe(accepted.message);
+    return { text: observedModelReplyText(reply?.text || '', accepted.execution), toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+  });
+  return configured;
+}
 
 describe('remote message authorization remains bound to its accepted identity', () => {
   it.each(['binding', 'membership', 'membership_replaced', 'replacement'] as const)('stops before memory, execution and delivery after %s revocation during attachment work', async reason => {
@@ -68,7 +102,7 @@ describe('remote message authorization remains bound to its accepted identity', 
     const onMessage = vi.fn(async () => ({ platform: 'feishu' as const, text: 'synthetic reply' }));
     const reply = vi.fn(async () => 'reply-id');
     expect(routes.dispatchIncomingMessage(message, { enrich: async value => { captured = value; return gate.promise; }, reply },
-      { queryMemories: memoryRead, personalityRegistry, onMessage })).toBe(true);
+      observedMessagingOptions({ queryMemories: memoryRead, personalityRegistry, onMessage }))).toBe(true);
     await waitFor(() => Boolean(captured));
     if (reason === 'binding') bindings.deleteBindingForUser(userId, binding.id, orgId, 'work');
     else if (reason === 'membership') org.removeMember(orgId, userId);
@@ -80,7 +114,7 @@ describe('remote message authorization remains bound to its accepted identity', 
       replacementUser = `replacement-${sequence}`;
       org.addMember(orgId, replacementUser, 'member');
       const code = bindings.createBindingCode('feishu', replacementUser, orgId, 'work');
-      const replacement = bindings.consumeBindingCode('feishu', code.code, message.userId, message.chatId)!;
+      const replacement = consumeFixtureBindingCode('feishu', code.code, message.userId, message.chatId)!;
       expect(replacement.revision).not.toBe(binding.revision);
     }
     gate.resolve(captured!);
@@ -92,7 +126,7 @@ describe('remote message authorization remains bound to its accepted identity', 
     expect(fetch).not.toHaveBeenCalled();
     if (replacementUser) {
       message = { ...message, messageId: `${message.messageId}-new-binding` };
-      routes.dispatchIncomingMessage(message, { enrich: async value => value, reply }, { queryMemories: memoryRead, personalityRegistry, onMessage });
+      routes.dispatchIncomingMessage(message, { enrich: async value => value, reply }, observedMessagingOptions({ queryMemories: memoryRead, personalityRegistry, onMessage }));
       await waitFor(done);
       expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ boundUserId: replacementUser, boundOrgId: orgId }));
       expect(reply).toHaveBeenCalledOnce();
@@ -104,7 +138,7 @@ describe('remote message authorization remains bound to its accepted identity', 
     const memoryRead = vi.fn(queryMemories);
     const onMessage = vi.fn(async () => ({ platform: 'feishu' as const, text: 'synthetic reply' }));
     const reply = vi.fn(async () => 'reply-id');
-    routes.dispatchIncomingMessage(message, { enrich: async value => value, reply }, { queryMemories: memoryRead, personalityRegistry, onMessage });
+    routes.dispatchIncomingMessage(message, { enrich: async value => value, reply }, observedMessagingOptions({ queryMemories: memoryRead, personalityRegistry, onMessage }));
     await waitFor(done);
     expect(memoryRead.mock.results[0].value).toEqual(expect.arrayContaining([expect.objectContaining({ id: `secret-${sequence}` })]));
     expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ boundUserId: userId, boundOrgId: orgId }));
@@ -115,7 +149,7 @@ describe('remote message authorization remains bound to its accepted identity', 
     const gate = deferred<{ platform: 'feishu'; text: string }>();
     const onMessage = vi.fn(() => gate.promise);
     const reply = vi.fn(async () => 'reply-id');
-    routes.dispatchIncomingMessage(message, { enrich: async value => value, reply }, { personalityRegistry, onMessage });
+    routes.dispatchIncomingMessage(message, { enrich: async value => value, reply }, observedMessagingOptions({ personalityRegistry, onMessage }));
     await waitFor(() => onMessage.mock.calls.length === 1);
     bindings.deleteBindingForUser(userId, binding.id, orgId, 'work');
     gate.resolve({ platform: 'feishu', text: 'must never be delivered' });
@@ -141,16 +175,37 @@ describe('remote message authorization remains bound to its accepted identity', 
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it('plans once from the scoped personality policy and exposes no tools when it forbids execution', async () => {
+    const { personalityRegistry: liveRegistry } = await import('../server/personality/registry');
+    const personality = { ...liveRegistry.getDefault(), toolPolicy: {
+      allowedTools: [], requireConfirmation: [], forbiddenTools: ['*'], maxIterations: 0,
+    } };
+    const scopedRegistry = { getForUser: vi.fn(() => personality), getDefault: vi.fn(() => personality) };
+    message = { ...message, text: '读取 D:/synthetic/receipt.txt 并告诉我内容。', attachments: [] };
+    model.call.mockResolvedValue({ text: '当前不能读取这份文件。', toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
+    const reply = vi.fn(async () => 'reply-id');
+    routes.dispatchIncomingMessage(message, { enrich: async value => value, reply }, { personalityRegistry: scopedRegistry });
+    await waitFor(done);
+    expect(journal.getMessagingJournalEntry(message)?.status).toBe('completed');
+    expect(scopedRegistry.getForUser).toHaveBeenCalledExactlyOnceWith('lumi', userId, orgId);
+    expect(model.pipeline).toHaveBeenCalledOnce();
+    expect(model.pipeline.mock.calls[0][0].personalityToolPolicy).toEqual(personality.toolPolicy);
+    const mainCalls = model.call.mock.calls.filter(args => args[2]?.source === model.pipeline.mock.calls[0][0].dispatch.source);
+    expect(mainCalls).toHaveLength(1);
+    expect(mainCalls[0][1]).toEqual([]);
+    expect(reply).toHaveBeenCalledOnce();
+  });
+
   it('closes admission immediately and waits for an accepted attachment route to settle on shutdown', async () => {
     const gate = deferred<IncomingMessage>();
     let captured: IncomingMessage | undefined;
     const onMessage = vi.fn(async () => ({ platform: 'feishu' as const, text: 'must stop' }));
     const reply = vi.fn(async () => 'reply-id');
-    routes.dispatchIncomingMessage(message, { enrich: async value => { captured = value; return gate.promise; }, reply }, { onMessage });
+    routes.dispatchIncomingMessage(message, { enrich: async value => { captured = value; return gate.promise; }, reply }, observedMessagingOptions({ onMessage }));
     await waitFor(() => Boolean(captured));
     let drained = false;
     const draining = routes.stopMessagingIngressAndDrain().then(() => { drained = true; });
-    expect(() => routes.dispatchIncomingMessage({ ...message, messageId: 'after-close' }, { enrich: async value => value, reply }, { onMessage })).toThrow(/ingress is stopping/);
+    expect(() => routes.dispatchIncomingMessage({ ...message, messageId: 'after-close' }, { enrich: async value => value, reply }, observedMessagingOptions({ onMessage }))).toThrow(/ingress is stopping/);
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(drained).toBe(false);
     gate.resolve(captured!);

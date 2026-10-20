@@ -1,5 +1,6 @@
 import type { DesktopExecutionReceipt } from '../desktop/execution_plan';
 import type { KnowledgeCoverageReport, KnowledgeIngestionStatus } from '../knowledge/ingestion_manifest';
+import { getLayaShadowStatus } from './laya_shadow';
 
 interface CapabilityRuntimeCounters {
   desktop: {
@@ -106,7 +107,7 @@ export function recordDesktopExecutionReceipt(receipt: DesktopExecutionReceipt):
   if (receipt.applicationCertification === 'mismatch') counters.desktop.identityMismatches += 1;
 }
 
-export function recordRoutingShadowComparison(aligned: boolean, externalCommitBlocked: boolean): void {
+export function recordExternalCapabilityValidation(aligned: boolean, externalCommitBlocked: boolean): void {
   counters.routing.comparisons += 1;
   if (!aligned) counters.routing.divergences += 1;
   if (externalCommitBlocked) counters.routing.externalCommitBlocks += 1;
@@ -152,6 +153,7 @@ export function getCapabilityRuntimeMetrics() {
     generatedAt: new Date().toISOString(),
     desktop: { ...counters.desktop },
     routing: { ...counters.routing },
+    layaShadow: getLayaShadowStatus(),
     knowledge: { ...counters.knowledge },
   };
 }

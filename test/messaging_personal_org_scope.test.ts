@@ -1,4 +1,7 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { observedMessagingOptions } from './organization_model_observer_fixture';
+import { decodeToolResult } from '../server/tools/result_envelope';
+import { commitFixturePersonalOrganizationScope } from './messaging_binding_fixture';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeApp } from './helpers';
 import { addMember, createOrg } from '../server/org/db';
 import * as LegalCases from '../server/org/legal_cases';
@@ -6,7 +9,6 @@ import * as OrgKB from '../server/org/kb';
 import {
   requestsOrganizationScope,
   resetPersonalOrganizationScopesForTest,
-  resolvePersonalOrganizationScope,
 } from '../server/messaging/personal_org_scope';
 import {
   classifyRemoteCaseAttachmentWriteIntent,
@@ -14,6 +16,10 @@ import {
   handleRemoteOrgCommand,
 } from '../server/messaging/routes';
 import type { IncomingMessage } from '../server/messaging/types';
+import { processWithPersonality } from '../server/regions/packs/cn/messaging_routes';
+import * as modelExecution from '../server/regions/packs/cn/messaging_turn/model_execution';
+import { closeConversation } from '../server/conversation/manager';
+import { conversationForMessagingTurn } from '../server/regions/packs/cn/messaging_persistence';
 
 function message(userId: string, text: string, partial: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
@@ -29,6 +35,19 @@ function message(userId: string, text: string, partial: Partial<IncomingMessage>
     timestamp: new Date().toISOString(),
     ...partial,
   };
+}
+
+async function admittedNativeCommand(input: IncomingMessage): Promise<string | null> {
+  const intercepted = vi.spyOn(modelExecution, 'prepareMessagingModelTurn').mockImplementationOnce(async context => ({
+    terminal: (await handleRemoteOrgCommand(context.msg, context.remoteToolContext)) || '', data: undefined, deliver: undefined,
+  }));
+  try { return await processWithPersonality(input); } finally {
+    intercepted.mockRestore();
+    // This unit fixture intercepts delivery to inspect the native receipt itself.
+    // Close that fixture conversation rather than fabricating a completed whole task.
+    const conversation = conversationForMessagingTurn(input);
+    if (conversation) closeConversation(conversation.id, 'Native handler unit fixture finished.', input.boundUserId);
+  }
 }
 
 describe('personal Lumi organization scope', () => {
@@ -48,18 +67,18 @@ describe('personal Lumi organization scope', () => {
     const org = createOrg('Only Scope Firm', `only-scope-${suffix}`, userId);
     addMember(org.id, userId, 'owner');
 
-    const entered = resolvePersonalOrganizationScope(message(userId, '查看组织案件'), true);
+    const entered = commitFixturePersonalOrganizationScope(message(userId, '查看组织案件'), true);
     expect(entered.kind).toBe('organization');
     if (entered.kind !== 'organization') throw new Error('organization scope was not entered');
     expect(entered.message.boundOrgId).toBe(org.id);
 
-    const followUp = resolvePersonalOrganizationScope(message(userId, '继续整理'), false);
+    const followUp = commitFixturePersonalOrganizationScope(message(userId, '继续整理'), false);
     expect(followUp.kind).toBe('organization');
     if (followUp.kind === 'organization') expect(followUp.message.boundOrgId).toBe(org.id);
 
-    const exited = resolvePersonalOrganizationScope(message(userId, '切回个人'), false);
+    const exited = commitFixturePersonalOrganizationScope(message(userId, '切回个人'), false);
     expect(exited).toMatchObject({ kind: 'reply', reply: expect.stringContaining('回到个人 Lumi') });
-    const personal = resolvePersonalOrganizationScope(message(userId, '今晚吃什么'), false);
+    const personal = commitFixturePersonalOrganizationScope(message(userId, '今晚吃什么'), false);
     expect(personal.kind).toBe('personal');
   });
 
@@ -72,28 +91,28 @@ describe('personal Lumi organization scope', () => {
     expect(requestsOrganizationScope('知识库里的文件可以发给我吗')).toBe(false);
     expect(requestsOrganizationScope('把组织知识库里的案件材料发给我')).toBe(true);
 
-    const capabilityQuestion = resolvePersonalOrganizationScope(
+    const capabilityQuestion = commitFixturePersonalOrganizationScope(
       message(userId, '知识库里的文件可以发给我吗'),
       requestsOrganizationScope('知识库里的文件可以发给我吗'),
     );
     expect(capabilityQuestion.kind).toBe('personal');
 
-    const entered = resolvePersonalOrganizationScope(message(userId, '查看组织案件'), true);
+    const entered = commitFixturePersonalOrganizationScope(message(userId, '查看组织案件'), true);
     expect(entered.kind).toBe('organization');
 
-    const correction = resolvePersonalOrganizationScope(message(userId, '刚刚那句话不是指令'), false);
+    const correction = commitFixturePersonalOrganizationScope(message(userId, '刚刚那句话不是指令'), false);
     expect(correction.kind).toBe('organization');
 
-    const relationship = resolvePersonalOrganizationScope(
+    const relationship = commitFixturePersonalOrganizationScope(
       message(userId, '我想让你知道，你是我真正的伙伴，我们要共同前行'),
       false,
     );
     expect(relationship.kind).toBe('personal');
 
-    const personalConfirmation = resolvePersonalOrganizationScope(message(userId, '确认'), false);
+    const personalConfirmation = commitFixturePersonalOrganizationScope(message(userId, '确认'), false);
     expect(personalConfirmation.kind).toBe('personal');
 
-    const explicitWork = resolvePersonalOrganizationScope(message(userId, '继续整理组织案件'), true);
+    const explicitWork = commitFixturePersonalOrganizationScope(message(userId, '继续整理组织案件'), true);
     expect(explicitWork.kind).toBe('organization');
   });
 
@@ -111,12 +130,12 @@ describe('personal Lumi organization scope', () => {
       localPath: 'D:\\lumi-data\\notice.pdf',
     };
 
-    const pending = resolvePersonalOrganizationScope(message(userId, '查询组织知识库里的立案流程', {
+    const pending = commitFixturePersonalOrganizationScope(message(userId, '查询组织知识库里的立案流程', {
       attachments: [attachment],
     }), true);
     expect(pending).toMatchObject({ kind: 'reply', reply: expect.stringContaining('多个可用组织') });
 
-    const selected = resolvePersonalOrganizationScope(message(userId, '2'), false);
+    const selected = commitFixturePersonalOrganizationScope(message(userId, '2'), false);
     expect(selected.kind).toBe('organization');
     if (selected.kind !== 'organization') throw new Error('pending organization was not selected');
     expect(selected.message).toMatchObject({
@@ -189,7 +208,7 @@ describe('personal Lumi organization scope', () => {
     expect(await handleRemoteOrgCommand(incoming)).toBeNull();
     expect(LegalCases.listCases(org.id, '', 20, userId)).toHaveLength(0);
 
-    const missingTarget = await handleRemoteOrgCommand({
+    const missingTarget = await admittedNativeCommand({
       ...incoming,
       messageId: `${incoming.messageId}-missing-target`,
       text: '把附件归档到案件：不存在的案件',
@@ -197,13 +216,19 @@ describe('personal Lumi organization scope', () => {
     expect(missingTarget).toContain('没有创建新案件');
     expect(LegalCases.listCases(org.id, '', 20, userId)).toHaveLength(0);
 
-    const explicitlyCreated = await handleRemoteOrgCommand({
+    const explicitlyCreated = await admittedNativeCommand({
       ...incoming,
       messageId: `${incoming.messageId}-create`,
       text: '新建案件并归档这份附件',
     });
     expect(explicitlyCreated).toContain('已创建组织案件');
-    expect(LegalCases.listCases(org.id, '', 20, userId)).toHaveLength(1);
+    const createdCases = LegalCases.listCases(org.id, '', 20, userId);
+    expect(createdCases).toHaveLength(1);
+    expect(decodeToolResult(explicitlyCreated!).receipt).toMatchObject({persisted:true, changedCaseIds:[createdCases[0].id], articleIds:[]});
+    const directCreate = await admittedNativeCommand({...incoming, messageId:`${incoming.messageId}-empty-case`,text:'新建案件：模拟补充审查',attachments:[]});
+    const directCase=LegalCases.listCases(org.id,'',20,userId).find(item=>item.id!==createdCases[0].id)!;
+    expect(directCase).toBeTruthy();
+    expect(decodeToolResult(directCreate!).receipt).toMatchObject({persisted:true,changedCaseIds:[directCase.id],articleIds:[]});
   });
 
   it('archives only to one reliable case identity and disambiguates multiple partial matches', async () => {
@@ -224,11 +249,12 @@ describe('personal Lumi organization scope', () => {
       stage: 'filing',
     });
     const exactBefore = exact.materials.length;
-    const exactReply = await handleRemoteOrgCommand(message(userId, '把附件归档到案件：张三诉李四合同纠纷', {
+    const exactReply = await admittedNativeCommand(message(userId, '把附件归档到案件：张三诉李四合同纠纷', {
       boundOrgId: org.id,
       attachments: [attachment],
     }));
     expect(exactReply).toContain(`案件：${exact.title}`);
+    expect(decodeToolResult(exactReply!).receipt).toMatchObject({persisted:true,changedCaseIds:[exact.id],articleIds:[]});
     expect(LegalCases.getCase(org.id, exact.id, userId)!.materials).toHaveLength(exactBefore + 1);
 
     const firstAmbiguous = LegalCases.createCase(org.id, userId, {
@@ -243,12 +269,13 @@ describe('personal Lumi organization scope', () => {
     });
     const firstBefore = firstAmbiguous.materials.length;
     const secondBefore = secondAmbiguous.materials.length;
-    const ambiguousReply = await handleRemoteOrgCommand(message(userId, '把附件归档到案件：甲乙合同纠纷', {
+    const ambiguousReply = await admittedNativeCommand(message(userId, '把附件归档到案件：甲乙合同纠纷', {
       boundOrgId: org.id,
       attachments: [{ ...attachment, id: 'ambiguous-archive-file' }],
     }));
 
     expect(ambiguousReply).toContain('找到 2 个可能的已有案件');
+    expect(decodeToolResult(ambiguousReply!).receipt).toMatchObject({ok:false,persisted:false,changedCaseIds:[],articleIds:[]});
     expect(ambiguousReply).toContain(firstAmbiguous.title);
     expect(ambiguousReply).toContain(secondAmbiguous.title);
     expect(LegalCases.getCase(org.id, firstAmbiguous.id, userId)!.materials).toHaveLength(firstBefore);
@@ -267,13 +294,13 @@ describe('personal Lumi organization scope', () => {
       dispatchIncomingMessage(incoming, {
         enrich: async value => value,
         reply: async () => undefined,
-      }, {
+      }, observedMessagingOptions({
         onMessage: async value => {
           clearTimeout(timeout);
           resolve(value);
           return { platform: value.platform, text: 'ok' };
         },
-      });
+      }));
     });
 
     expect(routed).toMatchObject({ boundUserId: userId, boundOrgId: org.id });

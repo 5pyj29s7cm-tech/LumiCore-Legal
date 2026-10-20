@@ -1,8 +1,8 @@
-import { readDB, writeDB } from '../../db_layer';
+import { readSettingRecord, writeSetting } from "../persistence/settings_repository";
+
 import type {
   VoiceprintTemplate,
   FaceTemplate,
-  TripleLockConfig,
   BiometricStore,
 } from './types';
 
@@ -11,8 +11,7 @@ function storeKey(uid: string): string {
 }
 
 function readStore(uid: string): BiometricStore {
-  const db = readDB();
-  const row = (db.settings || []).find((s: any) => s.key === storeKey(uid));
+  const row = readSettingRecord(storeKey(uid));
   if (row) {
     try {
       return JSON.parse(row.value);
@@ -24,16 +23,7 @@ function readStore(uid: string): BiometricStore {
 }
 
 function writeStore(uid: string, store: BiometricStore): void {
-  const db = readDB();
-  const existing = (db.settings || []).findIndex((s: any) => s.key === storeKey(uid));
-  const value = JSON.stringify(store);
-  if (existing >= 0) {
-    db.settings[existing].value = value;
-  } else {
-    if (!db.settings) db.settings = [];
-    db.settings.push({ key: storeKey(uid), value });
-  }
-  writeDB(db);
+  writeSetting(storeKey(uid), JSON.stringify(store));
 }
 
 // ── Voiceprints ──
@@ -60,20 +50,6 @@ export function replaceVoiceprints(uid: string, template: Omit<VoiceprintTemplat
 
 export function getVoiceprints(uid: string): VoiceprintTemplate[] {
   return readStore(uid).voiceprints;
-}
-
-export function getAllVoiceprints(): VoiceprintTemplate[] {
-  const db = readDB();
-  const all: VoiceprintTemplate[] = [];
-  for (const row of (db.settings || [])) {
-    if (typeof row.key === 'string' && row.key.startsWith('biometric_')) {
-      try {
-        const store: BiometricStore = JSON.parse(row.value);
-        all.push(...store.voiceprints);
-      } catch {}
-    }
-  }
-  return all;
 }
 
 export function deleteVoiceprint(uid: string, voiceprintId: string): boolean {
@@ -109,20 +85,6 @@ export function getFaces(uid: string): FaceTemplate[] {
   return readStore(uid).faces;
 }
 
-export function getAllFaces(): FaceTemplate[] {
-  const db = readDB();
-  const all: FaceTemplate[] = [];
-  for (const row of (db.settings || [])) {
-    if (typeof row.key === 'string' && row.key.startsWith('biometric_')) {
-      try {
-        const store: BiometricStore = JSON.parse(row.value);
-        all.push(...store.faces);
-      } catch {}
-    }
-  }
-  return all;
-}
-
 export function deleteFace(uid: string, faceId: string): boolean {
   const store = readStore(uid);
   const idx = store.faces.findIndex(f => f.faceId === faceId);
@@ -130,25 +92,4 @@ export function deleteFace(uid: string, faceId: string): boolean {
   store.faces.splice(idx, 1);
   writeStore(uid, store);
   return true;
-}
-
-export function touchFace(uid: string, faceId: string): void {
-  const store = readStore(uid);
-  const face = store.faces.find(f => f.faceId === faceId);
-  if (face) {
-    face.lastMatchedAt = new Date().toISOString();
-    writeStore(uid, store);
-  }
-}
-
-// ── Triple Lock ──
-
-export function getTripleLockConfig(uid: string): TripleLockConfig | null {
-  return readStore(uid).tripleLock;
-}
-
-export function saveTripleLockConfig(uid: string, config: TripleLockConfig): void {
-  const store = readStore(uid);
-  store.tripleLock = config;
-  writeStore(uid, store);
 }

@@ -1,3 +1,4 @@
+import { readImplementationSource } from './implementation_source';
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -54,6 +55,36 @@ function receipt(taskId: string, outcome: string, verification = 'verified') {
 }
 
 describe('structured runtime status', () => {
+  it('counts autonomous blockers beyond the visible list and changes identity when hidden totals change', () => {
+    const autonomousTasks = Array.from({ length: 12 }, (_, index) => ({ id: 'visible-' + index, userId: 'user-1',
+      status: 'pending', title: 'Current work', createdAt: '2026-08-10T00:00:00Z' }));
+    autonomousTasks.push({ id: 'hidden', userId: 'user-1', status: 'blocked', title: 'Old blocker', createdAt: '2026-08-09T00:00:00Z' });
+    const db = { autonomousTasks }, input = { userId: 'user-1', domain: 'personal' as const };
+    const first = buildStructuredRuntimeStatus(db, input);
+    expect(first.durableWork).toHaveLength(12);
+    expect(first.counts).toMatchObject({ autonomousActive: 12, durableBlocked: 1 });
+    expect(first.attentionReasons).toContain('durable_work_blocked');
+    autonomousTasks.push({ ...autonomousTasks[12], id: 'older-failure', status: 'failed' });
+    const second = buildStructuredRuntimeStatus(db, input);
+    expect(second.durableWork).toEqual(first.durableWork);
+    expect(second.counts.durableBlocked).toBe(2);
+    expect(second.snapshotId).not.toBe(first.snapshotId);
+    expect(buildStructuredRuntimeStatus(db, { ...input, userId: 'other' }).counts.durableBlocked).toBe(0);
+    expect(buildStructuredRuntimeStatus(db, { ...input, domain: 'work', orgId: 'org-a' }).durableWork).toEqual([]);
+  });
+  it('includes hidden receipt totals in snapshot identity without mutating persisted tasks or receipts', () => {
+    const db = { conversationActionTasks: Array.from({ length: 13 }, (_, i) => task('task-' + i,
+      { updatedAt: '2026-08-10T00:' + String(i).padStart(2, '0') + ':00Z' })),
+      conversationActionReceipts: [receipt('task-0', 'verified_success')] };
+    const first = buildStructuredRuntimeStatus(db, { userId: 'user-1', domain: 'personal' });
+    db.conversationActionReceipts.push({ ...receipt('task-0', 'verified_success'), id: 'second-receipt' });
+    const stored = JSON.stringify(db);
+    const second = buildStructuredRuntimeStatus(db, { userId: 'user-1', domain: 'personal' });
+    expect(second.tasks).toEqual(first.tasks);
+    expect(second.counts.verifiedReceipts).toBe(2);
+    expect(second.snapshotId).not.toBe(first.snapshotId);
+    expect(JSON.stringify(db)).toBe(stored);
+  });
   it('projects scoped task and receipt facts without raw payloads', () => {
     const db = {
       conversationActionTasks: [
@@ -123,10 +154,10 @@ describe('structured runtime status', () => {
   });
 
   it('keeps runtime evidence in System Explorer and only projects active work into a floating widget', () => {
-    const routes = readFileSync(path.join(process.cwd(), 'server/routes/system_routes.ts'), 'utf8');
-    const desktop = readFileSync(path.join(process.cwd(), 'src/components/DesktopUI.tsx'), 'utf8');
-    const chat = readFileSync(path.join(process.cwd(), 'src/components/AgentChatPage.tsx'), 'utf8');
-    const explorer = readFileSync(path.join(process.cwd(), 'src/components/SystemExplorer.tsx'), 'utf8');
+    const routes = readImplementationSource(path.join(process.cwd(), 'server/routes/system_routes.ts'), 'utf8');
+    const desktop = readImplementationSource(path.join(process.cwd(), 'src/components/DesktopUI.tsx'), 'utf8');
+    const chat = readImplementationSource(path.join(process.cwd(), 'src/components/AgentChatPage.tsx'), 'utf8');
+    const explorer = readImplementationSource(path.join(process.cwd(), 'src/components/SystemExplorer.tsx'), 'utf8');
     expect(routes).toContain("router.get('/runtime/status', requireAuth");
     expect(routes).toContain('const scope = resolveDomain(req.user!)');
     expect(desktop).not.toContain('<WorkflowPanel');

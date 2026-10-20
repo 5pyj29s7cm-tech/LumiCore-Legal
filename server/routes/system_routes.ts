@@ -1,17 +1,19 @@
+import { getBackendHealthReport } from '../client/self/health';
 import { Router } from "express";
-import jwt from "jsonwebtoken";
+import { listTokenUsageRows } from '../llm/token_tracker';
 import os from "os";
 import fs from "fs";
 import path from "path";
-import { getDatabasePersistenceStatus, readDB, writeDB, isDbDirty } from "../../db_layer";
+import { getDatabasePersistenceStatus, readDatabaseTables, commitDatabaseTables, isDbDirty } from "../../db_layer";
 import { projectAutonomousTaskFinalization } from "../autonomy/task_finalization";
 import { sendDurableMutation } from './durable_mutation';
 import { logger } from "../../logger";
 import { getDataRoot } from "../config/data_path";
 import { toolRegistry } from "../tools/registry";
 import { scheduler } from "../scheduler";
-import { classifyCloudError, getCloudHealth, recordFailure, resetCircuit } from "../cloud/core";
-import { loadKeys, saveKeys, getKey, getAllKeyNames, isPersistableKeyName } from "../config/keys";
+import { getProviderConfigurationEpoch } from "../cloud/circuit_breaker";
+import { classifyCloudError, getCloudHealth, resetCircuit } from "../cloud/core";
+import { loadKeys, saveKeys, getAllKeyNames, isPersistableKeyName } from "../config/keys";
 import { parseDoubaoSpeechCredentials } from "../config/doubao_speech";
 import { optionalAuth, requireAdmin, requireAuth, requireLocalRequest, resolveDomain } from "../middleware/auth";
 import { isLoopbackAddress } from "../config/local_identity";
@@ -28,6 +30,8 @@ import {
   isImageGenerationProvider,
   isVideoGenerationProvider,
   upsertUserPreferredGenerationModels,
+  normalizeGenerationModelPrefs,
+  validateOfficialGenerationPreferences,
 } from "../llm/generation_preferences";
 import {
   getUserPreferredWorldModel,
@@ -42,7 +46,7 @@ import {
 import { DEFAULT_MODELS, getUserPreferredLLM, upsertUserPreferredLLM } from "../llm/user_preferences";
 import { listModelRoutingReceipts } from "../llm/model_routing_receipts";
 import {
-  assessProviderAvailability,
+  createProviderAvailabilityReader,
   saveProviderProbe,
 } from "../llm/provider_health";
 import {
@@ -73,7 +77,6 @@ import { generateConfiguredEmbedding } from "../llm/embedding_provider";
 import { rerankConfiguredDocuments } from "../llm/rerank_provider";
 import { queryWindowsGpuName } from "../adapters/host_probe";
 import { loadRuntimeBuildMetadata } from "../../shared/runtime_build_metadata";
-import { PRODUCT_VARIANT } from "../../shared/product_variant";
 import {
   applyLumiOfficialModelConfiguration,
   isLumiOfficialApiConfigured,
@@ -188,7 +191,6 @@ export function getRuntimeVersionInfo() {
     buildId: runtimeBuildMetadata.buildId,
     sourceFingerprint: runtimeBuildMetadata.sourceFingerprint,
     sourceDirty: runtimeBuildMetadata.sourceDirty,
-    variant: PRODUCT_VARIANT,
     pid: process.pid,
     startedAt: serverStartedAt,
     uptimeSeconds: Math.round(process.uptime()),
@@ -267,18 +269,6 @@ function collectRuntimeLogSources() {
     .slice(0, 8);
 }
 
-function getUserIdFromRequest(req: any, jwtSecret: string): string {
-  let uid = 'anonymous';
-  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
-  if (token) {
-    try {
-      const decoded: any = jwt.verify(token, jwtSecret);
-      uid = decoded.uid || 'anonymous';
-    } catch {}
-  }
-  return uid;
-}
-
 function sumTimes(times: Record<string, number>): number {
   return (times.user || 0) + (times.nice || 0) + (times.sys || 0) + (times.idle || 0) + (times.irq || 0);
 }
@@ -343,7 +333,17 @@ export async function getSystemStatsSnapshot() {
   return systemStatsInFlight;
 }
 
-export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, llm: TestableModelRuntime = {}) {
+export function mountSystemRoutes(router: Router, _jwtSecret: string, io?: any, llm: TestableModelRuntime = {}) {
+  mountSystemHealthRoutes(router);
+  mountVoiceProviderRoutes(router);
+  mountToolSchedulerRoutes(router);
+  mountModelDiagnosticRoutes(router, llm);
+  mountModelPreferenceRoutes(router);
+  mountSettingsRoutes(router);
+  mountSystemInventoryRoutes(router, io);
+}
+
+function mountSystemHealthRoutes(router: Router) {
   router.get("/version", (_req, res) => {
     res.json(getRuntimeVersionInfo());
   });
@@ -372,11 +372,13 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   // Health Check
   router.get("/health", optionalAuth, (req, res) => {
     try {
-      const persistence = getDatabasePersistenceStatus();
+      const { fault, persistence, scheduler: schedulerHealth, status } = getBackendHealthReport();
       const detailed = /^(?:1|true|yes)$/i.test(String(req.query.details || ''));
       if (!detailed) {
         return res.json({
-          status: persistence.degraded ? 'degraded' : 'ok',
+          status,
+          fault,
+          scheduler: schedulerHealth,
           timestamp: new Date().toISOString(),
           runtime: {
             name: runtimeBuildMetadata.name,
@@ -394,7 +396,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       if (!isLoopbackAddress(req.socket?.remoteAddress)) {
         return res.status(403).json({ error: 'Detailed health is available only from the local Lumi desktop client.' });
       }
-      const db = readDB();
+      const db = readDatabaseTables(["autonomousTasks","conversationActionReceipts","conversationActionTasks","conversations","extensionActivationReceipts","extensionRevisions","externalAiHistoryMessages","externalAiHistorySources","externalAiHistorySyncJobs","interactions","settings","tokenUsage","users"]);
       const memory = process.memoryUsage();
       const toolMetrics = getToolRuntimeMetrics();
       const capabilityMetrics = getCapabilityRuntimeMetrics();
@@ -421,7 +423,9 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
         return counts;
       }, {});
       res.json({
-        status: persistence.degraded ? "degraded" : "ok",
+        status,
+        fault,
+        scheduler: schedulerHealth,
         timestamp: new Date().toISOString(),
         runtime: getRuntimeVersionInfo(),
         database: {
@@ -533,7 +537,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     try {
       const scope = resolveDomain(req.user!);
       const toolMetrics = getToolRuntimeMetrics();
-      const db = readDB();
+      const db = readDatabaseTables(["autonomousTasks","conversationActionReceipts","conversationActionTasks","conversations","extensionActivationReceipts","extensionRevisions","externalAiHistoryMessages","externalAiHistorySources","externalAiHistorySyncJobs","interactions","settings","tokenUsage","users"]);
       const capabilityMetrics = getCapabilityRuntimeMetrics();
       const runtimeStatus = buildStructuredRuntimeStatus(db, {
         userId: req.user!.uid,
@@ -572,19 +576,15 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       res.status(500).json({ error: error.message });
     }
   });
+}
 
+function mountVoiceProviderRoutes(router: Router) {
   // Explicit functional probe for local OpenAI-compatible runtimes. This is
   // separate from the cheap cached /health response so monitoring can choose
   // when to incur a network probe.
   router.get("/llm/local/health", requireAuth, requireAdmin, requireLocalRequest, async (_req, res) => {
-    const current = {
-      ollama: getLocalModelConfig('ollama'),
-      lmstudio: getLocalModelConfig('lmstudio'),
-    };
-    const [ollama, lmstudio] = await Promise.all([
-      refreshLocalModelConfig('ollama', current.ollama.baseUrl, { timeoutMs: 2500, inferenceTimeoutMs: 20_000 }),
-      refreshLocalModelConfig('lmstudio', current.lmstudio.baseUrl, { timeoutMs: 2500, inferenceTimeoutMs: 20_000 }),
-    ]);
+    await Promise.allSettled((['ollama', 'lmstudio'] as const).map(provider => refreshLocalModelConfig(provider, undefined, { timeoutMs: 2500, inferenceTimeoutMs: 20_000 })));
+    const ollama = getLocalModelConfig('ollama'), lmstudio = getLocalModelConfig('lmstudio');
     const status = ollama.detected || lmstudio.detected ? 'ok' : 'degraded';
     res.status(status === 'ok' ? 200 : 503).json({
       status,
@@ -731,7 +731,9 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       },
     });
   });
+}
 
+function mountToolSchedulerRoutes(router: Router) {
   // Tool list for security config
   router.get("/tools", requireAuth, (_req, res) => {
     const tools = toolRegistry.list().map(t => ({
@@ -771,25 +773,18 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     }
     return res.json({ id, ...result });
   });
+}
 
+function mountModelDiagnosticRoutes(router: Router, llm: TestableModelRuntime) {
   // Token usage aggregation
   router.get("/llm/usage", requireAuth, (req, res) => {
-    let token = req.cookies.token;
-    // Fallback: WebView2 may not send httpOnly cookies, check Authorization header
-    if (!token && req.headers.authorization?.startsWith('Bearer ')) {
-      token = req.headers.authorization.slice(7);
-    }
-    if (!token) return res.status(401).json({ error: "Unauthorized" });
     try {
-      const decoded: any = jwt.verify(token, jwtSecret);
       const days = parseInt(req.query.days as string) || 30;
       const providerFilter = req.query.provider as string | undefined;
-      const db = readDB();
-      const allUsage: any[] = db.tokenUsage || [];
+      const allUsage = listTokenUsageRows(req.user!.uid);
       const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
       const filtered = allUsage.filter((u: any) =>
-        u.userId === decoded.uid &&
         u.timestamp >= cutoff &&
         (!providerFilter || u.provider === providerFilter)
       );
@@ -824,7 +819,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
       res.json({ byProvider, daily, grandTotal, days, recordCount: filtered.length });
     } catch {
-      res.status(401).json({ error: "Invalid token" });
+      res.status(500).json({ error: 'Failed to read model usage' });
     }
   });
 
@@ -838,13 +833,14 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       const lmstudioConfig = getLocalModelConfig('lmstudio');
       const reasoningPreference = getUserPreferredLLM(req.user!.uid);
       const extensionProviders = listRegisteredProviders(req.user!.uid).map(({ userId: _userId, ...provider }) => provider);
+      const assessAvailability = createProviderAvailabilityReader();
       const status = (
         provider: string,
         configured: boolean,
         model: string,
         runtimeHealthy = false,
       ) => ({
-        ...assessProviderAvailability({ provider, configured, model, runtimeHealthy }),
+        ...assessAvailability({ provider, configured, model, runtimeHealthy }),
         model,
       });
       const dynamicProviders = Object.fromEntries(extensionProviders.map(provider => {
@@ -892,12 +888,13 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     const { provider, model } = req.body || {};
     const providerId = String(provider || '');
     const modelId = typeof model === 'string' ? model : undefined;
+    const configurationEpoch = getProviderConfigurationEpoch(providerId);
     try {
       const result = await testLLMProviderConnection(providerId, modelId, llm);
-      resetCircuit(result.provider);
       saveProviderProbe({
         provider: result.provider,
         model: result.model,
+        configurationEpoch,
         ok: true,
         testedAt: new Date().toISOString(),
         latencyMs: result.latencyMs,
@@ -907,10 +904,10 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       const message = sanitizedProviderError(err);
       const classified = classifyCloudError(err instanceof Error ? err : new Error(message), providerId);
       if (providerId) {
-        recordFailure(providerId, undefined, err instanceof Error ? err : new Error(message), { openImmediately: true });
         saveProviderProbe({
           provider: providerId,
           model: String(modelId || ''),
+          configurationEpoch,
           ok: false,
           testedAt: new Date().toISOString(),
           error: message,
@@ -923,7 +920,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   });
 
   router.post("/llm/route/test", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
-    const uid = getUserIdFromRequest(req, jwtSecret);
+    const uid = req.user!.uid;
     try {
       res.json(req.body?.probe === 'forced_primary_failure'
         ? await testLumiModelFailoverConfiguration(uid, llm)
@@ -952,7 +949,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   });
 
   router.post("/retrieval-model/test", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
-    const uid = getUserIdFromRequest(req, jwtSecret);
+    const uid = req.user!.uid;
     try {
       const startedAt = Date.now();
       const preferences = getUserRetrievalModelPreferences(uid);
@@ -997,12 +994,14 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       return res.status(502).json({ ok: false, error: message });
     }
   });
+}
 
+function mountModelPreferenceRoutes(router: Router) {
   // API Keys — read/write user-configured keys
   // LLM model preferences — read/write per user
   router.put("/preferences/llm", requireAuth, async (req, res) => {
     try {
-      const uid = getUserIdFromRequest(req, jwtSecret);
+      const uid = req.user!.uid;
       const updated = upsertUserPreferredLLM(uid, req.body || {});
       return await sendDurableMutation(req, res, { success: true, ...updated, scope: 'lumi', organizationOverridesSupported: false });
     } catch (err: any) {
@@ -1012,7 +1011,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   router.get("/preferences/llm", requireAuth, (req, res) => {
     try {
-      const uid = getUserIdFromRequest(req, jwtSecret);
+      const uid = req.user!.uid;
       res.json({
         ...getUserPreferredLLM(uid),
         scope: 'lumi',
@@ -1026,7 +1025,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   router.get("/preferences/llm/routing-receipts", requireAuth, (req, res) => {
     try {
-      const uid = getUserIdFromRequest(req, jwtSecret);
+      const uid = req.user!.uid;
       const requestedLimit = Number.parseInt(String(req.query.limit || '100'), 10);
       const limit = Number.isFinite(requestedLimit) ? requestedLimit : 100;
       res.json({
@@ -1051,7 +1050,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   // preference as well as the signed-in user's model roles. Keep it local and
   // administrator-only, just like credential writes and live provider probes.
   router.post("/preferences/official/apply", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
-    const uid = getUserIdFromRequest(req, jwtSecret);
+    const uid = req.user!.uid;
     try {
       const result = await applyLumiOfficialModelConfiguration(uid);
       return res.json(result);
@@ -1095,7 +1094,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       if (!isVisionProvider(req.body?.provider)) {
         return res.status(400).json({ error: 'Invalid vision provider' });
       }
-      const uid = getUserIdFromRequest(req, jwtSecret);
+      const uid = req.user!.uid;
       const updated = upsertUserPreferredVision(uid, req.body || {});
       return await sendDurableMutation(req, res, { success: true, ...updated });
     } catch (err: any) {
@@ -1105,7 +1104,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   router.get("/preferences/vision", requireAuth, (req, res) => {
     try {
-      const uid = getUserIdFromRequest(req, jwtSecret);
+      const uid = req.user!.uid;
       return res.json(getUserPreferredVision(uid));
     } catch {
       res.json(getUserPreferredVision('anonymous'));
@@ -1119,17 +1118,22 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       if (!isImageGenerationProvider(imageProvider) || !isVideoGenerationProvider(videoProvider)) {
         return res.status(400).json({ error: 'Invalid generation model provider' });
       }
-      const uid = getUserIdFromRequest(req, jwtSecret);
-      const prefs = upsertUserPreferredGenerationModels(uid, req.body);
+      const uid = req.user!.uid;
+      const candidate = normalizeGenerationModelPrefs(req.body);
+      const submitted = Object.keys(req.body || {}).filter(field => Object.hasOwn(candidate, field)) as (keyof typeof candidate)[];
+      if (submitted.some(field => candidate[field].provider === 'relay')) {
+        validateOfficialGenerationPreferences(req.body, await listOfficialApiModels());
+      }
+      const prefs = upsertUserPreferredGenerationModels(uid, candidate);
       return await sendDurableMutation(req, res, { success: true, ...prefs });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      res.status(400).json({ error: sanitizedProviderError(err) });
     }
   });
 
   router.get("/preferences/generation", requireAuth, (req, res) => {
     try {
-      const uid = getUserIdFromRequest(req, jwtSecret);
+      const uid = req.user!.uid;
       res.json(getUserPreferredGenerationModels(uid));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1141,7 +1145,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       if (!isWorldModelProvider(req.body?.provider)) {
         return res.status(400).json({ error: 'Invalid world model provider' });
       }
-      const uid = getUserIdFromRequest(req, jwtSecret);
+      const uid = req.user!.uid;
       const prefs = upsertUserWorldModelPrefs(uid, req.body);
       return await sendDurableMutation(req, res, { success: true, ...prefs, resolved: getUserPreferredWorldModel(uid) });
     } catch (err: any) {
@@ -1151,7 +1155,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   router.get("/preferences/world", requireAuth, (req, res) => {
     try {
-      const uid = getUserIdFromRequest(req, jwtSecret);
+      const uid = req.user!.uid;
       res.json({ ...getUserWorldModelPrefs(uid), resolved: getUserPreferredWorldModel(uid) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1160,7 +1164,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   router.put("/preferences/retrieval-model", requireAuth, async (req, res) => {
     try {
-      const uid = getUserIdFromRequest(req, jwtSecret);
+      const uid = req.user!.uid;
       return await sendDurableMutation(req, res, upsertUserRetrievalModelPreferences(uid, req.body));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1169,13 +1173,15 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
 
   router.get("/preferences/retrieval-model", requireAuth, (req, res) => {
     try {
-      const uid = getUserIdFromRequest(req, jwtSecret);
+      const uid = req.user!.uid;
       res.json(getUserRetrievalModelPreferences(uid));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
+}
 
+function mountSettingsRoutes(router: Router) {
   router.get("/settings/keys", requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
     try {
       const stored = loadKeys();
@@ -1254,7 +1260,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       }
       const normalized = normalizeUserSetting(key, value);
       const persistedKey = scopedUserSettingKey(req.user!.uid, key);
-      const db = readDB();
+      const db = readDatabaseTables(["autonomousTasks","conversationActionReceipts","conversationActionTasks","conversations","extensionActivationReceipts","extensionRevisions","externalAiHistoryMessages","externalAiHistorySources","externalAiHistorySyncJobs","interactions","settings","tokenUsage","users"]);
       if (!db.settings) db.settings = [];
       const idx = db.settings.findIndex((s: any) => s.key === persistedKey);
       if (idx >= 0) {
@@ -1262,7 +1268,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       } else {
         db.settings.push({ key: persistedKey, value: JSON.stringify(normalized) });
       }
-      writeDB(db);
+      commitDatabaseTables(db);
       await sendDurableMutation(req, res, { success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1274,7 +1280,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       if (!USER_SCOPED_SETTING_KEYS.has(req.params.key)) {
         return res.status(404).json({ error: 'Unknown user setting' });
       }
-      const db = readDB();
+      const db = readDatabaseTables(["autonomousTasks","conversationActionReceipts","conversationActionTasks","conversations","extensionActivationReceipts","extensionRevisions","externalAiHistoryMessages","externalAiHistorySources","externalAiHistorySyncJobs","interactions","settings","tokenUsage","users"]);
       const persistedKey = scopedUserSettingKey(req.user!.uid, req.params.key);
       const row = (db.settings || []).find((s: any) => s.key === persistedKey);
       res.json(row ? JSON.parse(row.value) : null);
@@ -1282,7 +1288,9 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
       res.status(500).json({ error: err.message });
     }
   });
+}
 
+function mountSystemInventoryRoutes(router: Router, io?: any) {
   // System stats — real-time CPU / memory / platform info
   router.get("/system/stats", requireAuth, async (_req: any, res: any) => {
     try {
@@ -1301,7 +1309,7 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
   // Ecosystem stats
   router.get("/ecosystem/stats", requireAuth, requireAdmin, requireLocalRequest, (_req: any, res: any) => {
     try {
-      const db = readDB();
+      const db = readDatabaseTables(["autonomousTasks","conversationActionReceipts","conversationActionTasks","conversations","extensionActivationReceipts","extensionRevisions","externalAiHistoryMessages","externalAiHistorySources","externalAiHistorySyncJobs","interactions","settings","tokenUsage","users"]);
       const mcpCfg = getMCPConfig();
       const allServers = Object.entries(mcpCfg);
       const enabledServers = allServers.filter(([, c]) => c.enabled);
@@ -1344,37 +1352,19 @@ export function mountSystemRoutes(router: Router, jwtSecret: string, io?: any, l
     });
   });
 
-  // ── Ollama local model config ──
-  // GET: return saved Ollama URL + detection status
-  router.get("/ollama/config", requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
-    res.json(getLocalModelConfig('ollama'));
-  });
-
-  // PUT: save Ollama URL and trigger re-detection
-  router.put("/ollama/config", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
-    try {
-      const { baseUrl } = req.body || {};
-      const result = await refreshLocalModelConfig('ollama', baseUrl, { timeoutMs: 5000 });
-      res.json(result);
-    } catch (err: any) {
-      res.status(400).json({ error: sanitizedProviderError(err) });
-    }
-  });
-
-  // ── LM Studio local model config ──
-  // GET: return saved LM Studio URL + detection status
-  router.get("/lmstudio/config", requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
-    res.json(getLocalModelConfig('lmstudio'));
-  });
-
-  // PUT: save LM Studio URL and trigger re-detection
-  router.put("/lmstudio/config", requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
-    try {
-      const { baseUrl } = req.body || {};
-      const result = await refreshLocalModelConfig('lmstudio', baseUrl, { timeoutMs: 5000 });
-      res.json(result);
-    } catch (err: any) {
-      res.status(400).json({ error: sanitizedProviderError(err) });
-    }
-  });
+  // Local model configuration requires the same authenticated, local administrator.
+  for (const provider of ['ollama', 'lmstudio'] as const) {
+    router.get(`/${provider}/config`, requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
+      res.json(getLocalModelConfig(provider));
+    });
+    router.put(`/${provider}/config`, requireAuth, requireAdmin, requireLocalRequest, async (req, res) => {
+      try {
+        const { baseUrl } = req.body || {};
+        const result = await refreshLocalModelConfig(provider, baseUrl, { timeoutMs: 5000 });
+        res.json(result);
+      } catch (err: any) {
+        res.status(400).json({ error: sanitizedProviderError(err) });
+      }
+    });
+  }
 }

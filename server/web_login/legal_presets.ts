@@ -6,6 +6,7 @@ export type WebLoginSitePreset = {
   category: 'legal';
   loginUrl: string;
   matchHosts: string[];
+  loginFrameSelector?: string;
   notes: string;
   sourceUrl: string;
 };
@@ -42,7 +43,8 @@ export const LEGAL_WEB_LOGIN_PRESETS: WebLoginSitePreset[] = [
     label: '中国裁判文书网',
     category: 'legal',
     loginUrl: 'https://wenshu.court.gov.cn/website/wenshu/181010CARHS5BS3C/index.html?open=login',
-    matchHosts: ['wenshu.court.gov.cn'],
+    matchHosts: ['wenshu.court.gov.cn', 'account.court.gov.cn'],
+    loginFrameSelector: 'iframe#contentIframe',
     sourceUrl: 'https://wenshu.court.gov.cn/',
     notes: [
       '中国裁判文书网是最高人民法院裁判文书公开平台，访问通常需要注册/登录。',

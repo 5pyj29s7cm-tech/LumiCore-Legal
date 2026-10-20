@@ -1,3 +1,4 @@
+import { cloneDatabaseValue } from '../server/db/snapshot_changes';
 import './helpers';
 import crypto from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -8,10 +9,8 @@ import {
   readDB,
   writeDB,
 } from '../db_layer';
-import {
-  appendConversationActionReceipts,
-  syncConversationActionTaskLedger,
-} from '../server/conversation/action_ledger';
+import { appendConversationActionReceipts } from "../server/conversation/ledger/receipt_store";
+import { syncConversationActionTaskLedger } from "../server/conversation/ledger/task_lifecycle";
 import {
   bindConversationActionTurnTask,
 } from '../server/conversation/action_turn_ledger';
@@ -188,7 +187,7 @@ describe('provider receipt to task truth snapshot integration', () => {
         chat: {
           completions: {
             create: async (payload: any) => {
-              providerPayload = structuredClone(payload);
+              providerPayload = cloneDatabaseValue(payload);
               return {
                 choices: [{
                   message: {
@@ -301,7 +300,7 @@ describe('provider receipt to task truth snapshot integration', () => {
     ['provider', 'task_truth_snapshot_model_provider_mismatch'],
     ['model', 'task_truth_snapshot_model_name_mismatch'],
   ] as const)('rejects a forged persisted attempt %s', (field, errorCode) => {
-    const forgedDb = structuredClone(readDB());
+    const forgedDb = cloneDatabaseValue(readDB());
     const routingReceipt = forgedDb.modelRoutingReceipts.find((row: any) => (
       row.id === routingReceiptId
     ));
@@ -316,7 +315,7 @@ describe('provider receipt to task truth snapshot integration', () => {
   });
 
   it('rejects a forged provider source row that is no longer a durable user turn', () => {
-    const forgedDb = structuredClone(readDB());
+    const forgedDb = cloneDatabaseValue(readDB());
     const sourceRow = forgedDb.interactions.find((row: any) => row.id === userMessageId);
     sourceRow.role = 'assistant';
 

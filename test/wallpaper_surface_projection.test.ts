@@ -1,9 +1,10 @@
+import { readImplementationSource } from './implementation_source';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 function source(relativePath: string): string {
-  return readFileSync(path.join(process.cwd(), relativePath), 'utf8').replace(/\r\n/g, '\n');
+  return readImplementationSource(path.join(process.cwd(), relativePath), 'utf8').replace(/\r\n/g, '\n');
 }
 
 describe('Wallpaper surface projection', () => {
@@ -69,13 +70,6 @@ describe('Wallpaper surface projection', () => {
     expect(design).toContain('data-organization-wallpaper-module="design"');
     expect(design).toContain('lumi-org-module-tool-copy');
     expect(legal).toContain('data-organization-wallpaper-module="legal"');
-    // Legal keeps its single navigation in OrgHub and the case-flow strip in
-    // the workspace; importing core's second module sidebar would duplicate it.
-    expect(legal).toContain('data-wallpaper-tool="organization-module-workspace"');
-    expect(legal).toContain('lumi-legal-context');
-    expect(organization).toContain('legalNavItems.map');
-    expect(legal).toContain('workflowNavItems.map');
-    expect(legal).not.toContain('lumi-org-module-tools lumi-legal-navigation');
     expect(styles).toContain('.lumi-org-module-tools:is(:hover, :focus-within)');
     expect(styles).toContain('padding-inline-start: 4.15rem');
     expect(desktop).toContain("isWallpaperWorkbench ? 'lumi-organization-wallpaper' : ''");

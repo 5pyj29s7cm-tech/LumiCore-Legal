@@ -1,3 +1,4 @@
+import { safeFileSegment } from '../../shared/file_identity';
 // Centralized data directory resolver.
 // All persisted files (DB, keys, config, voice samples, KB) live here.
 // Default: the product variant's dedicated LumiCore data root.
@@ -10,6 +11,7 @@ import path from 'path';
 import os from 'os';
 import { PRODUCT_VARIANT } from '../../shared/product_variant';
 import crypto from 'crypto';
+import { normalizePathIdentity } from '../../shared/file_identity';
 import { ensurePrivateRuntimeDirectory, restrictOwnerAccess } from './runtime_file_security';
 
 const ENV_KEY = 'LUMI_DATA_DIR';
@@ -103,8 +105,7 @@ interface ProductDataMigrationVerificationReceipt {
 }
 
 function normalizeRoot(value: string): string {
-  const normalized = path.normalize(path.resolve(value));
-  return process.platform === 'win32' ? normalized.toLocaleLowerCase('en-US') : normalized;
+  return normalizePathIdentity(path.resolve(value));
 }
 
 function digestRoot(value: string): string {
@@ -502,4 +503,8 @@ export function getDataDirectory(relativePath: string): string {
 
 export function getGeneratedOutputDir(): string {
   return getDataDirectory('generated');
+}
+
+export function getLegalDeliveryRoot(workspaceId: string): string {
+  return getDataDirectory(path.join('legal_delivery', safeFileSegment(workspaceId || 'default', 'default')));
 }

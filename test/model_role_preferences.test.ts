@@ -98,7 +98,7 @@ describe('specialized model role preferences', () => {
     expect(prefs.video.model).toBe('huawei_maas/Wan2.2-T2V-A14B');
     expect(prefs.imageToVideo).toMatchObject({
       provider: 'relay',
-      model: 'aliyun/Wan2.2-I2V-A14B',
+      model: DEFAULT_IMAGE_TO_VIDEO_MODELS.relay,
     });
   });
 

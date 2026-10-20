@@ -1,18 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeActionIntent } from '../server/cognition/normalized_action_intent';
-import { matchQuickCommand } from '../server/cognition/quick_commands';
 import { buildActionContract } from '../server/cognition/action_contract';
-import { buildForegroundWeChatReadArgs, buildForegroundWeChatSendArgs } from '../server/agents/nl_chainer';
-import {
-  findConversationActionTask,
-  formatConversationActionLedgerStatus,
-  getConversationActionStateFromLedger,
-  repairContradictoryConversationActionReceipts,
-  syncConversationActionTaskLedger,
-} from '../server/conversation/action_ledger';
+import { buildForegroundWeChatSendArgs } from '../server/regions/packs/cn/foreground_wechat_intent';
+import { findConversationActionTask, getConversationActionStateFromLedger } from "../server/conversation/ledger/queries";
+import { formatConversationActionLedgerStatus } from "../server/conversation/ledger/status";
+import { repairContradictoryConversationActionReceipts } from "../server/conversation/ledger/recovery";
+import { syncConversationActionTaskLedger } from "../server/conversation/ledger/task_lifecycle";
 import type { ConversationActionContinuationState } from '../server/cognition/action_continuation';
 import { ToolRegistry } from '../server/tools/registry';
-import { formatCnToolFailureDetail } from '../server/regions/packs/cn/voice_fast_path_messages';
+import { formatCnToolFailureDetail } from "../server/regions/messages/voice_fast_path_messages";
 
 const CUSTOMER_INTERNAL_EXECUTION_COPY = /(?:^|\n)\s*(?:\u72b6\u6001|\u8bc1\u636e|\u5177\u4f53\u963b\u585e|\u6267\u884c\u56de\u9988)\s*[:\uff1a]|\u56de\u6267|target_mismatch|terminalVerification|\b(?:taskId|requestId|desktop_open|client_action|desktop_execution_plan_receipt|verified|blocked|failed)\b|No successful current-turn tool execution/iu;
 
@@ -43,74 +39,6 @@ function actionState(overrides: Partial<ConversationActionContinuationState>): C
 }
 
 describe('Lumi field-call stability replay', () => {
-  it('replays verified legacy legal receipts across conversations without rerunning work', () => {
-    const query = '律师版文字验收：请只根据已经存在的行业任务账本和最终回执，分别列出“案件工作台、文书生成、合同审查、法条与类案、财产线索、交付核验、标书制作”的最近任务状态、关键结果、交付物和确认边界；不要重新执行工作流。';
-    const receiptByEntry: Record<string, { name: string; result: string }> = {
-      workspace: { name: 'legal_case_workspace', result: '# 验收案 案件工作台\n- 案件ID：case-verified\n- 完成度：5/10（50%）' },
-      packet: { name: 'legal_generate_argument_or_opinion', result: '# 应对策略律师复核草稿' },
-      contract: { name: 'legal_review_contract', result: '# 合同审查结果（仅依据原文）' },
-      research: { name: 'legal_search_statute', result: '已记录法源状态与缺口' },
-      asset: { name: 'legal_trace_assets', result: '未配置外部来源；待人工确认' },
-      verify: { name: 'legal_verify_archived_delivery', result: '## 总体结论\n- 不可正式交付。' },
-      bid: { name: 'legal_generate_bid', result: '# 内部投标响应工作底稿' },
-    };
-    const tasks = Object.entries(receiptByEntry).map(([key, receipt], index) => ({
-      id: `legacy-${key}`,
-      conversationId: 'historical-conversation',
-      userId: 'legal-user',
-      domain: 'personal',
-      orgId: '',
-      parentTaskId: '',
-      rootUserMessageId: '',
-      intentKind: 'legal_document',
-      operation: 'write',
-      goal: `legacy ${key}`,
-      target: '',
-      status: 'completed',
-      blocker: '',
-      activeRequestId: '',
-      completionSource: 'tool_receipt',
-      context: JSON.stringify({
-        actionState: actionState({
-          taskId: `legacy-${key}`,
-          receipts: [{
-            id: `receipt-${key}`,
-            key: `${receipt.name}:{}`,
-            name: receipt.name,
-            arguments: {},
-            result: receipt.result,
-            error: '',
-            outcome: 'success',
-            terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'verified' },
-            recordedAt: `2026-08-16T12:00:0${index}.000Z`,
-          }],
-        }),
-      }),
-      revision: 1,
-      createdAt: `2026-08-16T12:00:0${index}.000Z`,
-      updatedAt: `2026-08-16T12:00:0${index}.000Z`,
-      completedAt: `2026-08-16T12:00:0${index}.000Z`,
-    }));
-    const db: any = {
-      conversations: [{ id: 'current-conversation', userId: 'legal-user', domain: 'personal', orgId: '' }],
-      conversationActionTasks: tasks,
-      conversationActionReceipts: [],
-    };
-
-    const result = formatConversationActionLedgerStatus(db, {
-      conversationId: 'current-conversation',
-      userId: 'legal-user',
-      query,
-    });
-
-    expect(result).toContain('【案件工作台】\n最近任务状态：已完成（最终回执已验证）');
-    expect(result).toContain('案件 ID case-verified');
-    expect(result).toContain('【文书生成】\n最近任务状态：已完成（最终回执已验证）');
-    expect(result).toContain('【交付核验】\n最近任务状态：已完成（最终回执已验证）');
-    expect(result).toContain('不可正式交付');
-    expect(result).toContain('【标书制作】\n最近任务状态：已完成（最终回执已验证）');
-  });
-
   it('reports execution only when the exact task has a server-owned action turn', () => {
     const db: any = {
       conversationActionTasks: [],
@@ -155,7 +83,13 @@ describe('Lumi field-call stability replay', () => {
 
   it('reports desktop relay timeouts as actionable Chinese instead of an opaque failure', () => {
     expect(formatCnToolFailureDetail('Desktop tool "desktop_open" timed out (60s)'))
-      .toContain('窗口回执时超时');
+      .toContain('等待结果超时');
+  });
+
+  it('does not describe video generation timeout as a desktop operation', () => {
+    const message = formatCnToolFailureDetail('Lumi Official API video generation timed out. Task: queued-video');
+    expect(message).toContain('尚不能确认服务端是否仍在处理');
+    expect(message).not.toMatch(/桌面|窗口|重复打开|queued-video/u);
   });
 
   it.each([
@@ -192,9 +126,18 @@ describe('Lumi field-call stability replay', () => {
         target: '张勇',
         sideEffectClass: 'none',
       });
-      expect(buildForegroundWeChatReadArgs(text)).toMatchObject({ contact: '张勇', useSearch: true });
       expect(buildForegroundWeChatSendArgs(text)).toBeNull();
     }
+  });
+
+  it.each([
+    ['打开微信看看我和阿陆最近的聊天内容', '阿陆'],
+    ['总结我和方天明的聊天记录', '方天明'],
+    ['查看张勇的聊天记录', '张勇'],
+    ['查看微信聊天记录', ''],
+  ])('resolves the same read contact in the active normalizer: %s', (text, target) => {
+    expect(normalizeActionIntent(text)).toMatchObject({ kind: 'messaging_read', operation: 'read', target, sideEffectClass: 'none' });
+    expect(buildForegroundWeChatSendArgs(text)).toBeNull();
   });
 
   it('requires an exact recipient and payload before constructing a send', () => {
@@ -213,8 +156,6 @@ describe('Lumi field-call stability replay', () => {
       operation: 'navigate',
       clientAction: 'open_chat',
     });
-    const quick = await matchQuickCommand('打开聊天界面', 'field-replay', { surface: 'voice' });
-    expect(quick?.toolCall).toEqual({ name: 'client_action', arguments: { action: 'open_chat' } });
   });
 
   it('classifies an angry correction as explanation-only and executes no quick tool', async () => {
@@ -226,7 +167,6 @@ describe('Lumi field-call stability replay', () => {
       relation: 'correction',
     });
     expect(buildActionContract(text)).toMatchObject({ applies: false, kind: 'none' });
-    expect(await matchQuickCommand(text, 'field-replay', { surface: 'chat' })).toBeNull();
   });
 
   it('keeps completed CAD receipts queryable after the legacy pointer disappears', () => {

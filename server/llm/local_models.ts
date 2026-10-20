@@ -1,4 +1,4 @@
-import { readDB, writeDB } from '../../db_layer';
+import { readSettingRecord, writeSetting } from "../persistence/settings_repository";
 import { isStrictPrivacy, requireLocalEndpoint } from '../config/privacy';
 import { resetCircuit } from '../cloud/circuit_breaker';
 
@@ -53,6 +53,8 @@ const SETTING_KEYS: Record<LocalModelProvider, string> = {
 };
 const LOCAL_PROBE_TTL_MS = Math.max(2_000, Number(process.env.LUMI_LOCAL_MODEL_PROBE_TTL_MS) || 15_000);
 const probeInFlight = new Map<string, Promise<LocalModelProbeResult>>();
+const endpointVersions = new Map<LocalModelProvider, { baseUrl: string; revision: number }>();
+let endpointRevision = 0;
 const LOCAL_MODEL_MAX_QUEUE = Math.max(1, Math.min(256, Number(process.env.LUMI_LOCAL_MODEL_MAX_QUEUE) || 32));
 const LOCAL_MODEL_QUEUE_TIMEOUT_MS = Math.max(1_000, Math.min(300_000, Number(process.env.LUMI_LOCAL_MODEL_QUEUE_TIMEOUT_MS) || 45_000));
 
@@ -185,18 +187,20 @@ export async function runLocalModelInference<T>(
   // Capture identity before queueing: another model may update provider health
   // while this operation is waiting or running.
   const startingConfig = getLocalModelConfig(provider);
+  const owner = endpointVersion(provider, startingConfig.baseUrl);
   const model = options.model || startingConfig.probedModel;
   const release = await acquireQueueSlot(provider, options.signal);
   const state = queueState(provider);
   const startedAt = Date.now();
   try {
+    if (endpointVersions.get(provider) !== owner) throw new DOMException('Local model endpoint changed; retry the request', 'AbortError');
     const result = await operation();
     state.completed += 1;
-    markLocalModelHealthy(provider, Date.now() - startedAt, model, startingConfig.baseUrl);
+    if (endpointVersions.get(provider) === owner) markLocalModelHealthy(provider, Date.now() - startedAt, model, startingConfig.baseUrl);
     return result;
   } catch (error) {
     state.failed += 1;
-    markLocalModelUnhealthy(provider, error, model, startingConfig.baseUrl);
+    if (endpointVersions.get(provider) === owner) markLocalModelUnhealthy(provider, error, model, startingConfig.baseUrl);
     throw error;
   } finally {
     release();
@@ -227,6 +231,12 @@ function candidateBaseUrls(provider: LocalModelProvider, rawValue?: unknown): st
     candidates.push(ipv4.toString().replace(/\/$/, ''));
   }
   return [...new Set(candidates)];
+}
+
+function endpointVersion(provider: LocalModelProvider, baseUrl: string) {
+  const identity = candidateBaseUrls(provider, baseUrl).at(-1)!;
+  if (endpointVersions.get(provider)?.baseUrl !== identity) endpointVersions.set(provider, { baseUrl: identity, revision: ++endpointRevision });
+  return endpointVersions.get(provider)!;
 }
 
 async function probeLocalInference(
@@ -280,8 +290,7 @@ export function getLocalModelConfig(provider: LocalModelProvider): LocalModelCon
     consecutiveFailures: 0,
   };
   try {
-    const db = readDB();
-    const row = (db.settings || []).find((setting: any) => setting.key === SETTING_KEYS[provider]);
+    const row = readSettingRecord(SETTING_KEYS[provider]);
     if (!row?.value) return fallback;
     const stored = JSON.parse(row.value);
     return {
@@ -324,23 +333,19 @@ export function saveLocalModelConfig(provider: LocalModelProvider, config: Local
     ...(config.lastError ? { lastError: config.lastError.slice(0, 300) } : {}),
     ...(config.probedModel ? { probedModel: config.probedModel } : {}),
   };
-  let db: any;
+  const previousEndpoint = endpointVersion(provider, getLocalModelConfig(provider).baseUrl);
+  const changedEndpoint = endpointVersion(provider, payload.baseUrl) !== previousEndpoint;
   try {
-    db = readDB();
+    readSettingRecord(SETTING_KEYS[provider]);
   } catch {
     // Embedders and connection-test harnesses may construct the LLM runtime
     // before the durable database. The live probe result remains authoritative
     // for this call and will be persisted after normal runtime initialization.
-    if (payload.detected) resetCircuit(provider);
+    if (changedEndpoint) resetCircuit(provider);
     return payload;
   }
-  if (!db.settings) (db as any).settings = [];
-  const key = SETTING_KEYS[provider];
-  const existing = (db.settings || []).findIndex((setting: any) => setting.key === key);
-  if (existing >= 0) db.settings[existing].value = JSON.stringify(payload);
-  else db.settings.push({ key, value: JSON.stringify(payload) });
-  writeDB(db);
-  if (payload.detected) resetCircuit(provider);
+  writeSetting(SETTING_KEYS[provider], JSON.stringify(payload));
+  if (changedEndpoint) resetCircuit(provider);
   return payload;
 }
 
@@ -449,8 +454,14 @@ export async function refreshLocalModelConfig(
   rawBaseUrl?: unknown,
   options: { timeoutMs?: number; inferenceTimeoutMs?: number; requestedModel?: string; fetchImpl?: typeof fetch } = {},
 ): Promise<LocalModelProbeResult> {
-  const current = getLocalModelConfig(provider);
-  const result = await probeLocalModel(provider, rawBaseUrl || current.baseUrl, options);
+  let current = getLocalModelConfig(provider);
+  const baseUrl = normalizeLocalModelBaseUrl(provider, rawBaseUrl || current.baseUrl);
+  requireLocalEndpoint(baseUrl, 'Local language model configuration');
+  if (baseUrl !== current.baseUrl) current = saveLocalModelConfig(provider, { baseUrl, detected: false, models: [] });
+  const owner = endpointVersion(provider, baseUrl);
+  const result = await probeLocalModel(provider, baseUrl, options);
+  if (endpointVersions.get(provider) !== owner) throw new DOMException('Local model endpoint changed; retry the request', 'AbortError');
+  current = getLocalModelConfig(provider);
   let durableResult: LocalModelProbeResult = !result.detected && result.models.length === 0 && current.models.length > 0
     ? { ...result, models: current.models }
     : result;
@@ -491,10 +502,10 @@ export async function ensureLocalModelReady(
   }
   let probed = false;
   const probe = async (): Promise<LocalModelProbeResult> => {
-    const probeKey = JSON.stringify([provider, config.baseUrl, requested]);
+    const probeKey = JSON.stringify([provider, endpointVersion(provider, config.baseUrl).revision, requested]);
     let pending = probeInFlight.get(probeKey);
     if (!pending) {
-      pending = refreshLocalModelConfig(provider, config.baseUrl, {
+      pending = refreshLocalModelConfig(provider, undefined, {
         timeoutMs: options.timeoutMs || 5_000,
         inferenceTimeoutMs: options.inferenceTimeoutMs,
         requestedModel: requested,

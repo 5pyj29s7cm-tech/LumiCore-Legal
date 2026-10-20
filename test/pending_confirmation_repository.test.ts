@@ -1,3 +1,4 @@
+import { readImplementationSource } from './implementation_source';
 import './helpers';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -207,7 +208,7 @@ describe('encrypted pending confirmation repository', () => {
     )).toBeNull();
     (repository as any).claim = originalClaim;
 
-    const revocationText = fs.readFileSync(`${keyPath}.revocations.json`, 'utf8');
+    const revocationText = readImplementationSource(`${keyPath}.revocations.json`, 'utf8');
     expect(revocationText).not.toContain(userId);
     expect(revocationText).not.toContain(pending.id);
     const beforeRestart = await querySQL<any>(
@@ -318,20 +319,22 @@ describe('encrypted pending confirmation repository', () => {
     const productionFiles = [
       'server/socket/chat.ts',
       'server/socket/voice.ts',
-      'server/socket/task.ts',
       'server/regions/packs/cn/messaging_routes.ts',
     ];
     for (const file of productionFiles) {
-      const source = fs.readFileSync(path.resolve(file), 'utf8');
+      const source = readImplementationSource(path.resolve(file), 'utf8');
       expect(source).not.toMatch(/\b(?:record|get|consume|clear)PendingConfirmation\s*\(/);
+      expect(source).toContain('createTurnConfirmation({');
     }
-    const messagingSource = fs.readFileSync(
+    const messagingSource = readImplementationSource(
       path.resolve('server/regions/packs/cn/messaging_routes.ts'),
       'utf8',
     );
     expect(messagingSource).toContain('buildTransportNeutralConfirmationScope');
     expect(messagingSource).toContain('ensurePendingConfirmationPersistenceInitialized');
-    expect(messagingSource).toContain('consumePendingConfirmationDurably');
-    expect(messagingSource).toContain('recordPendingConfirmationDurably');
+    const boundary = readImplementationSource(path.resolve('server/tools/turn_confirmation.ts'), 'utf8');
+    expect(boundary).toContain('await consumePendingConfirmationDurably(');
+    expect(boundary).toContain('await recordPendingConfirmationDurably(');
+    expect(boundary).not.toMatch(/\b(?:record|consume)PendingConfirmation\s*\(/);
   });
 });

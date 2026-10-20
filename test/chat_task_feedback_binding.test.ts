@@ -1,15 +1,15 @@
+import { readImplementationSource } from './implementation_source';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const chat = readFileSync(path.join(process.cwd(), 'server/socket/chat.ts'), 'utf8');
-const task = readFileSync(path.join(process.cwd(), 'server/socket/task.ts'), 'utf8');
+const chat = readImplementationSource(path.join(process.cwd(), 'server/socket/chat.ts'), 'utf8');
 
 describe('chat task feedback binding integration', () => {
   it('resolves and exposes a structured relation before queue control', () => {
     const exactReplayGuard = chat.indexOf('if (existingExecution)');
-    const relation = chat.indexOf('resolvedTaskRelation = resolveActiveTaskMessageRelation(', exactReplayGuard);
-    const queueControl = chat.indexOf('const previousSession = chatExecutionQueue.getTail(sessionKey)', relation);
+    const relation = chat.indexOf('acceptedTurnResolution = resolveUserTurn({', exactReplayGuard);
+    const queueControl = chat.indexOf('const previousSession = existingSession;', relation);
 
     expect(exactReplayGuard).toBeGreaterThan(-1);
     expect(relation).toBeGreaterThan(exactReplayGuard);
@@ -35,16 +35,9 @@ describe('chat task feedback binding integration', () => {
       'persistChatSidecarCancellationIntent(executionScope, requestId, cancellationTargetRequestId)',
     );
     expect(chat).toContain(
-      'chatExecutionQueue.cancelRequest(sessionKey, cancellationTargetRequestId)',
+      'cancelConversationExecution(executionScope, cancellationTargetRequestId)',
     );
     expect(chat).not.toContain("reason: 'missing_control_target'");
-    expect(task).toContain(
-      'if (controlTargetRequestId && controlTargetRequestId !== runningTask.requestId)',
-    );
-    expect(task).toContain(
-      'const cancellationTargetRequestId = controlTargetRequestId || previous.requestId',
-    );
-    expect(task).not.toContain("reason: 'missing_control_target'");
   });
 
   // Cancellation is exercised through real Socket handlers in
@@ -56,7 +49,7 @@ describe('chat task feedback binding integration', () => {
 
   it('settles a repeated confirmation as a no-op before binding a new task', () => {
     const duplicateConfirmation = chat.indexOf('const adjacentConfirmedAction = !pendingConfirmation');
-    const bindTurn = chat.indexOf('const boundTurn = bindConversationActionExecutionTurn({', duplicateConfirmation);
+    const bindTurn = chat.indexOf('preparePlannedConversationExecution({', duplicateConfirmation);
 
     expect(duplicateConfirmation).toBeGreaterThan(-1);
     expect(chat.slice(duplicateConfirmation, duplicateConfirmation + 900)).toContain('findAdjacentVerifiedConfirmedAction({');
@@ -69,14 +62,18 @@ describe('chat task feedback binding integration', () => {
 
   it('routes bound correction/retry/accept feedback through the existing task revision', () => {
     const plannerContext = chat.indexOf('formatActiveTaskRelationContext(');
-    const boundExecution = chat.indexOf('const bindsExistingAction = Boolean(', plannerContext);
-    const prepare = chat.indexOf('prepareConversationActionExecution({', boundExecution);
-
+    const prepare = chat.indexOf('preparePlannedConversationExecution({', plannerContext);
+    const owner = readFileSync('server/conversation/planned_execution.ts', 'utf8');
     expect(plannerContext).toBeGreaterThan(-1);
-    expect(boundExecution).toBeGreaterThan(plannerContext);
-    expect(prepare).toBeGreaterThan(boundExecution);
-    expect(chat.slice(boundExecution, prepare)).toContain("['continue', 'correction', 'accept', 'retry']");
-    expect(chat).toContain('forceResume: true');
+    const prompt = readFileSync('server/socket/chat/prompt_context.ts', 'utf8');
+    const acceptedRelation = prompt.indexOf('context.resolvedTaskRelation = executionPipeline.taskRelation;');
+    expect(acceptedRelation).toBeGreaterThan(prompt.indexOf('assemble: async (executionPipeline: LumiExecutionPipeline)'));
+    expect(prepare).toBeGreaterThan(plannerContext);
+    const entry = readFileSync('server/socket/chat.ts', 'utf8');
+    expect(entry.indexOf('await conversationSetup!.resume(execution)')).toBeLessThan(entry.indexOf('await prepareChatTerminalWriters(conversation.context)'));
+    expect(owner).toContain("['continue', 'correction', 'accept', 'retry']");
+    expect(owner).toContain('const relation = execution.taskRelation;');
+    expect(owner).toContain('forceTask, forceResume:');
     expect(chat).toContain('userMessageId: acceptedUserMessageId');
   });
 
@@ -85,10 +82,10 @@ describe('chat task feedback binding integration', () => {
     const persistUser = chat.indexOf('persistAcceptedUserTurn: () => addMessageIdempotent({', admission);
     const flush = chat.indexOf('flush: flushDBOrThrow', persistUser);
     const accepted = chat.indexOf('const acceptedUserMessageId = chatAdmission.persisted;', flush);
-    const wait = chat.indexOf('await sessionLease.waitForTurn()', accepted);
-    const refresh = chat.indexOf('const refreshedConversation = getConversationForScope(', wait);
+    const wait = chat.indexOf('await runLumiEntryTurn<void>({', accepted);
+    const refresh = chat.indexOf('const refreshedConversation = getConversationForScope(', accepted);
     const stale = chat.indexOf("resolvedTaskRelation.binding === 'stale'", refresh);
-    const bind = chat.indexOf('const boundTurn = bindConversationActionExecutionTurn({', stale);
+    const bind = chat.indexOf('preparePlannedConversationExecution({', stale);
 
     expect(admission).toBeGreaterThan(-1);
     expect(persistUser).toBeGreaterThan(admission);
@@ -96,20 +93,28 @@ describe('chat task feedback binding integration', () => {
     expect(flush).toBeGreaterThan(persistUser);
     expect(accepted).toBeGreaterThan(flush);
     expect(wait).toBeGreaterThan(accepted);
-    expect(refresh).toBeGreaterThan(wait);
+    expect(refresh).toBeGreaterThan(accepted);
+    const core = readFileSync('server/cognition/turn_execution.ts', 'utf8');
+    expect(core).toContain('admission = capturedAdmission ||');
+    expect(core.indexOf('await admission?.waitForTurn();')).toBeLessThan(core.indexOf('await capturedPlanning()'));
+    const entry = readFileSync('server/socket/chat.ts', 'utf8');
+    expect(entry).toContain('resource: { admission: context.sessionLease, ownedByDurableRelease: true }');
+    expect(entry).toContain('settle: async () => { await context.releaseChatSession(); }');
     expect(stale).toBeGreaterThan(refresh);
     expect(bind).toBeGreaterThan(stale);
-    expect(chat.slice(bind, bind + 500)).toContain('userMessageId: acceptedUserMessageId');
+    expect(chat.slice(bind, bind + 650)).toContain('userMessageId: acceptedUserMessageId');
+    expect(chat.slice(bind, bind + 650)).toContain('bindConversationTurn: true');
+    expect(chat).not.toContain('bindConversationActionExecutionTurn({');
+    const owner = readFileSync('server/conversation/planned_execution.ts', 'utf8');
+    expect(owner).toContain('prepareConversationActionExecution({');
   });
 
-  it('revalidates every explicit control fence after waiting without merging receive-time state', () => {
+  it('revalidates the accepted task binding after waiting through the shared identity/version guard', () => {
     const refresh = chat.indexOf('const refreshedConversation = getConversationForScope(');
-    const resolve = chat.indexOf('resolvedTaskRelation = resolveActiveTaskMessageRelation(', refresh);
-    const section = chat.slice(resolve, resolve + 800);
-    expect(section).toContain('controlTargetRequestId');
-    expect(section).toContain('controlTargetTaskId');
-    expect(section).toContain('controlTargetRevision');
-    expect(section).not.toContain('receivedTaskRelation');
+    const resolve = chat.indexOf('resolvedTaskRelation = revalidateAcceptedTaskRelation(', refresh);
+    expect(resolve).toBeGreaterThan(refresh);
+    expect(chat.slice(resolve,resolve+180)).toContain('conversation.actionContinuationState');
+    expect(chat.slice(refresh,resolve)).not.toContain('resolveActiveTaskMessageRelation(');
   });
 
   it('does not report an older durable pointer as the current runtime status', () => {

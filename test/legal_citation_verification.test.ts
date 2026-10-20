@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import './helpers';
 import { verifyCitation, verifyMultipleCitations } from '../server/legal/kb';
+
+beforeAll(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-20T00:00:00Z')); });
+afterAll(() => vi.useRealTimers());
 
 describe('Authoritative legal citation verification', () => {
   it('recognizes Civil Code metadata without claiming provision verification', () => {
@@ -44,7 +47,7 @@ describe('Authoritative legal citation verification', () => {
     ['《政府采购法》第八十八条', 88],
     ['《个人信息保护法》第七十四条', 74],
     ['《行政复议法》第九十条', 90],
-    ['《民诉法解释》第五百五十二条', 552],
+    ['《民诉法解释》第五百五十条', 550],
     ['《民事诉讼证据规定》第一百条', 100],
     ['《合同编通则解释》第六十九条', 69],
     ['《担保制度解释》第七十一条', 71],
@@ -88,6 +91,12 @@ describe('Authoritative legal citation verification', () => {
     expect(checks).toHaveLength(1);
     expect(checks[0].citation).toBe('《民法典》第五百八十五条');
     expect(checks[0].isEffective).toBe(true);
+  });
+
+  it('ignores transaction documents while still checking actual and unknown statutes', () => {
+    const checks = verifyMultipleCitations('参照《技术规格书》《采购合同（示范文本）》《投标文件》；依法核验《劳动合同法》第十条和《不存在特别保护法》第十条。');
+    expect(checks.map(check => check.citation)).toEqual(['《劳动合同法》第十条', '《不存在特别保护法》第十条']);
+    expect(checks[1].exists).toBe(false);
   });
 
   it('continues to block repealed statutes', () => {

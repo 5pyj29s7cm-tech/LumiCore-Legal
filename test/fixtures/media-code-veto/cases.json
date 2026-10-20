@@ -1,0 +1,84 @@
+{
+  "positives": [
+    [
+      "exact-failed-meme",
+      "生成一张图片，作为现有聊天记录表情包视频的九格表情素材。使用当前已配置的Lumi官方图片生成模型，按以下参数只提交这一张素材一次，返回真实图片文件。\n{\n  \"officialOnly\": true,\n  \"prompt\": \"Create one original 3 by 3 reaction sticker contact sheet, exactly nine equally sized square cells with white gutters on a plain white background. Every cell shows the same funny round white cat with simple bold black outlines, cute expressive face and a tiny blue tie, clean hand drawn Chinese internet reaction sticker style. Top row: calmly listening, suspicious sideways glance, shocked wide eyes. Middle row: dramatically angry, nervously sweating, awkward forced smile. Bottom row: stunned speechless face, guilty hiding face, exaggerated falling backward in disbelief. Each expression fully contained within its own cell with ample safe margins. Distinct and readable at small size. Image only, with no lettering, captions, symbols, logos, labels, numerals or speech balloons.\",\n  \"size\": \"1024x1024\",\n  \"n\": 1\n}"
+    ],
+    [
+      "reaction-sticker",
+      "Generate an image of an original reaction sticker contact sheet."
+    ],
+    [
+      "React-theme-poster-zh",
+      "生成一张React主题海报，内容是开发者交流活动。"
+    ]
+  ],
+  "pureCode": [
+    [
+      "React-gallery-zh",
+      "生成一个 React 图片画廊组件，交付 TSX 源码。"
+    ],
+    [
+      "CSS-animation-zh",
+      "生成一个 CSS 图片轮播动画，只输出代码。"
+    ],
+    [
+      "PPT-image-slide-zh",
+      "生成一个 PPT 图片展示页，只交付演示文稿。"
+    ],
+    [
+      "React-video-player-en",
+      "Create a React video player component."
+    ],
+    [
+      "HTML-CSS-gallery-en",
+      "Write HTML and CSS for an animated image gallery."
+    ],
+    [
+      "React-video-player-zh",
+      "用 React 实现一个视频播放器组件。"
+    ],
+    [
+      "PPT-image-existing-en",
+      "Create a PowerPoint slide containing the supplied image."
+    ]
+  ],
+  "negative": [
+    [
+      "negated-image",
+      "不要生成图片，只告诉我怎么写提示词"
+    ],
+    [
+      "negated-video",
+      "Do not create a video, just write the script"
+    ],
+    [
+      "image-config",
+      "图片生成模型怎么配置？"
+    ],
+    [
+      "video-cost",
+      "视频生成一次多少钱？"
+    ],
+    [
+      "poster-copy",
+      "Create copy for a poster"
+    ],
+    [
+      "image-prompt",
+      "Generate a prompt for an image"
+    ],
+    [
+      "video-script",
+      "生成视频脚本，不要实际生成视频。"
+    ],
+    [
+      "open-existing",
+      "打开刚生成的视频"
+    ],
+    [
+      "view-existing",
+      "查看刚生成的图片"
+    ]
+  ]
+}

@@ -179,6 +179,22 @@ describe('Lumi model configuration tools', () => {
     expect(create).toHaveBeenCalledOnce();
   });
 
+  it.each(['ordered_fallback', 'auto'])('does not exhaust the %s live probe budget on thinking output', async selectionMode => {
+    const create = vi.fn(async (request: any) => ({
+      choices: [{ message: request.max_tokens >= 64 && request.thinking?.type === 'disabled'
+        ? { content: 'OK' } : { content: '', reasoning_content: 'Thinking only' } }],
+    }));
+    const result = JSON.parse(await createRegistry().execute('model_configuration_update', {
+      role: 'reasoning', provider: 'relay', model: 'aliyun/deepseek-v4-flash', selectionMode,
+      fallbackCandidates: [], allowCloudFallback: true,
+    }, {
+      userId: 'model-config-budget-' + selectionMode,
+      llmGetters: { getDeepSeek: () => null, getGemini: () => null, getRelay: () => ({ chat: { completions: { create } } }) },
+    }));
+    expect(result).toMatchObject({ verified: true, test: { ok: true, provider: 'relay', model: 'aliyun/deepseek-v4-flash' } });
+    expect(create).toHaveBeenCalledOnce();
+  });
+
   it('does not report a saved model as verified when its live test fails', async () => {
     const registry = createRegistry();
     const result = JSON.parse(await registry.execute('model_configuration_update', {

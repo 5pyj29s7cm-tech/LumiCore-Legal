@@ -1,9 +1,10 @@
-import { readDB } from '../../db_layer';
-import { classifySkillAuthoringIntent } from '../skills/authoring_intent';
-import { CN_CONVERSATION_EXECUTION_FACT_MESSAGES } from '../regions/packs/cn/conversation_execution_facts_messages';
-import { isPriorTurnToolReceiptQuestion } from '../cognition/normalized_action_intent';
+import { readDatabaseTables } from '../../db_layer';
+import { projectConversationReceiptHistory } from './receipt_history';
+import { CN_CONVERSATION_EXECUTION_FACT_MESSAGES } from "../regions/messages/conversation_execution_facts_messages";
+import { hasMixedStatusExecutionIntent, isPriorArtifactDeliveryQuestion, isPriorWorkDeliveryFactQuestion, isPriorTurnToolReceiptQuestion, isPriorSingleFileReadFactQuestion, isPriorFailureExplanationQuestion } from '../cognition/normalized_action_intent';
+export { isConversationExecutionFactQuestion } from '../cognition/normalized_action_intent';
 import { toolRecordSucceeded } from '../cognition/task_execution_ledger';
-import { formatCnToolFailureDetail } from '../regions/packs/cn/voice_fast_path_messages';
+import { formatCnToolFailureDetail } from "../regions/messages/voice_fast_path_messages";
 
 export interface ConversationExecutionFactScope {
   conversationId: string;
@@ -24,6 +25,8 @@ export interface ConversationExecutionFacts {
   recentUserMessages?: string[];
   /** Final assistant deliveries from this exact persisted conversation. */
   deliveredResults?: Array<{ requestId: string; messageId: string; text: string; timestamp: string }>;
+  /** Latest durable partial outcome, including the preserved next step. */
+  latestProgress?: string;
 }
 
 export interface ConversationExecutionToolFact {
@@ -57,35 +60,8 @@ function parseToolCalls(value: unknown): any[] {
   return Array.isArray(parsed) ? parsed : [];
 }
 
-export function isConversationExecutionFactQuestion(text: string): boolean {
-  const normalized = String(text || '').trim();
-  if (!normalized) return false;
-  if (classifySkillAuthoringIntent(normalized) !== 'none') return false;
-  if (isPriorWorkDeliveryFactQuestion(normalized)) return true;
-  if (isPriorFailureExplanationQuestion(normalized)) return true;
-  if (isPriorTurnToolReceiptQuestion(normalized)) return true;
-  if (isPriorSingleFileReadFactQuestion(normalized)) return true;
-  // i18n-allow -- Chinese prior-open fact-question recognition; not user-visible copy.
-  const asksAboutPriorOpen = /(?:你)?(?:不是|不都|难道没)?(?:已经|刚才|刚刚|之前).{0,16}(?:打开|启动|运行).{0,24}(?:吗|没有|没|不知道|忘了)|(?:你)?(?:已经|刚才|刚刚).{0,16}(?:打开|启动|运行)了[，,。！？!?\s]*(?:你)?(?:自己)?(?:不知道|忘了)|\b(?:didn'?t|did\s+you\s+not|you\s+already).{0,40}\b(?:open|launch|start)(?:ed)?\b/iu.test(normalized);
-  if (asksAboutPriorOpen) return true;
-  const conversationScope = /(?:这|本|当前|刚才|刚刚|整个).{0,10}(?:轮|段|次)?(?:对话|会话|聊天)|\b(?:this|current|that)\s+(?:conversation|chat|session)\b/iu.test(normalized);
-  const asksWhether = /(?:有没有|有没|是否|究竟|到底|真的)|\b(?:did|have|was|were)\b/iu.test(normalized);
-  const executionSubject = /(?:(?:调用|执行|使用|跑).{0,10}(?:工具|插件|技能)|(?:创建|新建|建立).{0,10}(?:任务|计划))|\b(?:call|use|run|execute)(?:d|ing)?\s+(?:any\s+)?tools?\b|\bcreat(?:e|ed|ing)\s+(?:any\s+)?tasks?\b/iu.test(normalized);
-  const asksVerifiedClientNavigation = /(?:成功|实际|真实|回执).{0,24}(?:客户端)?(?:导航|界面动作|页面动作)|(?:哪一个|哪个|什么).{0,24}(?:客户端)?(?:导航动作|界面动作)/u.test(normalized);
-  return (conversationScope && asksWhether && executionSubject) || asksVerifiedClientNavigation;
-}
 
-function isPriorWorkDeliveryFactQuestion(text: string): boolean {
-  // Detailed proof questions belong to the existing task-status projection,
-  // which retains the exact action target and verification evidence. A broad
-  // delivered-result recap must not reduce them to operation counts.
-  // i18n-allow: multilingual request recognition, not user-visible copy.
-  if (/(?:什么|哪些|哪项|何种).{0,8}(?:证据|凭证)|(?:证据|凭证).{0,16}(?:证明|验证|成功)|\bwhat\s+(?:evidence|proof)\b|\b(?:evidence|proof)\b.{0,24}\b(?:prov\w*|succeed\w*|verif\w*)\b/iu.test(text)) return false;
-  // i18n-allow: read-only questions about previous work and file changes.
-  return /(?:刚才|刚刚|之前|这次|本次|上一轮)[^。！？!?\n]{0,20}(?:实际|已经|已|都)?(?:完成|做|处理)[^。！？!?\n]{0,14}(?:什么|哪些|哪一步)|(?:原|源)文件[^。！？!?\n]{0,12}(?:改过|修改过|写过|变过)(?:吗|没有|没)|\bwhat\s+(?:did|have)\s+you\s+(?:actually\s+)?(?:complete|finish|do|done)|\b(?:was|did)\b[^.!?\n]{0,30}\b(?:original|source)\s+file\b[^.!?\n]{0,20}\b(?:change|modif)/iu.test(text);
-}
-
-function parseRecordArguments(value: unknown): Record<string, unknown> {
+function parseRecordArguments(value: unknown): Record<string, any> {
   let parsed = value;
   if (typeof parsed === 'string') {
     try { parsed = JSON.parse(parsed); } catch { return {}; }
@@ -95,85 +71,7 @@ function parseRecordArguments(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function isPriorSingleFileReadFactQuestion(text: string): boolean {
-  const normalized = String(text || '').replace(/\s+/gu, ' ').trim();
-  if (!normalized) return false;
-  // A correction that names a concrete file is executable work even when it
-  // also says "previous task" or contains the word "path".  Let the normal
-  // task-continuation path bind it to the server-owned task; never consume it
-  // as a read-only history lookup before the tool loop runs.
-  // i18n-allow: multilingual action/target recognition; not user-visible copy.
-  const hasExplicitFileTarget = /(?:[A-Za-z]:[\\/]|\\\\)[^\r\n“”"'<>|?*，,；;。！？!?]{1,440}\.[A-Za-z0-9]{1,16}(?=$|[\s，,；;。！？!?)）\]}'"])/u.test(normalized)
-    || /\/(?:Users|home|tmp|var|opt|Volumes)\/[^\r\n“”"'<>]{1,440}\.[A-Za-z0-9]{1,16}(?=$|[\s，,；;。！？!?)）\]}'"])/u.test(normalized);
-  // i18n-allow: multilingual correction/continuation recognition; not user-visible copy.
-  const explicitTargetAction = /(?:不是|不对|纠正|改成|改为|换成|而是|应该是)|(?:继续|接着|重试).{0,32}(?:任务|读取|读|打开|分析)|(?:请|帮我|现在|然后|继续|接着|重新|再次|再|改成|改为|换成)\s*(?:读取|读一下|打开|分析)|\b(?:instead|correct|change|replace|continue|resume|retry|re-?read|read\s+again)\b/iu.test(normalized);
-  if (hasExplicitFileTarget && explicitTargetAction) return false;
-  // A request to re-read is executable work. This fast path is only for
-  // recalling the immediately preceding, already verified read receipt.
-  // i18n-allow: multilingual previous-file fact recognition; not user-visible copy.
-  const freshReadMarkers = Array.from(normalized.matchAll(
-    /(?:重新\s*读取|再次\s*读取|再\s*读(?:取)?|重读)|\b(?:re-?read(?:ing)?|read\s+again)\b/giu,
-  ));
-  const asksForFreshRead = freshReadMarkers.some(marker => {
-    const markerIndex = marker.index ?? 0;
-    const prefix = normalized.slice(Math.max(0, markerIndex - 48), markerIndex);
-    const clausePrefix = prefix.slice(Math.max(
-      prefix.lastIndexOf('，'),
-      prefix.lastIndexOf(','),
-      prefix.lastIndexOf('。'),
-      prefix.lastIndexOf('.'),
-      prefix.lastIndexOf('！'),
-      prefix.lastIndexOf('!'),
-      prefix.lastIndexOf('？'),
-      prefix.lastIndexOf('?'),
-      prefix.lastIndexOf('；'),
-      prefix.lastIndexOf(';'),
-    ) + 1);
-    // "不要重新读取" and "without re-reading" explicitly forbid a new
-    // tool call. They must not be mistaken for an executable re-read request.
-    // Keep the negation close to the marker so a separate clause such as
-    // "不要猜，重新读取" still requests fresh work.
-    // i18n-allow: multilingual negated re-read recognition; not user-visible copy.
-    const negated = /(?:不要|别|无需|无须|不用|不必|不需要|请勿|禁止|不是(?:要|让你)?|并非(?:要|让你)?)[^，,。.!！？?；;\n]{0,6}$/u.test(clausePrefix)
-      || /(?:do\s+not|don't|dont|never|without|no\s+need\s+to|need\s+not|needn't|must\s+not)(?:\s+(?:actually|really|ever|please|the\s+file|it)){0,3}\s*$/iu.test(clausePrefix);
-    return !negated;
-  });
-  if (asksForFreshRead) return false;
-  // i18n-allow: multilingual previous-file fact recognition; not user-visible copy.
-  const prior = /(?:刚才|刚刚|上一轮|上次|前一轮|此前)|\b(?:just\s+now|previous(?:ly)?|last\s+turn|prior\s+turn|earlier)\b/iu.test(normalized);
-  // i18n-allow: multilingual previous-file fact recognition; not user-visible copy.
-  const read = /(?:读取|读过|读的|所读)|\b(?:read|file)\b/iu.test(normalized);
-  // i18n-allow: multilingual previous-file fact recognition; not user-visible copy.
-  const asksFact = /(?:哪个|哪一个|什么|精确|路径|字段|值|名称|版本)|\b(?:which|what|exact|path|field|value|name|version)\b/iu.test(normalized);
-  // A fact lookup must actually ask for, recall, or request presentation of a
-  // stored value. Merely mentioning "previous", "read", and "path" is not a
-  // question and must not steal an executable correction from the task lane.
-  // i18n-allow: multilingual fact-query recognition; not user-visible copy.
-  const asksForRecall = /[？?]/u.test(normalized)
-    || /(?:告诉我|列出|给我|回答|说(?:一)?下|回忆|根据.{0,20}回执|分.{0,8}(?:行|列))/u.test(normalized)
-    || /\b(?:tell|report|list|give|recall|show|based\s+(?:only\s+)?on)\b/iu.test(normalized);
-  return prior && read && asksFact && asksForRecall;
-}
 
-function isPriorFailureExplanationQuestion(text: string): boolean {
-  // i18n-allow: Chinese previous-turn failure question recognition; not user-visible copy.
-  return /^(?:(?:这次|刚才|刚刚|上次|前面|那个任务)\s*)?(?:为什么|怎么(?:会)?|为何)\s*(?:失败|没(?:有)?(?:做成|完成|成功)|没做成|出错|报错|受阻|卡住)(?:了|的)?[啊呀呢，,。！？?!\s]*$/u.test(text)
-    || /^why\s+(?:did\s+)?(?:it|that|the\s+(?:task|request))?\s*(?:fail|failed|not\s+(?:finish|complete|succeed))[?!.\s]*$/iu.test(text);
-}
-
-function parseRecordResult(value: unknown): Record<string, any> {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return value as Record<string, any>;
-  }
-  try {
-    const parsed = JSON.parse(String(value || '{}'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, any>
-      : {};
-  } catch {
-    return {};
-  }
-}
 
 function interactionRequestId(item: any): string {
   return String(item?.requestId || item?.externalMessageId || '').trim();
@@ -181,7 +79,7 @@ function interactionRequestId(item: any): string {
 
 function verifiedPriorOpen(record: ConversationExecutionFacts['toolCalls'][number]): boolean {
   if (!/^(?:desktop_open|browser_open_task)$/i.test(record.name) || record.error) return false;
-  const payload = parseRecordResult(record.result);
+  const payload = parseRecordArguments(record.result);
   const status = String(payload.status || payload.verification?.status || '').trim().toLowerCase();
   const targetMatched = payload.targetMatched === true || payload.verification?.targetMatched === true;
   if (payload.ok === false || payload.success === false || payload.opened === false) return false;
@@ -198,7 +96,7 @@ function verifiedPriorOpen(record: ConversationExecutionFacts['toolCalls'][numbe
 }
 
 function priorOpenTarget(record: ConversationExecutionFacts['toolCalls'][number]): string {
-  const payload = parseRecordResult(record.result);
+  const payload = parseRecordArguments(record.result);
   const invoked = String(
     record.arguments?.target
     || record.arguments?.path
@@ -264,15 +162,15 @@ function recalledAcceptanceCode(messages: string[]): string {
 }
 
 export function getConversationExecutionFacts(scope: ConversationExecutionFactScope): ConversationExecutionFacts {
-  const db = readDB();
+  const db = readDatabaseTables(["conversationActionTasks","conversationActionTurns","conversationActionReceipts","conversations","interactions"]);
   const domain = scope.domain === 'work' ? 'work' : 'personal';
   const orgId = domain === 'work' ? String(scope.orgId || '') : '';
-  const interactions = (db.interactions || []).filter((item: any) => (
+  const interactions: any[] = projectConversationReceiptHistory(db, (db.interactions || []).filter((item: any) => (
     String(item.conversationId || '') === scope.conversationId
     && String(item.userId || '') === scope.userId
     && String(item.domain || 'personal') === domain
     && (domain !== 'work' || String(item.orgId || '') === orgId)
-  ));
+  )));
   const mapInteractionToolCalls = (item: any): ConversationExecutionToolFact[] => (
     parseToolCalls(item.toolCalls).map((record: any) => ({
       name: String(record?.name || record?.toolName || '').trim(),
@@ -299,7 +197,8 @@ export function getConversationExecutionFacts(scope: ConversationExecutionFactSc
         : undefined,
     })).filter((record: ConversationExecutionToolFact) => Boolean(record.name))
   );
-  const toolCalls = interactions.flatMap(mapInteractionToolCalls);
+  const interactionToolCalls = interactions.map(mapInteractionToolCalls);
+  const toolCalls = interactionToolCalls.flat();
   const currentUserIndex = (() => {
     const exactRequestId = String(scope.currentRequestId || '').trim();
     if (!exactRequestId) return -1;
@@ -331,9 +230,9 @@ export function getConversationExecutionFacts(scope: ConversationExecutionFactSc
         // foreground lease. A queued transcript can therefore be ordered as
         // user1, user2, assistant1. Bind receipts to user1's immutable request
         // id instead of assuming assistant1 must sit between the two users.
-        ? interactions.flatMap((item: any) => {
+        ? interactions.flatMap((item: any, index: number) => {
             const itemRequestId = interactionRequestId(item);
-            return mapInteractionToolCalls(item).filter(record => (
+            return interactionToolCalls[index].filter(record => (
               itemRequestId === previousUserRequestId
               || record.requestId === previousUserRequestId
             ));
@@ -341,9 +240,9 @@ export function getConversationExecutionFacts(scope: ConversationExecutionFactSc
         // Legacy rows may predate durable request ids. Preserve the original
         // adjacency fallback only for those rows; a modern request with no
         // matching receipt must remain an authoritative empty result.
-        : interactions
+        : interactionToolCalls
           .slice(previousUserIndex + 1, currentUserIndex >= 0 ? currentUserIndex : interactions.length)
-          .flatMap(mapInteractionToolCalls)
+          .flat()
       : []
     : undefined;
   const tasks = (db.conversationActionTasks || []).filter((task: any) => (
@@ -367,18 +266,25 @@ export function getConversationExecutionFacts(scope: ConversationExecutionFactSc
     && turn.status === 'terminal' && turn.requestId !== scope.currentRequestId
     && (!scope.taskId || turn.taskId === scope.taskId)
   ));
-  const deliveredResults = interactions.filter((item: any) => {
+  const persistedResults = interactions.filter((item: any) => {
     if (item.role !== 'assistant' || !item.requestId || item.requestId === scope.currentRequestId) return false;
     const feedback = parseRecordArguments(item.completionFeedback);
     const message = String(item.message || '').trim();
-    return feedback.status === 'completed' && Boolean(message)
-      && !/(?:这次|这项操作)还没完成|没有取得可用的分析结果/u.test(message) // i18n-allow: inconsistent legacy terminal exclusion.
+    const hasProgress = feedback.status === 'completed'
+      || ['blocked', 'cancelled', 'failed', 'partial'].includes(String(feedback.status))
+        && ['completed', 'incomplete', 'blockers', 'nextSteps'].some(key => Array.isArray(feedback[key]) && feedback[key].length);
+    return hasProgress && Boolean(message)
+      && (feedback.status !== 'completed' || !/(?:这次|这项操作)还没完成|没有取得可用的分析结果/u.test(message)) // i18n-allow: inconsistent legacy completed terminal exclusion.
       && finalTurns.some((turn: any) => turn.requestId === item.requestId && turn.terminalMessageId === item.id);
-  }).slice(-3).map((item: any) => ({
+  });
+  const latestOutcome = persistedResults.at(-1);
+  const latestProgress = latestOutcome && parseRecordArguments(latestOutcome.completionFeedback).status !== 'completed'
+    ? String(latestOutcome.message || '').trim().slice(0, 1_800) : undefined;
+  const deliveredResults = persistedResults.filter((item: any) => parseRecordArguments(item.completionFeedback).status === 'completed').slice(-3).map((item: any) => ({
     requestId: String(item.requestId), messageId: String(item.id),
     text: String(item.message || '').trim().slice(0, 1_800), timestamp: String(item.timestamp || ''),
   }));
-  return { toolCalls, priorTurnToolCalls, tasks, recentUserMessages, deliveredResults };
+  return { toolCalls, priorTurnToolCalls, tasks, recentUserMessages, deliveredResults, latestProgress };
 }
 
 function priorTurnToolOutcome(record: ConversationExecutionToolFact): 'success' | 'failed' {
@@ -456,10 +362,10 @@ function priorReadResult(record: ConversationExecutionToolFact): Record<string, 
   const envelopeVerified = record.envelope?.status === 'verified_success'
     && record.envelope.verification?.status === 'verified';
   if (envelopeVerified) {
-    const envelopeResult = parseRecordResult(record.envelope?.result);
+    const envelopeResult = parseRecordArguments(record.envelope?.result);
     if (Object.keys(envelopeResult).length > 0) return envelopeResult;
   }
-  return parseRecordResult(record.result);
+  return parseRecordArguments(record.result);
 }
 
 function resultFieldRequested(text: string, fieldName: string): boolean {
@@ -530,7 +436,7 @@ function priorSingleFileReadFacts(facts: ConversationExecutionFacts): {
 
 function failedReceiptDetail(record: ConversationExecutionToolFact): string {
   if (record.errorDetail) return record.errorDetail;
-  const payload = parseRecordResult(record.result);
+  const payload = parseRecordArguments(record.result);
   const verification = payload.verification && typeof payload.verification === 'object'
     ? payload.verification
     : {};
@@ -548,7 +454,7 @@ function failedReceiptDetail(record: ConversationExecutionToolFact): string {
 
 function receiptFailed(record: ConversationExecutionToolFact): boolean {
   if (record.error || record.terminalVerification?.status === 'failed') return true;
-  const payload = parseRecordResult(record.result);
+  const payload = parseRecordArguments(record.result);
   const status = String(payload.status || payload.verification?.status || '').trim().toLowerCase();
   return payload.ok === false
     || payload.success === false
@@ -570,7 +476,7 @@ export function formatConversationExecutionFactAnswer(
   text: string,
 ): string {
   const zh = /[\u3400-\u9fff]/u.test(text);
-  if (isPriorWorkDeliveryFactQuestion(text)) {
+  if (isPriorWorkDeliveryFactQuestion(text) || isPriorArtifactDeliveryQuestion(text) && !hasMixedStatusExecutionIntent(text)) {
     const successful = facts.toolCalls.filter(record => priorTurnToolOutcome(record) === 'success');
     const operationCounts = new Map<string, number>();
     for (const record of successful) {
@@ -589,8 +495,9 @@ export function formatConversationExecutionFactAnswer(
         : (successful.length ? `Verified operations in this conversation: ${operations.map(item => `${item.label} (${item.count})`).join(', ')}.` : 'No verified successful tool operation was recorded in this conversation.'),
       zh ? (fileMutations.length ? CN_CONVERSATION_EXECUTION_FACT_MESSAGES.fileMutationRecorded : CN_CONVERSATION_EXECUTION_FACT_MESSAGES.noFileMutation)
         : (fileMutations.length ? 'File mutation calls were recorded; their individual receipts determine their outcome.' : 'No file write or modification was recorded in this conversation.'),
-      latestDelivery ? (zh ? CN_CONVERSATION_EXECUTION_FACT_MESSAGES.latestDeliveredResult : 'The latest result already sent to you was:') : (zh ? CN_CONVERSATION_EXECUTION_FACT_MESSAGES.noDeliveredResult : 'No completed, persisted result reply was found.'),
-      latestDelivery?.text || '',
+      facts.latestProgress ? (zh ? CN_CONVERSATION_EXECUTION_FACT_MESSAGES.latestProgress : 'The latest saved task progress was:')
+        : latestDelivery ? (zh ? CN_CONVERSATION_EXECUTION_FACT_MESSAGES.latestDeliveredResult : 'The latest result already sent to you was:') : (zh ? CN_CONVERSATION_EXECUTION_FACT_MESSAGES.noDeliveredResult : 'No completed, persisted result reply was found.'),
+      facts.latestProgress || latestDelivery?.text || '',
     ].filter(Boolean).join('\n');
   }
   if (isPriorSingleFileReadFactQuestion(text)) {
@@ -656,7 +563,7 @@ export function formatConversationExecutionFactAnswer(
       ? [...records].reverse().find(record => /^(?:desktop_active_window|get_active_window_info)$/i.test(record.name))
       : undefined;
     const observedWindowResult = observedWindowRecord
-      ? parseRecordResult(observedWindowRecord.result)
+      ? parseRecordArguments(observedWindowRecord.result)
       : {};
     const observedWindowTitle = String(
       observedWindowResult.windowTitle

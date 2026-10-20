@@ -1,9 +1,13 @@
+import { readImplementationSource } from './implementation_source';
+import { readVoiceImplementationSource } from './voice_implementation_source';
 import './helpers';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 const declarations = [
+  'client_get_state',
+  'client_action',
   'desktop_active_window',
   'desktop_capture_screen',
   'desktop_ui_snapshot',
@@ -71,6 +75,20 @@ describe('desktop execution stability policy', () => {
     await initDatabase();
   });
 
+  it('does not override the selected client lane with a second desktop decision', async () => {
+    const { buildDesktopExecutionStabilityPolicy } = await import('../server/cognition/desktop_execution_stability');
+    const { dispatch, capabilitySelection } = await buildPolicy('进入壁纸模式，继续当前优酷的视频播放');
+    expect(capabilitySelection.lane).toBe('client_surface');
+    const policy = buildDesktopExecutionStabilityPolicy({
+      channel: 'chat', text: '进入壁纸模式，继续当前优酷的视频播放',
+      flow: { ...dispatch.flow, workSurfaceRoute: { ...dispatch.flow.workSurfaceRoute, directDesktop: true } },
+      capabilitySelection,
+    });
+    expect(policy.applies).toBe(false);
+    expect(policy.executionPlan).toBeNull();
+    expect(policy.promptOverlay).toBe('');
+  });
+
   it('requires screen evidence for visible desktop/software control', async () => {
     const { capabilitySelection, policy } = await buildPolicy('open WPS and operate the visible desktop with mouse to write a Lumi intro document');
 
@@ -120,6 +138,7 @@ describe('desktop execution stability policy', () => {
     ].join('\n');
     const dispatch = buildLumiTurnDispatch({
       userId: 'desktop_policy_current_app_user',
+      continuationAppTarget: 'WPS',
       channel: 'chat',
       source: 'chat',
       text,
@@ -172,10 +191,9 @@ describe('desktop execution stability policy', () => {
 
   it('keeps chat, voice, and task sockets on the shared desktop stability path', () => {
     const root = process.cwd();
-    const chatSource = readFileSync(path.join(root, 'server/socket/chat.ts'), 'utf8');
-    const voiceSource = readFileSync(path.join(root, 'server/socket/voice.ts'), 'utf8');
-    const taskSource = readFileSync(path.join(root, 'server/socket/task.ts'), 'utf8');
-    const sources = [chatSource, voiceSource, taskSource];
+    const chatSource = readImplementationSource(path.join(root, 'server/socket/chat.ts'), 'utf8');
+    const voiceSource = readVoiceImplementationSource();
+    const sources = [chatSource, voiceSource];
 
     for (const source of sources) {
       expect(source).toContain('buildDesktopExecutionStabilityPolicy');
@@ -184,6 +202,5 @@ describe('desktop execution stability policy', () => {
     }
     expect(chatSource).toMatch(/source:\s*'chat',[\s\S]{0,160}taskId:\s*durableTaskId,[\s\S]{0,80}requestId/);
     expect(voiceSource).toMatch(/source:\s*'voice',[\s\S]{0,160}taskId:\s*actionTaskExecution\.state\?\.taskId,[\s\S]{0,80}requestId/);
-    expect(taskSource).toMatch(/source:\s*'task',[\s\S]{0,160}taskId:\s*actionTaskExecution\.state\?\.taskId,[\s\S]{0,80}requestId/);
   });
 });

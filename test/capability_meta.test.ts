@@ -1,15 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildCapabilityMetaResponse,
   buildOperationModeMetaResponse,
   isCapabilityMetaQuestion,
   isCurrentOperationModeQuestion,
   isOperationModeInventoryQuestion,
   isSelfIntroductionMetaQuestion,
 } from '../server/cognition/capability_meta';
-import { PRODUCT_VARIANT } from '../shared/product_variant';
 
 describe('capability access explanations', () => {
+  it.each([
+    '人数改成六人，预算不变。现在每人预算是多少？会议时间是什么？请沿用刚才的上下文，不调用工具。',
+    '我现在问的是会议时间，不是让你介绍自己。',
+    '用 Google Chrome 打开 https://chat.deepseek.com/，检查已有登录状态。不要发送对话。',
+  ])('preserves ordinary follow-ups and website actions: %s', (text) => {
+    expect(isCurrentOperationModeQuestion(text)).toBe(false);
+    expect(buildOperationModeMetaResponse({ text })).toBeNull();
+  });
   it.each([
     '\u4f60\u6709\u591a\u5c11\u79cd\u6a21\u5f0f',
     '\u4f60\u6709\u51e0\u79cd\u6a21\u5f0f',
@@ -58,17 +64,18 @@ describe('capability access explanations', () => {
     else expect(buildOperationModeMetaResponse({ text, operationMode: 'assistant' })).toBeNull();
   });
 
-  it('answers a first-user self introduction without old-task or unverified service claims', () => {
+  it('routes a first-user self introduction through the active conceptual turn without executing tools', async () => {
     const text = '\u4e3b\u7a0b\u5e8f\u5b9e\u673a\u9a8c\u6536\u00b7\u8eab\u4efd\u4e0e\u5f15\u5bfc\uff1a\u8bf7\u50cf\u7b2c\u4e00\u6b21\u9762\u5bf9\u65b0\u7528\u6237\u4e00\u6837\uff0c\u4ecb\u7ecd\u4f60\u662f\u8c01\u3001\u80fd\u505a\u4ec0\u4e48\u3001\u4e0d\u80fd\u4fdd\u8bc1\u4ec0\u4e48\u3001\u9047\u5230\u6267\u884c\u5931\u8d25\u600e\u4e48\u5904\u7406\u3002\u4e0d\u8981\u8c03\u7528\u5de5\u5177\u3002';
     expect(isSelfIntroductionMetaQuestion(text)).toBe(true);
     expect(isCapabilityMetaQuestion(text)).toBe(true);
-    const response = buildCapabilityMetaResponse({ text, operationMode: 'assistant', source: 'command-center-chat' }) || '';
-    expect(response).toContain('\u6211\u662f Lumi');
-    expect(response).toContain('\u79c1\u6709\u5316');
-    expect(response).toContain('\u8fd9\u6b21\u7eaf\u4ecb\u7ecd\u4e0d\u4f1a\u865a\u6784\u4efb\u4f55\u5df2\u8fde\u63a5\u670d\u52a1');
-    expect(response).not.toContain('\u6587\u4ef6\u4efb\u52a1\u72b6\u6001');
-    expect(response).not.toMatch(/\d+\s*\u4e2a(?:\u5de5\u5177|\u6280\u80fd|MCP)/u);
-    expect(response.split(/\n\n/)).toHaveLength(5);
+    const { initDatabase } = await import('../db_layer');
+    const { buildLumiTurnFlow } = await import('../server/cognition/turn_flow');
+    await initDatabase();
+    const flow = buildLumiTurnFlow({ userId: 'capability-meta-introduction', text, channel: 'chat', source: 'command-center-chat' });
+    expect(flow.conceptualCapabilityQuestion).toBe(true);
+    expect(flow.allowToolUseForTurn).toBe(false);
+    expect(flow.completionEvidenceNeeded).toBe(false);
+    expect(flow.routeText).toBe(text);
   });
 
   it.each([
@@ -88,7 +95,6 @@ describe('capability access explanations', () => {
     '介绍一下你自己并演示桌面操作。',
   ])('does not consume a concrete immediate action as capability meta: %s', (text) => {
     expect(isCapabilityMetaQuestion(text)).toBe(false);
-    expect(buildCapabilityMetaResponse({ text, operationMode: 'assistant' })).toBeNull();
   });
 
   it.each([
@@ -100,45 +106,15 @@ describe('capability access explanations', () => {
     expect(isCapabilityMetaQuestion(text)).toBe(false);
   });
 
-  it('does not let a trailing capability-report request steal a concrete legal action', () => {
-    const text = '律师版实机验收·合同审查：请审查下面这段模拟买卖合同条款，只依据原文输出风险点和修改建议。完成后告诉我实际使用了什么能力、结果是否已验证。';
-    expect(isCapabilityMetaQuestion(text)).toBe(false);
-    expect(buildCapabilityMetaResponse({ text, operationMode: 'assistant', source: 'command-center-chat' })).toBeNull();
-  });
-
-  it('does not treat a contextual delivery verification command as a capability question', () => {
-    const text = '律师版实机验收·交付核验：针对四号案件ID d2789373-effc-404c-aff6-25f101267790，对案件工作台中已归档的“诉前应对策略律师复核草稿”执行交付核验。输出总体是否可正式交付、实际使用能力和任务回执状态。';
-    expect(isCapabilityMetaQuestion(text)).toBe(false);
-  });
-
-  it('explains the integrated command-center entry and per-turn routing truth', () => {
-    const response = buildCapabilityMetaResponse({
-      text: '\u90a3\u8981\u600e\u4e48\u624d\u80fd\u8ba9\u4f60\u4f7f\u7528\u5176\u5b83\u5de5\u5177',
-      operationMode: 'assistant',
-      source: 'command-center-chat',
-    });
-
-    expect(response).toContain('不需要切换模式');
-    expect(response).toContain('\u552f\u4e00\u7684\u6587\u5b57\u5165\u53e3');
-    expect(response).toContain('\u6bcf\u8f6e\u53ea\u9009\u51fa');
-    expect(response).toContain('\u8def\u7531\u95ee\u9898');
-    expect(response).not.toContain('\u53bb\u6307\u6325\u4e2d\u5fc3');
-  });
-
-  it('answers edition identity and professional-review boundaries without treating the question as work', () => {
-    const text = '\u4f60\u662f\u8c01\uff1f\u8fd9\u662f\u54ea\u4e2a\u5b9a\u5236\u7248\uff1f\u4f60\u80fd\u5e2e\u5f8b\u5e08\u5b8c\u6210\u54ea\u4e9b\u5de5\u4f5c\uff0c\u54ea\u4e9b\u7ed3\u679c\u5fc5\u987b\u7531\u6267\u4e1a\u5f8b\u5e08\u590d\u6838\uff1f\u8bf7\u7528\u81ea\u7136\u5bf9\u8bdd\u56de\u7b54\uff0c\u4e0d\u8981\u6267\u884c\u5de5\u5177\u3002';
-    expect(isCapabilityMetaQuestion(text)).toBe(true);
-
-    const response = buildCapabilityMetaResponse({
-      text,
-      operationMode: 'assistant',
-      source: 'command-center-chat',
-    });
-
-    expect(response).toContain(PRODUCT_VARIANT.displayName);
-    expect(response).toContain('\u4efb\u52a1\u8d26\u672c');
-    expect(response).toContain('\u5fc5\u987b\u7531\u5bf9\u5e94\u4e13\u4e1a\u4eba\u5458\u590d\u6838');
-    expect(response).toContain('\u4e0d\u4f1a\u8865\u9020\u4e8b\u5b9e');
-    expect(response).not.toContain('\u6ca1\u6709\u6210\u529f\u6267\u884c\u4efb\u4f55\u5de5\u5177');
+  it('keeps capability explanations in the current turn instead of returning a retired canned answer', async () => {
+    const { initDatabase } = await import('../db_layer');
+    const { buildLumiTurnFlow } = await import('../server/cognition/turn_flow');
+    await initDatabase();
+    const text = 'How can I make Lumi use other tools?';
+    const flow = buildLumiTurnFlow({ userId: 'capability-meta-routing', text, channel: 'chat', source: 'command-center-chat' });
+    expect(flow.conceptualCapabilityQuestion).toBe(true);
+    expect(flow.allowToolUseForTurn).toBe(false);
+    expect(flow.routeText).toBe(text);
+    expect(buildOperationModeMetaResponse({ text })).toBeNull();
   });
 });

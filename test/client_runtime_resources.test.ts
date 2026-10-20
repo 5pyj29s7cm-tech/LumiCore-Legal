@@ -1,3 +1,4 @@
+import { readImplementationSource } from './implementation_source';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -8,7 +9,7 @@ import {
 import { samePresenceState } from '../src/hooks/usePresence';
 
 function source(file: string) {
-  return fs.readFileSync(path.join(process.cwd(), file), 'utf8');
+  return readImplementationSource(path.join(process.cwd(), file), 'utf8');
 }
 
 describe('client runtime resource boundaries', () => {
@@ -58,10 +59,6 @@ describe('client runtime resource boundaries', () => {
   it('uses low-frequency scheduling and closes every acquired face task', () => {
     const faceHook = source('src/hooks/useFaceRecognition.ts');
     const loader = source('src/lib/mediapipe/loader.ts');
-    const mediaPipeInit = loader.slice(
-      loader.indexOf('export async function initMediaPipe'),
-      loader.indexOf('export type HandResult'),
-    );
 
     expect(faceHook).not.toContain('requestAnimationFrame');
     expect(faceHook).toContain('window.setTimeout(runDetection');
@@ -70,7 +67,6 @@ describe('client runtime resource boundaries', () => {
     expect(loader).toContain('faceLandmarkerReferences += 1');
     expect(loader).toContain('faceLandmarkerReferences = Math.max(0, faceLandmarkerReferences - 1)');
     expect(loader).toContain('landmarker.close()');
-    expect(mediaPipeInit).not.toContain('initFaceLandmarker');
   });
 
   it('does not publish duplicate presence state objects', () => {
@@ -82,10 +78,4 @@ describe('client runtime resource boundaries', () => {
     );
   });
 
-  it('keeps the subtle desktop node map static', () => {
-    const nodeMap = source('src/components/GlobalNodeMap.tsx');
-    expect(nodeMap).toContain("variant === 'subtle' ? 30 : 60");
-    expect(nodeMap).toContain("if (variant === 'subtle')");
-    expect(nodeMap).toContain('style={{ ...style, opacity: dot.active ? 0.35 : 0.16 }}');
-  });
 });

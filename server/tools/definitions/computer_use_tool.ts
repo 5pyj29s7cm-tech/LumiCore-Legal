@@ -1,7 +1,8 @@
 import { ToolRegistry } from '../registry';
 import { computerUseLoop } from '../../agents/computer_use';
 import { capabilityContract, capabilityEvidence } from '../capability_contracts';
-import { normalizeActionIntent } from '../../cognition/normalized_action_intent';
+import { getClientStateForScope } from '../../client/self/state';
+import { genericExternalCommit, normalizeActionIntent } from '../../cognition/normalized_action_intent';
 import { resolveDesktopApplicationIdentity } from '../../desktop/execution_plan';
 
 const DEFAULT_COMPUTER_USE_STEPS = 12;
@@ -42,7 +43,7 @@ async function computerUse(args: Record<string, any>, context?: any): Promise<st
   if (!task.trim()) {
     throw new Error('The "task" parameter is required. Describe what you want Lumi to do on the desktop.');
   }
-  const normalizedIntent = normalizeActionIntent(task);
+  const normalizedIntent = genericExternalCommit(task) || normalizeActionIntent(task);
   if (normalizedIntent.sideEffectClass === 'external_commit') {
     throw new Error('Vision computer control cannot perform the final external commit. Use the dedicated provider/application capability with immutable confirmation and receipt verification.');
   }
@@ -59,7 +60,10 @@ async function computerUse(args: Record<string, any>, context?: any): Promise<st
 
   activeDesktopControlLeases.add(leaseKey);
   try {
+    const state = getClientStateForScope(context.userId || 'anonymous', { domain: context.domain || 'personal', orgId: context.orgId });
     return await computerUseLoop(task, {
+      desktopPresentationManaged: context.desktopPresentationManaged === true
+        || Boolean(state?.updatedAt && Date.now() - state.updatedAt <= 30_000 && state.surfaces?.wallpaperMode),
       userId: context.userId,
       desktopRelay: context.desktopRelay,
       llmGetters: context.llmGetters,
@@ -73,6 +77,10 @@ async function computerUse(args: Record<string, any>, context?: any): Promise<st
         catch { return false; }
       },
       expectedApplication: expectedApplication.family === 'unknown' ? undefined : expectedApplication,
+      applicationLaunchTarget: typeof args.target_application === 'string'
+        && /^[\p{L}\p{N} ._-]{1,100}$/u.test(args.target_application.trim())
+        && resolveDesktopApplicationIdentity(args.target_application, 'desktop_control').id === expectedApplication.id
+        ? args.target_application.trim() : undefined,
     });
   } finally {
     activeDesktopControlLeases.delete(leaseKey);
@@ -83,7 +91,7 @@ export function registerComputerUseTool(registry: ToolRegistry): void {
   registry.register({
     name: 'computer_use',
     description:
-      'Take control of the user desktop to complete a task after foreground confirmation or inside an approved autonomous workflow. Screenshot perception and next-action prediction use the desktop-action role in World Model settings, which may inherit visual perception or use an independent multimodal model. The tool enters wallpaper mode when available, visibly moves the cursor, performs one action, verifies the next screen state, and repeats. Use this for opening applications, navigating websites, filling forms, closing dialogs, moving files, managing windows, or other visible desktop interactions. Default 12 iterations; capped by the active desktop/autonomy tool policy up to 50; wallpaper/cursor overlay is cleaned up when finished.',
+      'Take control of the user desktop to complete a task after foreground confirmation or inside an approved autonomous workflow. Screenshot perception and next-action prediction use the desktop-action role in World Model settings, which may inherit visual perception or use an independent multimodal model. The tool enters wallpaper mode when available, visibly moves the cursor, performs one action, verifies the next screen state, and repeats. Use this for playing a requested song in a desktop music player (it handles search, play and progress verification), opening applications, navigating websites, filling forms, closing dialogs, moving files, managing windows, or other visible desktop interactions. Pass the original requested title and performer; a successful playback receipt already verifies the result. Default 12 iterations; capped by the active desktop/autonomy tool policy up to 50; wallpaper/cursor overlay is cleaned up when finished.',
     parameters: {
       type: 'object',
       properties: {

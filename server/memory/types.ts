@@ -121,6 +121,7 @@ export interface MemoryTree {
 }
 
 export interface MemoryQuery {
+  semanticTimeoutMs?: number;
   /** Only actual conversational recall should train retrieval associations. */
   recordRetrieval?: boolean;
   /** Administrative history may explicitly include superseded/test records. */
@@ -176,4 +177,9 @@ export interface ExtractedMemory {
   content: string;
   keywords: string[];
   confidence: number;
+}
+
+/** Memory Avatar memories are kept in a frozen, private lane. */
+export function isMemoryAvatarAgentId(agentId: unknown): boolean {
+  return String(agentId || '').trim().startsWith('memory_avatar_');
 }

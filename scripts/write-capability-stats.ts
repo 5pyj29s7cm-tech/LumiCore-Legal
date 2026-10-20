@@ -126,11 +126,7 @@ async function main(): Promise<void> {
     'capability-stats.md',
   );
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  // Retain equivalent checked-in bytes, including Windows line endings.
-  const existing = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8') : null;
-  if (existing?.replace(/\r\n/g, '\n') !== generated) {
-    fs.writeFileSync(outputPath, generated, 'utf8');
-  }
+  fs.writeFileSync(outputPath, generated, 'utf8');
   console.log(
     `[capability-stats] wrote ${path.relative(workspaceRoot, outputPath)} (${manifest.length} tools, ${bundledSkills.length} bundled skills)`,
   );

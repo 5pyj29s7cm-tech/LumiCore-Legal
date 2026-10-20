@@ -73,6 +73,14 @@ function capability(
 }
 
 describe('capability terminal verification', () => {
+  it('verifies real paths in artifact arrays without treating escaped JSON as a filesystem path', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lumi-artifact-array-'));
+    temporaryDirectories.push(directory);
+    const file = path.join(directory, '律师测试 标书.docx');
+    fs.writeFileSync(file, 'synthetic artifact');
+    expect(verifyCapabilityReceipt(capability('artifact'), { result: 'generated', receipt: { ok: true, artifacts: [file] } }).status).toBe('verified');
+    expect(verifyCapabilityReceipt(capability('artifact'), { result: 'generated', receipt: { ok: true, artifacts: [path.join(directory, 'missing.docx')] } }).status).toBe('unverified');
+  });
   it('verifies artifact receipts only when the declared file exists and is non-empty', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lumi-capability-'));
     temporaryDirectories.push(directory);
@@ -168,5 +176,28 @@ describe('capability terminal verification', () => {
     expect(verifyCapabilityReceipt(contract, {
       result: JSON.stringify({ ok: true, status: 'done', receipt: { ready: true, path: artifactPath } }),
     }).status).toBe('unverified');
+  });
+
+  it('verifies a receipt-only nested JSON result instead of requiring display text', () => {
+    const contract = capability('terminal_receipt');
+    contract.verification = {
+      strategy: 'terminal_receipt',
+      required: true,
+      requiredFields: ['ok', 'status', 'matchedCount', 'cancelledCount'],
+      requiredValues: { ok: true },
+      successStatuses: ['idle', 'cancelled'],
+      successSignals: [],
+      limitations: [],
+    };
+
+    expect(verifyCapabilityReceipt(contract, {
+      result: '',
+      receipt: JSON.stringify(JSON.stringify({
+        ok: true,
+        status: 'cancelled',
+        matchedCount: 8,
+        cancelledCount: 8,
+      })),
+    })).toMatchObject({ status: 'verified' });
   });
 });

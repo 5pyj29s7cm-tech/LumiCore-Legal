@@ -1,0 +1,172 @@
+import { type ProviderGetters as SharedProviderGetters, providerGetterArguments } from "./provider_getters";
+import {
+  makeLLMCall,
+  makeLLMCallStreaming,
+  type NormalizedMessage,
+  type StreamCallback,
+} from './providers';
+import { runWithTools, type LLMConfig, type LLMResult, type LLMUsageRecord } from './adapter';
+
+import type { NormalizedLLMResponse } from '../tools/types';
+import { resolveConversationModelConfig } from './conversation_profile';
+import { createModelTurnState } from './model_turn_state';
+import {
+  getExplicitSentenceCountConstraint,
+  sentenceCountCorrectionInstruction,
+} from '../cognition/response_constraints';
+import {
+  CN_STREAM_INTERRUPTION_RECOVERY_INSTRUCTION,
+  formatConversationIncompleteMessage,
+} from "../regions/messages/response_recovery_messages";
+
+export interface ConversationTurnInput {
+  messages: NormalizedMessage[];
+  config: LLMConfig;
+  getters: Partial<SharedProviderGetters>;
+  /** Buffered transports retain the same completion and correction policy. */
+  streaming?: boolean;
+  onChunk?: StreamCallback;
+  isCancelled?: () => boolean;
+  /** Revalidate the original owner/conversation before every provider call. */
+  assertCurrent?: () => void;
+  taskText?: string;
+}
+
+export interface ConversationTurnResult extends LLMResult {
+  completion: 'complete' | 'incomplete';
+  corrected: boolean;
+}
+
+/**
+ * All channels use the same no-tool response policy. Only the first draft
+ * streams to the caller; at most one complete replacement is then selected.
+ * This helper never authorizes or dispatches tools.
+ */
+async function executeConversationTurn(input: ConversationTurnInput): Promise<ConversationTurnResult> {
+  const { getters } = input;
+  const usageRecords: LLMUsageRecord[] = [];
+  const userContent = [...input.messages].reverse().find(message => message.role === 'user')?.content;
+  const taskText = input.taskText ?? (Array.isArray(userContent)
+    ? userContent.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')
+    : String(userContent || ''));
+  const config = resolveConversationModelConfig(taskText, {
+    ...input.config,
+    modelTurnState: input.config.modelTurnState ?? createModelTurnState(),
+  });
+  const assertActive = () => {
+    if (config.signal?.aborted || input.isCancelled?.()) {
+      throw new DOMException('Conversation turn cancelled', 'AbortError');
+    }
+    input.assertCurrent?.();
+  };
+  const recordUsage = (response: NormalizedLLMResponse) => {
+    if (!response.usage) return;
+    usageRecords.push({
+      provider: response.routing?.selectedProvider || config.provider,
+      model: response.routing?.selectedModel || config.model,
+      requestedProvider: response.routing?.requestedProvider,
+      requestedModel: response.routing?.requestedModel,
+      selectionMode: response.routing?.selectionMode,
+      fallbackReason: response.routing?.fallbackReason,
+      promptTokens: response.usage.promptTokens,
+      completionTokens: response.usage.completionTokens,
+      totalTokens: response.usage.totalTokens,
+    });
+  };
+  const callModel = async (messages: NormalizedMessage[], onChunk: StreamCallback) => {
+    assertActive();
+    const response = input.streaming === false
+      ? await makeLLMCall(messages, [], config, ...providerGetterArguments(getters, 'primary'))
+      : await makeLLMCallStreaming(
+      messages, [], config, chunk => {
+        if (config.signal?.aborted || input.isCancelled?.()) return;
+        onChunk(chunk);
+      },
+      ...providerGetterArguments(getters, 'primary'),
+    );
+    recordUsage(response);
+    assertActive();
+    return response;
+  };
+  const isComplete = (response: NormalizedLLMResponse, text: string) => {
+    const constraint = getExplicitSentenceCountConstraint(taskText, text);
+    return Boolean(text.trim())
+      && !response.streamIncomplete
+      && !response.toolCalls?.length
+      && (!constraint || constraint.actual === constraint.expected);
+  };
+  const incomplete = (reason: string): ConversationTurnResult => {
+    const text = formatConversationIncompleteMessage(taskText);
+    return {
+      text,
+      toolCalls: [],
+      usageRecords,
+      completion: 'incomplete',
+      corrected: false,
+      completionGuard: { text, blocked: true, reason },
+    };
+  };
+
+  const response = await callModel(input.messages, chunk => {
+    input.onChunk?.(chunk);
+  });
+  // Streamed preview is not a terminal provider result. In particular, a
+  // cancelled/empty result must never become complete from leftover chunks.
+  const firstText = String(response.text || '').trim();
+  if (isComplete(response, firstText)) {
+    return { text: firstText, toolCalls: [], usageRecords, completion: 'complete', corrected: false };
+  }
+
+  const sentenceConstraint = getExplicitSentenceCountConstraint(taskText, firstText);
+  const recoveryInstruction = sentenceConstraint && sentenceConstraint.actual !== sentenceConstraint.expected
+    ? sentenceCountCorrectionInstruction(sentenceConstraint.expected)
+    : CN_STREAM_INTERRUPTION_RECOVERY_INSTRUCTION;
+  assertActive();
+  let corrected: NormalizedLLMResponse;
+  try {
+    corrected = await callModel([
+      ...input.messages,
+      ...(firstText ? [{ role: 'assistant' as const, content: firstText }] : []),
+      { role: 'user', content: recoveryInstruction },
+    ], () => {});
+  } catch (error) {
+    // Revoked ownership and cancellation must reach the transport's durable
+    // cancellation boundary. An ordinary repair failure retains usage already
+    // incurred and cannot turn the initial incomplete draft into success.
+    assertActive();
+    if (error instanceof Error && error.name === 'AbortError') throw error;
+    return incomplete('conversation_repair_failed');
+  }
+  const correctedText = String(corrected.text || '').trim();
+  if (!isComplete(corrected, correctedText)) return incomplete('conversation_response_incomplete');
+  return { text: correctedText, toolCalls: [], usageRecords, completion: 'complete', corrected: true };
+}
+
+type ToolLoopArguments = Parameters<typeof runWithTools>;
+
+/** Named channel inputs; the adapter retains sole ownership of execution and budgets. */
+export interface ToolSessionOptions {
+  messages: ToolLoopArguments[0];
+  registry: ToolLoopArguments[1];
+  config: ToolLoopArguments[2];
+  onToolCall?: ToolLoopArguments[3];
+  maxIterations?: ToolLoopArguments[4];
+  onStreamChunk?: ToolLoopArguments[10];
+  context?: ToolLoopArguments[11];
+  getters?: Partial<SharedProviderGetters>;
+}
+/** One model executor for all transport entries; presence of the admitted registry selects the tool path. */
+export function runLumiTurn(input: ConversationTurnInput): Promise<ConversationTurnResult>;
+export function runLumiTurn(input: ToolSessionOptions): ReturnType<typeof runWithTools>;
+export function runLumiTurn(input: ToolSessionOptions | ConversationTurnInput): ReturnType<typeof runWithTools> | Promise<ConversationTurnResult> {
+  if (!('registry' in input)) return executeConversationTurn(input);
+
+  const getters = input.getters || {};
+  return runWithTools(
+    input.messages, input.registry, input.config, input.onToolCall, input.maxIterations,
+    getters.getDeepSeek, getters.getGemini, getters.getOpenAI, getters.getAnthropic,
+    getters.getQwen, input.onStreamChunk, input.context, getters.getOllama,
+    getters.getLmStudio, getters.getArk, getters.getXiaomi, getters.getKimi,
+    getters.getGlm, getters.getRelay,
+  );
+}

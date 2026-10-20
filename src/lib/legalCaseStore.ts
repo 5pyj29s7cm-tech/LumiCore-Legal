@@ -1,4 +1,4 @@
-import { getLocale } from '../i18n/runtime';
+import { apiJson } from '../services/apiClient';
 import type { LegalWorkflowRun } from '../../shared/legal_workflow_receipts';
 import { chinaLegalCopy } from '../i18n/regions/cn/legal';
 import { normalizeAssetTraceWorkflow, type AssetTraceWorkflow } from './legalAssetTraceWorkflow';
@@ -28,24 +28,21 @@ export interface LegalCaseFile {
   court: string;
   judge: string;
   stage: LegalCaseStage;
+  factDate?: string;
   hearingDate: string;
   judgmentDate: string;
   appealDeadline: string;
   enforcementDeadline: string;
   notes: string;
+  clientPartyName?: string;
   clientRole?: string;
   objective?: string;
   workflowRuns?: LegalWorkflowRun[];
   materials: LegalCaseMaterial[];
+  removedMaterialIds?: string[];
   assetTraceWorkflow?: AssetTraceWorkflow;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface MeetingNoteLike {
-  id?: string;
-  text: string;
-  time: number;
 }
 
 export const LEGAL_CASES_STORAGE = 'lumi_legal_cases_v1';
@@ -84,10 +81,12 @@ export function createEmptyLegalCase(): LegalCaseFile {
     title: '',
     caseNumber: '',
     party: '',
+    clientPartyName: '',
     cause: '',
     court: '',
     judge: '',
     stage: 'consultation',
+    factDate: '',
     hearingDate: '',
     judgmentDate: '',
     appealDeadline: '',
@@ -101,6 +100,7 @@ export function createEmptyLegalCase(): LegalCaseFile {
 
 function normalizeCaseFile(value: any): LegalCaseFile | null {
   if (!value || typeof value !== 'object' || !value.id) return null;
+  const removedMaterialIds: string[] = Array.isArray(value.removedMaterialIds) ? [...new Set<string>(value.removedMaterialIds.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200))] : [];
   return {
     id: String(value.id),
     title: String(value.title || ''),
@@ -110,14 +110,17 @@ function normalizeCaseFile(value: any): LegalCaseFile | null {
     court: String(value.court || ''),
     judge: String(value.judge || ''),
     stage: (['consultation', 'filing', 'trial', 'judgment', 'enforcement', 'closed'].includes(value.stage) ? value.stage : 'consultation') as LegalCaseStage,
+    factDate: String(value.factDate || ''),
     hearingDate: String(value.hearingDate || ''),
     judgmentDate: String(value.judgmentDate || ''),
     appealDeadline: String(value.appealDeadline || ''),
     enforcementDeadline: String(value.enforcementDeadline || ''),
     notes: String(value.notes || ''),
+    ...(Object.hasOwn(value, 'clientPartyName') ? { clientPartyName: String(value.clientPartyName || '') } : {}),
     clientRole: String(value.clientRole || ''),
     objective: String(value.objective || ''),
-    workflowRuns: Array.isArray(value.workflowRuns) ? value.workflowRuns : undefined,
+    workflowRuns: Array.isArray(value.workflowRuns) ? value.workflowRuns.filter((run: LegalWorkflowRun) => !run.materialIds.some(id => removedMaterialIds.includes(id))) : undefined,
+    removedMaterialIds,
     materials: Array.isArray(value.materials) ? value.materials.map((item: any) => ({
       id: String(item?.id || newId('mat')),
       type: (['consultation', 'evidence', 'pleading', 'judgment', 'contract', 'note'].includes(item?.type) ? item.type : 'note') as LegalCaseMaterialType,
@@ -128,7 +131,7 @@ function normalizeCaseFile(value: any): LegalCaseFile | null {
       localPath: item?.localPath ? String(item.localPath) : undefined,
       createdBy: item?.createdBy ? String(item.createdBy) : undefined,
       source: item?.source,
-    })) : [],
+    })).filter((item: LegalCaseMaterial) => !removedMaterialIds.includes(item.id)) : [],
     assetTraceWorkflow: normalizeAssetTraceWorkflow(value.assetTraceWorkflow) || undefined,
     createdAt: String(value.createdAt || new Date().toISOString()),
     updatedAt: String(value.updatedAt || value.createdAt || new Date().toISOString()),
@@ -198,7 +201,7 @@ export function updateLegalCase(caseId: string, patch: Partial<LegalCaseFile>): 
   let updated: LegalCaseFile | null = null;
   const next = cases.map(item => {
     if (item.id !== caseId) return item;
-    updated = { ...item, ...patch, updatedAt: new Date().toISOString() };
+    updated = normalizeCaseFile({ ...item, ...patch, removedMaterialIds: [...new Set([...(item.removedMaterialIds || []), ...(patch.removedMaterialIds || [])])], updatedAt: new Date().toISOString() })!;
     return updated;
   });
   if (!updated) return null;
@@ -250,6 +253,7 @@ export function mergePersonalLegalCaseRuntimeSnapshot(snapshot: unknown): LegalC
   }
 
   const runtimeIsNewer = incoming.updatedAt >= current.updatedAt;
+  const removedMaterialIds = [...new Set([...(current.removedMaterialIds || []), ...(incoming.removedMaterialIds || [])])];
   const currentById = new Map(current.materials.map(material => [material.id, material]));
   const runtimeById = new Map(incoming.materials.map(material => [material.id, material]));
   const mergedMaterials = [
@@ -265,120 +269,27 @@ export function mergePersonalLegalCaseRuntimeSnapshot(snapshot: unknown): LegalC
       };
     }),
     ...current.materials.filter(material => !runtimeById.has(material.id)),
-  ];
+  ].filter(material => !removedMaterialIds.includes(material.id));
   // A reply from another case must not switch the user's current selection.
   // Preserve edits made locally after this runtime snapshot was produced.
-  const merged = { ...current, ...(runtimeIsNewer ? incoming : {}), materials: mergedMaterials };
+  const merged = { ...current, ...(runtimeIsNewer ? incoming : {}),
+    factDate: runtimeIsNewer && Object.hasOwn(snapshot as object, 'factDate') ? incoming.factDate : current.factDate,
+    materials: mergedMaterials, removedMaterialIds,
+    workflowRuns: (runtimeIsNewer ? incoming.workflowRuns : current.workflowRuns)?.filter(run => !run.materialIds.some(id => removedMaterialIds.includes(id))) };
   if (JSON.stringify(merged) === JSON.stringify(current)) return current;
   writeLegalCaseFiles(cases.map(item => item.id === current.id ? merged : item));
   return merged;
 }
 
-export async function syncPersonalLegalCaseToRuntime(caseFile: LegalCaseFile): Promise<void> {
-  const response = await fetch('/api/legal/client-case-sync', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
+export async function syncPersonalLegalCaseToRuntime(caseFile: LegalCaseFile, signal?: AbortSignal): Promise<void> {
+  const data = await apiJson('/api/legal/client-case-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
     body: JSON.stringify({ case: caseFile, activate: getActiveLegalCaseId() === caseFile.id }),
   });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || 'Failed to synchronize the current legal case.');
-  }
-  const data = await response.json().catch(() => ({}));
+  signal?.throwIfAborted();
   if (data?.case) mergePersonalLegalCaseRuntimeSnapshot(data.case);
 }
-
-export async function deletePersonalLegalCaseFromRuntime(caseId: string): Promise<void> {
-  if (!caseId) return;
-  const response = await fetch(`/api/legal/client-case-sync/${encodeURIComponent(caseId)}`, {
-    method: 'DELETE',
-    credentials: 'include',
-  });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || 'Failed to remove the legal case runtime snapshot.');
-  }
-}
-
-export function getLegalConsultationCase(): LegalCaseFile | null {
-  const consultationId = getLegalConsultationCaseId();
-  return consultationId ? getLegalCaseById(consultationId) : null;
-}
-
-export function archiveLegalMeetingToConsultationCase({
-  report,
-  notes,
-  startedAt,
-  endedAt,
-}: {
-  report: string;
-  notes: MeetingNoteLike[];
-  startedAt: number | null;
-  endedAt: number;
-}): { caseFile: LegalCaseFile; material: LegalCaseMaterial } | null {
-  const caseId = getLegalConsultationCaseId();
-  const caseFile = caseId ? getLegalCaseById(caseId) : null;
-  if (!caseFile) return null;
-
-  const started = startedAt ? new Date(startedAt) : new Date(endedAt);
-  const ended = new Date(endedAt);
-  const locale = getLocale();
-  const localeTag = locale === 'zh' ? 'zh-CN' : 'en-US';
-  const copy = chinaLegalCopy(locale);
-  const transcript = notes
-    .map(note => {
-      const time = note.time ? new Date(note.time).toLocaleTimeString(localeTag) : '';
-      const text = String(note.text || '').trim();
-      return text ? `- [${time}] ${text}` : '';
-    })
-    .filter(Boolean)
-    .join('\n');
-
-  const title = `${copy.meeting.title} ${started.toLocaleString(localeTag)}`;
-  const content = [
-    `# ${title}`,
-    '',
-    `${copy.meeting.case}: ${getLegalCaseLabel(caseFile)}`,
-    `${copy.meeting.started}: ${started.toLocaleString(localeTag)}`,
-    `${copy.meeting.ended}: ${ended.toLocaleString(localeTag)}`,
-    '',
-    `## ${copy.meeting.summary}`,
-    '',
-    report || copy.meeting.noSummary,
-    '',
-    `## ${copy.meeting.transcript}`,
-    '',
-    transcript || copy.meeting.noTranscript,
-    '',
-    `## ${copy.meeting.boundary}`,
-    '',
-    copy.meeting.boundaryText,
-  ].join('\n');
-
-  const material = addLegalCaseMaterial(caseFile.id, {
-    type: 'consultation',
-    title,
-    content,
-    source: 'meeting',
-  });
-  if (!material) return null;
-
-  const updatedCase = getLegalCaseById(caseFile.id) || caseFile;
-  const nextNotes = [
-    updatedCase.notes,
-    '',
-    `【会谈归档 ${ended.toLocaleString()}】`,
-    report || transcript,
-  ].filter(Boolean).join('\n').trim();
-  updateLegalCase(caseFile.id, {
-    notes: nextNotes,
-    stage: updatedCase.stage === 'consultation' ? 'consultation' : updatedCase.stage,
-  });
-  clearLegalConsultationCaseId();
-
-  const finalCase = getLegalCaseById(caseFile.id) || updatedCase;
-  return { caseFile: finalCase, material };
+export async function deletePersonalLegalCaseFromRuntime(caseId: string, signal?: AbortSignal): Promise<void> {
+  if (caseId) await apiJson('/api/legal/client-case-sync/' + encodeURIComponent(caseId), { method: 'DELETE', signal });
 }
 
 export function emitLegalCasesChanged() {

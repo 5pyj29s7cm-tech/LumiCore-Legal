@@ -6,6 +6,7 @@ import { capabilityContract, capabilityEvidence } from '../capability_contracts'
 import type { ToolContext } from '../types';
 import { getDataPath } from '../../config/data_path';
 import { hasApprovedWorkflowToolCall } from '../../workflows/runtime';
+import { assertTextFileFormat } from '../text_file_format';
 
 function isPathInside(root: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -58,10 +59,13 @@ function resolveSafePath(userPath: string, cwd?: string): string {
   const resolved = path.resolve(base, expanded);
   const normalized = path.normalize(resolved);
 
+  const projectRoot = path.resolve(process.cwd());
+  const projectParent = path.dirname(projectRoot);
+  // A checkout at a volume root must not grant access to the whole volume.
   const allowedRoots = [
     os.homedir(),
-    process.cwd(),
-    path.resolve(process.cwd(), '..'),
+    projectRoot,
+    ...(projectParent === path.parse(projectParent).root ? [] : [projectParent]),
     os.tmpdir(),
   ];
 
@@ -244,7 +248,7 @@ async function searchFilesHandler(args: Record<string, any>, context?: HostFiles
 
 async function grepFilesHandler(args: Record<string, any>, context?: HostFilesystemContext): Promise<string> {
   assertHostFilesystemAccess(context);
-  const directory = resolveSafePath(args.directory || '.', context?.cwd);
+  const directory = resolveSafePath(requirePathArg(args, ['directory'], 'grep_files'), context?.cwd);
   const pattern = args.pattern || '';
   if (!pattern) throw new Error('Search pattern is required.');
 
@@ -370,6 +374,7 @@ export function registerFileOpsTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'write_file',
+    preflight: assertTextFileFormat,
     description: 'Write content to a file. Creates parent directories if needed.',
     parameters: {
       type: 'object',
@@ -444,11 +449,11 @@ export function registerFileOpsTools(registry: ToolRegistry): void {
       type: 'object',
       properties: {
         pattern: { type: 'string', description: 'Regex pattern to search for in file contents (e.g. "function\\s+loadConfig", "import.*from")' },
-        directory: { type: 'string', description: 'Directory to search in. Defaults to current directory.' },
+        directory: { type: 'string', description: 'Explicit bounded directory to search in.' },
         glob: { type: 'string', description: 'Optional file filter, e.g. "*.ts" or "*.{ts,tsx}" to only search matching files.' },
         maxResults: { type: 'number', description: 'Maximum matches to return (default 100, max 500).' },
       },
-      required: ['pattern'],
+      required: ['pattern', 'directory'],
     },
     handler: grepFilesHandler,
     permission: 'user',

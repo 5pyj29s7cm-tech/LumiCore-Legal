@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Mic, Phone, Loader2, Volume2 } from 'lucide-react';
+import { Mic, Loader2, Volume2 } from 'lucide-react';
 import { CallState } from '../hooks/useVoiceCall';
 import { useT } from '../lib/useT';
 
@@ -72,7 +72,7 @@ export function VoiceCallButton({ callState, audioLevel, onStart, onEnd, hasVoic
       <motion.button
         whileHover={{ scale: 1.05 }}
         whileTap={{ scale: 0.95 }}
-        onClick={isOn ? onEnd : onStart}
+        onClick={() => (isOn ? onEnd() : onStart())}
         className={`relative w-12 h-12 rounded-2xl border flex items-center justify-center transition-all ${config.color} ${
           isOn ? '' : (!hasVoice ? 'opacity-40 hover:opacity-100' : '')
         }`}

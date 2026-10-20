@@ -26,14 +26,25 @@ describe('legal case workflow consistency', () => {
       ],
     });
 
-    expect(workflow.steps.find(step => step.key === 'identity')?.state).toBe('done');
+    expect(workflow.steps.find(step => step.key === 'identity')?.state).toBe('manual');
     expect(workflow.steps.find(step => step.key === 'facts')?.state).toBe('done');
-    expect(workflow.steps.find(step => step.key === 'evidence')?.state).toBe('done');
+    expect(workflow.steps.find(step => step.key === 'evidence')?.state).toBe('manual');
     expect(workflow.steps.find(step => step.key === 'reasoning')?.state).toBe('ready');
     expect(workflow.steps.find(step => step.key === 'reasoning')?.summary).toBe('尚未形成完整法律分析底稿');
     expect(workflow.steps.find(step => step.key === 'current-law')?.state).not.toBe('done');
     expect(workflow.steps.find(step => step.key === 'drafts')?.state).not.toBe('done');
     expect(workflow.steps.find(step => step.key === 'delivery')?.state).not.toBe('done');
+    expect(workflow.readyForFormalDelivery).toBe(false);
+  });
+
+  it('does not infer source evidence or completed identity from a generated checklist', () => {
+    const workflow = evaluateLegalCaseWorkflow({ title: 'Synthetic case', party: '甲公司 / 乙公司',
+      notes: '【材料归档】文书包包含身份证、营业执照、付款事实和证据目录',
+      materials: [{ id: 'generated', source: 'tool', type: 'evidence', title: '待补证清单',
+        content: '缺身份证和营业执照；付款事实待核验；证据目录、原件尚未提供。' }] });
+    expect(workflow.steps.find(step => step.key === 'identity')?.state).toBe('ready');
+    expect(workflow.steps.find(step => step.key === 'facts')?.state).not.toBe('done');
+    expect(workflow.steps.find(step => step.key === 'evidence')?.state).toBe('ready');
     expect(workflow.readyForFormalDelivery).toBe(false);
   });
 

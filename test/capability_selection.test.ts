@@ -1,3 +1,5 @@
+import { readImplementationSource } from './implementation_source';
+import { readVoiceImplementationSource } from './voice_implementation_source';
 import './helpers';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -133,6 +135,7 @@ async function selectCapability(input: {
   operationMode?: string;
   targetIsLumi?: boolean;
   continuationContext?: string;
+  continuationAppTarget?: string;
 }) {
   const { buildLumiTurnDispatch } = await import('../server/cognition/turn_dispatch');
   const { buildLumiExecutionDecision } = await import('../server/cognition/execution_decision');
@@ -210,9 +213,7 @@ describe('Lumi capability selection', () => {
       targetIsLumi: true,
     });
     expect(demo.dispatch.boundary).not.toBe('skill_workflow');
-    expect(demo.dispatch.flow.specialWorkflow).toBeNull();
     expect(demo.dispatch.flow.workflowHint?.id).toBe('self_intro_demo');
-    expect(demo.dispatch.flow.workflowRouting).toBe('model_hint');
     expect(demo.selection.lane).toBe('skill_workflow');
     expect(demo.selection.primary).toContain('self_intro_demo');
     expect(demo.selection.promptOverlay).toContain('model owns the final respond-versus-act decision');
@@ -275,7 +276,6 @@ describe('Lumi capability selection', () => {
     });
 
     expect(dispatch.boundary).toBe('tool_action');
-    expect(dispatch.flow.specialWorkflow).toBeNull();
     expect(dispatch.flow.workSurfaceRoute.artifactFirst).toBe(true);
     expect(dispatch.flow.workSurfaceRoute.directDesktop).toBe(true);
     expect(selection.lane).toBe('design_cad');
@@ -308,8 +308,6 @@ describe('Lumi capability selection', () => {
       text: 'Live AutoCAD acceptance test. Prepare operations for a 4000 by 3000 room, then draw visibly through AutoCAD MCP/COM and require the completion marker.',
       operationMode: 'assistant',
     });
-
-    expect(dispatch.flow.specialWorkflow).toBeNull();
     expect(dispatch.flow.workSurfaceRoute.directDesktop).toBe(true);
     expect(selection.lane).toBe('design_cad');
     expect(selection.preferredTools).toEqual(expect.arrayContaining([
@@ -394,6 +392,7 @@ describe('Lumi capability selection', () => {
       userId: 'capability_selection_wps_exact_replay_user',
       text,
       continuationContext,
+      continuationAppTarget: 'WPS',
       operationMode: 'assistant',
     });
 
@@ -615,16 +614,20 @@ describe('Lumi capability selection', () => {
     expect(selection.preferredTools).toContain('wechat_read_recent_chat');
   });
 
-  it('keeps chat, voice, and task sockets on the shared capability selection path', () => {
+  it('keeps text and voice on the shared entry and capability selection owner', () => {
     const root = process.cwd();
     const sources = [
-      readFileSync(path.join(root, 'server/socket/chat.ts'), 'utf8'),
-      readFileSync(path.join(root, 'server/socket/voice.ts'), 'utf8'),
-      readFileSync(path.join(root, 'server/socket/task.ts'), 'utf8'),
+      readImplementationSource(path.join(root, 'server/socket/chat.ts'), 'utf8'),
+      readVoiceImplementationSource(),
     ];
 
+    const driver = readFileSync(path.join(root, 'server/cognition/turn_execution.ts'), 'utf8');
+    const pipeline = readFileSync(path.join(root, 'server/cognition/execution_pipeline.ts'), 'utf8');
+    expect(driver).toContain('const execution = buildLumiExecutionPipeline({');
+    expect(driver.indexOf('await admission?.waitForTurn();')).toBeLessThan(driver.indexOf('const execution = buildLumiExecutionPipeline({'));
+    expect(pipeline).toContain('buildLumiCapabilitySelection(');
     for (const source of sources) {
-      expect(source).toContain('buildLumiExecutionPipeline');
+      expect(source).toContain('await runLumiEntryTurn<void>({');
       expect(source).toContain('agent:capability_selection');
     }
   });

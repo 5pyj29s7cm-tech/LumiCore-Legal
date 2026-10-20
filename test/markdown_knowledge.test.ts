@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import jwt from 'jsonwebtoken';
 import { makeApp, JWT_SECRET } from './helpers';
+import { groupExistingFileMemories } from '../server/files/knowledge/memory_references';
 import {
   enrichMarkdownKnowledgeContent,
   normalizeKnowledgeLinkTarget,
@@ -59,6 +60,47 @@ See [Spec](docs/spec.md) and #rag.
   });
 });
 
+describe('knowledge file memory associations', () => {
+  const group = groupExistingFileMemories;
+  const personalScope = { domain: 'personal' as const, userId: 'owner', dir: '/vault' };
+  const workScope = { domain: 'work' as const, orgId: 'org-a', userId: 'owner', dir: '/vault' };
+  const base = { type: 'knowledge', userId: 'owner', agentId: 'lumi', domain: 'personal' };
+  const rows = [
+    { id: 'path', sourceInteractionId: 'D:/vault/REPORT.TXT', keywords: ['source:report.txt'] },
+    { id: 'keyword', keywords: ['SOURCE:CAFE\u0301.TXT'] },
+    { id: 'header', content: '[cafe\u0301.txt #1] body' },
+    { id: 'ambiguous', content: '[has # fragment.txt #2] body' },
+    { id: 'wrong-case', content: '[Header.txt #1] body' },
+    { id: 'private', userId: 'other', sourceInteractionId: 'Report.txt' },
+    { id: 'work', domain: 'work', orgId: 'org-a', userId: 'other', sourceInteractionId: 'Report.txt' },
+    { id: 'other-org', domain: 'work', orgId: 'org-b', sourceInteractionId: 'Report.txt' },
+    { id: 'other-agent', agentId: 'other', sourceInteractionId: 'Report.txt' },
+    { id: 'non-knowledge', type: 'episodic', sourceInteractionId: 'Report.txt' },
+  ].map(row => ({ ...base, ...row }));
+  const files = ['Report.txt', 'report.txt', 'café.txt', 'cafe\u0301.txt', 'has', 'has # fragment.txt', 'header.txt'];
+  const ids = (grouped: Map<string, any[]>) => Object.fromEntries([...grouped].map(([name, memories]) => [name, memories.map(memory => memory.id)]));
+
+  it('uses Windows file identity while preserving Unicode identity, complete legacy headers, order and scope', () => {
+    const options = { userId: 'owner', agentId: 'lumi', platform: 'win32' as const };
+    expect(ids(group({ memories: rows }, files, personalScope, options))).toEqual({
+      'Report.txt': ['path'], 'report.txt': ['path'],
+      'cafe\u0301.txt': ['keyword', 'header'],
+      'has # fragment.txt': ['ambiguous'], 'header.txt': ['wrong-case'],
+    });
+    expect(group({ memories: rows }, files, workScope, { platform: 'win32' }).get('Report.txt')?.map(memory => memory.id)).toEqual(['work']);
+    expect(group({ memories: rows }, [], personalScope, options).size).toBe(0);
+  });
+
+  it('keeps POSIX case and Unicode siblings separate and does not infer ownership from a folded legacy tag', () => {
+    const options = { userId: 'owner', agentId: 'lumi', platform: 'linux' as const };
+    expect(ids(group({ memories: rows }, files, personalScope, options))).toEqual({
+      'cafe\u0301.txt': ['header'], 'has # fragment.txt': ['ambiguous'],
+    });
+    expect(group({ memories: rows }, ['REPORT.TXT'], personalScope, options).get('REPORT.TXT')?.map(memory => memory.id)).toEqual(['path']);
+    expect(group({ memories: rows }, files, workScope, { platform: 'linux' }).get('Report.txt')?.map(memory => memory.id)).toEqual(['work']);
+  });
+});
+
 describe('RAG markdown source metadata', () => {
   beforeAll(async () => {
     const app = await makeApp();
@@ -104,6 +146,18 @@ describe('RAG markdown source metadata', () => {
       headers: { Cookie: orgCookie },
     });
     expect(mixedScope.status).toBe(403);
+    const { readDB } = await import('../db_layer');
+    const db = readDB();
+    for (const suffix of ['a', 'b']) db.memories.push({ id: 'vault-association-' + suffix, type: 'knowledge', domain: 'personal',
+      userId: 'vault-user-' + suffix, agentId: 'agent-' + suffix, sourceInteractionId: 'private-note.txt', content: 'Synthetic note',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as any);
+    for (const [cookie, agent] of [[cookieA, 'agent-a'], [cookieB, 'agent-b']]) {
+      const response = await fetch(testUrl + '/api/files/list?domain=personal', { headers: { Cookie: cookie } });
+      const listed = (await response.json()).files.find((file: any) => file.id === 'private-note.txt');
+      expect(listed.agentIds).toContain(agent);
+      expect(listed.agentIds).not.toContain(agent === 'agent-a' ? 'agent-b' : 'agent-a');
+      expect(listed.status).toBe('indexed');
+    }
   });
 
   it('stores tags, aliases, and links as retrievable memory keywords', async () => {

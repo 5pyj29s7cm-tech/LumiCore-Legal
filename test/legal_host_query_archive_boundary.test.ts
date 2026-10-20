@@ -1,0 +1,31 @@
+import './helpers';
+import fs from 'node:fs';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { initDatabase, readDB } from '../db_layer';
+import { createOrg, addMember } from '../server/org/db';
+import * as kb from '../server/org/kb';
+import { createBindingCode, authorizeMessagingGroup } from '../server/messaging/bindings';
+import { consumeFixtureBindingCode } from './messaging_binding_fixture';
+import { processWithPersonality } from '../server/regions/packs/cn/messaging_routes';
+import type { IncomingMessage } from '../server/messaging/types';
+import { finalizeLumiResponse } from '../server/cognition/result_finalizer';
+const capture=vi.hoisted(()=>({inputs:[] as any[]}));
+vi.mock('../server/cognition/result_finalizer',async original=>{const actual=await original<typeof import('../server/cognition/result_finalizer')>();return{...actual,finalizeLumiResponse:(input:any)=>{capture.inputs.push(input);return actual.finalizeLumiResponse(input);}};});
+vi.mock('../server/llm/embedding_provider',async original=>({...await original<typeof import('../server/llm/embedding_provider')>(),generateConfiguredEmbedding:vi.fn().mockRejectedValue(new Error('Synthetic offline query fixture'))}));
+let orgId='';const userId='readonly-host-query-owner';let modelCalls=0;
+beforeAll(async()=>{await initDatabase();orgId=createOrg('Synthetic host query organization','synthetic-host-query',userId).id;addMember(orgId,userId,'owner');const code=createBindingCode('feishu',userId,orgId,'work');expect(consumeFixtureBindingCode('feishu',code.code,'ou-host-query','oc-private-query','private')).toBeTruthy();authorizeMessagingGroup({platform:'feishu',chatId:'oc-host-query',orgId,createdBy:userId,allowedPlatformUserIds:['ou-host-query']});kb.createArticle(orgId,userId,{title:'QuerySourceMarker',content:'QuerySourceMarker synthetic original existing knowledge body. Payment and quality remain unverified.'},{index:false});});
+describe('read-only host organization transaction cannot prove archive writes',()=>{
+ it('uses the real query transaction and changes only hypothetical public wording',async()=>{
+  const before=JSON.stringify(kb.listArticles(orgId,undefined,userId));
+  const msg:IncomingMessage={platform:'feishu',userId:'ou-host-query',userName:'Synthetic Query Owner',chatId:'oc-host-query',chatType:'group',botMentioned:true,messageId:'host-query-boundary',text:'查询组织知识库 QuerySourceMarker',boundUserId:userId,boundOrgId:orgId,raw:{},timestamp:new Date().toISOString()};
+  const reply=await processWithPersonality(msg,{llmGetters:{getDeepSeek:()=>{modelCalls++;throw new Error('Model forbidden');},getGemini:()=>{modelCalls++;throw new Error('Model forbidden');}}});
+  expect(reply).toContain('QuerySourceMarker');expect(modelCalls).toBe(0);expect(JSON.stringify(kb.listArticles(orgId,undefined,userId))).toBe(before);
+  const input=capture.inputs.find(input=>input.toolRecords?.some((record:any)=>record.name==='organization_business_command'))!;
+  const task=readDB().conversationActionTasks.find((task:any)=>task.id===input.taskId);
+  const records=input.toolRecords;const hypothetical=finalizeLumiResponse({...input,responseText:'已归档工作稿。',completionGuard:undefined});
+  fs.writeFileSync('C:/Users/Administrator/Documents/Codex/2026-10-03/new-chat/work/legal-all-modules-20261013/other-modules/host-query-readonly-boundary/diagnosis-after-fix.json',JSON.stringify({simulation:true,productionModified:true,modelCalls,knowledgeUnchanged:true,actualReply:reply,task,canonicalRecords:records,inputIdentity:{requestId:input.requestId,taskId:input.taskId},hypothetical},null,2));
+  expect(JSON.parse(task!.context).executionPlan.intent.operation).toBe('read');
+  expect(JSON.parse(records[0].result)).toMatchObject({persisted:false,changedCaseIds:[],articleIds:[]});expect(records.some((record:any)=>record.terminalVerification?.status==='verified')).toBe(true);
+  expect(hypothetical.blocked).toBe(true);
+ });
+});

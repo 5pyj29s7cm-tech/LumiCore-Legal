@@ -144,6 +144,7 @@ describe('Lumi official streaming STT protocol', () => {
       header: { event: 'result-generated', task_id: runTask.header.task_id },
       payload: { output: { sentence: { text: 'hello', sentence_end: true } } },
     });
+    socket.message({ header: { event: 'task-finished', task_id: runTask.header.task_id }, payload: {} });
     await expect(promise).resolves.toMatchObject({ text: 'hello', isFinal: true });
   });
 

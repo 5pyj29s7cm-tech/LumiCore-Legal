@@ -296,6 +296,32 @@ afterEach(() => {
 });
 
 describe('signed extension and Provider registry', () => {
+  it('checks extension vision against the actual prepared payload after optional old image history is dropped', async () => {
+    const manifest = signedManifest(); expect(await install(manifest)).toMatchObject({ ok: true });
+    runtimeState.calls = [];
+    const images = Array.from({ length: 4 }, () => ({ type: 'image_url' as const, image_url: { url: 'data:image/png;base64,U1lOVEhFVElD' } }));
+    const result = await makeLLMCall([{ role: 'user', content: images }, { role: 'assistant', content: 'Old optional image history.' }, { role: 'user', content: 'Answer this current text-only request.' }], [],
+      { provider: manifest.id, model: 'signed-model', userId: USER_ID, selectionMode: 'pinned', noImplicitFailover: true, maxTokens: 128, inputTokenBudget: 4096 }, () => null, () => null);
+    expect(result.text).toBe('signed:signed-model');
+    const outbound = runtimeState.calls.filter(call => call.url.endsWith('/chat/completions')); expect(outbound).toHaveLength(1);
+    expect(JSON.stringify(outbound[0].body.messages)).not.toContain('image_url'); expect(outbound[0].body.messages.at(-1).content).toBe('Answer this current text-only request.');
+    await expect(makeLLMCall([{ role: 'user', content: images.slice(0, 1) }], [], { provider: manifest.id, model: 'signed-model', userId: USER_ID, selectionMode: 'pinned', noImplicitFailover: true, maxTokens: 128 }, () => null, () => null)).rejects.toThrow(/vision capability/);
+    expect(runtimeState.calls.filter(call => call.url.endsWith('/chat/completions'))).toHaveLength(1);
+  });
+
+  it('checks extension tools against actual optional schema projection while still refusing undeclared tools that remain', async () => {
+    const keys = keyPair(), manifest = signedManifest({ keys }); manifest.provider!.models[0].capabilities.tools = false;
+    manifest.signature.value = crypto.sign(null, extensionManifestSigningPayload(manifest), keys.privateKey).toString('base64');
+    expect(await install(manifest)).toMatchObject({ ok: true }); runtimeState.calls = [];
+    const optional = { type: 'function' as const, function: { name: 'optional_oversized_schema', description: 'Optional capability.', parameters: { type: 'object', properties: { selection: { type: 'string', enum: Array.from({ length: 400 }, (_, index) => 'synthetic-optional-item-' + index + '-'.repeat(60)) } } } } };
+    const config = { provider: manifest.id, model: 'signed-model', userId: USER_ID, selectionMode: 'pinned' as const, noImplicitFailover: true, maxTokens: 128, inputTokenBudget: 4096 };
+    const result = await makeLLMCall([{ role: 'user', content: 'Answer this current text-only request.' }], [optional], config, () => null, () => null);
+    expect(result.text).toBe('signed:signed-model'); const outbound = runtimeState.calls.filter(call => call.url.endsWith('/chat/completions')); expect(outbound).toHaveLength(1); expect(outbound[0].body).not.toHaveProperty('tools');
+    const retained = { ...optional, function: { ...optional.function, parameters: { type: 'object', properties: {} } } };
+    await expect(makeLLMCall([{ role: 'user', content: 'Current request.' }], [retained], config, () => null, () => null)).rejects.toThrow(/tool-calling capability/);
+    expect(runtimeState.calls.filter(call => call.url.endsWith('/chat/completions'))).toHaveLength(1);
+  });
+
   it('requires confirmation and rejects unsigned, tampered, credential-bearing, or unknown manifest fields', async () => {
     const manifest = signedManifest();
     await expect(registry.execute('extension_registry_install', { manifest, trustPublisher: true }, {

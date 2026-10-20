@@ -1,29 +1,13 @@
-import fs from 'node:fs';
-import vm from 'node:vm';
-import path from 'node:path';
-import ts from 'typescript';
+import { ChatExecutionWatch } from '../src/lib/chatExecutionWatch';
+import { chatRecoveryCopy } from '../src/i18n/locales/chatRecovery';
+import { extractSourceExpression } from './source_expression';
 import { expect, it, vi } from 'vitest';
 import { ChatRequestLedger, upsertPersistedPendingChatExecution, removePersistedPendingChatExecution } from '../src/lib/chatEventReceipts';
 import { chatExecutionStorageKey, ownedPendingChatExecutions, type ChatRecoveryOwner } from '../src/lib/chatExecutionRecovery';
 import { ChatViewWorkRegistry } from '../src/lib/chatViewWork';
 
 // Execute the real component callbacks, with synthetic storage and socket replies.
-const source = fs.readFileSync(path.resolve('src/components/AgentChatPage.tsx'), 'utf8');
-const ast = ts.createSourceFile('AgentChatPage.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-function callback(name: string, dependencies: Record<string, unknown>) {
-  let expression: ts.Expression | undefined;
-  function visit(node: ts.Node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name && node.initializer) {
-      expression = ts.isCallExpression(node.initializer) && node.initializer.expression.getText(ast) === 'useCallback'
-        ? node.initializer.arguments[0] : node.initializer;
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(ast);
-  if (!expression) throw new Error(`Missing callback: ${name}`);
-  const js = ts.transpileModule(`(${expression.getText(ast)})`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
-  return vm.runInNewContext(js, dependencies);
-}
+const callback = extractSourceExpression.bind(null, 'src/components/AgentChatPage.tsx');
 const noop = () => {};
 const owner = (userId: string): ChatRecoveryOwner => ({ userId, agentId: 'lumi', domain: 'personal', source: 'command-center-chat' });
 const requestId = 'owner-a-media-request';
@@ -53,20 +37,22 @@ function harness(currentOwner = owner('owner-a')) {
   const view = new ChatViewWorkRegistry();
   const resetMedia = vi.fn(() => { activeMedia.current = null; setReference(''); });
   const emit = vi.fn((_event: string, _payload: any, ack: any) => { replies.push(ack); });
-  const dependencies = {
+  const dependencies: Record<string, any> = {
     localStorage, activeExecutionStorageKey: key, ownedPendingChatExecutions, recoveryOwner: currentOwner,
     agentId: currentOwner.agentId, activeDomain: currentOwner.domain, activeOrgId: currentOwner.orgId || '',
     disposed: false, recoveryAttempt: 0, chatViewWorkRef: { current: view },
     ACTIVE_CHAT_EXECUTION_TTL_MS: 86400000, clearPersistedExecution: noop,
     isOfficeCommandCenter: true, activeMediaGenerationRef: activeMedia,
     mediaStudioOpenRef: { current: false }, mediaGenerationArtifactsRef: { current: [] }, mediaGenerationArtifactValidationRef: { current: null },
-    setMediaGenerationArtifacts: noop, setMediaGenerationStatus: noop, setMediaGenerationDetail: noop,
-    setMediaStudioMode: noop, setMediaPrimaryImage: setReference, setMediaReferenceImages: noop, setMediaVideoReferenceImage: noop,
+    setMediaGenerationArtifacts: noop, setMediaGeneration: noop,
+    setMediaStudioMode: noop, setMediaSources: vi.fn(value => { setReference(value.primaryImage); }),
     mediaGenerationText: { statusGenerating: 'generating' }, chatRequestLedgerRef: { current: ledger },
-    activeChatRequestIdRef: { current: null }, textChatActiveRef: { current: false }, chatTurnTimerGuardRef: { current: { begin: noop } },
-    setIsTyping: vi.fn(), lastResumedRequestIdsRef: { current: new Set() }, pushChatProgress: vi.fn(),
+    chatTurnTimerGuardRef: { current: { begin: noop } },
+    setIsTyping: vi.fn(), lastResumedRequestIdsRef: { current: new Set() }, pushChatProgress: vi.fn(), clearChatProgress: noop, chatRecoveryCopy,
     uiMessage: (value: string) => value, isZh: false, attachmentConversationIdRef: { current: 'current-conversation' },
-    chatExecutionSource: currentOwner.source, socket: { emit }, setWorkflowStatus: vi.fn(), resetMediaGenerationSurface: resetMedia,
+    chatExecutionSource: currentOwner.source, socket: { connected: true, emit }, setWorkflowStatus: vi.fn(), resetMediaGenerationSurface: resetMedia,
+    chatExecutionWatchesRef: { current: new Map() }, chatTurnUiMetaRef: { current: new Map() }, dropRequestStream: noop, persistActiveExecution: noop, bindAttachmentContextToConversation: noop,
+    ChatExecutionWatch: class extends ChatExecutionWatch { constructor(options: ConstructorParameters<typeof ChatExecutionWatch>[0]) { super(options, { setTimeout: (() => 1) as any, clearTimeout: noop }); } },
     settleTrackedChatRequest: (id: string) => {
       const next = removePersistedPendingChatExecution(JSON.parse(localStorage.getItem(key) || 'null'), id);
       if (next.pending.length) localStorage.setItem(key, JSON.stringify(next));
@@ -74,6 +60,7 @@ function harness(currentOwner = owner('owner-a')) {
       return ledger.settle(id);
     },
   };
+  dependencies.attachChatExecutionWatch = callback('attachChatExecutionWatch', dependencies);
   const resume = callback('resumeActiveExecution', dependencies);
   const accepted = { ok: true, snapshot: { requestId, source: currentOwner.source, status: 'executing', terminal: false } };
   return { data, localStorage, seed, key, ledger, activeMedia, setReference, resetMedia, emit, replies, view, dependencies, resume, accepted };
@@ -131,26 +118,28 @@ it.each([true, false])('cleans rejected media only if it belongs to that request
   await h.resume();
   h.activeMedia.current = { requestId: matches ? requestId : 'new-request' };
   h.replies[0]({ ok: false });
-  expect(h.resetMedia).toHaveBeenCalledTimes(matches ? 1 : 0);
+  expect(h.activeMedia.current).toEqual(matches ? null : { requestId: 'new-request' });
   if (!matches) expect(h.activeMedia.current.requestId).toBe('new-request');
 });
 
-it.each(['view-change', 'unmount', 'reconnect'])('ignores stale acknowledgements after %s', async variant => {
+it.each(['view-change', 'unmount'])('ignores stale acknowledgements after disposing the exact view watch: %s', async () => {
   const h = harness();
   await h.resume();
-  if (variant === 'view-change') h.view.invalidate();
-  else if (variant === 'unmount') h.dependencies.disposed = true;
-  else await h.resume();
+  h.dependencies.chatExecutionWatchesRef.current.get(requestId).dispose();
   h.replies[0](h.accepted);
   expect(h.setReference).not.toHaveBeenCalled();
   expect(h.localStorage.getItem(h.key)).not.toBeNull();
-  if (variant === 'reconnect') {
-    h.replies[1](h.accepted);
-    expect(h.setReference).toHaveBeenCalledWith(reference);
-  }
 });
 
-it('can recover after adopting the active conversation without dropping reference metadata', async () => {
+it('reuses the in-flight request watch across repeated reconnect callbacks', async () => {
+  const h = harness();
+  await h.resume(); await h.resume();
+  expect(h.emit).toHaveBeenCalledTimes(1);
+  h.replies[0](h.accepted);
+  expect(h.setReference).toHaveBeenCalledExactlyOnceWith(reference);
+});
+
+it('lets the server resolve an omitted conversation from the exact request without guessing the active conversation', async () => {
   const h = harness();
   const stored = JSON.parse(h.localStorage.getItem(h.key)!);
   delete stored.pending[0].conversationId;
@@ -167,9 +156,25 @@ it('can recover after adopting the active conversation without dropping referenc
   });
   await h.resume();
   expect(h.emit).toHaveBeenCalledTimes(1);
-  expect(h.emit.mock.calls[0][1].conversationId).toBe('recovered-conversation');
+  expect(h.emit.mock.calls[0][1].conversationId).toBeUndefined();
+  expect(h.dependencies.fetch).not.toHaveBeenCalled();
   expect(JSON.parse(h.localStorage.getItem(h.key)!).pending[0].mediaGeneration.primaryImage).toBe(reference);
   expect(h.setReference).not.toHaveBeenCalled();
   h.replies[0](h.accepted);
   expect(h.setReference).toHaveBeenCalledWith(reference);
+});
+
+it.each(['image_edit', 'image_to_video'])('recovers all source identities atomically and clears the previous selection: %s', async operation => {
+  const h = harness();
+  const stored = JSON.parse(h.localStorage.getItem(h.key)!);
+  const empty = { primaryImage: '', primaryArtifactId: '', referenceImages: [], referenceArtifactIds: [], referenceImage: '', referenceArtifactId: '' };
+  const sources = operation === 'image_edit'
+    ? { primaryImage: reference, primaryArtifactId: 'main-id', referenceImages: ['D:/ref.png'], referenceArtifactIds: ['ref-id'] }
+    : { referenceImage: reference, referenceArtifactId: 'first-frame-id' };
+  stored.pending[0].mediaGeneration = { mode: operation === 'image_edit' ? 'image' : 'video', operation, size: '1024x1024', prompt: 'Keep this source', ...sources };
+  h.localStorage.setItem(h.key, JSON.stringify(stored));
+  await h.resume();
+  expect(h.dependencies.setMediaSources).not.toHaveBeenCalled();
+  h.replies[0](h.accepted);
+  expect(h.dependencies.setMediaSources).toHaveBeenCalledExactlyOnceWith({ ...empty, ...sources });
 });

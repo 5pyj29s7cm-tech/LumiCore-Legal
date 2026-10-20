@@ -1,3 +1,4 @@
+import { readImplementationSource } from './implementation_source';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -118,8 +119,8 @@ describe('task terminal durability', () => {
   });
 
   it('wires all task terminals through the strict durability boundary', () => {
-    const source = readFileSync(path.join(process.cwd(), 'server/socket/task.ts'), 'utf8');
-    expect(source.match(/await commitTaskTerminal\(\{/g)?.length || 0).toBeGreaterThanOrEqual(10);
+    const source = readImplementationSource(path.join(process.cwd(), 'server/socket/chat.ts'), 'utf8');
+    expect(source.match(/await commit(?:Deterministic|Recorded)Terminal\(\{/g)?.length || 0).toBeGreaterThanOrEqual(10);
     expect(source).not.toMatch(/emitAgent\(["']agent:response["']/);
     expect(source).not.toMatch(/emitAgent\(["']agent:error["']/);
     expect(source).toContain('beginChatExecutionDurably(');

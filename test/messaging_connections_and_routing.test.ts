@@ -1,3 +1,5 @@
+import { observedMessagingOptions } from './organization_model_observer_fixture';
+import { consumeFixtureBindingCode } from './messaging_binding_fixture';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import sqlite3 from 'sqlite3';
 import { makeApp } from './helpers';
@@ -8,7 +10,6 @@ let bindings: typeof import('../server/messaging/bindings');
 let delivery: typeof import('../server/messaging/delivery_ledger');
 let ingressPolicy: typeof import('../server/messaging/ingress_policy');
 let routes: typeof import('../server/messaging/routes');
-let wechatRoutes: typeof import('../server/messaging/wechat-routes');
 let connections: typeof import('../server/messaging/connections');
 let messagingConfig: typeof import('../server/messaging/config');
 let orgDb: typeof import('../server/org/db');
@@ -35,13 +36,13 @@ async function captureRoutedMessage(message: IncomingMessage): Promise<IncomingM
     const accepted = routes.dispatchIncomingMessage(message, {
       enrich: async value => value,
       reply: async () => undefined,
-    }, {
+    }, observedMessagingOptions({
       onMessage: async value => {
         clearTimeout(timeout);
         resolve(value);
         return { platform: value.platform, text: 'ok' };
       },
-    });
+    }));
     if (!accepted) {
       clearTimeout(timeout);
       reject(new Error('message was rejected as a duplicate'));
@@ -53,12 +54,11 @@ describe('messaging long connections and organization routing', () => {
   beforeAll(async () => {
     const app = await makeApp();
     cleanup = app.cleanup;
-    [bindings, delivery, ingressPolicy, routes, wechatRoutes, connections, messagingConfig, orgDb] = await Promise.all([
+    [bindings, delivery, ingressPolicy, routes, connections, messagingConfig, orgDb] = await Promise.all([
       import('../server/messaging/bindings'),
       import('../server/messaging/delivery_ledger'),
       import('../server/messaging/ingress_policy'),
       import('../server/messaging/routes'),
-      import('../server/messaging/wechat-routes'),
       import('../server/messaging/connections'),
       import('../server/messaging/config'),
       import('../server/org/db'),
@@ -191,7 +191,7 @@ describe('messaging long connections and organization routing', () => {
     orgDb.addMember(orgB.id, lumiUserId, 'owner');
 
     const privateCode = bindings.createBindingCode('feishu', lumiUserId, orgA.id);
-    bindings.consumeBindingCode('feishu', privateCode.code, platformUserId, 'oc-private', 'private');
+    consumeFixtureBindingCode('feishu', privateCode.code, platformUserId, 'oc-private', 'private');
     bindings.authorizeMessagingGroup({
       platform: 'feishu',
       chatId: 'oc-group-b',
@@ -242,9 +242,9 @@ describe('messaging long connections and organization routing', () => {
     orgDb.addMember(orgA.id, lumiUserB, 'member');
 
     const first = bindings.createBindingCode('wecom', lumiUserA, orgA.id);
-    bindings.consumeBindingCode('wecom', first.code, 'member-a', 'private-a', 'private');
+    consumeFixtureBindingCode('wecom', first.code, 'member-a', 'private-a', 'private');
     const second = bindings.createBindingCode('wecom', lumiUserB, orgB.id);
-    bindings.consumeBindingCode('wecom', second.code, 'member-b', 'private-b', 'private');
+    consumeFixtureBindingCode('wecom', second.code, 'member-b', 'private-b', 'private');
     bindings.authorizeMessagingGroup({
       platform: 'wecom',
       chatId: 'shared-group',
@@ -270,8 +270,8 @@ describe('messaging long connections and organization routing', () => {
 
     const ownerCode = bindings.createBindingCode('feishu', ownerId, org.id);
     const memberCode = bindings.createBindingCode('feishu', memberId, org.id);
-    bindings.consumeBindingCode('feishu', ownerCode.code, 'ou-owner', 'oc-owner-private', 'private');
-    bindings.consumeBindingCode('feishu', memberCode.code, 'ou-member', 'oc-member-private', 'private');
+    consumeFixtureBindingCode('feishu', ownerCode.code, 'ou-owner', 'oc-owner-private', 'private');
+    consumeFixtureBindingCode('feishu', memberCode.code, 'ou-member', 'oc-member-private', 'private');
     bindings.authorizeMessagingGroup({
       platform: 'feishu',
       chatId: 'oc-concurrent',
@@ -297,7 +297,7 @@ describe('messaging long connections and organization routing', () => {
     expect(bindings.parseMessagingBindingCommand('Bind Lumi V_3XJS8J')).toEqual({ kind: 'bind', code: 'V_3XJS8J' });
     expect(bindings.parseMessagingBindingCommand('Already bound?')).toEqual({ kind: 'status' });
     expect(bindings.parseMessagingBindingCommand('我已经绑定成功了')).toEqual({ kind: 'status' });
-    const consumed = bindings.consumeBindingCode('wechat', code.code, 'wx-personal-user', 'wx-personal-user', 'private');
+    const consumed = consumeFixtureBindingCode('wechat', code.code, 'wx-personal-user', 'wx-personal-user', 'private');
 
     expect(consumed).toMatchObject({
       lumiUserId,
@@ -308,36 +308,20 @@ describe('messaging long connections and organization routing', () => {
     expect(bindings.getBinding('wechat', 'wx-personal-user', 'wx-personal-user', 'private')?.domain).toBe('personal');
   });
 
-  it('answers WeChat binding status from persisted state instead of model agreement', async () => {
-    const message = incoming({
-      platform: 'wechat',
-      userId: 'wx-status-user',
-      chatId: 'wx-status-user',
-      text: '我已经绑定成功了',
-    });
-    expect(wechatRoutes.handleWeChatBindingCommand(message)).toContain('尚未绑定');
-
-    const lumiUserId = `wechat-status-${Date.now()}-${Math.random()}`;
-    const code = bindings.createBindingCode('wechat', lumiUserId, '', 'personal');
-    const bindingMessage = {
-      ...message,
-      messageId: `wechat-binding-${Date.now()}`,
-      text: `绑定 Lumi ${code.code}`,
-    };
-    expect(wechatRoutes.handleWeChatBindingCommand(bindingMessage)).toBeNull();
-    const bindingReply = await new Promise<string>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('durable WeChat binding timed out')), 2_000);
-      routes.dispatchIncomingMessage(bindingMessage, {
+  it('answers WeChat binding status through the durable shared route', async () => {
+    const replyTo = (text: string) => new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('durable WeChat reply timed out')), 2_000);
+      routes.dispatchIncomingMessage(incoming({ platform: 'wechat', userId: 'wx-status-user', chatId: 'wx-status-user', text }), {
         enrich: async value => value,
-        reply: async (_value, text) => {
-          clearTimeout(timeout);
-          resolve(text);
-          return 'wechat-binding-reply';
-        },
+        reply: async (_value, reply) => { clearTimeout(timeout); resolve(reply); return 'wechat-binding-reply'; },
       });
     });
-    expect(bindingReply).toContain('绑定成功');
-    expect(wechatRoutes.handleWeChatBindingCommand(message)).toContain('已连接到你的个人 Lumi');
+    expect(await replyTo('我已经绑定成功了')).toContain('尚未绑定');
+    expect(await replyTo('绑定 Lumi ???')).toContain('格式');
+    const lumiUserId = `wechat-status-${Date.now()}-${Math.random()}`;
+    const code = bindings.createBindingCode('wechat', lumiUserId, '', 'personal');
+    expect(await replyTo(`绑定 Lumi ${code.code}`)).toContain('绑定成功');
+    expect(await replyTo('我已经绑定成功了')).toContain('已连接到你的个人 Lumi');
   });
 
   it('uses the main Lumi chat for personal WeChat and isolates group members and threads', async () => {
@@ -410,7 +394,7 @@ describe('messaging long connections and organization routing', () => {
       text: 'Open the calculator.',
     });
     const reply = await routes.processWithPersonality(second);
-    const { CN_TASK_EXECUTION_MESSAGES } = await import('../server/regions/packs/cn/voice_fast_path_messages');
+    const { CN_TASK_EXECUTION_MESSAGES } = await import("../server/regions/messages/task_execution_messages");
 
     expect(reply).toBe(CN_TASK_EXECUTION_MESSAGES.actionTurnBusy);
     expect(conversations.getOrCreateActiveConversation(userId, 'lumi', 'personal', '')).toMatchObject({
@@ -511,37 +495,30 @@ describe('messaging long connections and organization routing', () => {
       text: '在吗',
       operationMode: 'assistant',
     });
-    expect(greeting.dispatch.boundary).toBe('conversation');
-    expect(greeting.execution.allowToolUse).toBe(true);
+    expect(greeting.turnIntent.boundary).toBe('conversation');
+    expect(greeting.execution.allowToolUse).toBe(false);
     const greetingModelPolicy = buildModelCapabilityPolicy(greeting.execution);
-    expect(greetingModelPolicy.forbiddenTools).not.toContain('*');
-    expect(greetingModelPolicy.allowedTools).toEqual(expect.arrayContaining([
-      'client_get_state',
-      'desktop_open',
-      'wechat_send_message',
-    ]));
+    expect(greetingModelPolicy.forbiddenTools).toContain('*');
+    expect(greetingModelPolicy.allowedTools).toEqual([]);
 
     const knowledgeFileCapabilityQuestion = routes.buildRemoteLumiExecutionPlan({
       ...base,
       text: '\u77e5\u8bc6\u5e93\u91cc\u7684\u6587\u4ef6\u53ef\u4ee5\u53d1\u7ed9\u6211\u5417',
       operationMode: 'assistant',
     });
-    expect(knowledgeFileCapabilityQuestion.dispatch.boundary).toBe('conversation');
-    expect(knowledgeFileCapabilityQuestion.execution.allowToolUse).toBe(true);
+    expect(knowledgeFileCapabilityQuestion.turnIntent.boundary).toBe('conversation');
+    expect(knowledgeFileCapabilityQuestion.execution.allowToolUse).toBe(false);
     const knowledgeModelPolicy = buildModelCapabilityPolicy(knowledgeFileCapabilityQuestion.execution);
-    expect(knowledgeModelPolicy.forbiddenTools).not.toContain('*');
-    expect(knowledgeModelPolicy.allowedTools).toEqual(expect.arrayContaining([
-      'read_file',
-      'wechat_send_file',
-    ]));
+    expect(knowledgeModelPolicy.forbiddenTools).toContain('*');
+    expect(knowledgeModelPolicy.allowedTools).toEqual([]);
 
     const chatAction = routes.buildRemoteLumiExecutionPlan({
       ...base,
       text: '操作桌面打开微信',
       operationMode: 'chat',
     });
-    expect(chatAction.dispatch.flow.autoPromoteToAssistant).toBe(false);
-    expect(chatAction.dispatch.flow.effectiveOperationMode).toBe('assistant');
+    expect(chatAction.turnIntent.flow.autoPromoteToAssistant).toBe(false);
+    expect(chatAction.turnIntent.flow.effectiveOperationMode).toBe('assistant');
     expect(chatAction.execution.allowToolUse).toBe(true);
     expect(chatAction.execution.maxIterations).toBeGreaterThan(3);
     expect(chatAction.execution.toolRoute?.categories).toContain('messaging');
@@ -557,7 +534,7 @@ describe('messaging long connections and organization routing', () => {
       text: '给客户端做个自检',
       operationMode: 'assistant',
     });
-    expect(clientCheck.dispatch.flow.selfRepairTurn).toBe(true);
+    expect(clientCheck.turnIntent.flow.selfRepairTurn).toBe(true);
     const clientModelPolicy = buildModelCapabilityPolicy(clientCheck.execution);
     expect(clientModelPolicy.allowedTools).toEqual(expect.arrayContaining([
       'client_get_state',
@@ -572,14 +549,12 @@ describe('messaging long connections and organization routing', () => {
       text: '切换到自主模式',
       operationMode: 'assistant',
     });
-    expect(modeSwitch.dispatch.flow.requestedMode).toBeNull();
-    expect(modeSwitch.dispatch.flow.effectiveOperationMode).toBe('assistant');
+    expect(modeSwitch.turnIntent.flow.requestedMode).toBeNull();
+    expect(modeSwitch.turnIntent.flow.effectiveOperationMode).toBe('assistant');
     const modeSwitchModelPolicy = buildModelCapabilityPolicy(modeSwitch.execution);
-    expect(modeSwitchModelPolicy.allowedTools).toEqual(expect.arrayContaining([
-      'client_get_state',
-      'client_action',
-      'desktop_open',
-    ]));
+    expect(modeSwitch.execution.allowToolUse).toBe(false);
+    expect(modeSwitchModelPolicy.allowedTools).toEqual([]);
+    expect(modeSwitchModelPolicy.forbiddenTools).toContain('*');
   });
 
   it('keeps unbound remote senders off private tools and organization viewers off write tools', () => {
@@ -593,8 +568,8 @@ describe('messaging long connections and organization routing', () => {
       identityBound: false,
       canWriteOrganization: false,
     });
-    expect(unbound.dispatch.boundary).toBe('conversation');
-    expect(unbound.dispatch.flow.allowToolUseForTurn).toBe(false);
+    expect(unbound.turnIntent.boundary).toBe('conversation');
+    expect(unbound.turnIntent.flow.allowToolUseForTurn).toBe(false);
     expect(unbound.execution.allowToolUse).toBe(false);
     expect(unbound.execution.toolPolicy.forbiddenTools).toContain('*');
 
@@ -649,10 +624,27 @@ describe('messaging long connections and organization routing', () => {
     expect(getStoredOperationMode(userId)).toBe('assistant');
   });
 
-  it('persists remote execution plans and answers later status turns from the durable receipt ledger', async () => {
+  it('keeps the stored mode unchanged when a remote mode receipt explicitly reports failure', async () => {
+    const userId = 'wechat-mode-failed-' + Date.now() + '-' + Math.random();
+    const { updateClientState } = await import('../server/client/self_model');
+    const { getStoredOperationMode } = await import('../server/cognition/operation_mode_store');
+    updateClientState(userId, { platform: 'desktop', mode: 'assistant' });
+    const message = incoming({ platform: 'wechat', userId: 'wx-' + userId, chatId: 'wx-' + userId,
+      boundUserId: userId, messageId: 'failed-mode-' + userId, text: '\u5207\u6362\u5230\u4f1a\u8bae\u6a21\u5f0f' });
+    const reply = await routes.processWithPersonality(message, {
+      createScopedDesktopRelay: () => async (_name, args) => JSON.stringify({
+        ok: true, success: false, action: args.action, mode: args.mode,
+      }),
+    });
+    expect(getStoredOperationMode(userId)).toBe('assistant');
+    expect(reply).not.toMatch(/\u5df2\u5b8c\u6210|\u5df2\u5207\u5230\u4f1a\u8bae/);
+  });
+
+  it('persists remote tool receipts and answers later status turns without a synthetic plan', async () => {
     const userId = `wechat-ledger-${Date.now()}-${Math.random()}`;
     const { updateClientState } = await import('../server/client/self_model');
     const { readDB } = await import('../db_layer');
+    const { digest } = await import('../server/conversation/ledger/serialization');
     updateClientState(userId, { platform: 'desktop', mode: 'assistant' });
     const first = incoming({
       platform: 'wechat',
@@ -662,7 +654,9 @@ describe('messaging long connections and organization routing', () => {
       messageId: `mode-ledger-${Date.now()}`,
       text: '\u5207\u6362\u5230\u4f1a\u8bae\u6a21\u5f0f',
     });
-    const createScopedDesktopRelay = () => async (_name: string, args: Record<string, any>) => {
+    const relayCalls: Array<{ name: string; args: Record<string, any> }> = [];
+    const createScopedDesktopRelay = () => async (name: string, args: Record<string, any>) => {
+      relayCalls.push({ name, args });
       if (args.action === 'start_meeting_mode') {
         updateClientState(userId, { platform: 'desktop', mode: args.mode, surfaces: { meetingOpen: true } });
       }
@@ -675,11 +669,7 @@ describe('messaging long connections and organization routing', () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0]).toMatchObject({ status: 'completed', completionSource: 'tool_receipt' });
     const taskContext = JSON.parse(tasks[0].context);
-    expect(taskContext.executionPlan).toMatchObject({
-      taskId: tasks[0].id,
-      decisionAuthority: 'semantic_planner',
-      scriptAuthority: 'adapter_only',
-    });
+    expect(taskContext.executionPlan).toBeUndefined();
     const receipts = (afterExecution.conversationActionReceipts || [])
       .filter((item: any) => item.taskId === tasks[0].id);
     expect(receipts).toHaveLength(1);
@@ -687,7 +677,16 @@ describe('messaging long connections and organization routing', () => {
       toolName: 'client_action',
       requestId: `wechat_bot:${first.messageId}`,
       outcome: 'verified_success',
+      inputDigest: digest({ action: 'start_meeting_mode', mode: 'meeting', confirmed: false }),
     });
+    expect(JSON.parse(receipts[0].envelope)).toMatchObject({
+      status: 'verified_success', toolName: 'client_action', taskId: tasks[0].id,
+      requestId: `wechat_bot:${first.messageId}`,
+    });
+    expect(relayCalls.filter(call => call.args.action === 'start_meeting_mode')).toEqual([{
+      name: 'client_action', args: expect.objectContaining({ action: 'start_meeting_mode', mode: 'meeting' }),
+    }]);
+    const executionRelayCount = relayCalls.length;
 
     const status = incoming({
       platform: 'wechat',
@@ -705,6 +704,7 @@ describe('messaging long connections and organization routing', () => {
       },
     });
     expect(statusReply).toContain('\u5df2\u5b8c\u6210');
+    expect(relayCalls).toHaveLength(executionRelayCount);
     const afterStatus: any = readDB();
     expect((afterStatus.conversationActionTasks || []).filter((item: any) => item.userId === userId)).toHaveLength(1);
     expect((afterStatus.conversationActionReceipts || []).filter((item: any) => item.taskId === tasks[0].id)).toHaveLength(1);
@@ -789,5 +789,44 @@ describe('messaging long connections and organization routing', () => {
     const mixedMessage = connections.parseWeComLongConnectionMessage({ body: { ...base, msgid: 'msg-4', msgtype: 'mixed', mixed: { msg_item: [{ msgtype: 'text', text: { content: '看这张图' } }, { msgtype: 'image', image: { url: 'https://example.test/image', aeskey: 'image-key' } }] } } } as any);
     expect(mixedMessage?.text).toBe('看这张图');
     expect(mixedMessage?.attachments?.[0]).toMatchObject({ type: 'image', downloadUrl: 'https://example.test/image' });
+  });
+
+  it.each([true, false])('resolves bound=%s remote dispatch once from the accepted analysis', async identityBound => {
+    const dispatch = await import('../server/cognition/turn_dispatch');
+    const { vi } = await import('vitest');
+    const spy = vi.spyOn(dispatch, 'buildLumiTurnDispatch');
+    try {
+      const result = routes.buildRemoteLumiExecutionPlan({
+        userId: identityBound ? 'single-dispatch-owner' : 'anonymous', text: 'Open the desktop browser',
+        source: 'feishu_bot', domain: 'personal', orgId: '', operationMode: 'assistant',
+        identityBound, canWriteOrganization: identityBound,
+      });
+      expect(spy).toHaveBeenCalledOnce();
+      expect(spy.mock.calls[0][0].analysis).toBeDefined();
+      if (!identityBound) {
+        expect(result.turnIntent.boundary).toBe('conversation');
+        expect(result.turnIntent.flow.effectiveOperationMode).toBe('chat');
+        expect(result.execution.allowToolUse).toBe(false);
+        expect(result.authorizationPolicy.forbiddenTools).toContain('*');
+      }
+    } finally { spy.mockRestore(); }
+  });
+
+  it('keeps an unbound sender conversational even when a task snapshot is supplied', async () => {
+    const { normalizeConversationActionState } = await import('../server/cognition/action_continuation');
+    const state = normalizeConversationActionState({ taskId: 'guest-must-not-own-task', goal: 'Open the desktop browser',
+      status: 'executing', unfinished: true, revision: 1, receipts: [], updatedAt: new Date().toISOString() });
+    expect(state).not.toBeNull();
+    const result = routes.buildRemoteLumiExecutionPlan({
+      userId: 'anonymous', text: 'Continue opening the desktop browser', source: 'feishu_bot',
+      domain: 'personal', orgId: '', operationMode: 'assistant', identityBound: false,
+      canWriteOrganization: false, actionTaskState: state,
+    });
+    expect(result.turnIntent.boundary).toBe('conversation');
+    expect(result.turnIntent.flow.effectiveOperationMode).toBe('chat');
+    expect(result.execution.allowToolUse).toBe(false);
+    expect(result.executionRequested).toBe(false);
+    expect(result.modelToolProjection.toolNames).toEqual([]);
+    expect(result.authorizationPolicy.forbiddenTools).toContain('*');
   });
 });

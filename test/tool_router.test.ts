@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { mergeToolPolicyWithRoute, routeToolsForTurn } from '../server/cognition/tool_router';
 import { isDiagnosticOrRepairRequest } from '../server/cognition/tool_intent';
+import { traceToolIntentDecision } from '../server/cognition/tool_intent';
 
 function declaration(name: string, description = name) {
   return {
@@ -12,6 +13,39 @@ function declaration(name: string, description = name) {
     },
   };
 }
+
+it('exposes only the configuration reader for current model identity questions', () => {
+  for (const text of ['你现在是什么模型', '你用哪个模型？', 'What model are you using?']) {
+    expect(traceToolIntentDecision(text).allowToolUse).toBe(true);
+    const route = routeToolsForTurn(text, ['model_configuration_get','model_configuration_update','computer_use','client_get_state'].map(name=>declaration(name)));
+    expect(route.toolNames).toEqual(['model_configuration_get']); expect(route.hardAllowlist).toBe(true);
+  }
+  expect(traceToolIntentDecision('什么是语言模型？').allowToolUse).toBe(false);
+});
+
+it('offers real external case lookup instead of a planning-only tool', () => {
+  const route = routeToolsForTurn('打开中国裁判文书网查找浙江省衢州市中级法院最新的判例',
+    ['legal_external_research_plan','legal_search_external_authorities','web_login_profile_list','web_login_run','browser_open_task','computer_use'].map(name=>declaration(name)));
+  expect(route.toolNames).toContain('computer_use'); expect(route.toolNames).toContain('browser_open_task');
+  expect(route.toolNames).not.toContain('legal_external_research_plan');
+  expect(route.forbiddenToolNames).toContain('legal_external_research_plan');
+});
+
+it('keeps the grounded playback owner ahead of raw observations', () => {
+  const route = routeToolsForTurn('在电脑上的网易云音乐里播放陈奕迅的十年。', [
+    'desktop_capture_screen', 'desktop_active_window', 'desktop_list_apps', 'desktop_open', 'computer_use',
+  ].map(name => declaration(name)));
+  expect(route.toolNames[0]).toBe('computer_use');
+  expect(route.toolNames).not.toContain('desktop_capture_screen');
+});
+
+it('keeps file creation, safe copy edits, and the requested WPS opening available together', () => {
+  const tools = ['create_docx', 'create_xlsx', 'modify_xlsx', 'modify_docx', 'desktop_open', 'desktop_active_window', 'read_docx', 'read_xlsx'];
+  const route = routeToolsForTurn('生成 D:/reports/meeting.docx，并在 WPS 打开文件检查内容。', tools.map(name => declaration(name)));
+  expect(route.toolNames).toEqual(expect.arrayContaining(['create_docx', 'desktop_open', 'desktop_active_window', 'read_docx']));
+  const edit = routeToolsForTurn('把 D:/reports/source.xlsx 数量改成6，另存 D:/reports/updated.xlsx。', tools.map(name => declaration(name)));
+  expect(edit.toolNames).toContain('modify_xlsx');
+});
 
 function mcpManifest(toolNames: string[], provider: string) {
   return toolNames.map(toolName => ({
@@ -1494,4 +1528,10 @@ describe('tool router', () => {
 
     expect(policy.allowedTools).toEqual(['read_file']);
   });
+});
+
+it('retains the user-named local renderer ahead of fallback file tools under a compact schema budget', () => {
+ const names = ['read_file','write_file','read_files_batch','search_files','grep_files','desktop_write_text_file','create_docx','create_xlsx','read_docx','read_xlsx','modify_docx','modify_xlsx','desktop_open','desktop_active_window','client_capability_manifest','chat_song_render'];
+ const route = routeToolsForTurn("请读取并合成聊天唱歌工程 a590fef2-1d8f-4cea-a2b6-6a3ed5567e6a 的第 18 版。这是已经定好的聊天记录＋表情包主版本，使用工程已有的音轨、对白和全部素材，通过 chat_song_render 在本地合成并返回真实MP4。不要重新生成模型画面，也无需申请人工核词确认；歌曲的人工核对标记保持原值，不能代勾。", names.map(name => declaration(name)), {maxTools:8, enableMcpHealthGate:false});
+ expect(route.toolNames).toContain('chat_song_render');
 });

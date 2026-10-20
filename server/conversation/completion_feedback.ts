@@ -1,6 +1,6 @@
 import { redactDiagnosticSecrets } from '../client/diagnostic_sanitizer';
 import type { TaskCompletionFeedback } from '../cognition/acceptance_evidence';
-import { sanitizeExecutionDiagnosticForPublicFeedback } from '../cognition/execution_guard_recovery';
+import { sanitizeExecutionDiagnosticForPublicFeedback } from '../client/diagnostic_sanitizer';
 
 export type { TaskCompletionFeedback } from '../cognition/acceptance_evidence';
 
@@ -18,8 +18,8 @@ const MAX_COMPLETION_FEEDBACK_ITEM_CHARS = 500;
 
 // Completion evidence is deliberately richer inside the acceptance ledger.
 // None of its protocol vocabulary belongs in chat history or a user-facing
-// task card. The public projection below keeps only status-level semantics and
-// a genuinely human blocker when one exists.
+// task card. Preserve human-readable checkpoints and next steps; replacing
+// them all with generic status prose loses the actual continuation boundary.
 const INTERNAL_PUBLIC_FEEDBACK_RE = /(?:\b(?:desktop|execution)_[a-z0-9_]+\b|\b(?:verified|observed|terminal)\s+(?:tool|action)?\s*receipts?\b|\btool\s+(?:name|receipt|execution)\b|\bverified terminal evidence\b|\bmachine[- ]verified\b|\bterminal machine receipt\b|\bpreserved receipt ledger\b|\bproviderTrace\b)/iu;
 const GENERATED_TASK_LABEL_RE = /(?:completed with verified terminal evidence|is not verified complete|is waiting for confirmation|is still running in the background)\.?$/iu;
 const SNAKE_CASE_PROTOCOL_RE = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,}\b/u;
@@ -39,7 +39,7 @@ function publicStatusItem(
 ): string {
   if (chinese) {
     // i18n-allow -- compact server-owned public feedback for Chinese chat.
-    if (section === 'completed') return status === 'working' ? '已保留当前进度。' : '任务已完成。';
+    if (section === 'completed') return status === 'completed' ? '任务已完成。' : '已保留已经完成的部分。';
     // i18n-allow -- compact server-owned public feedback for Chinese chat.
     if (section === 'evidence') return '已记录当前执行结果。';
     // i18n-allow -- compact server-owned public feedback for Chinese chat.
@@ -48,23 +48,23 @@ function publicStatusItem(
       // i18n-allow -- compact server-owned public feedback for Chinese chat.
       if (status === 'working') return '任务仍在进行中。';
       // i18n-allow -- compact server-owned public feedback for Chinese chat.
-      return '任务尚未完成。';
+      return status === 'blocked' ? '整项请求尚未核验完成。' : '任务尚未完成。';
     }
     // i18n-allow -- compact server-owned public feedback for Chinese chat.
-    if (section === 'blockers') return '当前步骤未能完成。';
+    if (section === 'blockers') return status === 'blocked' ? '整项请求尚未核验完成；已取得的结果予以保留。' : '当前步骤未能完成。';
     // i18n-allow -- compact server-owned public feedback for Chinese chat.
     if (status === 'completed' || status === 'cancelled') return '无需后续操作。';
     // i18n-allow -- compact server-owned public feedback for Chinese chat.
     return status === 'working' ? '按当前进度继续即可。' : '处理当前阻塞后可继续。';
   }
-  if (section === 'completed') return status === 'working' ? 'Current progress was preserved.' : 'The task is complete.';
+  if (section === 'completed') return status === 'completed' ? 'The task is complete.' : 'Completed steps were preserved.';
   if (section === 'evidence') return 'The current execution result was recorded.';
   if (section === 'incomplete') {
     if (status === 'cancelled') return 'The task was cancelled.';
     if (status === 'working') return 'The task is still in progress.';
-    return 'The task is not complete yet.';
+    return status === 'blocked' ? 'The whole request has not been verified complete.' : 'The task is not complete yet.';
   }
-  if (section === 'blockers') return 'The current step could not be completed.';
+  if (section === 'blockers') return status === 'blocked' ? 'The whole request has not been verified complete; existing results were preserved.' : 'The current step could not be completed.';
   if (status === 'completed' || status === 'cancelled') return 'No further action is needed.';
   return status === 'working' ? 'Continue from the current progress.' : 'Resolve the current blocker, then continue.';
 }
@@ -103,35 +103,28 @@ export function normalizeCompletionFeedbackForPersistence(
   const status = String(raw.status || '').trim().toLowerCase() as TaskCompletionFeedback['status'];
   if (!COMPLETION_FEEDBACK_STATUSES.has(status)) return undefined;
   const chinese = feedbackUsesChinese(raw);
-  const rawCompletedPresent = Array.isArray(raw.completed)
-    && raw.completed.some(item => typeof item === 'string' && item.trim());
-  const rawEvidencePresent = Array.isArray(raw.evidence)
-    && raw.evidence.some(item => typeof item === 'string' && item.trim());
-  const rawIncompletePresent = Array.isArray(raw.incomplete)
-    && raw.incomplete.some(item => typeof item === 'string' && item.trim());
-  const rawBlockersPresent = Array.isArray(raw.blockers)
-    && raw.blockers.some(item => typeof item === 'string' && item.trim());
+  const hasItems = (section: FeedbackSection) => Array.isArray(raw[section])
+    && (raw[section] as unknown[]).some(item => typeof item === 'string' && item.trim());
   const blockers = normalizePublicNarrativeItems(raw.blockers);
-  if ((status === 'blocked' || status === 'failed') && rawBlockersPresent && blockers.length === 0) {
+  if ((status === 'blocked' || status === 'failed') && hasItems('blockers') && blockers.length === 0) {
     blockers.push(publicStatusItem('blockers', status, chinese));
   }
-  const rawNextStepsPresent = Array.isArray(raw.nextSteps)
-    && raw.nextSteps.some(item => typeof item === 'string' && item.trim());
+  const narratives = (section: FeedbackSection) => {
+    if (!hasItems(section)) return [];
+    const items = normalizePublicNarrativeItems(raw[section]);
+    return items.length ? items : [publicStatusItem(section, status, chinese)];
+  };
   return {
     status,
-    completed: rawCompletedPresent
-      ? [publicStatusItem('completed', status, chinese)]
-      : [],
-    evidence: rawEvidencePresent
+    completed: narratives('completed'),
+    evidence: hasItems('evidence')
       ? [publicStatusItem('evidence', status, chinese)]
       : [],
-    incomplete: rawIncompletePresent
-      ? [publicStatusItem('incomplete', status, chinese)]
-      : [],
+    incomplete: narratives('incomplete'),
     blockers,
-    nextSteps: rawNextStepsPresent
-      ? [publicStatusItem('nextSteps', status, chinese)]
-      : [],
+    nextSteps: status === 'completed' || status === 'cancelled'
+      ? hasItems('nextSteps') ? [publicStatusItem('nextSteps', status, chinese)] : []
+      : narratives('nextSteps'),
   };
 }
 

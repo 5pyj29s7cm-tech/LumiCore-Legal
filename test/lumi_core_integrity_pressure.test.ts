@@ -56,7 +56,6 @@ function evaluateTurn(input: {
   text: string;
   channel?: 'chat' | 'voice' | 'task';
   operationMode?: string;
-  registeredContracts?: boolean;
 }) {
   const registry = buildRegistry();
   const channel = input.channel || 'chat';
@@ -72,13 +71,11 @@ function evaluateTurn(input: {
     flow: dispatch.flow,
     text: input.text,
     toolDeclarations: buildDeclarations(registry),
-    toolRegistry: input.registeredContracts ? registry : undefined,
   });
   const selection = buildLumiCapabilitySelection({
     dispatch,
     execution,
     text: input.text,
-    registry: input.registeredContracts ? registry : undefined,
   });
   return { registry, dispatch, execution, selection };
 }
@@ -207,7 +204,6 @@ describe('Lumi core integrity pressure', () => {
       text: '\u8bed\u97f3\u4f1a\u8bae\u8bb0\u5f55\uff1a\u6839\u636e\u8fd9\u4e2a\u6848\u5b50\u751f\u6210\u7b54\u8fa9\u72b6\u548c\u8d28\u8bc1\u610f\u89c1',
       channel: 'voice',
       operationMode: 'assistant',
-      registeredContracts: true,
     });
     expect(legalVoice.selection.lane).toBe('legal_casework');
     expect(legalVoice.selection.preferredTools).toEqual(expect.arrayContaining([
@@ -315,7 +311,7 @@ describe('Lumi core integrity pressure', () => {
     expect(list.boundary).toContain('Desktop-only targets are controlled through visible windows');
 
     const planRaw = await registry.execute('desktop_ai_discovery_plan', {
-      focus: 'desktop AI and coding agents',
+      focus: 'desktop AI and coding tools',
     }, {
       userId: 'core_integrity_desktop_ai_user',
     });

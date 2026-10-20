@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useMemo, useState } from 'react';
 import {
   Building2, BookOpen, Users, Settings,
-  ScrollText, MessageSquare,
+  ScrollText, ArrowLeft,
   Shield, User, Briefcase, Home, GitBranch, Loader2, MessagesSquare,
   FolderOpen, FileText, Search, Crosshair, CheckCircle,
 } from 'lucide-react';
@@ -24,7 +24,6 @@ import type { LegalView } from './LegalHub';
 
 const AuditLogViewer = lazy(() => import('./AuditLogViewer').then(m => ({ default: m.AuditLogViewer })));
 const BranchDashboard = lazy(() => import('./BranchDashboard').then(m => ({ default: m.BranchDashboard })));
-const CentralLumiChat = lazy(() => import('./CentralLumiChat').then(m => ({ default: m.CentralLumiChat })));
 const KnowledgeBaseBrowser = lazy(() => import('./KnowledgeBaseBrowser').then(m => ({ default: m.KnowledgeBaseBrowser })));
 const KnowledgeBaseEditor = lazy(() => import('./KnowledgeBaseEditor').then(m => ({ default: m.KnowledgeBaseEditor })));
 const LegalHub = lazy(() => import('./LegalHub').then(m => ({ default: m.LegalHub })));
@@ -38,8 +37,6 @@ interface NavItem {
   id: SubView;
   label: string;
   icon: React.ReactNode;
-  roles: Array<'owner' | 'admin' | 'member' | 'viewer'>;
-  showInNav?: boolean;
 }
 
 interface LegalNavItem {
@@ -75,14 +72,13 @@ export function OrgHub() {
   const workspaceCopy = chinaLegalCopy(t.langCode === 'en' ? 'en' : 'zh').workspace;
 
   const allNavItems: NavItem[] = useMemo(() => [
-    { id: 'dashboard', label: t.orgDashboard, icon: <Home size={16} />, roles: ['owner', 'admin', 'member', 'viewer'] },
-    { id: 'kb', label: t.orgKB, icon: <BookOpen size={16} />, roles: ['owner', 'admin', 'member', 'viewer'], showInNav: false },
-    { id: 'chat', label: t.orgChat, icon: <MessageSquare size={16} />, roles: ['owner', 'admin', 'member', 'viewer'], showInNav: false },
-    { id: 'messaging', label: t.messaging || uiMessage('org-hub.messaging.ec30100616'), icon: <MessagesSquare size={16} />, roles: ['owner', 'admin', 'member'] },
-    { id: 'members', label: t.orgMembers, icon: <Users size={16} />, roles: ['owner', 'admin'], showInNav: false },
-    { id: 'audit', label: t.orgAudit, icon: <ScrollText size={16} />, roles: ['owner', 'admin'] },
-    { id: 'settings', label: t.orgSettings, icon: <Settings size={16} />, roles: ['owner', 'admin', 'member', 'viewer'] },
-    { id: 'branch', label: uiMessage('org-hub.branch-connection.9cecc72547'), icon: <GitBranch size={16} />, roles: ['owner', 'admin', 'member', 'viewer'], showInNav: false },
+    { id: 'dashboard', label: t.orgDashboard, icon: <Home size={16} /> },
+    { id: 'kb', label: t.orgKB, icon: <BookOpen size={16} /> },
+    { id: 'messaging', label: t.messaging || uiMessage('org-hub.messaging.ec30100616'), icon: <MessagesSquare size={16} /> },
+    { id: 'members', label: t.orgMembers, icon: <Users size={16} /> },
+    { id: 'audit', label: t.orgAudit, icon: <ScrollText size={16} /> },
+    { id: 'settings', label: t.orgSettings, icon: <Settings size={16} /> },
+    { id: 'branch', label: uiMessage('org-hub.branch-connection.9cecc72547'), icon: <GitBranch size={16} /> },
   ], [t]);
 
   const roleLabel: Record<string, { label: string; icon: React.ReactNode; color: string }> = useMemo(() => ({
@@ -108,19 +104,19 @@ export function OrgHub() {
     return () => window.removeEventListener('lumi:navigate', handler);
   }, [orgRole]);
 
-  const visibleItems = allNavItems.filter(item => item.roles.includes(orgRole as any));
+  const visibleItems = allNavItems.filter(item => canAccessOrganizationWorkspaceView(orgRole, item.id));
   const availableWorkspaceViews = useMemo(
     () => listOrganizationWorkspaceViewsForRole(orgRole),
     [orgRole],
   );
-  const primaryNavItems = visibleItems.filter(item => item.showInNav !== false);
+  const primaryNavItems = visibleItems.filter(item => item.id === 'dashboard');
   const legalNavItems: LegalNavItem[] = useMemo(() => [
     { id: 'workspace', label: workspaceCopy.caseWorkspace, icon: <FolderOpen size={16} /> },
     { id: 'packet', label: workspaceCopy.documentGeneration, icon: <FileText size={16} /> },
     { id: 'contract-review', label: t.legalContractReview, icon: <Shield size={16} /> },
     { id: 'research', label: workspaceCopy.lawAndCases, icon: <Search size={16} /> },
     { id: 'asset-trace', label: workspaceCopy.assetClues, icon: <Crosshair size={16} /> },
-    { id: 'verify', label: workspaceCopy.deliveryVerification, icon: <CheckCircle size={16} /> },
+    { id: 'verify', label: t.legalVerifyCitation, icon: <CheckCircle size={16} /> },
     { id: 'bid', label: workspaceCopy.bidProduction, icon: <Briefcase size={16} /> },
   ], [t, workspaceCopy]);
   const roleInfo = roleLabel[orgRole] || roleLabel.member;
@@ -168,26 +164,7 @@ export function OrgHub() {
     if (view === 'workspace') setLegalWorkspaceResetKey(value => value + 1);
     setLegalView(view);
     openSubView('legal');
-    const entryId = view === 'workspace'
-      ? 'workspace'
-      : view === 'packet'
-        ? 'packet'
-        : view === 'contract-review'
-          ? 'contract-review'
-          : view === 'research'
-            ? 'research'
-            : view === 'asset-trace'
-              ? 'asset-trace'
-              : view === 'verify'
-                ? 'verify'
-                : 'bid';
-    // Navigation only selects the legal outcome. The persistent task is created
-    // lazily by legalToolClient when real work starts, so browsing never bloats
-    // the task ledger with empty tasks.
-    sessionStorage.setItem('lumi_legal_industry_task', JSON.stringify({
-      entryId,
-      createdAt: Date.now(),
-    }));
+
   };
 
   const renderView = () => {
@@ -195,15 +172,13 @@ export function OrgHub() {
       case 'dashboard': return <BranchDashboard />;
       case 'kb': return <KnowledgeBaseBrowser />;
       case 'kb-edit': return <KnowledgeBaseEditor articleId={editingArticleId} onSaved={() => { setEditingArticleId(undefined); setSubView('kb'); }} />;
-      case 'chat': return <CentralLumiChat />;
       case 'messaging': return <MessagingHub t={t} />;
       case 'members': return <OrgMembers />;
       case 'settings': return <OrganizationSettingsWorkspace />;
       case 'audit': return <AuditLogViewer />;
       case 'legal': return (
         <LegalHub
-          view={legalView}
-          onViewChange={setLegalView}
+          initialView={legalView}
           workspaceResetKey={legalWorkspaceResetKey}
         />
       );
@@ -292,7 +267,11 @@ export function OrgHub() {
       {/* Content */}
       <div data-wallpaper-tool="organization-workspace" className="lumi-org-workspace flex min-w-0 flex-1 flex-col">
         <div data-wallpaper-tool="organization-context" className="lumi-org-context-bar sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-white/[0.08] bg-black/30 px-3 py-3 backdrop-blur-xl sm:gap-4 sm:px-5">
-          <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-3">
+            {subView !== 'dashboard' && <button type="button" onClick={() => openSubView(subView === 'kb-edit' ? 'kb' : 'dashboard')} aria-label={subView === 'kb-edit' ? t.backToKB : `${t.back} ${t.orgDashboard}`} title={subView === 'kb-edit' ? t.backToKB : `${t.back} ${t.orgDashboard}`} className="lumi-button h-9 shrink-0 px-3">
+              <ArrowLeft size={16} /><span>{t.back}</span>
+            </button>}
+            <div className="min-w-0">
             <div className="flex items-center gap-2 text-white/85">
               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-blue-300/15 bg-blue-400/10 text-blue-200">{currentItem.icon}</span>
               <h2 className="truncate text-sm font-black uppercase tracking-[0.14em]">{currentItem.label}</h2>
@@ -300,6 +279,7 @@ export function OrgHub() {
             <p className="mt-0.5 truncate text-xs text-white/35">
               {orgConnection?.orgName || t.orgWorkSpace} · {displayedDomain}
             </p>
+            </div>
           </div>
           <span title={roleInfo.label} className={`flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-[0.14em] sm:px-2.5 ${roleInfo.color}`}>
             {roleInfo.icon}<span className="hidden sm:inline">{roleInfo.label}</span>

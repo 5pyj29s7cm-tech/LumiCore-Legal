@@ -1,6 +1,9 @@
+import { TurnAnalysis } from './turn_analysis';
+import { isExplicitConfirmationReply } from '../tools/pending_confirmation';
 import { isStoredMemoryRecallQuestion } from './normalized_action_intent';
+import { withoutLocationLiterals } from './location_literals';
+import { mediaCreationInstruction, isAvatarAuthoringRequest } from './media_creation_intent';
 import type { OperationMode } from './operation_modes';
-import { classifySkillAuthoringIntent } from '../skills/authoring_intent';
 import {
   detectRequestedOperationMode,
   buildOperationModeTaxonomyPrompt,
@@ -11,14 +14,14 @@ import {
   hasClientActionOnlyIntent,
   hasExplicitNoMutationInstruction,
   hasExplicitNoToolInstruction,
-  hasExplicitToolIntent,
   isConversationalProductFeedback,
-  isCurrentClientDiagnosticRequest,
   isDiagnosticOrRepairRequest,
   shouldAllowToolUseForTurn,
 } from './tool_intent';
 import { hasVisionIntent } from './vision_routing';
 import { resolveWorkSurfaceRoute } from './work_surface';
+import { getStoredDesktopExecutionPreference } from './operation_mode_store';
+import type { DesktopExecutionPreference } from '../../shared/operation_modes';
 import { matchSkillWorkflow, type SkillWorkflowDescriptor } from '../skills/workflow_registry';
 import { needsCompletionEvidence } from '../work_product/completion_guard';
 import {
@@ -26,30 +29,32 @@ import {
   type WorkTakeoverContinuityContext,
   type WorkTakeoverTurnSurface,
 } from '../work_takeover/continuity';
-import { buildActionContract } from './action_contract';
 import {
   classifyRecentActionFollowupIntent,
-  isRecoveredCurrentAppEditingContinuation,
+  isCurrentAppEditingRequest,
   needsRecentActionContinuationContext,
 } from './action_continuation';
 import { isCapabilityMetaQuestion } from './capability_meta';
-import {
-  isCurrentIndustryWorkflowExecutionRequest,
-  matchCurrentIndustryWorkflow,
-} from '../regions/packs/cn/industry_capability_profile';
-import { isCurrentIndustryGuidanceRequest } from '../industry/user_guidance';
-import { normalizeActionIntent } from './normalized_action_intent';
 import { isReadOnlyKnowledgeBaseInspectionRequest } from './knowledge_intent';
 
-export type LumiTurnChannel = 'chat' | 'voice' | 'task' | 'autonomy' | 'scheduler';
+export type LumiTurnChannel = 'chat' | 'voice' | 'task' | 'scheduler' | 'autonomy';
+/** Input modality changes presentation, never the interactive decision owner. */
+export function isInteractiveTurnChannel(channel: LumiTurnChannel): boolean {
+  return channel === 'chat' || channel === 'voice';
+}
 export type LumiVerificationIntent = 'none' | 'completion_evidence' | 'work_takeover_result' | 'capability_experiment';
 export type LumiCapabilityLearningIntent = 'none' | 'inspect_reuse' | 'learn_missing' | 'stabilize_existing';
 
 export interface LumiTurnFlowInput {
+  analysis?: TurnAnalysis;
   userId: string;
   text: string;
   /** Prior-turn detail used only to fill a genuinely underspecified action. */
   continuationContext?: string;
+  /** The shared pipeline already resolved the current turn against its task. */
+  actionFollowupIntent?: import('./action_continuation').RecentActionFollowupIntent;
+  /** Exact server-bound application, never recovered from model prose. */
+  continuationAppTarget?: string;
   channel: LumiTurnChannel;
   source?: string;
   category?: string;
@@ -62,12 +67,20 @@ export interface LumiTurnFlowInput {
 }
 
 export interface LumiTurnFlow {
+  /** Server-owned contract for the exact routed instruction, shared by execution and completion. */
+  acceptedActionContract?: { taskText: string; contract: import('./action_contract').LumiActionContract };
+  actionFollowupIntent?: import('./action_continuation').RecentActionFollowupIntent;
+  currentAppEditTarget?: string;
   /** User-authored root goal from the exact server-bound continuation task. */
   rootTaskText?: string;
   /** A prerequisite step must not complete the retained root goal. */
   preparationRootText?: string;
   /** Exact server-resolved target shared across all execution consumers. */
   acceptedTaskTarget?: import('../conversation/task_target_anchor').AcceptedTaskTarget;
+  /** Current upload metadata, separate from untrusted extracted file contents. */
+  currentAttachmentPaths?: string[];
+  /** Validated media arguments shared by execution and completion; routing prose is not the brief. */
+  structuredMediaRequest?: import('../../shared/media_generation').StructuredMediaRequest;
   channel: LumiTurnChannel;
   source?: string;
   surface: WorkTakeoverTurnSurface;
@@ -78,25 +91,19 @@ export interface LumiTurnFlow {
   requestedMode: OperationMode | null;
   autoPromoteToAssistant: boolean;
   conceptualCapabilityQuestion?: boolean;
-  industryWorkflowEntryId?: string;
-  industryGuidanceRequest?: boolean;
   /** Whether the main model receives the hard-policy capability manifest. */
   modelToolAccess: 'manifest' | 'hard_off';
   allowToolUseForTurn: boolean;
   selfRepairTurn: boolean;
   clientActionOnlyTurn: boolean;
   visionIntent: boolean;
+  desktopExecutionPreference?: DesktopExecutionPreference;
   workSurfaceRoute: ReturnType<typeof resolveWorkSurfaceRoute>;
   workTakeover: WorkTakeoverContinuityContext;
   /** Matched reusable workflow exposed to the model as a capability hint. */
   workflowHint?: SkillWorkflowDescriptor | null;
-  /** Chat keeps workflow matching advisory; isolated execution surfaces may opt into the adapter. */
-  workflowRouting?: 'none' | 'model_hint' | 'isolated_adapter';
-  specialWorkflow: SkillWorkflowDescriptor | null;
   executionGovernance: LumiExecutionGovernance;
   completionEvidenceNeeded: boolean;
-  /** Read-only recall/status turn grounded by recovered conversation task evidence. */
-  statusOnlyContinuation?: boolean;
   routeText: string;
   promptOverlay: string;
 }
@@ -109,8 +116,6 @@ export interface LumiExecutionGovernance {
   shouldInspectCapabilitiesFirst: boolean;
 }
 
-const QUESTION_RE = /[?？]\s*$|是不是|为什么|怎么回事|有没有|找到了吗|听见了吗/u;
-const WORK_ACTION_RE = /桌面|文件|文件夹|目录|草稿图|图纸|平面图|施工图|设计图|cad|CAD|DXF|运行日志|日志|生成|创建|画一|画个|按照.*画|找|搜索|打开|执行|运行|去干活|开始干活|开始处理|继续处理|继续做|接着做/u;
 const WORK_SOURCE_RE = /(?:work|task|takeover|org|organization|job|workflow|workspace|任务|工作|接管|组织)/i;
 const WORK_PRODUCT_RE = /交付|方案|报告|PPT|PDF|CAD|DXF|DWG|文档|文件|报价|视频|发布|草稿|微信|回复|账号|店铺|立案|装修|设计|图纸|素材|脚本|表格|合同|起诉状|诉状|包\b|\b(package|deliverable|draft|publish|export|file|document|cad|dxf|ppt|pdf)\b/i;
 const CAPABILITY_CONTEXT_RE = /lumi|能力|技能|工具|接入|集成|mcp|网页登录|自动登录|外部软件|桌面感知|屏幕|客户端|任务中心|agent|adapter|适配器|沉淀|学会|复用|脚本|内置|通用化/i;
@@ -127,7 +132,7 @@ export function resolveTurnSurface(input: {
 }): WorkTakeoverTurnSurface {
   if (input.explicitSurface) return input.explicitSurface;
   if (input.channel === 'voice') return 'voice';
-  if (input.channel === 'task' || input.channel === 'autonomy' || input.channel === 'scheduler') return 'work';
+  if (input.channel === 'task' || input.channel === 'scheduler' || input.channel === 'autonomy') return 'work';
   if (input.domain === 'work') return 'work';
   const source = String(input.source || '');
   const category = String(input.category || '');
@@ -135,10 +140,25 @@ export function resolveTurnSurface(input: {
   return 'chat';
 }
 
-export function buildTurnFlowPromptOverlay(flow: Omit<LumiTurnFlow, 'promptOverlay'>): string {
+export function buildTurnFlowPromptOverlay(flow: Omit<LumiTurnFlow, 'promptOverlay'>, analysis = new TurnAnalysis()): string {
+  if (!flow.allowToolUseForTurn && flow.executionGovernance.capabilityLearningIntent === 'none') {
+    return [
+      '## Lumi Turn Flow',
+      `Channel: ${flow.channel}. Surface: ${flow.surface}. Tool access: chat-only.`,
+      'Lumi is the same personal core across text and voice. Answer the newest user message naturally; history supplies context, not additional pending requests.',
+      'Do not force a task/tool path or claim new actions. Discuss prior work only when relevant to the current question, using verified receipts for outcomes. Do not prepend a progress report when the user changes the subject.',
+      flow.conceptualCapabilityQuestion
+        ? 'Explain capabilities without treating this turn\'s tool exposure as the installed inventory. Lumi has no selectable operation modes.'
+        : '',
+      flow.source === 'command-center-chat'
+        ? 'The integrated text panel is Lumi\'s only text entry. The user is already there; do not redirect them to another chat screen.'
+        : '',
+      flow.workTakeover.shouldResumeTask ? flow.workTakeover.promptOverlay : '',
+    ].filter(Boolean).join('\n');
+  }
   const focus: string[] = [];
-  if (flow.workflowHint || flow.specialWorkflow) {
-    focus.push(`skill_workflow_hint=${(flow.workflowHint || flow.specialWorkflow)?.skillId}`);
+  if (flow.workflowHint) {
+    focus.push(`skill_workflow_hint=${flow.workflowHint.skillId}`);
   }
   if (!flow.conceptualCapabilityQuestion && flow.workTakeover.shouldResumeTask) focus.push(`active_task=${flow.workTakeover.latestTask?.id || 'unknown'}`);
   if (!flow.conceptualCapabilityQuestion && flow.workTakeover.strength === 'hint') focus.push(`task_hint=${flow.workTakeover.latestTask?.id || 'unknown'}`);
@@ -166,12 +186,11 @@ export function buildTurnFlowPromptOverlay(flow: Omit<LumiTurnFlow, 'promptOverl
       : '',
     '3. Use the task center only for persistent work with state, follow-up, artifacts, blockers, and confirmation boundaries.',
     '4. Treat matched skill workflows as capability candidates. The model decides whether they fit the current turn; never let a demo/script override the current user wording or task parameters.',
-    '5. Use external software, browser, desktop control, and MCP/tools as Lumi\'s hands, not as separate agents. Verify visible or file results before claiming completion.',
-    '6. Keep planning, execution, recovery, verification, and feedback on the single LumiCore task lifecycle.',
+    '5. Use external software, browser, desktop control, and MCP/tools as Lumi\'s capabilities, not as separate execution subjects. Verify visible or file results before claiming completion.',
+    '6. Keep one LumiCore execution owner for the whole task. Continue the same task state through planning, tool use, confirmation, correction, recovery, and final feedback.',
     'Execution governance:',
     `- Result verification: ${flow.executionGovernance.verificationIntent} (${flow.executionGovernance.verificationReason}). Before saying work is done, rely on tool evidence, visible desktop evidence, file existence/content checks, or work_product_verify/work_takeover_task_verify_result.`,
-    '- Execution ownership: one LumiCore execution owner keeps a continuous task identity and explains progress and results humanly.',
-    classifySkillAuthoringIntent(flow.routeText) !== 'none'
+    analysis.authoring(flow.routeText) !== 'none'
       ? '- Explicit skill/workflow authoring: use the requested draft/save entry directly. Computation must depend on runtime inputs; do not save observed constants as the algorithm. Preserve exact review and separate installation/publication approval. External capability research is not a prerequisite for explicit authoring.'
       : `- Capability learning: ${flow.executionGovernance.capabilityLearningIntent} (${flow.executionGovernance.capabilityLearningReason}). Follow one evidence-backed capability chain: inspect the live manifest and installed skills; search the Skill Hall and reuse a callable skill; inspect or configure an approved external MCP candidate when the store has no fit; generate an isolated draft only when a real gap remains. Installing or configuring requires its own explicit confirmation, must register exact tools into the live manifest, and still needs a real task receipt before claiming the user\'s work is complete. Use capability_gap_autofix only for a brittle implementation that already exists, never as a substitute for this discovery order.`,
     'If chat/work intent is ambiguous, ask one short clarification or continue the conversation naturally.',
@@ -201,16 +220,21 @@ function taskContextText(workTakeover: WorkTakeoverContinuityContext): string {
 
 function classifyCapabilityLearningIntent(
   text: string,
-  input: Pick<LumiTurnFlowInput, 'targetIsLumi'>,
+  input: Pick<LumiTurnFlowInput, 'targetIsLumi' | 'continuationAppTarget' | 'actionFollowupIntent'>,
+  analysis: TurnAnalysis,
 ): Pick<LumiExecutionGovernance, 'capabilityLearningIntent' | 'capabilityLearningReason' | 'shouldInspectCapabilitiesFirst'> {
-  if (classifySkillAuthoringIntent(text) !== 'none') {
+  text = withoutLocationLiterals(text);
+  if (mediaCreationInstruction(text) || isAvatarAuthoringRequest(text)) {
+    return { capabilityLearningIntent: 'none', capabilityLearningReason: 'Execute the requested media/person authoring action; descriptive constraints are not a capability audit.', shouldInspectCapabilitiesFirst: false };
+  }
+  if (analysis.authoring(text) !== 'none') {
     return {
       capabilityLearningIntent: 'stabilize_existing',
       capabilityLearningReason: 'explicit user skill/workflow authoring: use the authoring tools directly; preserve draft review and exact installation/publication approval',
       shouldInspectCapabilitiesFirst: false,
     };
   }
-  if (isRecoveredCurrentAppEditingContinuation(text)) {
+  if (input.continuationAppTarget && isCurrentAppEditingRequest(text)) {
     return {
       capabilityLearningIntent: 'none',
       capabilityLearningReason: 'current-app editing continues through visible UI controls instead of capability learning',
@@ -221,7 +245,7 @@ function classifyCapabilityLearningIntent(
   const englishReuseAudit = /\b(duplicate|reuse|reusable|hard-?coded|script|built-?in|demo|already|existing|fragmented|same\s+path)\b/i.test(text);
   const englishCapabilityAction = /\b(learn|stabili[sz]e|remember|optimi[sz]e|improve|wire|integrate|make\s+real|make\s+reusable|fix|repair)\b/i.test(text);
   const englishCapabilityGap = /\b(can'?t|cannot|fail(?:s|ed)?|broken|unstable|missing|brittle|bad|not\s+working|crash(?:ed)?|stuck|forgot)\b/i.test(text);
-  const directActionContract = buildActionContract(text);
+  const directActionContract = analysis.contract(text);
   const explicitCapabilityMeta = /(?:Lumi|lumi).{0,32}(?:能力|技能|工具|权限|认知|稳定|优化|修|学会|通用|复用|脚本|接入|边界|桌面|后台)|(?:能力|技能|工具|权限|认知|稳定|优化|修|学会|通用|复用|脚本|接入|边界|桌面|后台).{0,32}(?:Lumi|lumi)|\b(?:capabilit(?:y|ies)|skill|tool|adapter|workflow|mcp|agent)\b.*\b(?:learn|stabili[sz]e|improve|fix|reuse|reusable|hard-?coded|script)\b|\b(?:learn|stabili[sz]e|improve|fix|reuse|reusable|hard-?coded|script)\b.*\b(?:capabilit(?:y|ies)|skill|tool|adapter|workflow|mcp|agent)\b/i.test(text);
   if (directActionContract.applies && directActionContract.kind !== 'none' && !explicitCapabilityMeta) {
     return {
@@ -292,6 +316,7 @@ function classifyVerificationIntent(input: {
 function buildExecutionGovernance(input: {
   text: string;
   flowInput: LumiTurnFlowInput;
+  analysis: TurnAnalysis;
   allowToolUseForTurn: boolean;
   clientActionOnlyTurn: boolean;
   selfRepairTurn: boolean;
@@ -308,7 +333,7 @@ function buildExecutionGovernance(input: {
     // or deliverable vocabulary into the new conversation.
     Boolean(input.workTakeover.shouldResumeTask && needsCompletionEvidence(taskText)) ||
     Boolean(input.workTakeover.shouldResumeTask && WORK_PRODUCT_RE.test(`${input.text} ${taskText}`));
-  const capability = classifyCapabilityLearningIntent(input.text, input.flowInput);
+  const capability = classifyCapabilityLearningIntent(input.text, input.flowInput, input.analysis);
   const verification = classifyVerificationIntent({
     text: input.text,
     taskText,
@@ -326,29 +351,23 @@ function buildExecutionGovernance(input: {
 }
 
 export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
+  const analysis = input.analysis || new TurnAnalysis();
   const explicitNoToolInstruction = hasExplicitNoToolInstruction(input.text);
   const explicitNoMutationInstruction = hasExplicitNoMutationInstruction(input.text);
-  const conceptualCapabilityQuestion = isCapabilityMetaQuestion(input.text);
+  const conceptualCapabilityQuestion = isCapabilityMetaQuestion(input.text, analysis);
   const continuationContext = String(input.continuationContext || '').trim();
   const hasContinuationContext = Boolean(continuationContext);
-  const directActionFollowupIntent = classifyRecentActionFollowupIntent(input.text);
-  const recoveredActionFollowupIntent = /(?:^|\s)- followupIntent:\s*status(?:\s|$)/i.test(continuationContext)
-    ? 'status' as const
-    : /(?:^|\s)- followupIntent:\s*execute(?:\s|$)/i.test(continuationContext)
-      ? 'execute' as const
-      : /(?:^|\n)- followupIntent:\s*repeat(?:\s|$)/i.test(continuationContext)
-        ? 'repeat' as const
-      : 'none' as const;
-  const actionFollowupIntent = directActionFollowupIntent !== 'none'
-    ? directActionFollowupIntent
-    : recoveredActionFollowupIntent;
+  const actionFollowupIntent = input.actionFollowupIntent ?? classifyRecentActionFollowupIntent(input.text, analysis);
+  const currentAppEditTarget = isCurrentAppEditingRequest(input.text)
+    ? input.continuationAppTarget || '' : '';
   const immediateAssistantRestatement = actionFollowupIntent === 'repeat';
   // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
   const explicitContinuationConfirmation =
-    /^(?:确认|确定|允许|同意|嗯|好|好的|可以|行|开始|yes|ok|okay|confirm|go)[。！？.!?]*$/iu.test(input.text.trim()); // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
-  const currentAcceptsContinuationContext = needsRecentActionContinuationContext(input.text)
+    (input.actionFollowupIntent === undefined || input.actionFollowupIntent === 'execute')
+    && isExplicitConfirmationReply(input.text);
+  const currentAcceptsContinuationContext = needsRecentActionContinuationContext(input.text, analysis)
     || explicitContinuationConfirmation
-    || recoveredActionFollowupIntent !== 'none';
+    || actionFollowupIntent !== 'none';
   const continuationMayDriveAction = !conceptualCapabilityQuestion && hasContinuationContext
     && (actionFollowupIntent === 'execute' || explicitContinuationConfirmation);
   const statusOnlyContinuation = !conceptualCapabilityQuestion && hasContinuationContext && actionFollowupIntent === 'status';
@@ -362,11 +381,6 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     : hasContinuationContext && currentAcceptsContinuationContext
     ? contextualText
     : input.text;
-  const industryWorkflowMatch = !conceptualCapabilityQuestion
-    ? matchCurrentIndustryWorkflow(routingText)
-    : null;
-  const industryWorkflowExecutionDetected = !conceptualCapabilityQuestion
-    && isCurrentIndustryWorkflowExecutionRequest(routingText);
   const operationMode = normalizeOperationMode(input.operationMode);
   const requestedMode = input.requestedMode === 'meeting' ? 'meeting' : detectRequestedOperationMode(input.text);
   const surface = resolveTurnSurface({
@@ -381,45 +395,38 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     orgId: input.orgId,
     surface,
   });
+  const currentActionContract = analysis.contract(input.text);
+  const currentActionIntent = analysis.intent(input.text);
   const rawClientActionIntent = !conceptualCapabilityQuestion
     && !explicitNoToolInstruction
-    && hasClientActionOnlyIntent(input.text);
+    && !currentActionContract.components?.length
+    && hasClientActionOnlyIntent(input.text, analysis);
   // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
   const continuationNamesExternalTarget = continuationMayDriveAction
     && /(?:desktop_|wechat_|browser_|mcp_|AutoCAD|\bCAD\b|微信|浏览器)/iu.test(continuationContext); // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
   const clientActionIntent = rawClientActionIntent && !continuationNamesExternalTarget;
-  // Native client navigation has higher priority than industry execution.
-  // Words such as “生成” or “处理” may be part of a workspace name and must
-  // not create a task when the user only asked to open that workspace.
-  const industryWorkflowExecutionRequested = industryWorkflowExecutionDetected
-    && !clientActionIntent
-    && !statusOnlyContinuation;
-  const currentActionContract = buildActionContract(input.text);
-  const normalizedActionIntent = normalizeActionIntent(input.text);
-  const matchedWorkflowCandidate = matchSkillWorkflow(routingText, { targetIsLumi: input.targetIsLumi });
-  const industryGuidanceRequest = !conceptualCapabilityQuestion
-    && !statusOnlyContinuation
-    && normalizedActionIntent.kind !== 'correction_explanation'
-    && isCurrentIndustryGuidanceRequest(input.text);
-  const readOnlyConversationTurn = isStoredMemoryRecallQuestion(input.text)
-    || (isConversationalProductFeedback(input.text) && !industryWorkflowExecutionRequested && !matchedWorkflowCandidate)
+  // i18n-allow: A standalone Chinese completed-action acknowledgement has no new instruction.
+  const completedActionAcknowledgement = /^(?:已经|已)?(?:打开|关闭|保存|发送|完成)(?:好)?了[。.!！\s]*$/u.test(input.text);
+  const readOnlyConversationTurn = completedActionAcknowledgement || isStoredMemoryRecallQuestion(input.text)
+    || !statusOnlyContinuation && currentActionIntent.kind === 'status_query' && currentActionIntent.target === 'previous_action'
+    || isConversationalProductFeedback(input.text, analysis)
     || (
       explicitNoMutationInstruction
       && currentActionContract.kind === 'none'
+      && !hasVisionIntent(input.text)
       && /[？?]|(?:先聊|只回答|告诉我|你认为|解释|reply|answer|explain)/iu.test(input.text)
     );
   const actionContract = currentActionContract.applies || !continuationMayDriveAction
     ? currentActionContract
-    : buildActionContract(routingText);
+    : analysis.contract(routingText);
   const actionContractRequiresTools = actionContract.applies && actionContract.kind !== 'none' && !clientActionIntent;
   const readOnlyKnowledgeInspection = isReadOnlyKnowledgeBaseInspectionRequest(input.text);
-  const directWorkTakeoverExecution = workTakeover.shouldResumeTask && workTakeover.intent === 'advance';
   const taskEntryTurn = input.channel === 'task';
   // All legacy postures share one execution policy. Task intent and explicit
   // no-tool/confirmation boundaries decide execution, never a mode promotion.
   const autoPromoteToAssistant = false;
   const effectiveOperationMode = normalizeOperationMode(input.requestedMode || operationMode);
-  const capabilityLearningPreview = classifyCapabilityLearningIntent(input.text, input);
+  const capabilityLearningPreview = classifyCapabilityLearningIntent(input.text, input, analysis);
   const explicitCapabilityMaintenance =
     capabilityLearningPreview.capabilityLearningIntent === 'inspect_reuse'
     || capabilityLearningPreview.capabilityLearningIntent === 'stabilize_existing';
@@ -433,26 +440,29 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     // phrase such as “if vision is unavailable” can strip `desktop_open` from
     // an explicit “open Notepad” request and leave only diagnostic tools.
     && (!actionContractRequiresTools || actionContract.label === 'Current Lumi runtime diagnostic')
-    && isDiagnosticOrRepairRequest(input.text);
+    && isDiagnosticOrRepairRequest(input.text, analysis);
   const clientActionOnlyTurn = !selfRepairTurn && clientActionIntent;
   const visionIntent = hasVisionIntent(routingText);
-  const workSurfaceRoute = resolveWorkSurfaceRoute(statusOnlyContinuation ? '' : routingText);
-  const recoveredCurrentAppEdit = isRecoveredCurrentAppEditingContinuation(routingText);
+  const recoveredCurrentAppEdit = Boolean(currentAppEditTarget);
   const allowToolUseForTurn = immediateAssistantRestatement || explicitNoToolInstruction || readOnlyConversationTurn
     ? false
     : conceptualCapabilityQuestion || statusOnlyContinuation
       ? false
-      : industryGuidanceRequest || industryWorkflowExecutionRequested || clientActionOnlyTurn ||
+      : clientActionOnlyTurn ||
           taskEntryTurn ||
           actionContractRequiresTools ||
           readOnlyKnowledgeInspection ||
+          analysis.authoring(input.text) !== 'none' ||
           continuationMayDriveAction ||
           workTakeover.shouldResumeTask ||
-          shouldAllowToolUseForTurn(input.text, input.source, effectiveOperationMode);
+          shouldAllowToolUseForTurn(input.text, input.source, effectiveOperationMode, analysis);
+  const desktopExecutionPreference = getStoredDesktopExecutionPreference(input.userId);
+  const workSurfaceRoute = resolveWorkSurfaceRoute(routingText, currentAppEditTarget,
+    allowToolUseForTurn && !clientActionOnlyTurn && !selfRepairTurn ? desktopExecutionPreference : 'internal');
   // Legacy action detection still describes the likely lane, but it no longer
   // decides whether the main chat model can inspect/use the manifest. Only
   // explicit no-tool/read-only/status/meeting boundaries turn model access off.
-  const modelToolAccess = input.channel === 'chat'
+  const modelToolAccess = isInteractiveTurnChannel(input.channel)
     && !immediateAssistantRestatement
     && !explicitNoToolInstruction
     && !readOnlyConversationTurn
@@ -464,31 +474,18 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
         : 'hard_off' as const;
   const matchedWorkflow = immediateAssistantRestatement || conceptualCapabilityQuestion || recoveredCurrentAppEdit || explicitNoToolInstruction
     ? null
-    : matchedWorkflowCandidate;
-  // Main chat is open-ended natural language. A regex workflow match may enrich
-  // the capability prompt, but it cannot own dispatch, expand permissions, or
-  // produce a terminal answer before the model sees the manifest. Task/autonomy
-  // entry points remain the isolated deterministic adapter boundary.
-  const workflowRouting = !matchedWorkflow
-    ? 'none' as const
-    : input.channel === 'chat'
-      ? 'model_hint' as const
-      : 'isolated_adapter' as const;
-  const specialWorkflow = workflowRouting === 'isolated_adapter' ? matchedWorkflow : null;
+    : matchSkillWorkflow(routingText, { targetIsLumi: input.targetIsLumi });
   const derivedExecution = buildExecutionGovernance({
     text: routingText,
     flowInput: input,
+    analysis,
     allowToolUseForTurn,
     clientActionOnlyTurn,
     selfRepairTurn,
     workSurfaceRoute,
     workTakeover,
   });
-  const execution = immediateAssistantRestatement
-    || conceptualCapabilityQuestion
-    || statusOnlyContinuation
-    || readOnlyConversationTurn
-    || explicitNoToolInstruction
+  const execution = immediateAssistantRestatement || conceptualCapabilityQuestion || readOnlyConversationTurn || explicitNoToolInstruction
     ? {
         completionEvidenceNeeded: false,
         governance: {
@@ -497,27 +494,25 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
             ? 'the user asked to hear the adjacent assistant reply again, not to execute work'
             : conceptualCapabilityQuestion
             ? 'conceptual capability explanation does not execute work'
-            : statusOnlyContinuation
-              ? 'receipt-backed status follow-up does not execute new work'
-              : explicitNoToolInstruction
-                ? 'the current turn explicitly forbids tool execution'
-                : 'the current turn explicitly requests conversation without modifying the prior work product',
+            : explicitNoToolInstruction
+              ? 'the current turn explicitly forbids tool execution'
+              : 'the current turn explicitly requests conversation without modifying the prior work product',
           capabilityLearningIntent: 'none' as const,
           capabilityLearningReason: immediateAssistantRestatement
             ? 'the user requested a restatement, not capability repair'
             : conceptualCapabilityQuestion
             ? 'the user asked how existing capability routing works'
-            : statusOnlyContinuation
-              ? 'status follow-up reuses existing evidence instead of learning a capability'
-              : explicitNoToolInstruction
-                ? 'the user explicitly requested no tool or capability execution'
-                : 'the current turn does not request capability learning',
+            : explicitNoToolInstruction
+              ? 'the user explicitly requested no tool or capability execution'
+              : 'the current turn does not request capability learning',
           shouldInspectCapabilitiesFirst: false,
         },
       }
     : derivedExecution;
 
   const flowWithoutPrompt: Omit<LumiTurnFlow, 'promptOverlay'> = {
+    actionFollowupIntent,
+    currentAppEditTarget,
     channel: input.channel,
     source: input.source,
     surface,
@@ -528,21 +523,17 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
     requestedMode,
     autoPromoteToAssistant,
     conceptualCapabilityQuestion,
-    industryWorkflowEntryId: industryWorkflowExecutionRequested ? industryWorkflowMatch?.entry.entryId || '' : '',
-    industryGuidanceRequest,
     modelToolAccess,
     allowToolUseForTurn,
     selfRepairTurn,
     clientActionOnlyTurn,
     visionIntent,
+    desktopExecutionPreference,
     workSurfaceRoute,
     workTakeover,
     workflowHint: matchedWorkflow,
-    workflowRouting,
-    specialWorkflow,
     executionGovernance: execution.governance,
     completionEvidenceNeeded: execution.completionEvidenceNeeded,
-    statusOnlyContinuation,
     routeText: readOnlyConversationTurn
       ? input.text
       : !conceptualCapabilityQuestion && !statusOnlyContinuation && workTakeover.shouldResumeTask && workTakeover.routeText
@@ -553,7 +544,7 @@ export function buildLumiTurnFlow(input: LumiTurnFlowInput): LumiTurnFlow {
   return {
     ...flowWithoutPrompt,
     promptOverlay: [
-      buildTurnFlowPromptOverlay(flowWithoutPrompt),
+      buildTurnFlowPromptOverlay(flowWithoutPrompt, analysis),
       readOnlyConversationTurn
         ? [
             '## Current-turn read-only conversation boundary',

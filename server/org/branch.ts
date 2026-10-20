@@ -1,3 +1,5 @@
+import { isPublicNetworkAddress as isPublicCompanyAddress } from '../utils/public_network_address';
+export { isPublicCompanyAddress };
 /**
  * Employee-side organization branch connection manager.
  *
@@ -7,10 +9,12 @@
  * durable receipt for the exact immutable payload.
  */
 
-import { createHash, randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
+import { branchSyncDigest as digest } from './branch_protocol';
+import type { BranchSyncPayload, BranchSyncItemReceipt, BranchSyncReceipt as ProtocolReceipt } from './branch_protocol';
 import { promises as dns } from 'node:dns';
 import { isIP } from 'node:net';
-import { flushDBOrThrow, readDB, writeDB } from '../../db_layer';
+import { flushDBOrThrow, readDatabaseTables, commitDatabaseTables } from '../../db_layer';
 import { runtimeBackgroundWork } from '../runtime/shutdown_work';
 
 const BRANCH_STATE_SETTING = 'org.branch.client.state.v2';
@@ -40,32 +44,9 @@ export interface SyncPayload {
   interactions: any[];
 }
 
-interface BranchSyncRequest extends SyncPayload {
-  orgId: string;
-  branchId: string;
-  batchId: string;
-}
-
-interface BranchSyncItemReceipt {
-  kind: 'memory' | 'interaction';
-  sourceId: string;
-  targetId: string;
-  digest: string;
-  outcome: 'inserted' | 'updated' | 'unchanged';
-}
-
-interface BranchSyncReceipt {
-  version: 1;
-  receiptId: string;
-  orgId: string;
-  branchId: string;
-  batchId: string;
-  payloadDigest: string;
-  verified: true;
-  accepted: number;
-  items: BranchSyncItemReceipt[];
-  persistedAt: string;
-}
+type BranchSyncRequest = SyncPayload & Pick<BranchSyncPayload, 'orgId' | 'branchId' | 'batchId'>;
+type BranchSyncReceipt = Pick<ProtocolReceipt,
+  'version' | 'receiptId' | 'orgId' | 'branchId' | 'batchId' | 'payloadDigest' | 'verified' | 'accepted' | 'items' | 'persistedAt'>;
 
 interface OfflineAction {
   id: string;
@@ -87,15 +68,6 @@ interface SyncIndexEntry {
 
 type SyncIndex = Record<string, SyncIndexEntry>;
 
-interface CachedArticle {
-  id: string;
-  title: string;
-  content: string;
-  category: string;
-  tags: string;
-  cachedAt: string;
-}
-
 let branchState: BranchState | null = null;
 interface SyncDrainResult { synced: number; flushed: number; errors: string[] }
 let syncInFlight: Promise<SyncDrainResult> | null = null;
@@ -109,7 +81,7 @@ function isObject(value: unknown): value is Record<string, any> {
 
 function readSetting<T>(key: string, fallback: T): T {
   try {
-    const raw = (readDB().settings || []).find((item: any) => item?.key === key)?.value;
+    const raw = (readDatabaseTables(["interactions","memories","settings","branchState"]).settings || []).find((item: any) => item?.key === key)?.value;
     if (!raw) return fallback;
     return JSON.parse(raw) as T;
   } catch {
@@ -160,7 +132,7 @@ function bs(): BranchState {
   if (branchState) return branchState;
   const saved = readSetting<unknown>(BRANCH_STATE_SETTING, null);
   const legacy = (() => {
-    try { return (readDB() as any).branchState; } catch { return null; }
+    try { return (readDatabaseTables(["interactions","memories","settings","branchState"]) as any).branchState; } catch { return null; }
   })();
   branchState = normalizeSavedState(saved) || normalizeSavedState(legacy) || newBranchState();
   saveBranchState();
@@ -169,27 +141,12 @@ function bs(): BranchState {
 
 function saveBranchState(): void {
   try {
-    const db = readDB();
+    const db = readDatabaseTables(["interactions","memories","settings","branchState"]);
     writeSetting(db, BRANCH_STATE_SETTING, bs());
-    writeDB(db);
+    commitDatabaseTables(db);
   } catch {
     // The runtime may ask for public state before database initialization.
   }
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (!isObject(value)) return value;
-  return Object.fromEntries(
-    Object.keys(value)
-      .filter(key => !key.startsWith('_synced'))
-      .sort()
-      .map(key => [key, canonicalize(value[key])]),
-  );
-}
-
-function digest(value: unknown): string {
-  return createHash('sha256').update(JSON.stringify(canonicalize(value))).digest('hex');
 }
 
 function itemKey(kind: BranchSyncItemReceipt['kind'], sourceId: string): string {
@@ -213,62 +170,14 @@ function getOfflineQueue(): OfflineAction[] {
 
 function saveOfflineQueue(queue: OfflineAction[]): void {
   if (queue.length > MAX_OFFLINE_ACTIONS) throw new Error('Organization offline queue capacity exceeded; existing batches were retained');
-  const db = readDB();
+  const db = readDatabaseTables(["interactions","memories","settings","branchState"]);
   writeSetting(db, OFFLINE_QUEUE_SETTING, queue);
-  writeDB(db);
+  commitDatabaseTables(db);
 }
 
 function getSyncIndex(): SyncIndex {
   const index = readSetting<unknown>(SYNC_INDEX_SETTING, {});
   return isObject(index) ? index as SyncIndex : {};
-}
-
-function ipv4Number(address: string): number | null {
-  const octets = address.split('.');
-  if (octets.length !== 4 || octets.some(part => !/^\d{1,3}$/.test(part) || Number(part) > 255)) return null;
-  return octets.reduce((value, part) => ((value << 8) | Number(part)) >>> 0, 0);
-}
-
-function ipv4InCidr(address: string, network: string, prefix: number): boolean {
-  const candidate = ipv4Number(address);
-  const base = ipv4Number(network);
-  if (candidate === null || base === null) return false;
-  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
-  return (candidate & mask) === (base & mask);
-}
-
-/** Fail-closed address classification used before any branch credential leaves the host. */
-export function isPublicCompanyAddress(address: string): boolean {
-  const normalized = String(address || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
-  const family = isIP(normalized);
-  if (family === 4) {
-    return ![
-      ['0.0.0.0', 8],
-      ['10.0.0.0', 8],
-      ['100.64.0.0', 10],
-      ['127.0.0.0', 8],
-      ['169.254.0.0', 16],
-      ['172.16.0.0', 12],
-      ['192.0.0.0', 24],
-      ['192.0.2.0', 24],
-      ['192.168.0.0', 16],
-      ['198.18.0.0', 15],
-      ['198.51.100.0', 24],
-      ['203.0.113.0', 24],
-      ['224.0.0.0', 4],
-      ['240.0.0.0', 4],
-    ].some(([network, prefix]) => ipv4InCidr(normalized, String(network), Number(prefix)));
-  }
-  if (family !== 6) return false;
-  if (normalized === '::' || normalized === '::1') return false;
-  if (normalized.startsWith('::ffff:')) return false; // mapped IPv4, including hexadecimal forms
-  if (/^(?:fc|fd)/.test(normalized)) return false; // unique-local
-  if (/^fe[89ab]/.test(normalized)) return false; // link-local
-  if (/^ff/.test(normalized)) return false; // multicast
-  if (!/^[23]/.test(normalized)) return false; // only global-unicast space
-  if (/^(?:2001:0*:|2002:|3fff:)/.test(normalized)) return false; // transition/documentation ranges
-  if (/^2001:db8(?::|$)/.test(normalized)) return false; // documentation
-  return true;
 }
 
 function normalizeCompanyUrl(value: string): string {
@@ -350,7 +259,7 @@ function receiptMatches(request: BranchSyncRequest, receipt: unknown): receipt i
 async function acknowledgeReceipt(action: OfflineAction, receipt: BranchSyncReceipt): Promise<number> {
   const request = action.payload as BranchSyncRequest;
   if (!receiptMatches(request, receipt)) throw new Error('Company receipt does not match the immutable sync batch');
-  const db = readDB();
+  const db = readDatabaseTables(["interactions","memories","settings","branchState"]);
   const index = getSyncIndex();
   for (const item of receipt.items) {
     index[itemKey(item.kind, item.sourceId)] = {
@@ -365,7 +274,7 @@ async function acknowledgeReceipt(action: OfflineAction, receipt: BranchSyncRece
   writeSetting(db, OFFLINE_QUEUE_SETTING, queue);
   bs().lastSyncAt = receipt.persistedAt;
   writeSetting(db, BRANCH_STATE_SETTING, bs());
-  writeDB(db);
+  commitDatabaseTables(db);
   await flushDBOrThrow();
   return receipt.accepted;
 }
@@ -450,7 +359,7 @@ async function executeSyncAction(action: OfflineAction): Promise<{ synced: numbe
 }
 
 function unsyncedPayload(orgId: string): SyncPayload {
-  const db = readDB();
+  const db = readDatabaseTables(["interactions","memories","settings","branchState"]);
   const index = getSyncIndex();
   const select = (kind: BranchSyncItemReceipt['kind'], values: any[] = []) => values.filter(item => {
     if (item?.domain !== 'work' || item?.orgId !== orgId || !item?.id) return false;
@@ -601,19 +510,6 @@ export function disconnectFromOrg(): void {
   saveBranchState();
 }
 
-export function switchDomain(domain: 'personal' | 'work'): void {
-  bs().currentDomain = domain;
-  saveBranchState();
-}
-
-export function getCurrentDomain(): 'personal' | 'work' {
-  return bs().currentDomain;
-}
-
-export function isWorkDomain(): boolean {
-  return bs().currentDomain === 'work' && bs().status === 'connected';
-}
-
 async function runSyncWorkData(includeUnsynced: boolean): Promise<SyncDrainResult> {
   const generation = connectionGeneration;
   const state = bs();
@@ -661,15 +557,6 @@ export async function syncWorkData(): Promise<{ synced: number; errors: string[]
   return { synced, errors };
 }
 
-let kbCache: CachedArticle[] | null = null;
-
-function getKbCache(): CachedArticle[] {
-  if (kbCache) return kbCache;
-  const saved = readSetting<unknown>(KB_CACHE_SETTING, []);
-  kbCache = Array.isArray(saved) ? saved.filter(isObject) as CachedArticle[] : [];
-  return kbCache;
-}
-
 export async function pullKbCache(): Promise<number> {
   const state = bs();
   if (!state.companyUrl || !state.connectionToken) return 0;
@@ -680,7 +567,7 @@ export async function pullKbCache(): Promise<number> {
     if (!response.ok) return 0;
     const body: any = await response.json();
     const now = new Date().toISOString();
-    kbCache = (Array.isArray(body?.articles) ? body.articles : []).map((article: any) => ({
+    const kbCache = (Array.isArray(body?.articles) ? body.articles : []).map((article: any) => ({
       id: String(article.id || ''),
       title: String(article.title || ''),
       content: String(article.content || ''),
@@ -688,48 +575,13 @@ export async function pullKbCache(): Promise<number> {
       tags: String(article.tags || ''),
       cachedAt: now,
     }));
-    const db = readDB();
+    const db = readDatabaseTables(["interactions","memories","settings","branchState"]);
     writeSetting(db, KB_CACHE_SETTING, kbCache);
-    writeDB(db);
+    commitDatabaseTables(db);
     return kbCache.length;
   } catch {
     return 0;
   }
-}
-
-export function searchKbCache(query: string): CachedArticle[] {
-  const normalized = query.toLowerCase();
-  return getKbCache().filter(article =>
-    article.title.toLowerCase().includes(normalized)
-    || article.content.toLowerCase().includes(normalized)
-    || article.tags.toLowerCase().includes(normalized),
-  );
-}
-
-export function getKbCacheStats(): { count: number; lastUpdated: string | null } {
-  const cache = getKbCache();
-  const timestamps = cache.map(article => article.cachedAt).sort();
-  return { count: cache.length, lastUpdated: timestamps.at(-1) || null };
-}
-
-export function queueOfflineAction(type: OfflineAction['type'], payload: any): void {
-  const queue = getOfflineQueue();
-  if (type === 'sync') {
-    const batchId = String(payload?.batchId || '');
-    if (batchId && queue.some(action => action.type === 'sync' && action.payload?.batchId === batchId)) return;
-  }
-  const now = new Date().toISOString();
-  queue.push({
-    id: randomUUID(),
-    type,
-    payload,
-    state: 'pending',
-    attempts: 0,
-    lastError: '',
-    queuedAt: now,
-    updatedAt: now,
-  });
-  saveOfflineQueue(queue);
 }
 
 export async function flushOfflineQueue(): Promise<{ flushed: number; errors: string[] }> {
@@ -739,54 +591,4 @@ export async function flushOfflineQueue(): Promise<{ flushed: number; errors: st
 
 export function getOfflineQueueLength(): number {
   return getOfflineQueue().length;
-}
-
-export async function checkConnection(): Promise<BranchStatus> {
-  const state = bs();
-  if (!state.companyUrl || !state.connectionToken) {
-    state.status = 'disconnected';
-    saveBranchState();
-    return state.status;
-  }
-  try {
-    const response = await fetchWithTimeout(`${state.companyUrl}/api/branch/status`, {
-      headers: { Authorization: `Bearer ${state.connectionToken}` },
-    }, 5_000);
-    if (response.ok) {
-      const body: any = await response.json();
-      if (body?.branchId !== state.branchId || body?.orgId !== state.orgId) {
-        state.status = 'error';
-      } else {
-        state.status = 'connected';
-        state.lastHeartbeatAt = new Date().toISOString();
-      }
-    } else if (response.status === 401 || response.status === 403) {
-      state.status = 'error';
-      state.connectionToken = null;
-    } else {
-      state.status = 'reconnecting';
-    }
-  } catch {
-    state.status = 'reconnecting';
-  }
-  saveBranchState();
-  return state.status;
-}
-
-let autoSyncTimer: ReturnType<typeof setInterval> | null = null;
-
-export function startAutoSync(intervalMs = 30_000): void {
-  if (autoSyncTimer) return;
-  autoSyncTimer = setInterval(async () => {
-    if (bs().status === 'connected' && bs().currentDomain === 'work') {
-      await syncWorkData();
-      await checkConnection();
-    }
-  }, intervalMs);
-}
-
-export function stopAutoSync(): void {
-  if (!autoSyncTimer) return;
-  clearInterval(autoSyncTimer);
-  autoSyncTimer = null;
 }

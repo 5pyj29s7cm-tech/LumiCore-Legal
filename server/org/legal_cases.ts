@@ -1,12 +1,15 @@
 import fs from 'fs';
 import path from 'path';
-import { randomUUID } from 'crypto';
-import { legalCaseSourceFingerprint, type LegalWorkflowRun } from '../../shared/legal_workflow_receipts';
+import { createHash, randomUUID } from 'crypto';
+import { isLegalSourceMaterial, legalCaseSourceFingerprint, type LegalWorkflowRun } from '../../shared/legal_workflow_receipts';
 import type { LegalReasoningLink } from '../regions/packs/cn/legal_reasoning_links';
 import { getDataPath } from '../config/data_path';
+import { sameArtifactPath } from '../tools/artifact_evidence';
 import * as EDB from './db';
+import { recordLegalCaseWrite } from '../legal/execution';
+import { searchKnowledgeText, type KnowledgeSearchResult } from './kb';
 import { inspectLegalReasoningStructure } from '../regions/packs/cn/legal_reasoning_structure';
-import { CN_LEGAL_REASONING_DRAFT_MESSAGES } from '../regions/packs/cn/skill_messages';
+import { CN_LEGAL_REASONING_DRAFT_MESSAGES } from '../regions/messages/skill_messages';
 import {
   assertOrganizationResourceAccess,
   authorizeOrganizationResource,
@@ -56,15 +59,18 @@ export interface OrgLegalCaseFile {
   court: string;
   judge: string;
   stage: LegalCaseStage;
+  factDate?: string;
   hearingDate: string;
   judgmentDate: string;
   appealDeadline: string;
   enforcementDeadline: string;
   notes: string;
+  clientPartyName?: string;
   clientRole?: string;
   objective?: string;
   workflowRuns?: LegalWorkflowRun[];
   materials: OrgLegalCaseMaterial[];
+  removedMaterialIds?: string[];
   assetTraceWorkflow?: Record<string, unknown>;
   createdBy: string;
   updatedBy: string;
@@ -192,9 +198,11 @@ export function upsertCaseSnapshot(
   const stage = ['consultation', 'filing', 'trial', 'judgment', 'enforcement', 'closed'].includes(String(input.stage || ''))
     ? input.stage as LegalCaseStage
     : current?.stage || 'consultation';
-  const materials = Array.isArray(input.materials)
+  const removedMaterialIds = [...new Set([...(current?.removedMaterialIds || []), ...(Array.isArray(input.removedMaterialIds) ? input.removedMaterialIds.filter(id => typeof id === 'string' && id.length > 0 && id.length <= 200) : [])])];
+  const removed = new Set(removedMaterialIds);
+  const materials = (Array.isArray(input.materials)
     ? mergeSnapshotMaterials(current?.materials || [], input.materials, userId)
-    : current?.materials || [];
+    : current?.materials || []).filter(material => !removed.has(material.id));
   const caseFile: OrgLegalCaseFile = {
     id: caseId,
     orgId,
@@ -205,15 +213,18 @@ export function upsertCaseSnapshot(
     court: normalizeText(input.court),
     judge: normalizeText(input.judge),
     stage,
+    factDate: normalizeText(input.factDate) || current?.factDate,
     hearingDate: normalizeText(input.hearingDate),
     judgmentDate: normalizeText(input.judgmentDate),
     appealDeadline: normalizeText(input.appealDeadline),
     enforcementDeadline: normalizeText(input.enforcementDeadline),
     notes: normalizeText(input.notes),
+    clientPartyName: Object.hasOwn(input, 'clientPartyName') ? normalizeText(input.clientPartyName) : current?.clientPartyName,
     clientRole: normalizeText(input.clientRole) || current?.clientRole,
     objective: normalizeText(input.objective) || current?.objective,
-    workflowRuns: current?.workflowRuns,
+    workflowRuns: current?.workflowRuns?.filter(run => !run.materialIds.some(id => removed.has(id))),
     materials,
+    removedMaterialIds,
     assetTraceWorkflow: input.assetTraceWorkflow && typeof input.assetTraceWorkflow === 'object'
       ? input.assetTraceWorkflow
       : current?.assetTraceWorkflow,
@@ -228,6 +239,7 @@ export function upsertCaseSnapshot(
   if (index >= 0) store.cases[index] = caseFile;
   else store.cases.unshift(caseFile);
   writeStore(store);
+  recordLegalCaseWrite(orgId, userId, caseFile.id, caseFile.materials.filter(material => !current?.materials.some(prior => prior.id === material.id)).map(material => material.id));
   EDB.logAudit({
     orgId,
     userId,
@@ -259,7 +271,7 @@ function extractHearingDate(text: string): string {
     const nested = hearingWindow[0].match(datePattern);
     if (nested) return normalizeLegalDateMatch(nested);
   }
-  return normalizeLegalDateMatch(text.match(datePattern));
+  return '';
 }
 
 export function extractLegalCaseHints(text: string): Partial<Pick<OrgLegalCaseFile, 'caseNumber' | 'court' | 'hearingDate' | 'judgmentDate' | 'cause'>> {
@@ -291,6 +303,16 @@ function canAccessCase(
     permission,
     ownerUserId: caseFile.createdBy,
   }).allowed;
+}
+
+export function legalWorkspaceNamespace(userId: string, orgId?: string): string {
+  return orgId || `personal:${String(userId || '').trim().replace(/[^a-zA-Z0-9_.@-]+/g, '_').replace(/^_+|_+$/g, '') || 'anonymous'}`;
+}
+
+/** Only server-issued receipts grant access; editable case prose does not. */
+export function canReadCaseOutput(orgId: string, userId: string, filePath: string): boolean {
+  return readStore().cases.some(item => item.orgId === orgId && canAccessCase(item, userId, 'read')
+    && (item.workflowRuns || []).some(run => run.artifacts.some(artifact => sameArtifactPath(artifact, filePath))));
 }
 
 export function listCases(orgId: string, query = '', limit = 50, actorUserId?: string): OrgLegalCaseFile[] {
@@ -326,6 +348,130 @@ export function getCase(
   return caseFile && canAccessCase(caseFile, actorUserId, permission) ? caseFile : null;
 }
 
+export interface LegalMaterialReview {
+  revision: string;
+  status: 'pending' | 'confirmed' | 'revoked' | 'stale';
+  reviewedAt?: string;
+  reviewerId?: string;
+  scope: 'archived_text' | 'archived_text_and_file';
+}
+
+const MATERIAL_REVIEW_ACTION = 'legal_case.material.review';
+
+function materialReviewRevision(caseFile: OrgLegalCaseFile, material: OrgLegalCaseMaterial): Pick<LegalMaterialReview, 'revision' | 'scope'> {
+  let fileState = material.localPath ? 'unavailable' : 'none';
+  let fileHash = '';
+  if (material.localPath) {
+    try {
+      const filePath = path.resolve(material.localPath);
+      if (fs.statSync(filePath).isFile()) {
+        fileHash = createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+        fileState = 'file';
+      } else fileState = 'directory';
+    } catch { /* An absent/unreadable file is never confirmed as a file version. */ }
+  }
+  const revision = createHash('sha256').update(JSON.stringify({
+    caseId: caseFile.id, orgId: caseFile.orgId,
+    caseSourceFingerprint: legalCaseSourceFingerprint(caseFile),
+    sources: (caseFile.materials || []).filter(isLegalSourceMaterial).map(item => [
+      item.id, item.type, item.source, item.title, item.content, item.localPath,
+    ]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    stage: caseFile.stage, judge: caseFile.judge,
+    dates: [caseFile.factDate, caseFile.hearingDate, caseFile.judgmentDate, caseFile.appealDeadline, caseFile.enforcementDeadline],
+    material: [material.id, material.type, material.source, material.title, material.content, material.fileName,
+      material.localPath, material.reasoningLinks, material.reasoningBasis],
+    fileState, fileHash,
+  })).digest('hex');
+  return { revision, scope: fileState === 'file' ? 'archived_text_and_file' : 'archived_text' };
+}
+
+/** The audit event is the only review authority; editable case snapshots are not. */
+export function getMaterialReview(orgId: string, userId: string, caseId: string, materialId: string): LegalMaterialReview | null {
+  const caseFile = getCase(orgId, caseId, userId);
+  const material = caseFile?.materials.find(item => item.id === materialId);
+  if (!caseFile || !material) return null;
+  const current = materialReviewRevision(caseFile, material);
+  let latest: { timestamp: string; userId: string; revision: string; decision: 'confirmed' | 'revoked' } | undefined;
+  for (const entry of EDB.listAuditLog(orgId, null)) {
+    if (entry.action !== MATERIAL_REVIEW_ACTION || entry.resourceType !== 'legal_case' || entry.resourceId !== caseId) continue;
+    try {
+      const details = JSON.parse(entry.details);
+      if (details.materialId !== materialId || !['confirmed', 'revoked'].includes(details.decision)
+        || !/^[a-f0-9]{64}$/.test(String(details.revision || ''))) continue;
+      // listAuditLog sorts newest first, retaining append order for equal timestamps.
+      // The last appended event therefore wins a confirmation/revocation in one ms.
+      if (!latest || entry.timestamp >= latest.timestamp) latest = {
+        timestamp: entry.timestamp, userId: entry.userId, revision: details.revision, decision: details.decision,
+      };
+    } catch { /* Ignore unrelated or malformed audit details. */ }
+  }
+  if (!latest) return { ...current, status: 'pending' };
+  return { ...current, status: latest.revision === current.revision ? latest.decision : 'stale',
+    reviewedAt: latest.timestamp, reviewerId: latest.userId };
+}
+
+/** Called only by the authenticated human review route, never by a model tool. */
+export function recordMaterialReview(orgId: string, userId: string, caseId: string, materialId: string,
+  input: { expectedRevision: string; decision: 'confirmed' | 'revoked' }): LegalMaterialReview | null {
+  const caseFile = getCase(orgId, caseId, userId, 'write');
+  const material = caseFile?.materials.find(item => item.id === materialId);
+  if (!caseFile || !material) return null;
+  const current = materialReviewRevision(caseFile, material);
+  if (input.expectedRevision !== current.revision) throw Object.assign(new Error('The archived material changed after review. Review its current version again.'),
+    { code: 'LEGAL_MATERIAL_REVISION_CHANGED', statusCode: 409 });
+  if (!['confirmed', 'revoked'].includes(input.decision)) throw Object.assign(new Error('A confirmed or revoked review decision is required.'), { statusCode: 400 });
+  EDB.logAudit({ orgId, userId, action: MATERIAL_REVIEW_ACTION, resourceType: 'legal_case', resourceId: caseId,
+    details: { materialId, revision: current.revision, decision: input.decision, scope: current.scope } });
+  return getMaterialReview(orgId, userId, caseId, materialId);
+}
+
+/** Removes only this case association; original files and knowledge entries remain. */
+export function removeMaterial(orgId: string, userId: string, caseId: string, materialId: string, expectedRevision: string): OrgLegalCaseFile | null {
+  const caseFile = getCase(orgId, caseId, userId, 'write');
+  const material = caseFile?.materials.find(item => item.id === materialId);
+  if (!caseFile || !material) return null;
+  const current = materialReviewRevision(caseFile, material);
+  if (expectedRevision !== current.revision) throw Object.assign(new Error('The archived material changed. Read its current version before removing it.'),
+    { code: 'LEGAL_MATERIAL_REVISION_CHANGED', statusCode: 409 });
+  const saved = updateCase(orgId, userId, caseId, { removedMaterialIds: [...(caseFile.removedMaterialIds || []), materialId] });
+  EDB.logAudit({ orgId, userId, action: 'legal_case.material.remove', resourceType: 'legal_case', resourceId: caseId,
+    details: { materialId, revision: current.revision, retainedFilesAndKnowledge: true } });
+  return saved;
+}
+
+export interface LegalCaseKnowledgeResult extends KnowledgeSearchResult {
+  caseId: string;
+  materialId?: string;
+  materialSource: string;
+}
+
+/** Read the case ledger itself: no duplicate archive, model dependency or
+ * newest-200 truncation. New and edited materials are visible on the next turn. */
+export function searchCaseKnowledge(orgId: string, userId: string, query: string, limit = 5): LegalCaseKnowledgeResult[] {
+  const articles: EDB.KbArticle[] = [];
+  const sources = new Map<string, Pick<LegalCaseKnowledgeResult, 'caseId' | 'materialId' | 'materialSource'>>();
+  for (const item of readStore().cases) {
+    if (item.orgId !== orgId || !canAccessCase(item, userId, 'read')) continue;
+    const add = (id: string, title: string, content: string, materialSource: string, materialId?: string) => {
+      if (!content.trim()) return;
+      sources.set(id, { caseId: item.id, materialId, materialSource });
+      articles.push({
+        id, orgId, title, content, category: 'legal_case_material',
+        tags: JSON.stringify([`case-id:${item.id}`, `source:${materialSource}`]),
+        authorId: item.createdBy, status: 'published', viewCount: 0,
+        createdAt: item.createdAt, updatedAt: item.updatedAt, ingestionManifest: '{}',
+      });
+    };
+    add(`case:${item.id}`, item.title,
+      [item.caseNumber, item.party, item.cause, item.court, item.notes].filter(Boolean).join('\n'), 'case_record');
+    for (const material of item.materials || []) {
+      add(`case:${item.id}:material:${material.id}`, `${item.title} / ${material.title}`,
+        material.content, material.source === 'tool' ? 'generated_draft_not_evidence' : material.source, material.id);
+    }
+  }
+  return searchKnowledgeText(articles, query, limit).map(result => ({ ...result, ...sources.get(result.articleId)! }));
+}
+
 export function createCase(orgId: string, userId: string, input: Partial<OrgLegalCaseFile>): OrgLegalCaseFile {
   const store = readStore();
   const ts = now();
@@ -339,11 +485,13 @@ export function createCase(orgId: string, userId: string, input: Partial<OrgLega
     court: normalizeText(input.court),
     judge: normalizeText(input.judge),
     stage: (input.stage as LegalCaseStage) || 'consultation',
+    factDate: normalizeText(input.factDate) || undefined,
     hearingDate: normalizeText(input.hearingDate),
     judgmentDate: normalizeText(input.judgmentDate),
     appealDeadline: normalizeText(input.appealDeadline),
     enforcementDeadline: normalizeText(input.enforcementDeadline),
     notes: normalizeText(input.notes),
+    clientPartyName: normalizeText(input.clientPartyName),
     clientRole: normalizeText(input.clientRole),
     objective: normalizeText(input.objective),
     materials: Array.isArray(input.materials) ? input.materials : [],
@@ -357,6 +505,7 @@ export function createCase(orgId: string, userId: string, input: Partial<OrgLega
   };
   store.cases.unshift(caseFile);
   writeStore(store);
+  recordLegalCaseWrite(orgId, userId, caseFile.id, caseFile.materials.map(material => material.id));
   EDB.logAudit({
     orgId,
     userId,
@@ -379,19 +528,23 @@ export function updateCase(orgId: string, userId: string, caseId: string, patch:
       permission: 'write', ownerUserId: current.createdBy,
     });
   }
+  const removedMaterialIds = [...new Set([...(current.removedMaterialIds || []), ...(Array.isArray(patch.removedMaterialIds) ? patch.removedMaterialIds.filter(id => typeof id === 'string' && id.length > 0 && id.length <= 200) : [])])];
+  const removed = new Set(removedMaterialIds);
   const next: OrgLegalCaseFile = {
     ...current,
     ...patch,
     // Browser snapshots and case updates cannot manufacture verification receipts.
-    workflowRuns: current.workflowRuns,
+    workflowRuns: current.workflowRuns?.filter(run => !run.materialIds.some(id => removed.has(id))),
     id: current.id,
     orgId: current.orgId,
-    materials: patch.materials || current.materials || [],
+    materials: (patch.materials || current.materials || []).filter(material => !removed.has(material.id)),
+    removedMaterialIds,
     updatedBy: userId,
     updatedAt: now(),
   };
   store.cases[idx] = next;
   writeStore(store);
+  recordLegalCaseWrite(orgId, userId, caseId, next.materials.filter(material => !current.materials.some(prior => prior.id === material.id)).map(material => material.id));
   EDB.logAudit({
     orgId,
     userId,
@@ -408,8 +561,11 @@ export function recordWorkflowRun(orgId: string, userId: string, caseId: string,
   if (!getCase(orgId, caseId, userId, 'write')) return;
   const store = readStore();
   const item = store.cases.find(value => value.orgId === orgId && value.id === caseId);
-  if (!item) return;
-  item.workflowRuns = [{ ...run, checkedAt: now(), basis: legalCaseSourceFingerprint(item) }, ...(item.workflowRuns || [])].slice(0, 100);
+  if (!item || run.materialIds.some(id => item.removedMaterialIds?.includes(id))) return;
+  item.workflowRuns = [{ ...run, checkedAt: now(), basis: legalCaseSourceFingerprint(item) }, ...(item.workflowRuns || []).map(previous => {
+    if (previous.tool !== run.tool) return previous;
+    const { displayText: _displayText, ...metadata } = previous; return metadata;
+  })].slice(0, 100);
   item.updatedAt = now();
   item.updatedBy = userId;
   writeStore(store);
@@ -473,7 +629,6 @@ export function addMaterial(
   const nextMaterials = [nextMaterial, ...(current.materials || [])];
   updateCase(orgId, userId, caseId, {
     materials: nextMaterials,
-    notes: [current.notes, material.content ? `【材料归档】${nextMaterial.title}` : ''].filter(Boolean).join('\n'),
   });
   EDB.logAudit({
     orgId,

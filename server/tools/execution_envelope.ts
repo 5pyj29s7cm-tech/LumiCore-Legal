@@ -1,28 +1,21 @@
+import { stableValue } from '../../shared/stable_json';
+import { toolExecutionIdentity } from './execution_identity';
 import crypto from 'node:crypto';
 import { isConfirmationBlockedToolRecord } from './confirmation_block';
 import type { ToolExecutionEnvelope, ToolExecutionRecord } from './types';
 import { toolRecordSucceeded } from '../cognition/task_execution_ledger';
-
-function parseResult(value: string): unknown {
-  const raw = String(value || '').trim();
-  if (!raw) return undefined;
-  try { return JSON.parse(raw); } catch { return raw; }
-}
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.keys(value as Record<string, unknown>)
-      .sort()
-      .map(key => [key, stableValue((value as Record<string, unknown>)[key])]),
-  );
-}
+import { toolRecordTerminalPayload } from './receipt_payload';
 
 export function toolRecordIdempotencyKey(record: ToolExecutionRecord): string {
   if (record.idempotencyKey) return record.idempotencyKey;
+  // Two reads of the same path may observe different saved versions. The
+  // archive must retain both observations while duplicate delivery of the
+  // same invocation remains idempotent. Mutation/external commit keys keep
+  // their existing semantics, and legacy records without metadata keep theirs.
+  const observation = record.id && ['observe', 'test'].includes(record.capability?.operation || '')
+    ? { observationId: record.id, requestId: record.requestId || '' } : {};
   return crypto.createHash('sha256')
-    .update(JSON.stringify(stableValue({ name: record.name, arguments: record.arguments || {} })))
+    .update(JSON.stringify(stableValue({ name: record.name, arguments: record.arguments || {}, ...observation })))
     .digest('hex');
 }
 
@@ -46,7 +39,7 @@ function verifiedObservedWindowTarget(record: ToolExecutionRecord): string {
     record.terminalVerification?.status !== 'verified'
     || !toolRecordSucceeded(record)
   ) return '';
-  const parsed = record.receipt !== undefined ? record.receipt : parseResult(record.result);
+  const parsed = toolRecordTerminalPayload(record);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return '';
   const payload = parsed as Record<string, any>;
   const currentDocument = payload.currentDocument
@@ -122,18 +115,20 @@ export function buildToolExecutionEnvelope(
     taskId?: string;
     turnId?: string;
     requestId?: string;
+    turnRowId?: string;
+    externalMessageId?: string;
     startedAt?: string;
     completedAt?: string;
     durationMs?: number;
   } = {},
 ): ToolExecutionEnvelope {
-  const parsed = record.receipt !== undefined ? record.receipt : parseResult(record.result);
+  const parsed = toolRecordTerminalPayload(record);
   const payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
     ? parsed as Record<string, any>
     : {};
   const rawError = String(record.error || '').trim();
   const timeout = /timed?\s*out|timeout/i.test(rawError);
-  const unknownOutcome = /unknown (?:prior )?(?:external commit )?outcome|external commit outcome is unknown|automatic resend was stopped/i.test(rawError);
+  const unknownOutcome = /outcome_unknown|unknown (?:prior )?(?:external commit )?outcome|external commit outcome is unknown|automatic resend was stopped/i.test(rawError);
   const forbidden = /forbidden|not exposed|outside .*policy|permission denied|adapter circuit is open/i.test(rawError);
   const targetMismatch = payload.targetMatched === false
     || payload.conversationVerified === false
@@ -160,7 +155,7 @@ export function buildToolExecutionEnvelope(
   if (waitingConfirmation) status = 'waiting_confirmation';
   else if (targetMismatch) status = 'target_mismatch';
   else if (forbidden) status = 'forbidden';
-  else if (((timeout || unknownOutcome) && externalCommit) || unverifiedExternalResult) status = 'unknown_outcome';
+  else if (unknownOutcome || (timeout && externalCommit) || unverifiedExternalResult) status = 'unknown_outcome';
   else if (timeout) status = 'timeout';
   else status = succeeded && (terminalVerified || compatibilitySuccess) ? 'verified_success' : 'failed';
 
@@ -168,6 +163,7 @@ export function buildToolExecutionEnvelope(
     version: 1,
     status,
     toolName: record.name,
+    ...toolExecutionIdentity({ ...correlation, ...toolExecutionIdentity(record) }),
     taskId: String(record.taskId || correlation.taskId || ''),
     turnId: String(record.turnId || correlation.turnId || ''),
     requestId: String(record.requestId || correlation.requestId || ''),

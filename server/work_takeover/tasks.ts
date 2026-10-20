@@ -1,4 +1,6 @@
-import { readDB, writeDB } from '../../db_layer';
+import type { WorkTakeoverExecutionPlan, WorkTakeoverStepExecutionResult } from './execution_planner';
+import { readSettingRecord, writeSetting } from "../persistence/settings_repository";
+
 import type { WechatIntakeResult, WechatUrgency, WechatWorkCategory } from './wechat_intake';
 
 export type WorkTakeoverStatus =
@@ -114,6 +116,7 @@ export interface WorkTakeoverUpdateInput {
   currentActionIndex?: number;
   draftReply?: string;
   artifact?: Partial<WorkTakeoverArtifact> & { label: string };
+  artifacts?: Array<Partial<WorkTakeoverArtifact> & { label: string }>;
   allowedNow?: string[];
   confirmationRequired?: string[];
   blockedBy?: string[];
@@ -155,8 +158,7 @@ function id(prefix: string): string {
 }
 
 function readStoredTasks(): WorkTakeoverTask[] {
-  const db = readDB();
-  const setting = (db.settings || []).find((item: any) => item.key === SETTINGS_KEY);
+  const setting = readSettingRecord(SETTINGS_KEY);
   if (!setting?.value) return [];
   try {
     const parsed = JSON.parse(setting.value);
@@ -167,17 +169,8 @@ function readStoredTasks(): WorkTakeoverTask[] {
 }
 
 function writeStoredTasks(tasks: WorkTakeoverTask[]) {
-  const db = readDB();
-  if (!Array.isArray(db.settings)) db.settings = [];
-  const trimmed = tasks
-    .slice()
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .slice(-MAX_TASKS);
-  const value = JSON.stringify(trimmed);
-  const index = db.settings.findIndex((item: any) => item.key === SETTINGS_KEY);
-  if (index >= 0) db.settings[index].value = value;
-  else db.settings.push({ key: SETTINGS_KEY, value });
-  writeDB(db);
+  writeSetting(SETTINGS_KEY, JSON.stringify(tasks.slice()
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-MAX_TASKS)));
 }
 
 function event(type: WorkTakeoverEvent['type'], text: string): WorkTakeoverEvent {
@@ -329,7 +322,7 @@ export function listWorkTakeoverTasks(filter: {
   let tasks = readStoredTasks();
   if (filter.userId) tasks = tasks.filter(task => task.userId === filter.userId);
   if (filter.domain) tasks = tasks.filter(task => task.domain === filter.domain);
-  if (filter.orgId) tasks = tasks.filter(task => task.orgId === filter.orgId);
+  if (filter.orgId !== undefined) tasks = tasks.filter(task => task.orgId === filter.orgId);
   if (filter.category) tasks = tasks.filter(task => task.category === filter.category);
   if (filter.status === 'active') {
     tasks = tasks.filter(task => ['queued', 'in_progress', 'waiting_confirmation', 'blocked'].includes(task.status));
@@ -342,6 +335,18 @@ export function listWorkTakeoverTasks(filter: {
 
 export function getWorkTakeoverTask(userId: string, taskId: string): WorkTakeoverTask | null {
   return readStoredTasks().find(task => task.id === taskId && task.userId === userId) || null;
+}
+
+/** Select only the task owned by the exact current surface, even for an explicit ID. */
+export function getScopedWorkTakeoverTask(
+  scope: Pick<WorkTakeoverTask, 'userId' | 'domain' | 'orgId'>,
+  taskId?: string,
+): WorkTakeoverTask | null {
+  if (scope.domain === 'work' && !scope.orgId) return null;
+  const task = taskId !== undefined
+    ? getWorkTakeoverTask(scope.userId, taskId)
+    : listWorkTakeoverTasks({ ...scope, status: 'active', limit: 1 })[0] || null;
+  return task && task.domain === scope.domain && task.orgId === scope.orgId ? task : null;
 }
 
 export function updateWorkTakeoverTask(userId: string, taskId: string, input: WorkTakeoverUpdateInput): WorkTakeoverTask | null {
@@ -378,19 +383,20 @@ export function updateWorkTakeoverTask(userId: string, taskId: string, input: Wo
     task.events.push(event('draft_added', 'Draft reply added.'));
   }
 
-  if (input.artifact?.label) {
+  for (const artifact of [...(input.artifact ? [input.artifact] : []), ...(input.artifacts || [])]) {
+    if (!artifact.label) continue;
     const artifactTimestamp = nowIso();
     task.artifacts.push({
-      id: input.artifact.id || id('wt_artifact'),
-      type: input.artifact.type || 'other',
-      label: String(input.artifact.label).slice(0, 160),
-      path: input.artifact.path,
-      content: input.artifact.content,
-      status: input.artifact.status || 'planned',
-      createdAt: input.artifact.createdAt || artifactTimestamp,
+      id: artifact.id || id('wt_artifact'),
+      type: artifact.type || 'other',
+      label: String(artifact.label).slice(0, 160),
+      path: artifact.path,
+      content: artifact.content,
+      status: artifact.status || 'planned',
+      createdAt: artifact.createdAt || artifactTimestamp,
       updatedAt: artifactTimestamp,
     });
-    task.events.push(event('artifact_added', `Artifact added: ${input.artifact.label}`));
+    task.events.push(event('artifact_added', `Artifact added: ${artifact.label}`));
   }
 
   if (input.status && input.status !== task.status) {
@@ -435,4 +441,65 @@ export function continueWorkTakeoverTask(userId: string, taskId?: string): {
     draft: updated.drafts[updated.drafts.length - 1],
     confirmationRequired: updated.confirmationRequired,
   };
+}
+
+export function removeWorkTakeoverTaskArtifacts(
+  userId: string,
+  taskId: string,
+  artifactPaths: string[],
+): WorkTakeoverTask | null {
+  const targets = new Set(artifactPaths.map(value => String(value || '').trim()).filter(Boolean));
+  const tasks = readStoredTasks();
+  const index = tasks.findIndex(task => task.id === taskId && task.userId === userId);
+  if (index < 0) return null;
+  const task = tasks[index];
+  if (!targets.size) return task;
+  const retained = task.artifacts.filter(artifact => !artifact.path || !targets.has(String(artifact.path).trim()));
+  const removed = task.artifacts.length - retained.length;
+  if (removed === 0) return task;
+  task.artifacts = retained;
+  task.events.push(event('note', `Removed ${removed} failed task-owned artifact reference(s).`));
+  task.events.push(event('updated', 'Work takeover task updated.'));
+  task.updatedAt = nowIso();
+  tasks[index] = task;
+  writeStoredTasks(tasks);
+  return task;
+}
+
+export function recordWorkTakeoverStepExecution(
+  userId: string,
+  task: WorkTakeoverTask,
+  plan: WorkTakeoverExecutionPlan,
+  execution: WorkTakeoverStepExecutionResult,
+): WorkTakeoverTask {
+  const current = getWorkTakeoverTask(userId, task.id);
+  if (!current || current.domain !== task.domain || current.orgId !== task.orgId
+    || execution.taskId !== task.id || plan.taskId !== task.id || execution.planId !== plan.planId) {
+    throw new Error('Work takeover execution is not bound to a current owned task');
+  }
+  const unique = (values: string[]) => Array.from(new Set(values.map(value => String(value || '').replace(/\s+/g, ' ').trim()).filter(Boolean)));
+  const history = current.metadata?.workTakeoverExecution?.history;
+  return updateWorkTakeoverTask(userId, task.id, {
+    status: execution.status === 'blocked'
+      ? 'blocked'
+      : execution.status === 'waiting_confirmation'
+      ? 'waiting_confirmation'
+      : 'in_progress',
+    allowedNow: unique([...current.allowedNow, ...plan.safeActions]),
+    confirmationRequired: unique([...current.confirmationRequired, ...execution.confirmationRequired]),
+    blockedBy: execution.blockers.length ? unique([...current.blockedBy, ...execution.blockers]) : undefined,
+    result: execution.nextInstruction,
+    metadata: {
+      workTakeoverExecution: {
+        lastPlan: plan,
+        lastExecution: execution,
+        history: [...(Array.isArray(history) ? history.slice(-20) : []), execution],
+        updatedAt: execution.executedAt,
+      },
+    },
+    note: execution.summary,
+    expectedRevision: current.revision || 0,
+    artifacts: execution.artifacts,
+    draftReply: execution.draftReply && !current.drafts.some(draft => draft.text === execution.draftReply) ? execution.draftReply : undefined,
+  })!;
 }

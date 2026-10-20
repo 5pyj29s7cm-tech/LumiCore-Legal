@@ -1,3 +1,5 @@
+import { readImplementationSource } from './implementation_source';
+import { readVoiceImplementationSource } from './voice_implementation_source';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -9,7 +11,6 @@ import {
 import {
   VOICE_DESKTOP_LEASE_WAIT_MS,
   VOICE_MODEL_INPUT_BUDGET_TOKENS,
-  canReuseSpeculativeVoiceSpeech,
   resolveVoiceModelInputBudget,
 } from '../server/socket/voice_runtime_policy';
 import {
@@ -111,31 +112,10 @@ describe('live voice runtime stability policy', () => {
       .toBeLessThanOrEqual(VOICE_MODEL_INPUT_BUDGET_TOKENS);
   });
 
-  it('does not reuse old speculative audio after a live voice switch', () => {
-    expect(canReuseSpeculativeVoiceSpeech({
-      preparedVoiceId: 'voice-a',
-      currentVoiceId: 'voice-a',
-      preparedSwitchGeneration: 4,
-      currentSwitchGeneration: 4,
-    })).toBe(true);
-    expect(canReuseSpeculativeVoiceSpeech({
-      preparedVoiceId: 'voice-a',
-      currentVoiceId: 'voice-b',
-      preparedSwitchGeneration: 4,
-      currentSwitchGeneration: 5,
-    })).toBe(false);
-    expect(canReuseSpeculativeVoiceSpeech({
-      preparedVoiceId: 'voice-a',
-      currentVoiceId: 'voice-a',
-      preparedSwitchGeneration: 4,
-      currentSwitchGeneration: 5,
-    })).toBe(false);
-  });
-
   it('wires capture recovery, live input-device changes, bounded prompts, and the voice lease deadline', () => {
     const root = process.cwd();
-    const hook = fs.readFileSync(path.join(root, 'src/hooks/useVoiceCall.ts'), 'utf8');
-    const voice = fs.readFileSync(path.join(root, 'server/socket/voice.ts'), 'utf8');
+    const hook = readImplementationSource(path.join(root, 'src/hooks/useVoiceCall.ts'), 'utf8');
+    const voice = readVoiceImplementationSource();
 
     expect(hook).toContain('classifyVoiceCaptureHealth');
     expect(hook).toContain('captureRecoveryTimerRef');

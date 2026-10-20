@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   createPreFinalizationTextGate,
+  finalizeLumiResponseForDelivery,
   shouldDeferModelOutputUntilFinalized,
   shouldForwardPreFinalizationProgress,
 } from '../server/cognition/response_delivery';
+import { finalizeLumiResponse } from '../server/cognition/result_finalizer';
 import type { LumiTurnFlow } from '../server/cognition/turn_flow';
 import { hasImmediateExecutionPromise } from '../server/cognition/execution_claims';
 
@@ -36,7 +38,7 @@ function flow(overrides: Partial<LumiTurnFlow> = {}): LumiTurnFlow {
       strength: 'none',
       shouldResumeTask: false,
     } as LumiTurnFlow['workTakeover'],
-    specialWorkflow: null,
+    workflowHint: null,
     executionGovernance: {
       verificationIntent: 'none',
       verificationReason: '',
@@ -103,13 +105,13 @@ describe('finalized output delivery gate', () => {
     })).toBe(true);
   });
 
-  it('buffers special workflows until their tool ledger is finalized', () => {
+  it('buffers workflow hints until their tool ledger is finalized', () => {
     const taskText = 'Lumi, introduce yourself';
     expect(shouldDeferModelOutputUntilFinalized({
       taskText,
       flow: flow({
         routeText: taskText,
-        specialWorkflow: { id: 'self_intro_demo' } as LumiTurnFlow['specialWorkflow'],
+        workflowHint: { id: 'self_intro_demo' } as LumiTurnFlow['workflowHint'],
       }),
     })).toBe(true);
   });
@@ -180,4 +182,50 @@ describe('finalized output delivery gate', () => {
     expect(snapshot.emittedText).toBe('');
     expect(snapshot.withheldText).toBe('\u6211\u5df2\u7ecf\u6253\u5f00\u5fae\u4fe1\u4e86');
   });
+});
+
+it('retains a blocked completion guard when a recovery returns otherwise valid search evidence', async () => {
+  const records = [{ name: 'web_search', arguments: { query: 'synthetic' }, result: JSON.stringify({ results: [{ title: 'Synthetic result', url: 'https://example.com' }] }) }];
+  expect(finalizeLumiResponse({ taskText: 'Search the public web for synthetic examples.',
+    responseText: 'The search returned a synthetic result.', toolRecords: records, source: 'recovery_guard_control' }).blocked).toBe(false);
+  let attempts = 0;
+  const delivered = await finalizeLumiResponseForDelivery({
+    taskText: 'Search the public web for synthetic examples.', responseText: 'I searched.',
+    source: 'recovery_guard_fixture', allowToolUse: true, toolRecords: [],
+    initialFinalization: { text: 'I searched.', blocked: true, reason: 'No successful current-turn tool execution was recorded.' },
+    attempt: async () => {
+      attempts += 1;
+      return { text: 'The search returned a synthetic result.', toolRecords: records,
+        completionGuard: { text: 'The provider response is incomplete.', blocked: true, reason: 'conversation_response_incomplete' } };
+    },
+  });
+  expect(attempts).toBe(1);
+  expect(delivered.finalization).toMatchObject({ blocked: true, reason: 'execution_recovery_incomplete' });
+  expect(delivered.recoveryFailed).toBe(true);
+  expect(delivered.toolRecords).toEqual(records);
+});
+
+it('requires the new exact confirmation even when the prior reply was not blocked', async () => {
+  let attempts = 0;
+  const delivered = await finalizeLumiResponseForDelivery({
+    taskText: 'Send the message to the newly corrected recipient.', responseText: 'Ready.',
+    source: 'fresh_confirmation_fixture', allowToolUse: true, requiresFreshConfirmation: true,
+    initialFinalization: { text: 'Ready.', blocked: false }, toolRecords: [],
+    attempt: async () => { attempts += 1; return { text: 'Ready.' }; },
+    refinalize: text => ({ text, blocked: false }),
+  });
+  expect(attempts).toBe(1);
+  expect(delivered.finalization.blocked).toBe(true);
+  expect(delivered.recoveryFailed).toBe(true);
+});
+
+it.each([true, false])('exposes waiting confirmation only for an exact currently pending proposal: %s', async pending => {
+  const text = 'Please confirm the exact message for the specified recipient.';
+  const delivered = await finalizeLumiResponseForDelivery({
+    taskText: 'Send the message.', responseText: text, source: 'confirmation_fixture',
+    initialFinalization: { text, blocked: false, reason: 'waiting_confirmation' }, toolRecords: [],
+    pendingConfirmation: pending, trustedConfirmationRequestText: () => text,
+  });
+  expect(delivered.finalization.text).toBe(text);
+  expect(delivered.finalization.reason).toBe(pending ? 'waiting_confirmation' : 'execution_recovery_incomplete');
 });

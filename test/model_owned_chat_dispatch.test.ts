@@ -1,20 +1,13 @@
+import { readImplementationSource } from './implementation_source';
 import './helpers';
-import { readFileSync } from 'node:fs';
+import { enCatalog } from '../src/i18n/locales/catalog_en';
+import { zhCatalog } from '../src/i18n/locales/catalog_zh';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initDatabase } from '../db_layer';
-import {
-  LEGACY_INTENT_CLASSIFIER_AUTHORITY,
-  legacyIntentCanOwnNaturalLanguageDecision,
-} from '../server/cognition/intent';
-import { handleLLMFailure, processInput } from '../server/cognition';
-import {
-  getNormalizedIntentRuntimeRole,
-  normalizeActionIntent,
-} from '../server/cognition/normalized_action_intent';
 import { buildLumiTurnDispatch } from '../server/cognition/turn_dispatch';
 import { buildModelCapabilityPolicy } from '../server/cognition/capability_selection';
-import { buildQuickCommandToolPolicy } from '../server/cognition/quick_commands';
 import { buildOperationModeToolPolicy } from '../server/cognition/operation_modes';
 import {
   shouldAllowToolUseForTurn,
@@ -31,38 +24,6 @@ describe('model-owned main chat architecture', () => {
     await initDatabase();
   });
 
-  it.each([
-    '你好 Lumi',
-    '你是谁，能做什么？',
-    '打开记事本',
-    '创建一个文本文件并核验内容',
-    '刚才为什么失败？请继续解决',
-  ])('keeps legacy intent classification advisory for natural language: %s', async (text) => {
-    const result = await processInput(text, {
-      userId: 'model_owned_chat_user',
-      personalityId: 'lumi',
-      personalityName: 'Lumi',
-      llmProvider: 'test',
-      llmModel: 'test',
-      isLLMAvailable: true,
-    });
-
-    expect(LEGACY_INTENT_CLASSIFIER_AUTHORITY).toBe('advisory');
-    expect(legacyIntentCanOwnNaturalLanguageDecision()).toBe(false);
-    expect(result.directToolExecuted).toBe(false);
-    expect(result.responseText).toBe('');
-  });
-
-  it('keeps text-derived client navigation advisory and reserves deterministic ownership for structured events', () => {
-    const navigation = normalizeActionIntent('打开技能大厅');
-    expect(getNormalizedIntentRuntimeRole(navigation)).toBe('advisory');
-    expect(getNormalizedIntentRuntimeRole(navigation, 'natural_language')).toBe('advisory');
-    expect(getNormalizedIntentRuntimeRole(navigation, 'model_selected_capability')).toBe('advisory');
-    expect(getNormalizedIntentRuntimeRole(navigation, 'structured_client_event')).toBe('native_client_event');
-    expect(getNormalizedIntentRuntimeRole(normalizeActionIntent('打开记事本'))).toBe('advisory');
-    expect(getNormalizedIntentRuntimeRole(normalizeActionIntent('给阿陆发一条微信'))).toBe('advisory');
-  });
-
   it('keeps a chat workflow match as a model hint instead of an executable dispatch owner', () => {
     const dispatch = buildLumiTurnDispatch({
       userId: 'model_owned_workflow_user',
@@ -74,8 +35,6 @@ describe('model-owned main chat architecture', () => {
     });
 
     expect(dispatch.flow.workflowHint?.id).toBe('self_intro_demo');
-    expect(dispatch.flow.workflowRouting).toBe('model_hint');
-    expect(dispatch.flow.specialWorkflow).toBeNull();
     expect(dispatch.boundary).not.toBe('skill_workflow');
     expect(dispatch.flow.promptOverlay).toContain('capability candidates');
   });
@@ -185,15 +144,14 @@ describe('model-owned main chat architecture', () => {
   });
 
   it('describes Chat foreground escalation consistently with the hard runtime policy', () => {
-    const translationsSource = readFileSync(path.resolve(process.cwd(), 'src/lib/translations.ts'), 'utf8');
-    const adapterRegistrySource = readFileSync(path.resolve(process.cwd(), 'server/adapters/registry.ts'), 'utf8');
-    const generatedMessages = JSON.parse(readFileSync(
+    const adapterRegistrySource = readImplementationSource(path.resolve(process.cwd(), 'server/adapters/registry.ts'), 'utf8');
+    const generatedMessages = JSON.parse(readImplementationSource(
       path.resolve(process.cwd(), 'src/i18n/locales/ui.generated.json'),
       'utf8',
     ));
 
-    expect(translationsSource).toContain("Clear action requests may use Assistant's foreground tools for that turn");
-    expect(translationsSource).toContain('明确要求执行时，该回合可调用助手模式的前台工具');
+    expect(enCatalog.modeChatDesc).toContain("Clear action requests may use Assistant's foreground tools for that turn");
+    expect(zhCatalog.modeChatDesc).toContain('明确要求执行时，该回合可调用助手模式的前台工具');
     expect(generatedMessages['desktop-onboarding.chat-answer-only-no-proactive.fb6dff28d4'].en)
       .toContain('explicit action requests may use Assistant tools');
     expect(generatedMessages['desktop-ui.pure-conversation-answers-and-discussion.10bb20f365'].en)
@@ -213,20 +171,11 @@ describe('model-owned main chat architecture', () => {
     });
   });
 
-  it('keeps quick-command matches fail-closed and wires the main model loop to the hard capability policy', () => {
-    const policy = {
-      allowedTools: ['client_get_state'],
-      forbiddenTools: ['desktop_run_command'],
-      requireConfirmation: [],
-      maxIterations: 4,
-    };
-    expect(buildQuickCommandToolPolicy(policy, 'browser_open_task')).toBe(policy);
+  it('wires the main model loop to the hard capability policy', () => {
 
-    const chatSource = readFileSync(path.resolve(process.cwd(), 'server/socket/chat.ts'), 'utf8');
+    const chatSource = readImplementationSource(path.resolve(process.cwd(), 'server/socket/chat.ts'), 'utf8');
     expect(chatSource).toContain('toolPolicy: modelCapabilityPolicy');
     expect(chatSource).toContain('// ── Model-owned natural-language dispatch');
-    expect(chatSource).not.toContain('buildDeterministicClientNavigationCommand');
-    expect(chatSource).not.toContain('buildQuickCommandToolPolicy');
     expect(chatSource).not.toContain('quickFinalized');
     expect(chatSource).not.toContain('const directlyAppliedMode');
     expect(chatSource).not.toContain('registerBackgroundTask');
@@ -245,12 +194,13 @@ describe('model-owned main chat architecture', () => {
     // Natural-language dispatch remains model-owned. Tool-capable fresh turns
     // create only a durable task envelope before the model/tool relay so every
     // receipt has a stable taskId; preparation itself does not execute tools.
-    expect(chatSource).toContain('const bindsExistingAction = Boolean(');
-    expect(chatSource).toContain('const preparesFreshAction = Boolean(');
-    expect(chatSource).toContain('executionPipeline.capabilityPlan.taskLedgerRequired || Boolean(pendingConfirmation)');
-    expect(chatSource).toContain('prepareConversationActionExecution({');
+    const taskOwner = readFileSync('server/conversation/planned_execution.ts', 'utf8');
+    expect(chatSource).toContain('preparePlannedConversationExecution({');
+    expect(chatSource).not.toContain('const bindsExistingAction =');
+    expect(chatSource).toContain('acceptedRuntimeCleanup: Boolean(acceptedRuntimeCleanupOffer && conversationId)');
+    expect(taskOwner).toContain('execution.capabilityPlan.taskLedgerRequired');
+    expect(taskOwner.match(/prepareConversationActionExecution\(\{/g)).toHaveLength(1);
     expect(chatSource).toContain('userMessageId: acceptedUserMessageId');
-    expect(chatSource).toContain('forceTask: true');
     expect(chatSource).not.toContain('persistConversationExecutionPlan');
     expect(chatSource).not.toContain("setConversationActionExecutionStatus(conversationId, uid, 'executing'");
     // A cancellation is recorded as a terminal continuation boundary.  Normal
@@ -261,9 +211,9 @@ describe('model-owned main chat architecture', () => {
   });
 
   it('uses model-owned hard policies and further narrows the public REST entrance', () => {
-    const messaging = readFileSync(path.resolve(process.cwd(), 'server/regions/packs/cn/messaging_routes.ts'), 'utf8');
-    const rest = readFileSync(path.resolve(process.cwd(), 'server/routes/chat_routes.ts'), 'utf8');
-    const misc = readFileSync(path.resolve(process.cwd(), 'server/routes/misc_routes.ts'), 'utf8');
+    const messaging = readImplementationSource(path.resolve(process.cwd(), 'server/regions/packs/cn/messaging_routes.ts'), 'utf8');
+    const rest = readImplementationSource(path.resolve(process.cwd(), 'server/routes/chat_routes.ts'), 'utf8');
+    const misc = readImplementationSource(path.resolve(process.cwd(), 'server/routes/misc_routes.ts'), 'utf8');
 
     expect(messaging).toContain('const modelToolPolicy = executionPlan.authorizationPolicy');
     expect(messaging).toContain('const modelToolProjection = executionPlan.modelToolProjection');
@@ -271,13 +221,15 @@ describe('model-owned main chat architecture', () => {
     expect(messaging).toContain('modelToolPolicy.maxIterations || executionDecision.maxIterations');
     expect(messaging).toContain('isPureOperationModeSwitchRequest(requestText, requestedMode)');
 
-    expect(rest).toContain('const restModelToolPolicy = restExecutionPipeline.authorizationPolicy');
-    expect(rest).toContain('const restModelToolProjection = restExecutionPipeline.modelToolProjection');
-    expect(rest).toContain('additionalForbiddenTools: restBoundaryForbiddenTools');
+    expect(rest).toContain('return await runLumiEntryTurn({');
+    expect(rest).toContain('maxIterations: execution.authorizationPolicy.maxIterations || 3');
+    expect(readFileSync('server/cognition/turn_execution.ts', 'utf8')).toContain('...assembled.model, execution, messages,');
+    expect(readFileSync('server/cognition/turn_model.ts', 'utf8')).toContain('modelToolProjection: execution.modelToolProjection');
+    expect(rest).toContain('executionBoundary,');
     expect(rest).not.toContain('buildModelToolProjection');
     expect(rest).not.toMatch(/restExecutionDecision\.(?:baseToolPolicy|toolPolicy|maxIterations|toolRoute)\s*=/);
     expect(rest).toContain("'remote_restricted'");
-    expect(rest).toContain('toolPolicy: restModelToolPolicy');
+    expect(readFileSync('server/cognition/turn_model.ts', 'utf8')).toContain('toolPolicy: execution.authorizationPolicy');
     expect(rest).toContain('isSanctuary: !req.user');
 
     // misc_routes used to mount a second, less constrained /chat handler.
@@ -308,21 +260,5 @@ describe('model-owned main chat architecture', () => {
     expect(result.blocked).toBe(false);
     expect(result.text).toBe(responseText);
     expect(result.reason).not.toContain('Model-authored wording preserved');
-  });
-
-  it('keeps the exhausted-model response transport-safe instead of impersonating Lumi with canned intent replies', () => {
-    const intent = {
-      category: 'command' as const,
-      confidence: 0.99,
-      entities: {},
-      needsLLM: false,
-      directToolCall: { name: 'desktop_open', args: { app: 'notepad' } },
-    };
-    const result = handleLLMFailure(intent, new Error('secret provider detail'));
-    expect(result.isFallback).toBe(true);
-    expect(result.directToolExecuted).toBe(false);
-    expect(result.responseText).not.toContain('secret provider detail');
-    expect(result.responseText).not.toContain('打开记事本');
-    expect(result.responseText).not.toContain('核心功能还在');
   });
 });

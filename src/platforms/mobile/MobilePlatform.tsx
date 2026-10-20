@@ -1,37 +1,26 @@
-import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence, useMotionValue, useTransform } from 'motion/react';
-import { 
-  Smartphone, 
-  Orbit, 
-  MessageSquare, 
-  Globe, 
-  Settings, 
-  User, 
-  ShieldCheck, 
-  Activity, 
+import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import {
+  Orbit,
+  Globe,
+  User,
   Zap,
-  Battery,
-  Wifi,
-  Signal,
   LayoutGrid,
   ChevronDown,
-  Volume2,
-  VolumeX,
-  Moon,
-  Sun,
-  Bluetooth,
-  Maximize2,
   LogOut,
   Cpu,
-  Radio,
   Mic,
-  Shield
 } from 'lucide-react';
 import { sounds } from '../../services/soundService';
 
 import { useSocket } from '../../hooks/useSocket';
 import { useVoiceCall } from '../../hooks/useVoiceCall';
+import { useRuntimeStatus } from '../../hooks/useRuntimeStatus';
+import { RuntimeEvidencePanel } from '../../components/RuntimeEvidencePanel';
+import { ClientConnectionStatus } from '../../components/ClientConnectionStatus';
+import { ClientSurface } from '../../components/ClientSurface';
 import { useApp } from '../../contexts/AppContext';
+import { getDomainReconciliation } from '../../lib/domainSession';
 
 interface MobilePlatformProps {
   t: any;
@@ -44,24 +33,16 @@ interface MobilePlatformProps {
 }
 
 export function MobilePlatform({ t, user, lang, setLang, onLogin, onExit, renderTabContent }: MobilePlatformProps) {
-  const [activeScreen, setActiveScreen] = useState<'home' | 'core' | 'factory' | 'agents' | 'profile'>('home');
-  const [currentTime, setCurrentTime] = useState(new Date());
-  const [isControlCenterOpen, setIsControlCenterOpen] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [activeScreen, setActiveScreen] = useState<'home' | 'core' | 'factory' | 'skills' | 'profile'>('home');
 
   const socket = useSocket();
+  const { workDomain, orgConnection } = useApp();
+  const scopeReady = Boolean(user) && getDomainReconciliation(workDomain, user?.orgId, orgConnection?.orgId) === 'none';
+  const runtime = useRuntimeStatus({ enabled: scopeReady, userId: user?.uid, scopeKey: workDomain === 'work' ? 'work:' + user?.orgId : 'personal' });
   const { callState, startCall, endCall } = useVoiceCall({
     socket,
-    onResponse: (text) => {
-      // Logic to show response in mobile UI if needed
-    }
   });
 
-  useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   const triggerHaptic = (pattern: number | number[] = 10) => {
     if ('vibrate' in navigator) {
@@ -72,21 +53,16 @@ export function MobilePlatform({ t, user, lang, setLang, onLogin, onExit, render
   const handleNavClick = (screen: any) => {
     if (activeScreen === screen) return;
     triggerHaptic(5);
-    if (!isMuted) sounds.playClick();
+    sounds.playClick();
     setActiveScreen(screen);
   };
 
-  const toggleControlCenter = () => {
-    triggerHaptic(15);
-    if (!isMuted) sounds.playClick();
-    setIsControlCenterOpen(!isControlCenterOpen);
-  };
 
   const navItems = [
     { id: 'home', icon: LayoutGrid, label: t.navHome || 'Home' },
     { id: 'factory', icon: Cpu, label: t.navFactory || 'Factory' },
     { id: 'core', icon: Orbit, label: t.navCore || 'Core' },
-    { id: 'agents', icon: MessageSquare, label: t.navAgents || 'Agents' },
+    { id: 'skills', icon: Zap, label: t.skills || 'Skills' },
     { id: 'profile', icon: User, label: t.navProfile || 'Profile' },
   ];
 
@@ -108,72 +84,9 @@ export function MobilePlatform({ t, user, lang, setLang, onLogin, onExit, render
               </div>
             </div>
 
-            {/* Device Monitoring Grid */}
-            <div className="grid gap-4">
-              <div className="glass-dark p-6 rounded-[2.5rem] border border-white/5 space-y-4">
-                <div className="flex justify-between items-center">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-2xl bg-white/5 flex items-center justify-center text-celestial-saturn">
-                      <Smartphone size={20} />
-                    </div>
-                    <div>
-                      <div className="text-xs font-black uppercase">{t.localHost || 'Local Host'}</div>
-                      <div className="text-xs text-white/40 uppercase font-mono">NODE_IP: 192.168.1.44</div>
-                    </div>
-                  </div>
-                  <div className="px-3 py-1 bg-celestial-saturn/10 border border-celestial-saturn/20 rounded-full text-xs font-black text-celestial-saturn uppercase">{t.linked || 'Linked'}</div>
-                </div>
-                <div className="space-y-1.5">
-                   <div className="flex justify-between text-xs font-bold text-white/20 uppercase tracking-widest">
-                     <span>{t.shardingSync || 'Sharding Sync'}</span>
-                     <span>98.2%</span>
-                   </div>
-                   <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
-                      <motion.div initial={{ width: 0 }} animate={{ width: '98.2%' }} className="h-full bg-celestial-saturn" />
-                   </div>
-                </div>
-              </div>
-
-              <div className="glass-dark p-6 rounded-[2.5rem] border border-white/5 space-y-4">
-                <div className="flex justify-between items-center">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-2xl bg-white/5 flex items-center justify-center text-purple-400">
-                      <Radio size={20} />
-                    </div>
-                    <div>
-                      <div className="text-xs font-black uppercase">{t.meshBridge || 'Mesh Bridge'}</div>
-                      <div className="text-xs text-white/40 uppercase font-mono">LATENCY: 12ms</div>
-                    </div>
-                  </div>
-                  <div className="px-3 py-1 bg-purple-500/10 border border-purple-500/20 rounded-full text-xs font-black text-purple-500 uppercase">{t.activeStatus || 'Active'}</div>
-                </div>
-                <div className="space-y-1.5">
-                   <div className="flex justify-between text-xs font-bold text-white/20 uppercase tracking-widest">
-                     <span>{t.globalTraffic || 'Global Traffic'}</span>
-                     <span>4.2 PB/S</span>
-                   </div>
-                   <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
-                      <motion.div initial={{ width: 0 }} animate={{ width: '42%' }} className="h-full bg-purple-500" />
-                   </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Hardware Quick Permissions */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="glass-dark p-5 rounded-[2rem] border border-white/5 flex items-center gap-3">
-                 <div className="w-8 h-8 rounded-xl bg-celestial-saturn/20 flex items-center justify-center text-celestial-saturn">
-                   <ShieldCheck size={14} />
-                 </div>
-                 <div className="text-xs font-black uppercase tracking-tight">{t.biometricsTile || 'Biometrics'}</div>
-              </div>
-              <div className="glass-dark p-5 rounded-[2rem] border border-white/5 flex items-center gap-3">
-                 <div className="w-8 h-8 rounded-xl bg-orange-500/20 flex items-center justify-center text-orange-400">
-                   <Activity size={14} />
-                 </div>
-                 <div className="text-xs font-black uppercase tracking-tight">{t.telemetryTile || 'Telemetry'}</div>
-              </div>
-            </div>
+            <ClientConnectionStatus lang={lang} />
+            <RuntimeEvidencePanel status={runtime.status} loading={runtime.loading} error={runtime.error} variant="compact" />
+            {!user && <button onClick={onLogin} className="w-full rounded-xl border border-white/10 p-3 text-sm">{t.login || 'Sign in'}</button>}
           </motion.div>
         );
       case 'core':
@@ -187,14 +100,14 @@ export function MobilePlatform({ t, user, lang, setLang, onLogin, onExit, render
           >
             <div className="text-center space-y-2">
                <h2 className="text-4xl font-black italic tracking-tighter uppercase text-white">{t.centralPersona || <>Central <span className="text-celestial-saturn text-glow">Persona</span></>}</h2>
-               <p className="text-xs text-white/30 uppercase tracking-[0.4em] font-mono leading-none">{t.localShardIntegrityVerified || 'Local Shard Integrity Verified'}</p>
+               <ClientConnectionStatus lang={lang} />
             </div>
 
             <motion.div 
               whileTap={{ scale: 0.9 }}
               onClick={() => {
                 triggerHaptic(20);
-                if (!isMuted) sounds.playPulse();
+                sounds.playPulse();
               }}
               className="relative"
             >
@@ -203,7 +116,7 @@ export function MobilePlatform({ t, user, lang, setLang, onLogin, onExit, render
                   <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,200,80,0.1)_0%,transparent_75%)]" />
                   <div className="text-center z-10 pointer-events-none">
                      <Orbit size={100} className="text-celestial-saturn opacity-20 animate-spin-slow mb-4" />
-                     <div className="text-xs font-black text-white/40 uppercase tracking-widest">Shard_K_001</div>
+                     <div className="text-xs font-black text-white/40 uppercase tracking-widest">LUMICORE</div>
                   </div>
                </div>
             </motion.div>
@@ -246,22 +159,20 @@ export function MobilePlatform({ t, user, lang, setLang, onLogin, onExit, render
             {renderTabContent('generate')}
           </motion.div>
         );
-      case 'agents':
+      case 'skills':
         return (
           <motion.div 
-            key="agents"
+            key="skills"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
             className="h-full pt-4 space-y-8"
           >
             <div className="flex justify-between items-end px-2">
-              <h2 className="text-3xl font-black italic tracking-tighter uppercase whitespace-pre-line leading-none">{t.neuralEntities || <>Neural <br/> <span className="text-purple-500">Entities</span></>}</h2>
-              <div className="w-10 h-10 rounded-2xl bg-white/5 flex items-center justify-center text-white/40">
-                 <Shield size={18} />
-              </div>
+              <h2 className="text-3xl font-black italic tracking-tighter uppercase whitespace-pre-line leading-none">{t.skills || 'Skills'}</h2>
+              <div className="w-10 h-10 rounded-2xl bg-white/5 flex items-center justify-center text-white/40"><Zap size={18} /></div>
             </div>
-            {renderTabContent('ecosystem')}
+            {renderTabContent('skills')}
           </motion.div>
         );
       case 'profile':
@@ -303,7 +214,7 @@ export function MobilePlatform({ t, user, lang, setLang, onLogin, onExit, render
                 <button 
                   onClick={() => {
                     triggerHaptic(5);
-                    if (!isMuted) sounds.playClick();
+                    sounds.playClick();
                     onExit();
                   }}
                   className="w-full p-6 glass-dark rounded-[2.5rem] border border-white/5 flex items-center justify-center gap-3 text-white/40 hover:text-white transition-colors"
@@ -332,7 +243,9 @@ export function MobilePlatform({ t, user, lang, setLang, onLogin, onExit, render
       {/* Main Viewport Container */}
       <div className="flex-1 overflow-y-auto px-6 pb-36 pt-4 z-10 custom-scrollbar relative">
         <AnimatePresence mode="wait">
-          {renderScreen()}
+          <ClientSurface key={activeScreen} id={'mobile-' + activeScreen} fallback={<p className="py-6 text-white/40">{t.loading || 'Loading'}</p>}>
+            {renderScreen()}
+          </ClientSurface>
         </AnimatePresence>
       </div>
 

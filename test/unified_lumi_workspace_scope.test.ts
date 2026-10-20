@@ -77,9 +77,10 @@ describe('one Lumi with isolated personal and organization workspaces', () => {
   });
 
   it('normalizes organization destinations and enforces member role boundaries', () => {
-    expect(normalizeOrganizationWorkspaceView('company-lumi')).toBe('chat');
+    expect(normalizeOrganizationWorkspaceView('company-lumi')).toBeNull();
+    expect(normalizeOrganizationWorkspaceView('chat')).toBeNull();
     expect(normalizeOrganizationWorkspaceView('law firm')).toBe('legal');
-    expect(normalizeOrganizationWorkspaceView('brand_design')).toBeNull();
+    expect(normalizeOrganizationWorkspaceView('brand_design')).toBe('brand-design');
     expect(canAccessOrganizationWorkspaceView('viewer', 'messaging')).toBe(false);
     expect(canAccessOrganizationWorkspaceView(undefined, 'messaging')).toBe(false);
     expect(canAccessOrganizationWorkspaceView('viewer', 'audit')).toBe(false);
@@ -88,13 +89,13 @@ describe('one Lumi with isolated personal and organization workspaces', () => {
     expect(listOrganizationWorkspaceViewsForRole('viewer')).not.toContain('members');
     expect(listOrganizationWorkspaceViewsForRole('owner')).toEqual(expect.arrayContaining([
       'kb',
-      'chat',
       'messaging',
       'members',
       'audit',
-      'settings',
-      'branch',
       'legal',
     ]));
+    expect(listOrganizationWorkspaceViewsForRole('owner')).not.toContain('chat');
+    expect(listOrganizationWorkspaceViewsForRole('owner')).not.toContain('spatial-design');
+    expect(listOrganizationWorkspaceViewsForRole('owner')).not.toContain('brand-design');
   });
 });

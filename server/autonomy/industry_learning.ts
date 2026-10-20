@@ -1,5 +1,6 @@
-import { readDB } from '../../db_layer';
+import { readDatabaseTables } from '../../db_layer';
 import type { ProfessionProfile } from './professions';
+import { isMemoryAvatarScoped } from '../memory';
 
 export interface IndustryLearningProfile {
   industry: string;
@@ -124,7 +125,7 @@ function recentIndustryTasks(db: any, userId: string): any[] {
 
 function recentHabitMemories(db: any, userId: string): string[] {
   return (db.memories || [])
-    .filter((memory: any) => memory.userId === userId && ['habit', 'preference', 'knowledge'].includes(memory.type))
+    .filter((memory: any) => memory.userId === userId && !isMemoryAvatarScoped(memory) && ['habit', 'preference', 'knowledge'].includes(memory.type))
     .sort((a: any, b: any) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')))
     .slice(0, 12)
     .map((memory: any) => compact(memory.content, 180));
@@ -177,7 +178,7 @@ function profileFromTaskCategory(category: string, tasks: any[], habits: string[
 }
 
 export function getIndustryLearningProfiles(userId: string): IndustryLearningProfile[] {
-  const db = readDB();
+  const db = readDatabaseTables(["memories","professionProfiles","workTakeoverTasks"]);
   const habits = recentHabitMemories(db, userId);
   const profiles = topProfessionProfiles(db).map(profile => profileFromProfession(profile, habits));
   const tasks = recentIndustryTasks(db, userId);

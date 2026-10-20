@@ -1,3 +1,4 @@
+import { readImplementationSource } from './implementation_source';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import { makeApp } from './helpers';
@@ -614,41 +615,33 @@ describe('reasoning model switching stability', () => {
 
   it('contains no channel-level model substitution rules', async () => {
     const fs = await import('node:fs/promises');
-    const [chat, voice, task] = await Promise.all([
-      fs.readFile('server/socket/chat.ts', 'utf8'),
-      fs.readFile('server/socket/voice.ts', 'utf8'),
-      fs.readFile('server/socket/task.ts', 'utf8'),
+    const [chat, voice] = await Promise.all([
+      Promise.resolve(readImplementationSource('server/socket/chat.ts', 'utf8')),
+      Promise.resolve(readImplementationSource('server/socket/voice.ts', 'utf8')),
     ]);
     expect(chat).not.toMatch(/activeModel\s*=\s*isComplex/);
     expect(voice).not.toMatch(/effectiveModel\s*=\s*isComplex/);
     expect(voice).not.toContain("provider === 'deepseek' ? 'deepseek-v4-pro'");
-    expect(task).toContain('let activeModel = userLLMPrefs.model');
-    expect(task).not.toMatch(/activeModel\s*=\s*isComplex/);
-    expect(task).not.toContain('Model auto-selected');
-    for (const source of [chat, voice, task]) {
+    for (const source of [chat, voice]) {
       expect(source).toContain('const reasoningRoutePolicy = {');
       expect(source).toContain('selectionMode: userLLMPrefs.selectionMode');
       expect(source).toContain('fallbackCandidates: userLLMPrefs.fallbackCandidates');
       expect(source).toContain('allowCloudFallback: userLLMPrefs.allowCloudFallback');
-      expect(source).toMatch(/(?:makeLLMCall(?:Streaming)?|runWithTools|callAuthorizedModel|streamAuthorizedModel|runAuthorizedTools)\([\s\S]{0,1600}\.\.\.reasoningRoutePolicy/);
+      expect(source).toMatch(/(?:makeLLMCall(?:Streaming)?|runWithTools|runLumiTurn|runResolvedLumiTurn|callAuthorizedModel|streamAuthorizedModel|runAuthorizedTools)\([\s\S]{0,1600}\.\.\.reasoningRoutePolicy/);
     }
   });
 
   it('keeps auxiliary runtimes and frontend persistence free of hidden model overrides', async () => {
     const fs = await import('node:fs/promises');
-    const [mcp, narrative, generator, appContext, settings] = await Promise.all([
+    const [mcp, narrative, generator, settings] = await Promise.all([
       fs.readFile('server/mcp/lumi_server.ts', 'utf8'),
       fs.readFile('server/memory/narrative.ts', 'utf8'),
       fs.readFile('server/skills/generator.ts', 'utf8'),
-      fs.readFile('src/contexts/AppContext.tsx', 'utf8'),
-      fs.readFile('src/components/Settings.tsx', 'utf8'),
+      Promise.resolve(readImplementationSource('src/components/Settings.tsx', 'utf8')),
     ]);
     expect(mcp).not.toMatch(/model:\s*['"]deepseek-v4-(?:flash|pro)['"]/);
     expect(narrative).not.toMatch(/provider:\s*['"]deepseek['"]/);
     expect(generator).toContain('request.model || preferred.model');
     expect(settings).not.toContain('persistModel(generationModels[0])');
-    const updateStart = appContext.indexOf('const updateAIConfig');
-    const updateEnd = appContext.indexOf('const updateVisionConfig', updateStart);
-    expect(appContext.slice(updateStart, updateEnd)).not.toContain('setAiConfig(prev =>');
   });
 });

@@ -1,10 +1,11 @@
+import { readImplementationSource } from './implementation_source';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { containsInternalExecutionLanguage } from '../shared/public_execution_language';
 import { projectCustomerVisibleExecutionEvent } from '../server/socket/public_agent_event_projection';
 
-const source = (relativePath: string) => fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8');
+const source = (relativePath: string) => readImplementationSource(path.join(process.cwd(), relativePath), 'utf8');
 
 const expectSafePublicText = (value: unknown, forbidden: string[] = []) => {
   const publicText = String(value || '');
@@ -32,7 +33,7 @@ describe('customer-visible execution event projection', () => {
     expectSafePublicText(projected.publicText, ['private-progress-secret']);
   });
 
-  it('keeps tool lifecycle machine fields while projecting coarse, useful action copy', () => {
+  it('keeps tool lifecycle machine fields while projecting only its lifecycle state', () => {
     const args = { path: 'C:\\private\\customer.txt', apiKey: 'sk-private-tool' };
     const started = projectCustomerVisibleExecutionEvent('agent:tool_call', {
       correlationId: 'call-1',
@@ -46,7 +47,7 @@ describe('customer-visible execution event projection', () => {
       name: 'desktop_list_files',
       arguments: args,
       args,
-      publicText: '\u6b63\u5728\u6838\u5bf9\u76f8\u5173\u4fe1\u606f\u3002',
+      publicText: '\u6b63\u5728\u5904\u7406\u8fd9\u4e00\u6b65\u3002',
     });
     expectSafePublicText(started.publicText, ['desktop_list_files', 'customer.txt', 'sk-private-tool']);
 
@@ -55,7 +56,7 @@ describe('customer-visible execution event projection', () => {
       result: 'C:\\private\\customer.txt belongs to Alice',
     }, { taskText: '\u5e2e\u6211\u770b\u4e00\u4e0b\u6587\u4ef6' });
     expect(completed.result).toContain('Alice');
-    expect(completed.publicText).toBe('\u76f8\u5173\u4fe1\u606f\u5df2\u7ecf\u6838\u5bf9\u5b8c\u6210\u3002');
+    expect(completed.publicText).toBe('\u8fd9\u4e00\u6b65\u5df2\u7ecf\u5904\u7406\u5b8c\u6210\u3002');
     expectSafePublicText(completed.publicText, ['desktop_list_files', 'customer.txt', 'Alice']);
   });
 
@@ -77,12 +78,22 @@ describe('customer-visible execution event projection', () => {
     expectSafePublicText(projected.publicText, [error, 'desktop_open', 'private target']);
   });
 
+  it.each(['zh', 'en'] as const)('does not recommend replaying an external action with unknown outcome (%s)', language => {
+    const error = 'External commit outcome is unknown; handler failed after the durable claim.';
+    const projected = projectCustomerVisibleExecutionEvent('agent:tool', {
+      name: 'generate_video', error,
+    }, { language });
+    expect(projected.publicText).toBe(language === 'zh' ? '这一步没有完成。' : 'This step did not finish.');
+    expect(projected.publicText).not.toMatch(/重试|retry/i);
+    expectSafePublicText(projected.publicText, [error, 'durable claim']);
+  });
+
   it('projects English copy and leaves unrelated events unchanged', () => {
     const tool = projectCustomerVisibleExecutionEvent('agent:tool_call', {
       name: 'write_file',
       arguments: { secret: 'not-public' },
     }, { taskText: 'Save this note' });
-    expect(tool.publicText).toBe('I am processing and saving the content.');
+    expect(tool.publicText).toBe('I am working on this step.');
     expectSafePublicText(tool.publicText, ['write_file', 'not-public']);
 
     const response = projectCustomerVisibleExecutionEvent('agent:response', { text: 'Hello' });
@@ -96,24 +107,23 @@ describe('customer-visible execution event projection', () => {
       name,
       result: JSON.stringify({ ok: true, status: 'observed', items: [] }),
     }, { language: 'en' });
-    expect(started.publicText).toBe('I am checking the relevant information.');
-    expect(completed.publicText).toBe('The relevant information has been checked.');
+    expect(started.publicText).toBe('I am working on this step.');
+    expect(completed.publicText).toBe('This step is complete.');
   });
 
-  it.each(['send_email', 'send_email_with_attachments', 'wechat_send_message'])('retains sending copy for the explicit %s operation', name => {
+  it.each(['send_email', 'send_email_with_attachments', 'wechat_send_message'])('does not infer a sending outcome from the %s name', name => {
     const completed = projectCustomerVisibleExecutionEvent('agent:tool', { name, result: 'accepted' }, { language: 'en' });
-    expect(completed.publicText).toBe('The send operation is complete.');
+    expect(completed.publicText).toBe('This step is complete.');
   });
 });
 
 describe('socket channel projection contract', () => {
   it.each([
     ['server/socket/chat.ts', 'visibleUserText'],
-    ['server/socket/task.ts', 'data.text'],
     ['server/socket/voice.ts', 'actionIntentText'],
   ])('projects every normalized event at the %s boundary', (relativePath, taskExpression) => {
     const code = source(relativePath);
-    expect(code).toContain("import { projectCustomerVisibleExecutionEvent } from './public_agent_event_projection';");
+    expect(code).toMatch(/import\s*\{\s*projectCustomerVisibleExecutionEvent\s*\}\s*from\s*['"]\.\/public_agent_event_projection['"]/);
     const normalizer = code.slice(
       code.indexOf('const normalizeAgentPayload = ('),
       code.indexOf('const publishRecordedAgent', code.indexOf('const normalizeAgentPayload = (')),

@@ -20,15 +20,13 @@ export const LUMI_CLIENT_MODE_IDS = [
   LUMI_MEETING_CAPTURE_SURFACE.id,
 ] as const;
 
-export function isLumiOperationMode(value: unknown): value is LumiOperationMode {
-  return value === 'assistant';
-}
-
-export function isLumiClientMode(value: unknown): value is LumiClientMode {
-  return isLumiOperationMode(value) || value === LUMI_MEETING_CAPTURE_SURFACE.id;
-}
-
 export function normalizeLumiClientMode(value: unknown): LumiClientMode {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   return normalized === 'meeting' ? 'meeting' : 'assistant';
+}
+
+/** Desktop execution preference is independent of permissions and wallpaper presentation. */
+export type DesktopExecutionPreference = 'internal' | 'external';
+export function normalizeDesktopExecutionPreference(value: unknown): DesktopExecutionPreference {
+  return value === 'external' ? 'external' : 'internal';
 }

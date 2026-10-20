@@ -48,12 +48,10 @@ interface ToolConfig {
   icon: React.ReactNode;
 }
 
-const localText = (t: any, zh: string, en: string) => (t.langCode === 'en' ? en : zh);
 
 export function DesignHub({ workspace = 'spatial' }: { workspace?: DesignWorkspace }) {
   const [view, setView] = useState<DesignView>(() => workspace === 'spatial' ? 'space' : 'brand');
   const t = useT();
-  const ui = (zh: string, en: string) => localText(t, zh, en);
 
   React.useEffect(() => {
     setView(workspace === 'spatial' ? 'space' : 'brand');
@@ -218,8 +216,7 @@ export function DesignHub({ workspace = 'spatial' }: { workspace?: DesignWorkspa
 }
 
 function useDesignChat() {
-  const t = useT();
-  const ui = (zh: string, en: string) => localText(t, zh, en);
+  useT(); // Subscribe to locale changes used by uiMessage().
   const [input, setInput] = useState('');
   const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
@@ -249,18 +246,17 @@ function useDesignChat() {
 }
 
 function DesignToolView({ config, workspace }: { config: ToolConfig; workspace: DesignWorkspace }) {
-  const t = useT();
-  const ui = (zh: string, en: string) => localText(t, zh, en);
+  useT(); // Subscribe to locale changes used by uiMessage().
   const { input, setInput, result, loading, send } = useDesignChat();
 
   const run = () => {
     const outputGuide = config.output.map(item => `- ${item}`).join('\n');
     send(`${config.role}
 
-${uiMessage('design-hub.prompt-output-sections')}
+请按以下模块输出：
 ${outputGuide}
 
-${uiMessage('design-hub.prompt-user-requirement')}
+用户需求：
 ${input}`);
   };
 

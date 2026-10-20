@@ -1,3 +1,4 @@
+import { readImplementationSource } from './implementation_source';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -16,7 +17,7 @@ import { isWorldModelProvider } from '../server/llm/world_preferences';
 import { LUMI_OFFICIAL_DEFAULT_MODELS } from '../shared/model_provider_capabilities';
 
 function source(relativePath: string): string {
-  return fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8').replace(/\r\n/g, '\n');
+  return readImplementationSource(path.join(process.cwd(), relativePath), 'utf8').replace(/\r\n/g, '\n');
 }
 
 describe('Lumi official API role settings contract', () => {
@@ -33,7 +34,6 @@ describe('Lumi official API role settings contract', () => {
 
   it('exposes the same capability boundary in the settings UI', () => {
     const settings = source('src/components/Settings.tsx');
-    const voice = source('src/components/VoiceProviderSwitch.tsx');
 
     expect(settings).toContain('const LUMI_OFFICIAL_PROVIDER_ID = SHARED_LUMI_OFFICIAL_PROVIDER_ID');
     expect(settings).toContain("value={LUMI_OFFICIAL_PROVIDER_ID}>{lumiOfficialApiLabel(t)} · Vision");
@@ -48,9 +48,6 @@ describe('Lumi official API role settings contract', () => {
     expect(settings).toContain('LUMI_OFFICIAL_DEFAULT_MODELS.image_to_video');
     expect(settings).toContain('LUMI_OFFICIAL_DEFAULT_MODELS.embedding');
     expect(settings).toContain('LUMI_OFFICIAL_DEFAULT_MODELS.rerank');
-    expect(voice).toContain("value: 'relay'");
-    expect(voice).toContain('disabled: false');
-    expect(voice).toContain('officialVoiceNote');
   });
 
   it('keeps the documented endpoint and model ids in one shared contract', async () => {
@@ -61,10 +58,10 @@ describe('Lumi official API role settings contract', () => {
     expect(manifest.LUMI_OFFICIAL_DEFAULT_MODELS.reasoning).toBe('aliyun/deepseek-v4-flash');
     expect(manifest.LUMI_OFFICIAL_DEFAULT_MODELS.vision).toBe('aliyun/qwen2.5-vl-72b');
     expect(manifest.LUMI_OFFICIAL_DEFAULT_MODELS.world).toBe('aliyun/qwen3-vl-flash');
-    expect(manifest.LUMI_OFFICIAL_DEFAULT_MODELS.video_generation).toBe('aliyun/Wan2.2-T2V-A14B');
+    expect(manifest.LUMI_OFFICIAL_DEFAULT_MODELS.video_generation).toBe('aliyun/wan3.0-video');
     expect(LUMI_OFFICIAL_DEFAULT_MODELS.image_generation).toBe('aliyun/qwen-image');
     expect(LUMI_OFFICIAL_DEFAULT_MODELS.image_edit).toBe('aliyun/qwen-image-edit-2509');
-    expect(LUMI_OFFICIAL_DEFAULT_MODELS.image_to_video).toBe('aliyun/Wan2.2-I2V-A14B');
+    expect(LUMI_OFFICIAL_DEFAULT_MODELS.image_to_video).toBe('aliyun/wan3.0-video');
     expect(LUMI_OFFICIAL_DEFAULT_MODELS.speech_recognition).toBe('aliyun/qwen-audio-3.0-asr-flash-streaming');
     expect(LUMI_OFFICIAL_DEFAULT_MODELS.speech_synthesis).toBe('aliyun/cosyvoice-v3-flash');
   });

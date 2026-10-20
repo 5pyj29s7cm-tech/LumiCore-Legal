@@ -1,764 +1,56 @@
-import { verifiedExternalCliStatus, formatExternalCliStatus } from './external_cli_status';
-import { CN_EXTERNAL_CLI_MESSAGES } from '../regions/packs/cn/external_cli_messages';
-import fs from 'node:fs';
-import { hasImmediateExecutionPromise } from './execution_claims';
-import { verifiedSkillAuthoringReceipt } from '../skills/authoring_receipt';
-import { guardCompletionClaims, type CompletionGuardResult } from '../work_product/completion_guard';
-import { containsCompactToolEvidenceMarker } from '../conversation/summary_grounding';
-import { findDesktopCompletionReview, desktopCompletionReviewText, DESKTOP_COMPLETION_REVIEW_REASON } from './desktop_completion_review';
-import { formatGroundedKnowledgeObservation } from './knowledge_result';
-import { buildMediaArtifactReceipt } from '../socket/media_artifact_receipt';
-import { isVideoPlaybackRequest } from './media_intent';
+import { currentAppMutationRequirements } from './action_request';
+import { CN_TASK_EXECUTION_MESSAGES } from '../regions/messages/task_execution_messages';
+import { CN_ACTION_CONTRACT_COPY } from "../regions/messages/action_contract_copy";
 import type { ToolExecutionRecord } from '../tools/types';
-import { artifactPathFromRecord, resolveArtifactDelivery } from '../tools/artifact_evidence';
-import { matchesRequestedArtifactOutput } from './artifact_write_scope';
-import type { LumiTurnFlow } from './turn_flow';
-import {
-  evaluateDesktopObservationEvidence,
-  requiresActiveWindowObservation,
-} from './desktop_observation';
-import {
-  formatClientDiagnosticResult,
-  hasCompleteClientDiagnosticReceipts,
-} from './client_diagnostic_result';
-import {
-  hasExplicitNoMutationInstruction,
-  isCurrentClientDiagnosticRequest,
-  isDiagnosticOrRepairRequest,
-} from './tool_intent';
-import { CN_CAD_MESSAGES } from '../regions/packs/cn/cad_messages';
-import {
-  CN_VOICE_FAST_PATH_MESSAGES,
-  CN_VOICE_QUICK_WORK_MESSAGES,
-  formatCnClientActionTargetLabel,
-  formatCnToolFailureDetail,
-  formatCnMediaGenerationFailure,
-} from '../regions/packs/cn/voice_fast_path_messages';
-import {
-  formatArtifactCreatedAndOpened,
-  formatArtifactCreatedOpenFailed,
-  formatInternalDispatchUnavailable,
-} from '../i18n/naturalness_messages';
-import {
-  CN_MESSAGING_MESSAGES,
-  formatCnMessagingContractBlocker,
-  formatCnUnsupportedToolExecutionClaim,
-} from '../regions/packs/cn/messaging_messages';
-import {
-  buildActionContract,
-  buildActionEvidenceContract,
-  claimsCurrentAppSaveCompletion,
-  documentReadMatchesRequestedTarget,
-  isSuccessfulExactDocumentRead,
-  extractDesktopLaunchTarget,
-  extractPrimaryTaskText,
-  extractExplicitArtifactTextRequirements,
-  extractSimpleDesktopOpenTarget,
-  requestedMediaPlayerTarget,
-  extractCurrentAppTarget,
-  extractRequestedCurrentAppText,
-  hasAuthenticatedWebResultEvidence,
-  hasBlankAutoCadDocumentEvidence,
-  hasCoreActionEvidence,
-  hasCurrentAppSaveEvidence,
-  hasCurrentAppUiMutationEvidence,
-  hasMediaPlaybackEvidence,
-  hasMediaPauseEvidence,
-  hasRequestedDesktopOpenEvidence,
-  hasVisualModelAvailabilityEvidence,
-  hasVerifiedCadGeometryExtractionEvidence,
-  hasVisibleAutoCadExecutionEvidence,
-  requiresArtifactPostWriteReadback,
-  requiresCadGeometryExtractionOnly,
-  requiresCurrentAuthoringDocumentInspection,
-  requiresCurrentAppUiMutation,
-  requiresMediaPlaybackAction,
-  requiresAuthenticatedWebResult,
-  requiresVisualModelAvailabilityCheck,
-  requiresVisibleAutoCadExecution,
-  resolveVerifiedCurrentAuthoringDocumentEvidence,
-  summarizeActionContractBlocker,
-} from './action_contract';
-import { isMediaPauseRequest } from './media_intent';
-import { CN_RESULT_GROUNDING_MESSAGES } from '../regions/packs/cn/voice_fast_path_messages';
-import { CN_EXECUTION_EVIDENCE_MESSAGES } from '../regions/packs/cn/execution_evidence_messages';
-import { CN_TASK_TARGET_ANCHOR_MESSAGES } from '../regions/packs/cn/task_target_anchor_messages';
-import { CN_EXTERNAL_AI_MESSAGES } from '../regions/packs/cn/external_ai_messages';
+import { isCanonicalToolExecutionRecord } from '../tools/execution_engine';
+import { actualDocumentReadContent, isSuccessfulExactDocumentRead } from './action_desktop_evidence';
 import { coalesceToolExecutionRecords, toolRecordSucceeded } from './task_execution_ledger';
 import { parseReceiptObject, toolRecordTerminalPayload, toolRecordTerminalText } from '../tools/receipt_payload';
+import { formatRuntimeCleanupReceipt } from "../regions/messages/runtime_cleanup_messages";
+import { CN_VOICE_FAST_PATH_MESSAGES, CN_VOICE_QUICK_WORK_MESSAGES, formatCnMediaGenerationFailure } from "../regions/messages/voice_fast_path_messages";
 import { isExplicitRuntimeCleanupProposal } from './pending_assistant_offer';
-import { sanitizeUserFacingExecutionOutput } from './user_output_protection';
-import { formatVerifiedTaskResultForReadability } from './reply_style';
-import {
-  hasContinuousStockWatchIntent,
-  hasContinuousStockWatchEvidence,
-  requiresLegalCurrentLawGate,
-  claimsLegalDocumentCompletion,
-  hasLegalDocumentProductionEvidence,
-  hasLegalCurrentLawGateEvidence,
-  hasLegalReasoningChainEvidence,
-  hasLegalExternalPlatformSignal,
-  describesAuthorizedLegalExternalHandoff,
-  claimsExternalLegalPlatformFinalAction,
-  claimsExternalLegalPlatformResult,
-  hasLegalExternalPlatformResultEvidence,
-} from './result_policy_evidence';
-import { normalizeActionIntent } from './normalized_action_intent';
-import { buildOperationModeMetaResponse } from './capability_meta';
-import { CN_UNVERIFIED_CLIENT_STATE_CLAIM } from '../regions/packs/cn/capability_meta_messages';
-import { formatRuntimeCleanupReceipt } from '../i18n/runtime_cleanup_messages';
+import { buildActionContract, claimsCurrentAppSaveCompletion, documentReadMatchesRequestedTarget, extractExplicitArtifactTextRequirements, extractSimpleDesktopOpenTarget, hasAuthenticatedWebResultEvidence, browserSessionObservation, hasCoreActionEvidence, hasCurrentAppSaveEvidence, hasCurrentAppUiMutationEvidence, hasMediaPlaybackEvidence, hasMediaPauseEvidence, hasRequestedDesktopOpenEvidence, hasVisibleAutoCadExecutionEvidence, requiresArtifactPostWriteReadback, requiresCurrentAppUiMutation, requiresAuthenticatedWebResult, requiresVisibleAutoCadExecution, summarizeActionContractBlocker } from './action_contract';
+import { formatCnMessagingContractBlocker } from "../regions/messages/messaging_messages";
+import { CN_EXECUTION_EVIDENCE_MESSAGES } from "../regions/messages/execution_evidence_messages";
 import type { LumiClientMode } from '../../shared/operation_modes';
-import { validatePlaybackVerification } from './playback_verification';
+import { formatVerifiedTaskResultForReadability } from './reply_style';
+import { hasExplicitNoMutationInstruction } from './tool_intent';
+import { hasVisionIntent } from './vision_routing';
+import { isModelConfigurationReadRequest } from './model_configuration_intent';
+import type { LumiTurnFlow } from './turn_flow';
+import { verifiedExternalCliStatus, formatExternalCliStatus } from './external_cli_status';
+import { findDesktopCompletionReview, desktopCompletionReviewText, DESKTOP_COMPLETION_REVIEW_REASON } from './desktop_completion_review';
+import { artifactRecordMatchesTurn, artifactPathFromRecord, resolveArtifactDelivery, isArtifactProducerRecord, sameArtifactPath } from '../tools/artifact_evidence';
+import { withoutLocationLiterals } from './location_literals';
 import { buildTaskTargetAnchorProjection, isVerifiedProducedDocumentTarget } from '../conversation/task_target_anchor';
-
-export interface LumiResultFinalizerInput {
-  taskText: string;
-  responseText: string;
-  toolRecords?: ToolExecutionRecord[];
-  source: 'chat' | 'voice' | 'task' | 'workflow' | string;
-  flow?: LumiTurnFlow;
-  /** Optional durable fences for status-bearing receipts. */
-  taskId?: string;
-  requestId?: string;
-  completionGuard?: CompletionGuardResult;
-}
-
-export interface LumiResultFinalizerResult {
-  text: string;
-  blocked: boolean;
-  reason?: string;
-  notification?: {
-    type: 'work_product_guard';
-    level: 'warning';
-    message: string;
-  };
-}
+import { missingTaskInputResult } from './missing_task_input';
+import { getArtifactTaskProgress } from './action_contract';
+import { formatArtifactProgress, artifactProgressFeedback } from './artifact_progress';
+import { missingSpreadsheetRequirements } from './spreadsheet_requirements';
+import { CN_EXTERNAL_CLI_MESSAGES } from "../regions/messages/external_cli_messages";
+import { buildOperationModeMetaResponse } from './capability_meta';
+import { formatGroundedKnowledgeObservation } from './knowledge_result';
+import { buildMediaArtifactReceipt } from '../socket/media_artifact_receipt';
+import { sanitizeUserFacingExecutionOutput } from './user_output_protection';
+import { guardCompletionClaims } from '../work_product/completion_guard';
+import { hasImmediateExecutionPromise } from './execution_claims';
+import { formatClientDiagnosticResult, hasCompleteClientDiagnosticReceipts } from './client_diagnostic_result';
+import { evaluateDesktopObservationEvidence } from './desktop_observation';
+import { hasContinuousStockWatchIntent, hasContinuousStockWatchEvidence, requiresLegalCurrentLawGate, claimsLegalDocumentCompletion, hasLegalCurrentLawGateEvidence, hasLegalExternalPlatformSignal, describesAuthorizedLegalExternalHandoff, claimsExternalLegalPlatformFinalAction, claimsExternalLegalPlatformResult, hasLegalExternalPlatformResultEvidence } from './result_policy_evidence';
+import { type LumiResultFinalizerInput, type LumiResultFinalizerResult } from "./result_finalizer_types";
+import { taskActionContract, isInternalRuntimeWorkNarration, resultTaskText, isChineseText, summarizeToolFailure, hasResultCoreActionEvidence, isVerifiedCurrentTurnRecord, requiresSourceGroundedArtifactContent, sanitizeInternalExecutionText } from "./result_finalizer_support";
+import { formatGroundedDesktopEvidence, formatGroundedSimpleDesktopOpenResult, formatGroundedClientActionResult, formatGroundedCurrentAuthoringDocumentResult, formatGoalSpecificDesktopResult, formatObservedDesktopOpenResult, formatGroundedPartialActionResult, formatCurrentAuthoringDocumentClarification, formatCreatedArtifactWithoutInAppCompletion } from "./result_desktop_presenter";
+import { unsupportedOngoingExecutionClaim, withoutUnsupportedOngoingExecutionTail, leakedLegacyToolProtocol, unsupportedClientStateVerificationClaim, unsupportedLedgerOnlyWorkTaskCompletion, unsupportedToolModeClaim, unsupportedToolAvailabilityExcuse, groundedVerifiedDocumentObservation, VERIFIED_DOCUMENT_OBSERVATION_TOOL_RE, unsupportedPriorDiagnosticClaim, unsupportedToolExecutionClaim, realWorldClaimKind, isExecutionClaimGuardTurn, isFirstPersonConcreteRealWorldClaim, hasVerifiedEvidenceForRealWorldClaim, unsupportedRealWorldClaim } from "./result_claim_guards";
+import { groundedMediaGeneration, formatGroundedWorkflowProgress, formatGroundedSkillDraft, formatGroundedArtifactResult, formatGroundedCadRunResult, formatGroundedBlankAutoCadDocumentResult, formatGroundedWpsMutationResult, formatGroundedCadGeometryExtractionResult, formatExternalAiHistoryResult } from "./result_artifact_presenter";
 
 const TOOL_ITERATION_LIMIT_RESPONSE_RE =
   /The tool loop reached its limit|Maximum tool call iterations reached|before Lumi could write the final answer|\u8fd9\u8f6e\u5de5\u5177(?:\u5904\u7406|\u8c03\u7528)\u6b21\u6570(?:\u5df2)?(?:\u5230\u8fbe|\u8fbe\u5230|\u5230)\u4e0a\u9650/iu;
-
-function resultTaskText(input: LumiResultFinalizerInput): string {
-  const routed = String(input.flow?.routeText || '').trim();
-  return routed || String(input.taskText || '').trim();
-}
-
-function hasResultCoreActionEvidence(
-  input: LumiResultFinalizerInput,
-  contract: ReturnType<typeof buildActionEvidenceContract>,
-  records: ToolExecutionRecord[],
-  taskText: string,
-): boolean {
-  return hasCoreActionEvidence(contract, records, taskText, undefined, {
-    requestId: input.requestId,
-    taskId: input.taskId,
-  }, input.flow?.acceptedTaskTarget);
-}
-
-function recordMatchesCurrentTurnIdentity(
-  input: LumiResultFinalizerInput,
-  record: ToolExecutionRecord,
-): boolean {
-  const expectedTaskId = String(input.taskId || '').trim();
-  const expectedRequestId = String(input.requestId || '').trim();
-  const actualTaskIds = [record.taskId, record.envelope?.taskId]
-    .map(value => String(value || '').trim())
-    .filter(Boolean);
-  const actualRequestIds = [record.requestId, record.envelope?.requestId]
-    .map(value => String(value || '').trim())
-    .filter(Boolean);
-  if (
-    expectedTaskId
-    && (actualTaskIds.length === 0 || actualTaskIds.some(value => value !== expectedTaskId))
-  ) return false;
-  if (
-    expectedRequestId
-    && (actualRequestIds.length === 0 || actualRequestIds.some(value => value !== expectedRequestId))
-  ) return false;
-  return true;
-}
-
-/** A completion/progress claim may consume only receipts fenced to this turn. */
-function isVerifiedCurrentTurnRecord(
-  input: LumiResultFinalizerInput,
-  record: ToolExecutionRecord,
-): boolean {
-  if (!toolRecordSucceeded(record) || !recordMatchesCurrentTurnIdentity(input, record)) return false;
-  const receipt = parseReceiptObject(record.receipt);
-  const result = parseReceiptObject(record.result);
-  return record.terminalVerification?.status === 'verified'
-    || (
-      record.envelope?.status === 'verified_success'
-      && record.envelope.verification?.status === 'verified'
-    )
-    || receipt?.status === 'verified_success'
-    || receipt?.status === 'verified'
-    || receipt?.verification?.status === 'verified'
-    || receipt?.terminalVerification?.status === 'verified'
-    || result?.status === 'verified_success'
-    || result?.status === 'verified'
-    || result?.verification?.status === 'verified'
-    || result?.terminalVerification?.status === 'verified';
-}
-
-type RealWorldClaimKind =
-  | 'communication'
-  | 'reminder'
-  | 'playback'
-  | 'open'
-  | 'file_mutation'
-  | 'media_artifact'
-  | 'runtime_configuration';
-
-function realWorldClaimKind(value: string): RealWorldClaimKind | '' {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  // Do not turn denials, hypotheticals, quotations, or explanations of the
-  // policy into positive execution claims.
-  const positive = text
-    .replace(/[“”][^“”\r\n]{0,240}[“”]/gu, ' ')
-    .replace(/[‘’][^‘’\r\n]{0,240}[‘’]/gu, ' ')
-    .replace(/"[^"\r\n]{0,240}"/gu, ' ')
-    .split(/[\n。！!]+/u)
-    .map(clause => clause.trim())
-    // i18n-allow: Chinese negated/hypothetical execution-claim recognition; not user-visible copy.
-    .filter(clause => clause
-      && !/[？?]/u.test(clause)
-      && !/^(?:没有|没|未|并未|不能|无法|如果|假如|例如|比如|假设)|(?:没有|并未|未曾|不能|不应|不可).{0,16}(?:完成|发送|创建|打开|播放|执行)|\b(?:did\s+not|didn't|cannot|can't|if|for\s+example)\b/iu.test(clause) // i18n-allow: reviewed execution-claim input recognition.
-      && !/(?:你|他|她|它|用户|模型|系统|文档|消息).{0,10}(?:说|声称|表示|写着|显示|回复|提到).{0,24}(?:已|已经|成功)|\b(?:you|they|the\s+(?:model|system|message|document))\s+(?:said|claimed|reported|shows?)\b/iu.test(clause)) // i18n-allow: reviewed reported-speech input recognition.
-    .join('\n');
-  if (!positive) return '';
-  // i18n-allow: Concrete generated-media and delivered-image claim recognition.
-  if (/(?:已经|已|成功).{0,18}(?:生成|制作|创建).{0,36}(?:图片|图像|视频)|(?:请查看|展示给|这是|以下).{0,30}(?:图片|图像|视频)|\b(?:generated|created).{0,36}(?:image|picture|video)\b/iu.test(positive)
-    && /!\[[^\]]*\]\(|https?:\/\/|(?:已经|已|成功).{0,18}(?:生成|制作|创建)/iu.test(positive)) return 'media_artifact'; // i18n-allow: Concrete artifact-delivery recognition.
-  // i18n-allow: Chinese real-world execution-claim recognition; not user-visible copy.
-  if (/(?:已|已经|成功).{0,14}(?:发送|发出|上传|提交|发布|送达)|(?:发送|上传|提交|发布)成功|\b(?:sent|uploaded|submitted|published|delivered)\b/iu.test(positive)) return 'communication';
-  // i18n-allow: Chinese reminder-creation claim recognition; not user-visible copy.
-  if (/(?:已|已经|成功).{0,16}(?:创建|设置|新建).{0,12}(?:提醒|定时|日程|计划|任务)|(?:提醒|定时任务|日程).{0,16}(?:已创建|已设置)|\b(?:reminder|schedule|calendar).{0,24}(?:created|set)\b/iu.test(positive)) return 'reminder';
-  // i18n-allow: Chinese media-state claim recognition; not user-visible copy.
-  if (/(?:播放|暂停).{0,12}(?:已|已经|启动|开始|成功|正在)|(?:已|已经|成功).{0,12}(?:播放|暂停)|(?:音量|声音)\s*(?:已经)?\s*(?:调到|设为|设置为)?\s*\d{1,3}\s*%?|\b(?:playing|playback started|volume\s*(?:is|set to)?\s*\d+)\b/iu.test(positive)) return 'playback';
-  // i18n-allow: Chinese file-mutation claim recognition; not user-visible copy.
-  if (/(?:已|已经|成功).{0,12}(?:复制|保存|写入|删除|移动)|(?:复制|保存|写入|删除|移动)成功|\b(?:copied|saved|written|deleted|moved)\b/iu.test(positive)) return 'file_mutation';
-  // i18n-allow: Chinese launch/open claim recognition; not user-visible copy.
-  if (
-    /(?:已|已经|成功).{0,12}(?:打开|启动)|(?:打开|启动)成功|\b(?:opened|launched)\b/iu.test(positive)
-    && !/(?:打开|启动)(?:了)?(?:思路|话题|心扉|眼界|想象|局面|新篇章)|\bopen(?:ed)?\s+(?:my\s+)?(?:mind|thinking|perspective)\b/iu.test(positive) // i18n-allow: reviewed abstract-expression input recognition.
-  ) return 'open';
-  // i18n-allow: Chinese runtime-provider claim recognition; not user-visible copy.
-  if (/(?:Lumi[-\s‑]?Neutral\s*v?2|(?:当前|现在|这次|始终|一直|实际)?[^。！？!?\n]{0,24}(?:音色|声线|TTS|STT|语音|模型|提供商|供应商|云端)[^。！？!?\n]{0,36}(?:使用|采用|调用|接入|来自|切到|切换到|是|为)[^。！？!?\n]{0,36}(?:本地|云端|官方|relay|GPT[- ]?SoVITS|CosyVoice|Lumi[-\s‑]?Neutral|long[a-z0-9_-]+))/iu.test(positive)) return 'runtime_configuration';
-  return '';
-}
-
-function isExecutionClaimGuardTurn(input: LumiResultFinalizerInput, contractApplies: boolean): boolean {
-  if (contractApplies || (input.toolRecords || []).length > 0) return true;
-  if (
-    input.flow?.completionEvidenceNeeded === true
-    || input.flow?.clientActionOnlyTurn === true
-    || input.flow?.selfRepairTurn === true
-  ) return true;
-  const task = resultTaskText(input).trim();
-  // A terse confirmation can carry an already server-bound action even though
-  // it has no standalone action contract of its own.
-  return /^(?:嗯|对|是|好|好的|可以|确认|继续|执行|重试|yes|ok(?:ay)?|confirm|continue|retry)[，,。.!！\s]*(?:对|是|的)?[，,。.!！\s]*$/iu.test(task); // i18n-allow: reviewed terse action-followup input recognition.
-}
-
-function isFirstPersonConcreteRealWorldClaim(value: string, kind: RealWorldClaimKind): boolean {
-  const text = String(value || '').trim();
-  // Completed playback, generated output and a named application do not need
-  // an explicit 'I'. Chinese routinely omits that subject in task replies.
-  if (kind === 'media_artifact') return true;
-  if (kind === 'playback' && /(?:视频|第一集|第\d+集|音乐|歌曲|播放器)|\b(?:video|episode|music|song|player)\b/iu.test(text)) return true; // i18n-allow: Media subject recognition.
-  if (kind === 'open' && /(?:网页|网站|首页|浏览器|客户端|爱奇艺|优酷|网易云|WPS)|\b(?:browser|website|app|application)\b/iu.test(text)) return true; // i18n-allow: Concrete application subject recognition.
-  if (!/(?:^|[\s，,。；;！!])(?:我|我们)(?=[^\s，,。；;！!])|\b(?:I|we|Lumi)\b/iu.test(text)) return false; // i18n-allow: reviewed first-person claim recognition.
-  if (kind === 'communication') {
-    return /(?:给|向|发到|上传到|提交到|发布到).{1,40}|(?:文件|文档|消息|邮件|帖子|链接).{0,16}(?:发送|上传|提交|发布)|\b(?:sent|uploaded|submitted|published)\b.{0,40}\b(?:file|document|message|email|post|link|to)\b/iu.test(text); // i18n-allow: reviewed communication-target recognition.
-  }
-  if (kind === 'file_mutation') {
-    return /(?:文件|文档|目录|文件夹|表格|合同|报告|[A-Za-z0-9_ -]+\.[A-Za-z0-9]{1,12}|[A-Za-z]:[\\/]).{0,24}(?:复制|保存|写入|删除|移动)|(?:复制|保存|写入|删除|移动).{0,24}(?:文件|文档|目录|文件夹|表格|合同|报告|[A-Za-z0-9_ -]+\.[A-Za-z0-9]{1,12}|[A-Za-z]:[\\/])/iu.test(text); // i18n-allow: reviewed file-target recognition.
-  }
-  if (kind === 'open') {
-    return /(?:打开|启动).{0,24}(?:浏览器|网页|网站|应用|程序|客户端|文件|文档|窗口|设置|[A-Za-z0-9_ -]+\.[A-Za-z0-9]{1,12}|https?:\/\/)|\b(?:opened|launched)\b.{0,40}\b(?:browser|page|site|app|application|client|file|document|window|settings)\b/iu.test(text); // i18n-allow: reviewed open-target recognition.
-  }
-  if (kind === 'playback') return /(?:音乐|歌曲|播放器|音量|声音|\d{1,3}\s*%|\b(?:music|song|player|volume)\b)/iu.test(text); // i18n-allow: reviewed playback-target recognition.
-  if (kind === 'reminder') return /(?:提醒|定时|日程|计划|\b(?:reminder|schedule|calendar)\b)/iu.test(text); // i18n-allow: reviewed reminder-target recognition.
-  return /(?:音色|声线|TTS|STT|语音|模型|提供商|供应商|Lumi[-\s‑]?Neutral|GPT[- ]?SoVITS|CosyVoice|relay|long[a-z0-9_-]+)/iu.test(text); // i18n-allow: reviewed runtime-provider recognition.
-}
-
-function normalizedClaimSlot(value: unknown): string {
-  return String(value || '')
-    .normalize('NFKC')
-    .toLocaleLowerCase('en-US')
-    .replace(/^[\s“”‘’"']+|[\s“”‘’"'，。！？!?]+$/gu, '')
-    .trim();
-}
-
-function messagingReceiptMatchesRequestedTarget(
-  record: ToolExecutionRecord,
-  taskText: string,
-): boolean {
-  const payload = parseReceiptObject(toolRecordTerminalPayload(record)) || {};
-  if (payload.targetMatched === true || payload.verification?.targetMatched === true) return true;
-  const expectedIntent = normalizeActionIntent(taskText);
-  const expectedTarget = normalizedClaimSlot(expectedIntent.kind === 'messaging_send'
-    ? expectedIntent.target
-    : '');
-  const candidates = [
-    record.arguments?.contact,
-    record.arguments?.recipient,
-    record.arguments?.target,
-    record.arguments?.to,
-    payload.contact,
-    payload.recipient,
-    payload.target,
-  ].map(normalizedClaimSlot).filter(Boolean);
-  if (String(record.name || '') === 'wechat_send_file') {
-    const requestedFile = taskText.match(/([^\\/\s，。！？!?]+\.[A-Za-z0-9]{1,12})/u)?.[1];
-    const acknowledgedFile = String(payload.fileName || payload.filename || '').trim();
-    if (requestedFile && acknowledgedFile && normalizedClaimSlot(requestedFile) === normalizedClaimSlot(acknowledgedFile)) {
-      return true;
-    }
-    const acknowledgedStem = acknowledgedFile.replace(/\.[^.\\/]+$/u, '');
-    if (acknowledgedStem.length >= 2 && normalizedClaimSlot(taskText).includes(normalizedClaimSlot(acknowledgedStem))) {
-      return true;
-    }
-  }
-  if (expectedTarget) return candidates.some(candidate => candidate === expectedTarget);
-  const normalizedTask = normalizedClaimSlot(taskText);
-  return candidates.some(candidate => candidate.length >= 2 && normalizedTask.includes(candidate));
-}
-
-function hasVerifiedEvidenceForRealWorldClaim(
-  input: LumiResultFinalizerInput,
-  kind: RealWorldClaimKind,
-): boolean {
-  const taskText = resultTaskText(input);
-  const hasExplicitTurnIdentity = Boolean(String(input.taskId || '').trim() || String(input.requestId || '').trim());
-  const records = (input.toolRecords || []).filter(record => (
-    isVerifiedCurrentTurnRecord(input, record)
-    || (!hasExplicitTurnIdentity && toolRecordSucceeded(record))
-  ));
-  if (records.length === 0) return false;
-  const contract = taskActionContract(input);
-
-  if (kind === 'media_artifact') {
-    const urls = Array.from(input.responseText.matchAll(/https?:\/\/[^\s<>"')\]]+/gu), match => match[0]);
-    return records.some(record => {
-      const artifactReceipt = buildMediaArtifactReceipt(record.name, record.arguments, toolRecordTerminalPayload(record), record.error);
-      return artifactReceipt && urls.every(url => artifactReceipt.artifacts.some(artifact => artifact.url === url || artifact.path === url));
-    });
-  }
-
-  if (kind === 'open') {
-    const requestedTarget = extractDesktopLaunchTarget(taskText)
-      || extractSimpleDesktopOpenTarget(taskText);
-    return Boolean(requestedTarget) && records.some(record => (
-      isVerifiedPrimaryDesktopOpen(record, requestedTarget)
-      || (
-        record.name === 'browser_open_task'
-        && parseReceiptObject(toolRecordTerminalPayload(record))?.opened === true
-        && hasRequestedDesktopOpenEvidence([record], taskText, requestedTarget)
-      )
-    ));
-  }
-  if (kind === 'playback') {
-    if (isMediaPauseRequest(taskText)) return hasMediaPauseEvidence(records, taskText, { requestId: input.requestId, taskId: input.taskId });
-    return requiresMediaPlaybackAction(taskText)
-      && hasMediaPlaybackEvidence(records, taskText, { requestId: input.requestId, taskId: input.taskId });
-  }
-  if (kind === 'communication') {
-    if (!['messaging_send', 'public_post'].includes(contract.kind)) return false;
-    if (!hasResultCoreActionEvidence(input, contract, records, taskText)) return false;
-    if (contract.kind === 'public_post') return true;
-    return records.some(record => (
-      /^(?:wechat_send_message|wechat_send_file)$/i.test(String(record.name || ''))
-      && messagingReceiptMatchesRequestedTarget(record, taskText)
-    ));
-  }
-  if (kind === 'file_mutation') {
-    return ['artifact_work', 'desktop_operation'].includes(contract.kind)
-      && hasResultCoreActionEvidence(input, contract, records, taskText);
-  }
-  if (kind === 'reminder') {
-    return records.some(record => {
-      if (!/^(?:reminder_create|calendar_event_create|schedule_create|task_create)$/i.test(String(record.name || ''))) {
-        return false;
-      }
-      const payload = parseReceiptObject(toolRecordTerminalPayload(record)) || {};
-      const status = String(payload.status || payload.verification?.status || '').toLowerCase();
-      return payload.created === true || /^(?:created|scheduled|verified|completed)$/.test(status);
-    });
-  }
-
-  // Runtime configuration reads and mutations have several specialized
-  // grounders earlier in this finalizer. A generic settings/client-state read
-  // must never be promoted here into proof of a model or voice switch.
-  return false;
-}
-
-function unsupportedRealWorldClaim(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const kind = realWorldClaimKind(input.responseText);
-  if (!kind) return null;
-  const verified = hasVerifiedEvidenceForRealWorldClaim(input, kind);
-  if (verified) return null;
-  const zh = isChineseText(resultTaskText(input)) || isChineseText(input.responseText);
-  const text = zh
-    ? kind === 'communication'
-      ? CN_EXECUTION_EVIDENCE_MESSAGES.unsupportedCommunicationClaim
-      : kind === 'reminder'
-        ? CN_EXECUTION_EVIDENCE_MESSAGES.unsupportedReminderClaim
-        : kind === 'playback'
-          ? CN_EXECUTION_EVIDENCE_MESSAGES.unsupportedPlaybackClaim
-          : kind === 'file_mutation'
-            ? CN_EXECUTION_EVIDENCE_MESSAGES.unsupportedFileMutationClaim
-            : kind === 'open'
-              ? CN_EXECUTION_EVIDENCE_MESSAGES.unsupportedOpenClaim
-              : kind === 'runtime_configuration'
-                ? CN_EXECUTION_EVIDENCE_MESSAGES.unsupportedRuntimeConfigurationClaim
-                : CN_EXECUTION_EVIDENCE_MESSAGES.unsupportedRealWorldClaim
-    : 'No verified receipt from this task and turn supports that execution claim.';
-  return {
-    text,
-    blocked: true,
-    reason: `${taskActionContract(input).kind}: unsupported current-turn real-world claim: ${kind}.`,
-  };
-}
-
-const VERIFIED_DOCUMENT_OBSERVATION_TOOL_RE = /^(?:read_file|read_files_batch|read_pdf|read_docx|read_xlsx|pdf_to_text|extract_document_text|ocr_image_file)$/iu;
-
-function groundedVerifiedDocumentObservation(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const task = resultTaskText(input);
-  // i18n-allow: Chinese read-only document intent recognition; not user-visible copy.
-  if (!/(?:读取|阅读|查看|看看|分析|审查|审阅|总结|概括|附件|文件|文档|PDF|\b(?:read|review|inspect|analy[sz]e|summari[sz]e|attachment|document|file)\b)/iu.test(task)) {
-    return null;
-  }
-  // i18n-allow: Chinese document-mutation intent recognition; not user-visible copy.
-  if (/(?:创建|新建|写入|保存|导出|复制|移动|删除|生成|另存|\b(?:creat(?:e|ed|ing)|writ(?:e|ing|ten)|sav(?:e|ed|ing)|export(?:ed|ing)?|cop(?:y|ied|ying)|mov(?:e|ed|ing)|delet(?:e|ed|ing)|generat(?:e|ed|ing))\b)/iu.test(task)) {
-    return null;
-  }
-  const record = [...(input.toolRecords || [])].reverse().find(candidate => (
-    VERIFIED_DOCUMENT_OBSERVATION_TOOL_RE.test(String(candidate.name || ''))
-    && isVerifiedCurrentTurnRecord(input, candidate)
-    && isSuccessfulExactDocumentRead(candidate)
-    && documentReadMatchesRequestedTarget(candidate, task, input.flow?.acceptedTaskTarget)
-  ));
-  if (!record) return null;
-  // A successful read cannot erase a downstream delivery/claim failure.
-  // In particular, preserve a blocked shared-loop verdict instead of saving
-  // its "not complete" text under a completed assistant receipt.
-  if (input.completionGuard?.blocked) return { ...input.completionGuard };
-  const response = String(input.responseText || '').trim();
-  if (unsupportedRealWorldClaim(input)) return null;
-  const unusableNarration = !response
-    || isInternalRuntimeWorkNarration(response)
-    // i18n-allow: Chinese stale/internal blocked-result recognition; not user-visible copy.
-    || /(?:^|\n)\s*(?:状态\s*[：:]\s*(?:受阻|失败)|这(?:次|项操作)还没完成|没有取得可用的分析结果)|(?:尚未|还没|没有|未能|无法).{0,16}(?:完成|算出|计算|给出结果)|\b(?:blocked|execution_recovery_incomplete|not (?:yet )?complete|no (?:usable )?result)\b/iu.test(response);
-  // A verified read is terminal for a plain read/view request. It is only an
-  // intermediate step when the user asked Lumi to interpret or synthesize the
-  // document and no usable analysis prose was produced.
-  // i18n-allow: Chinese document-analysis intent recognition; not user-visible copy.
-  // Recovered capsule diagnostics describe internal steps, not new user goals.
-  const [currentAction, recoveredContext = ''] = task.split(/\n## Recent action continuation context\b/i, 2);
-  const recoveredGoal = recoveredContext.match(/^- originalGoal:[ \t]*([^\r\n]*)/im)?.[1] || '';
-  const instruction = [extractPrimaryTaskText(task), input.flow?.rootTaskText || recoveredGoal].join('\n');
-  const calculationRequested = /(?:计算|重算|算出|金额|总额|合计|\b(?:calculat\w*|recalculat\w*|total|multiply)\b)/iu.test(instruction); // i18n-allow: document calculation intent.
-  const analysisRequested = calculationRequested || /(?:分析|审查|审阅|总结|概括|提炼|解读|\b(?:review|analy[sz]e|summari[sz]e|interpret|synthesize)\b)/iu.test(instruction);
-  const calculationOutput = /(?:金额|总额|合计|总计|结果|[=×]|\b(?:amount|total|result)\b)[^\r\n]{0,100}(?:\d|[零一二三四五六七八九十百千万])|^\s*[-+]?\d+(?:\.\d+)?\s*(?:元|美元|USD|CNY)?[。.!！]?\s*$/iu.test(response); // i18n-allow: returned calculation data, not tool-count or path digits.
-  const onlyReadAcknowledgment = /^(?:(?:已|已经|成功|完成|文件|内容|数据|读取|阅读|查看|检查|核验|验证|完毕|任务|操作|read|file|content|verified|completed|successfully|done)|[\s。.!！,，:：;；-])+$/iu.test(response);
-  const rawReadOnly = response.replace(/\s+/gu, '') === String(record.result || '').replace(/\s+/gu, '');
-  const analysisMissing = analysisRequested && (unusableNarration || onlyReadAcknowledgment || rawReadOnly || (calculationRequested && !calculationOutput));
-  return {
-    text: unusableNarration || analysisMissing
-      ? analysisMissing
-        ? (isChineseText(task)
-            ? CN_EXECUTION_EVIDENCE_MESSAGES.verifiedDocumentReadWithoutAnalysis
-            : 'The file content was read successfully, but no analysis result was generated. Only the read step is verified; the overall analysis is not complete.')
-        : (isChineseText(task)
-            ? CN_EXECUTION_EVIDENCE_MESSAGES.verifiedDocumentObservation
-            : 'The file content was read successfully.')
-      : formatVerifiedTaskResultForReadability(response),
-    blocked: analysisMissing,
-    reason: analysisMissing
-      ? 'Verified document read completed, but no usable analysis was generated.'
-      : 'Grounded read-only document observation from a verified current-turn receipt.',
-  };
-}
-
-function leakedLegacyToolProtocol(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
-  const raw = String(input.responseText || '').trim();
-  if (containsCompactToolEvidenceMarker(raw)) {
-    return {
-      text: isChineseText(resultTaskText(input)) || isChineseText(raw)
-        ? CN_RESULT_GROUNDING_MESSAGES.actionNotStarted
-        : 'No verified execution result supports this response.',
-      blocked: true,
-      reason: 'Model output contained a reserved server receipt marker.',
-    };
-  }
-  const hasXmlProtocol = /<(?:function_calls|tool_calls|invoke)\b/i.test(raw);
-  const hasFencedToolProtocol = /```\s*(?:tool|tools|tool_call|tool_calls|function_call|function_calls)\b/i.test(raw);
-  // i18n-allow: Chinese internal tool-protocol recognition; not user-visible copy.
-  const hasBracketProtocol = /\[(?:[^\]\r\n]{1,48})\]\s*[A-Za-z][A-Za-z0-9_.:-]{1,127}\s*\([^\r\n)]*\)|\[(?:调用|call(?:ing)?|tool)\s+[A-Za-z][A-Za-z0-9_.:-]{1,127}\s*\](?:\s*\{)?/iu.test(raw);
-  if (!hasXmlProtocol && !hasFencedToolProtocol && !hasBracketProtocol) return null;
-  const names = Array.from(raw.matchAll(/<invoke\s+name=["']([^"']+)["']/gi), match => match[1]);
-  const clientStateRequested = names.includes('client_get_state');
-  const chinese = isChineseText(resultTaskText(input));
-  const text = chinese
-    ? clientStateRequested
-      ? CN_RESULT_GROUNDING_MESSAGES.clientStateProtocolBlocked
-      : CN_RESULT_GROUNDING_MESSAGES.toolProtocolBlocked
-    : clientStateRequested
-      ? 'I could not read the current client state, so I will not expose an internal tool request as the answer.'
-      : 'The tool request was not executed; its internal protocol text was blocked.';
-  return {
-    text,
-    blocked: true,
-    reason: 'Legacy tool-call protocol leaked into assistant text.',
-    notification: {
-      type: 'work_product_guard',
-      level: 'warning',
-      message: 'Legacy tool-call protocol leaked into assistant text.',
-    },
-  };
-}
-
-function claimedExecutedToolNames(text: string): { asserted: boolean; toolNames: string[] } {
-  const raw = String(text || '');
-  const clauses: string[] = [];
-  const patterns = [
-    /(?:\u8fd0\u884c|\u8c03\u7528|\u6267\u884c|\u4f7f\u7528)\u4e86[^\u3002\uff01\uff1f\n\r)]{0,180}/gu,
-    /\b(?:I|we|Lumi)\s+(?:have\s+)?(?:ran|called|executed|used)\b[^.!?\n\r)]{0,180}/gi,
-  ];
-  for (const pattern of patterns) {
-    for (const match of raw.matchAll(pattern)) {
-      const prefix = raw.slice(Math.max(0, (match.index || 0) - 28), match.index || 0);
-      if (/(?:\u6ca1\u6709|\u5e76\u672a|\u672a\u66fe|\u4e0d\u80fd|\u4e0d\u5e94|\u4e0d\u8981|\u5e76\u975e|did\s+not|didn't|cannot|can't|must\s+not|never)\s*$/i.test(prefix)) continue;
-      clauses.push(match[0]);
-    }
-  }
-  const toolNames = Array.from(new Set(clauses.flatMap(clause =>
-    Array.from(clause.matchAll(/`([A-Za-z][A-Za-z0-9_.:-]{1,127})`/g), match => match[1])
-  )));
-  return { asserted: clauses.length > 0, toolNames };
-}
-
-function unsupportedToolExecutionClaim(input: LumiResultFinalizerInput): string | null {
-  const claim = claimedExecutedToolNames(input.responseText);
-  if (!claim.asserted) return null;
-  const actualNames = new Set((input.toolRecords || []).map(record => String(record.name || '')));
-  const missing = claim.toolNames.length > 0
-    ? claim.toolNames.filter(name => !actualNames.has(name))
-    : (actualNames.size === 0 ? ['tool execution evidence'] : []);
-  if (missing.length === 0) return null;
-  if (isChineseText(resultTaskText(input)) || isChineseText(input.responseText)) {
-    return formatCnUnsupportedToolExecutionClaim(missing[0] === 'tool execution evidence' ? [] : missing);
-  }
-  return [
-    missing[0] === 'tool execution evidence'
-      ? 'No actual tool execution was recorded for this turn.'
-      : `No actual tool call was recorded for: ${missing.join(', ')}.`,
-    'I cannot present an unrecorded action as executed; the real tools must run before I report their results.',
-  ].join('\n');
-}
-
-function unsupportedToolModeClaim(input: LumiResultFinalizerInput): string | null {
-  const response = String(input.responseText || '');
-  // i18n-allow: Chinese unsupported-mode claim recognition; not user-visible copy.
-  const claimsInventedMode = /(?:已(?:经)?|现在|已经成功).{0,18}(?:切换|切到|进入|开启).{0,32}(?:Fetcher|System\s*Diagnostics|工具可用(?:模式|状态)|诊断工具模式)/iu.test(response);
-  if (!claimsInventedMode) return null;
-  const hasModeReceipt = (input.toolRecords || []).some(record => (
-    !record.error
-    && (
-      /^(?:set_client_mode|operation_mode)$/i.test(String(record.name || ''))
-      || (
-        /^client_action$/i.test(String(record.name || ''))
-        && /^set_client_mode$/i.test(String(record.arguments?.action || ''))
-      )
-    )
-    && String(record.result || '').trim()
-  ));
-  if (hasModeReceipt) return null;
-  return isChineseText(resultTaskText(input)) || isChineseText(response)
-    ? CN_EXECUTION_EVIDENCE_MESSAGES.inventedToolMode
-    : 'No such mode switch occurred. Fetcher/System Diagnostics is not a user-selectable runtime mode; the tools actually declared for this turn are authoritative.';
-}
-
-function hasVerifiedOngoingExecutionReceipt(input: LumiResultFinalizerInput): boolean {
-  const records = input.toolRecords || [];
-  const task = resultTaskText(input);
-  // i18n-allow: Reviewed multilingual runtime-status query recognition; not user-visible copy.
-  const explicitRuntimeStatusQuery = /(?:任务|工作|后台|运行).{0,24}(?:状态|进度|还在|是否|怎么样)|(?:状态|进度).{0,24}(?:任务|工作|后台|运行)|\b(?:status|progress|still\s+running|active\s+(?:task|work|run))\b/iu.test(task);
-  return records.some(record => {
-    if (
-      !toolRecordSucceeded(record)
-      || record.terminalVerification?.status === 'failed'
-    ) return false;
-    if (!recordMatchesCurrentTurnIdentity(input, record)) return false;
-    const payload = parseReceiptObject(toolRecordTerminalPayload(record));
-    if (!payload) return false;
-    const status = String(
-      payload.status
-      || payload.task?.status
-      || payload.run?.status
-      || '',
-    ).trim().toLowerCase();
-    const name = String(record.name || '');
-    if (name === 'runtime_work_status') {
-      return explicitRuntimeStatusQuery
-        && status === 'active'
-        && Number(payload.activeCount || 0) > 0;
-    }
-    if (!/(?:work_takeover|autonomy|scheduler|background|runtime_work|task_(?:create|start|run|resume))/i.test(name)) {
-      return false;
-    }
-    const durableIdentity = String(
-      payload.taskId
-      || payload.runId
-      || payload.jobId
-      || payload.task?.id
-      || record.taskId
-      || '',
-    ).trim();
-    return Boolean(durableIdentity)
-      && /^(?:active|running|executing|in_progress)$/.test(status);
-  });
-}
-
-function unsupportedOngoingExecutionClaim(
-  input: LumiResultFinalizerInput,
-  includeActionPlans = true,
-): string | null {
-  const response = String(input.responseText || '').trim();
-  if (!response) return null;
-  const task = resultTaskText(input);
-  const actionRequested = taskActionContract(input).applies
-    || isDiagnosticOrRepairRequest(task)
-    || input.flow?.completionEvidenceNeeded === true
-    || (input.toolRecords || []).length > 0;
-  // i18n-allow: Chinese execution-plan recognition; not user-visible copy.
-  const claimsPendingAction = /(?:^|[\n\u3002\uff01\uff1f.!?])\s*(?:(?:\u597d|\u597d\u7684|\u53ef\u4ee5|\u884c)[\uff0c,\s]*)?(?:(?:\u6211|\u8ba9\u6211|\u8fd9\u8fb9)?\s*(?:\u5148|\u73b0\u5728|\u9a6c\u4e0a|\u7acb\u5373|\u63a5\u4e0b\u6765|\u7ee7\u7eed)\s*(?:\u770b\u770b|\u67e5\u770b|\u68c0\u67e5|\u8bfb\u53d6|\u6253\u5f00|\u6267\u884c|\u5904\u7406|\u91cd\u542f|\u4fee\u590d|\u6062\u590d|\u8c03\u7528|\u5f00\u59cb)|(?:\u6211|\u8fd9\u8fb9)\s*\u6b63\u5728\s*(?:\u770b|\u67e5|\u8bfb|\u6253\u5f00|\u6267\u884c|\u5904\u7406|\u91cd\u542f|\u4fee\u590d|\u6062\u590d))|\b(?:let\s+me|i(?:'ll|\s+will|\s+am\s+going\s+to)|first\s+i(?:'ll|\s+will))\b[^.!?\n]{0,100}\b(?:check|inspect|read|open|execute|handle|restart|repair|recover|start)\b/iu.test(response);
-  // The terminal candidate may also end in a bare status phrase such as
-  // “正在执行——”. At finalization that wording is truthful only when a durable
-  // background execution receipt still reports an active run.
-  // i18n-allow: Reviewed multilingual execution-status recognition; not user-visible copy.
-  const claimsStandaloneOngoing = /(?:^|[\n。！？.!?])\s*正在\s*(?:执行|操作|处理|调用|修复|重启)[—\-\s。！!]*$/iu.test(response);
-  // General first-person execution promises are handled by the shared
-  // completion guard below, which already excludes quoted explanations and
-  // reflective self-assessment. This narrow check covers the distinct false
-  // claim seen in production: inventing that an internal "tool chain" was
-  // restored even though this turn has no tool receipt.
-  // i18n-allow: Chinese execution-claim recognition; not user-visible copy.
-  const claimsInventedToolChain = /工具(?:链|链路)[^。！？!?\n]{0,20}(?:已经)?(?:恢复|可用)|\btool(?:ing)?\s+(?:chain|pipeline)[^.!?\n]{0,30}\b(?:restored|available|working)\b/iu.test(response);
-  const claimsExecutionActivity = claimsPendingAction || claimsStandaloneOngoing;
-  // An unknown/short user utterance must not make a concrete immediate action
-  // promise exempt from checking simply because routing classified it as chat.
-  // i18n-allow: Immediate externally observable action promise, not quoted advice.
-  const concreteImmediatePromise = hasImmediateExecutionPromise(response);
-  if (concreteImmediatePromise && !(input.toolRecords || []).length) {
-    return isChineseText(response) ? CN_RESULT_GROUNDING_MESSAGES.actionNotStarted : 'No action started in this turn.';
-  }
-  if (concreteImmediatePromise && includeActionPlans && !hasVerifiedOngoingExecutionReceipt(input)) {
-    return isChineseText(response) ? CN_RESULT_GROUNDING_MESSAGES.executionEndedWithoutCompletion
-      : 'This attempt ended without verified completion; no background execution is running.';
-  }
-  if (!claimsInventedToolChain && !(includeActionPlans && actionRequested && claimsExecutionActivity)) return null;
-  if (claimsExecutionActivity && hasVerifiedOngoingExecutionReceipt(input)) return null;
-  const attemptedButEnded = (input.toolRecords || []).length > 0;
-  return isChineseText(resultTaskText(input)) || isChineseText(response)
-    ? claimsInventedToolChain
-      ? CN_RESULT_GROUNDING_MESSAGES.unverifiedExecutionActivity
-      : attemptedButEnded
-        ? CN_RESULT_GROUNDING_MESSAGES.executionEndedWithoutCompletion
-        : CN_RESULT_GROUNDING_MESSAGES.actionNotStarted
-    : claimsInventedToolChain
-      ? 'No new execution started in this turn; the draft response mixed in an older task.'
-      : attemptedButEnded
-        ? 'This foreground attempt has ended without verified goal completion; it is not still executing.'
-        : 'No tool execution started in this turn. The response described a plan, not an action or result.';
-}
-
-function unsupportedToolAvailabilityExcuse(input: LumiResultFinalizerInput): string | null {
-  const response = String(input.responseText || '');
-  // A correct explanation may explicitly deny the fictional state (for
-  // example, "the routed subset does not mean tools are unmounted"). Remove
-  // those denial clauses before looking for an unsupported availability claim.
-  const availabilityClaimText = response.replace(
-    /(?:\u4e0d\u4ee3\u8868|\u5e76\u4e0d\u4ee3\u8868|\u4e0d\u7b49\u4e8e|\u4e0d\u80fd\u8bf4\u660e|\u4e0d\u662f\u8bf4|does\s+not\s+mean|doesn'?t\s+mean)[^\u3002\uff01\uff1f.!?\n]{0,100}[\u3002\uff01\uff1f.!?]?/giu,
-    '',
-  );
-  // Keep the state word close to the tool noun. A broad wildcard here makes
-  // truthful plans such as “用桌面打开工具启动计算器，不打开替代软件” look as
-  // if they claimed the tool itself was not open.
-  // i18n-allow: Unsupported user-switchable tool-state excuse recognition; not user-visible copy.
-  const claimsToolsAreOff = /(?:当前|现在|这轮|我这边|当前会话|这个会话)?[^。！？!?\n]{0,32}(?:工具|tool)(?:\s*(?:本身|列表|集合|状态|权限|能力|链路|路由|is|are)){0,2}[\s:：]*(?:没(?:有)?打开|未打开|没开启|未开启|不可用|没有开放|没(?:有)?挂载|未挂载|没带|只有|只(?:挂载|有)|not (?:open|enabled|available|mounted|loaded)|disabled)|(?:当前|现在|这轮|我这边|当前会话|这个会话)?[^。！？!?\n]{0,28}(?:只有|只(?:挂载|有)|没(?:有)?挂载|未挂载|没带)[^。！？!?\n]{0,20}(?:工具|tool)|(?:需要|要不要|可以)(?:我)?[^。！？!?\n]{0,28}(?:切换|切到|进入|开启)[^。！？!?\n]{0,24}(?:工具可用|工具模式|tool mode|tools? enabled)/iu.test(availabilityClaimText);
-  if (!claimsToolsAreOff) return null;
-  const actualUnavailableReceipt = (input.toolRecords || []).some(record => (
-    String(record.error || '').trim()
-    // i18n-allow: Chinese tool-error recognition pattern; not user-visible copy.
-    && /(?:tool[^\n]{0,40}(?:unavailable|not found|not declared|disabled)|工具[^\n]{0,32}(?:不可用|未声明|不存在|已禁用))/iu.test(String(record.error || ''))
-  ));
-  if (actualUnavailableReceipt) return null;
-  return isChineseText(resultTaskText(input)) || isChineseText(response)
-    ? CN_EXECUTION_EVIDENCE_MESSAGES.inventedToolAvailability
-    : 'No receipt shows that tools were disabled, and there is no user-switchable “tool available mode.” Lumi must resume the real tool route instead of shifting an internal routing failure to the user.';
-}
-
-function unsupportedPriorDiagnosticClaim(input: LumiResultFinalizerInput): string | null {
-  const task = resultTaskText(input);
-  const response = String(input.responseText || '');
-  // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
-  const deniesDiagnostic = /(?:没有|没|并未|不是|不在|未曾|无法确认|不能确认)[^。！？!?\n]{0,32}(?:自检|健康检查|扫描|检查)|\b(?:did\s+not|didn't|wasn'?t|cannot\s+confirm)\b[^.!?\n]{0,80}\b(?:self[- ]?check|scan|diagnostic)/iu.test(response);
-  if (deniesDiagnostic) return null;
-  // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
-  const claimsDiagnostic = /(?:刚才|刚刚|之前|上一轮|上一次)?[^。！？!?\n]{0,20}(?:在|已经|刚刚|跑了|执行了|进行了|做了)[^。！？!?\n]{0,48}(?:自检|健康检查|扫描\s*MCP|扫描.*技能|检查.*运行时)|\b(?:I|Lumi|we)\s+(?:was|were|have\s+been|had\s+been)?\s*(?:running|performing|doing)[^.!?\n]{0,80}\b(?:self[- ]?check|diagnostic|MCP\s+scan)/iu.test(response);
-  if (!claimsDiagnostic) return null;
-
-  // Only apply the prior-run guard when the task or answer actually points
-  // backward in time. A current request such as "please run a self-check"
-  // must still be allowed to summarize receipts produced in this turn.
-  // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
-  const priorTaskContext = /(?:刚才|刚刚|之前|上一轮|上一次|上轮)|(?:为什么|怎么|为何)[^。！？!?\n]{0,48}(?:这么久|那么久|半天|延迟|才[^。！？!?\n]{0,12}(?:回|答|回复|回应))|\b(?:earlier|previously|last\s+(?:turn|time)|prior\s+turn|why[^.!?]{0,60}(?:delay|took?\s+so\s+long))\b/iu.test(task);
-  const currentDiagnosticRequest = !priorTaskContext
-    && isCurrentClientDiagnosticRequest(task);
-  // i18n-allow: Chinese input-recognition pattern; not user-visible copy.
-  const priorResponseContext = /(?:刚才|刚刚|之前|上一轮|上一次|上轮)|\b(?:earlier|previously|last\s+(?:turn|time)|was|were|had\s+been)\b/iu.test(response);
-  if (!priorTaskContext && (!priorResponseContext || currentDiagnosticRequest)) return null;
-
-  // Current-turn tool records cannot prove a claim about "just now" or a
-  // previous turn: ToolExecutionRecord has no prior-turn identity/timestamp.
-  // Explicit current self-check requests are grounded earlier by
-  // formatClientDiagnosticResult; any remaining prior-run narrative is blocked.
-  return isChineseText(resultTaskText(input)) || isChineseText(response)
-    ? CN_RESULT_GROUNDING_MESSAGES.priorDiagnosticUnsupported
-    : 'There is no verifiable client-diagnostic receipt for the prior turn. I cannot explain the delay as a self-check when no such check was recorded.';
-}
-
-function taskActionContract(input: LumiResultFinalizerInput) {
-  const text = resultTaskText(input);
-  const contract = buildActionEvidenceContract(text);
-  if (!input.flow?.preparationRootText) return contract;
-  const root = input.flow.preparationRootText;
-  return { ...contract, components: [
-    { text: root, contract: buildActionEvidenceContract(root) },
-    { text: extractPrimaryTaskText(text), contract },
-  ] };
-}
 
 function parseRuntimeWorkReceipt(record: ToolExecutionRecord): Record<string, any> | null {
   if (!toolRecordSucceeded(record)) return null;
   const payload = parseReceiptObject(toolRecordTerminalPayload(record));
   if (!payload || payload.ok !== true) return null;
   return payload;
-}
-
-function isInternalRuntimeWorkNarration(value: string): boolean {
-  const text = String(value || '').trim();
-  if (!text) return true;
-  // These are model/tool-loop control messages, not useful user feedback. A
-  // verified runtime receipt must still produce a concise visible answer.
-  return /(?:内部调度没有形成可用结果|模型不得重新快照|无法形成已验证.*(?:提议|清理)|当前模型请求没有声明|只能由运行时采用|工具结果已收到|no response|no (?:verified|actual) .*result|cannot .*reconstruct .*target)/iu.test(text); // i18n-allow: internal execution-narration recognition; not user-visible copy.
 }
 
 /**
@@ -856,84 +148,6 @@ function formatGroundedRuntimeWorkResult(
   };
 }
 
-function unsupportedClientStateVerificationClaim(input: LumiResultFinalizerInput): string | null {
-  const response = String(input.responseText || '').trim();
-  if (!response) return null;
-  // A conceptual answer may describe a compile-time product definition, but it
-  // must not pretend that live client/runtime state was read or verified.
-  const deniesVerification = /(?:\u6ca1\u6709|\u5e76\u672a|\u672a\u66fe|\u4e0d\u80fd|\u65e0\u6cd5|did\s+not|didn't|cannot|can't|was\s+not|wasn't)[^\u3002\uff01\uff1f.!?\n]{0,24}(?:\u9a8c\u8bc1|\u6838\u5b9e|\u786e\u8ba4|\u8bfb\u53d6|\u67e5\u8be2|verify|confirm|read|inspect|query)/iu.test(response);
-  if (deniesVerification) return null;
-  const verificationClaim = /(?:(?:\u5df2\u9a8c\u8bc1|\u5df2\u6838\u5b9e|\u7ecf\u6838\u5b9e|\u5df2\u786e\u8ba4|\u5df2\u8bfb\u53d6|\u5df2\u67e5\u8be2|\u67e5\u5230|verified|confirmed|read|queried|inspected)[^\u3002\uff01\uff1f.!?\n]{0,100}(?:client\.modes|\u5ba2\u6237\u7aef\u72b6\u6001|\u8fd0\u884c\u65f6\u72b6\u6001|\u5f53\u524d\u914d\u7f6e|client\s+state|runtime\s+state|current\s+configuration)|(?:client\.modes|\u5ba2\u6237\u7aef\u72b6\u6001|\u8fd0\u884c\u65f6\u72b6\u6001|\u5f53\u524d\u914d\u7f6e|client\s+state|runtime\s+state|current\s+configuration)[^\u3002\uff01\uff1f.!?\n]{0,100}(?:\u5df2\u9a8c\u8bc1|\u5df2\u6838\u5b9e|\u7ecf\u6838\u5b9e|\u5df2\u786e\u8ba4|\u5df2\u8bfb\u53d6|\u5df2\u67e5\u8be2|verified|confirmed|read|queried|inspected))/iu.test(response);
-  if (!verificationClaim) return null;
-
-  const hasRelevantReceipt = (input.toolRecords || []).some(record => (
-    toolRecordSucceeded(record)
-    && /^(?:client_get_state|client_health_check|client_capability_manifest|model_configuration_get)$/i.test(String(record.name || ''))
-  ));
-  if (hasRelevantReceipt) return null;
-
-  return isChineseText(resultTaskText(input)) || isChineseText(response)
-    ? CN_UNVERIFIED_CLIENT_STATE_CLAIM
-    : 'No verifiable client-runtime receipt was recorded for this turn, so the current state cannot be described as verified. Product definitions may be stated directly; live state requires a real query receipt.';
-}
-
-function isChineseText(value: string): boolean {
-  return /[\u3400-\u9fff]/u.test(value || '');
-}
-
-function sanitizeInternalExecutionText(value: string, chinese: boolean): string {
-  const raw = String(value || '').trim();
-  if (!raw) return raw;
-  const internalLine = /(?:No successful (?:current-turn )?tool execution|\ballowedTools\b|\bappTarget\b|\bUI\s*evidence\b|work product guard|action contract|Required completion evidence|Preferred tools|Verification tools|tool route|tool protocol|Maximum tool call iterations|execution_recovery_incomplete|desktop_control_paused_for_user_activity|target_mismatch|<\/?function_calls?>|<invoke\b|\[historical\s+source=[^\]]+\]|\[[^\]\r\n]{1,48}\]\s*[A-Za-z][A-Za-z0-9_.:-]{1,127}\s*\(|^\s*(?:\u72b6\u6001\s*[:\uff1a]\s*(?:\u5931\u8d25|\u53d7\u963b)|\u8bc1\u636e\s*[:\uff1a]|\u5177\u4f53\u963b\u585e\s*[:\uff1a]|\u6267\u884c\u53cd\u9988\s*$|\u5df2\u5b8c\u6210\u9879\s*$|\u673a\u5668\u8bc1\u636e\s*$|\u672a\u5b8c\u6210\u9879\s*$|\u963b\u585e\u9879\s*$|\u4e0b\u4e00\u6b65\s*$)|\u6211\u5df2\u4fdd\u7559\u539f\u76ee\u6807.{0,120}\u56de\u6267)/i;
-  const withoutHistoryMarkers = raw.replace(/\[historical\s+source=[^\]]+\]\s*/gi, '');
-  if (!internalLine.test(withoutHistoryMarkers) && withoutHistoryMarkers === raw) return raw;
-  const cleaned = withoutHistoryMarkers
-    .split(/\r?\n/)
-    .filter(line => !internalLine.test(line))
-    .join('\n')
-    .trim();
-  return cleaned || formatInternalDispatchUnavailable(chinese);
-}
-
-function summarizeToolFailure(records: ToolExecutionRecord[]): string {
-  const webAccountBlocker = summarizeWebAccountBlocker(records);
-  if (webAccountBlocker) return webAccountBlocker;
-  const failed = [...records].reverse().find(record => record.error);
-  if (!failed) return '';
-  const name = String(failed.name || '');
-  const error = String(failed.error || '').trim();
-  const action = (() => {
-    if (/^(desktop_open|open_item)$/i.test(name)) return '\u6253\u5f00\u6216\u805a\u7126\u76ee\u6807\u7a97\u53e3';
-    if (/^(desktop_active_window|get_active_window_info)$/i.test(name)) return '\u8bfb\u53d6\u5f53\u524d\u524d\u53f0\u7a97\u53e3';
-    if (/^(wechat_read_recent_chat)$/i.test(name)) return '\u5fae\u4fe1\u524d\u53f0\u804a\u5929\u8bfb\u53d6';
-    if (/^(wechat_send_message)$/i.test(name)) return CN_MESSAGING_MESSAGES.textSendAction;
-    if (/^(wechat_send_file)$/i.test(name)) return CN_MESSAGING_MESSAGES.fileSendAction;
-    if (/^(computer_use)$/i.test(name)) return '\u89c6\u89c9\u684c\u9762\u6267\u884c';
-    if (/keyboard/i.test(name)) return '\u952e\u76d8\u8f93\u5165';
-    if (/mouse|cursor/i.test(name)) return '\u5149\u6807\u70b9\u51fb';
-    return CN_VOICE_FAST_PATH_MESSAGES.genericToolAction;
-  })();
-  return error ? `${action}\uff1a${formatCnToolFailureDetail(error)}` : action;
-}
-
-function summarizeWebAccountBlocker(records: ToolExecutionRecord[]): string {
-  for (const record of [...records].reverse()) {
-    const name = String(record.name || '');
-    const result = String(record.result || '');
-    const error = String(record.error || '');
-    if (/^web_login_profile_list$/i.test(name) && /"profiles"\s*:\s*\[\s*\]/i.test(result)) {
-      return '\u6ca1\u6709\u627e\u5230\u5df2\u4fdd\u5b58\u7684\u7f51\u9875\u767b\u5f55 profile/\u4f1a\u8bdd';
-    }
-    if (/^web_login_run$/i.test(name) && /manual_required|captcha|2FA|QR|passkey|\u9a8c\u8bc1\u7801|\u626b\u7801|\u4e8c\u6b21\u9a8c\u8bc1/i.test(`${result}\n${error}`)) {
-      return '\u767b\u5f55\u9700\u8981\u624b\u52a8\u5b8c\u6210\u626b\u7801\u3001\u9a8c\u8bc1\u7801\u30012FA \u6216\u8d26\u53f7\u786e\u8ba4';
-    }
-    if (/mcp_playwright_browser_(?:evaluate|run_code_unsafe)/i.test(name) && /cross-origin|Blocked a frame|iframe|contentFrame/i.test(`${result}\n${error}`)) {
-      return '\u767b\u5f55\u6846\u5728\u8de8\u57df iframe \u91cc\uff0c\u666e\u901a\u9875\u9762 JS \u4e0d\u80fd\u76f4\u63a5\u63a5\u7ba1\uff1b\u9700\u8981\u8d70\u53ef\u89c1 web_login_run \u4f1a\u8bdd\u6216\u7528\u6237\u5b8c\u6210\u9a8c\u8bc1';
-    }
-  }
-  return '';
-}
-
 function shouldUseCompactActionBlockedResponse(input: LumiResultFinalizerInput): boolean {
   const records = input.toolRecords || [];
   const actionText = resultTaskText(input);
@@ -949,67 +163,13 @@ function shouldUseCompactActionBlockedResponse(input: LumiResultFinalizerInput):
 
 function shouldEnforceCoreActionContract(contract: ReturnType<typeof buildActionContract>, text: string): boolean {
   if (!contract.applies) return false;
-  if (['messaging_read', 'messaging_send', 'browser_account', 'public_post', 'cad_drafting', 'customer_operations', 'ecommerce_operations', 'design_delivery', 'stock_monitor', 'task_control', 'desktop_operation', 'artifact_work'].includes(contract.kind)) {
+  if (['messaging_read', 'messaging_send', 'browser_account', 'public_post', 'cad_drafting', 'customer_operations', 'ecommerce_operations', 'design_delivery', 'stock_monitor', 'task_control', 'desktop_operation', 'artifact_work', 'media_generation', 'external_ai_request'].includes(contract.kind)) {
     return true;
   }
   if (contract.kind === 'legal_document') {
     return /\u4ee3\u7406\u8bcd|\u8d77\u8bc9\u72b6|\u7b54\u8fa9\u72b6|pleading/i.test(text);
   }
   return false;
-}
-
-function formatCurrentAuthoringDocumentClarification(
-  input: LumiResultFinalizerInput,
-): string | null {
-  const taskText = resultTaskText(input);
-  if (!requiresCurrentAuthoringDocumentInspection(taskText)) return null;
-  const activeWindowRecord = [...(input.toolRecords || [])].reverse().find(record => (
-    /^(?:desktop_active_window|get_active_window_info)$/i.test(String(record.name || ''))
-    && !record.error
-  ));
-  const payload = activeWindowRecord
-    ? parseReceiptObject(activeWindowRecord.receipt)
-      || parseReceiptObject(activeWindowRecord.result)
-      || {}
-    : {};
-  const nestedWindow = payload.activeWindow && typeof payload.activeWindow === 'object'
-    ? payload.activeWindow
-    : payload.window && typeof payload.window === 'object'
-      ? payload.window
-      : {};
-  const title = String(
-    payload.windowTitle
-    || payload.title
-    || nestedWindow.windowTitle
-    || nestedWindow.title
-    || '',
-  ).trim().slice(0, 180);
-  const processName = String(
-    payload.processName
-    || payload.process_name
-    || payload.executable
-    || nestedWindow.processName
-    || nestedWindow.process_name
-    || nestedWindow.executable
-    || '',
-  ).trim().replace(/^.*[\\/]/, '').slice(0, 120);
-  const visibleTarget = title || processName;
-  const authoringSurface = /(?:\bwps(?:\.exe)?\b|\bwpp(?:\.exe)?\b|\bet(?:\.exe)?\b|\bwinword(?:\.exe)?\b|\bexcel(?:\.exe)?\b|\bpowerpnt(?:\.exe)?\b|\bword\b|\bpowerpoint\b)/iu
-    .test(`${title}\n${processName}`);
-  const zh = isChineseText(taskText) || isChineseText(input.responseText);
-  if (authoringSurface) {
-    return zh
-      ? CN_EXECUTION_EVIDENCE_MESSAGES.currentAuthoringNeedsExactFile(visibleTarget)
-      : `I can see “${visibleTarget}” in the foreground, but I cannot yet bind it to one exact file. Save the document first or attach the file, and I can continue the analysis.`;
-  }
-  if (visibleTarget) {
-    return zh
-      ? CN_EXECUTION_EVIDENCE_MESSAGES.currentAuthoringWrongForeground(visibleTarget)
-      : `The foreground window is “${visibleTarget}”, not a readable WPS, Word, Excel, or PowerPoint document. Bring the document to the foreground or attach the file.`;
-  }
-  return zh
-    ? CN_EXECUTION_EVIDENCE_MESSAGES.currentAuthoringMissingForeground
-    : 'I cannot identify a foreground document window yet. Bring the document to the foreground or attach the file.';
 }
 
 function formatCompactBlockedResponse(input: LumiResultFinalizerInput, reason?: string): string {
@@ -1019,7 +179,6 @@ function formatCompactBlockedResponse(input: LumiResultFinalizerInput, reason?: 
   const contractBlocker = zh && contract.kind === 'messaging_send'
     ? formatCnMessagingContractBlocker(failure)
     : summarizeActionContractBlocker(contract, failure);
-  const source = String(input.source || '').toLowerCase();
   if (/External legal platform final action/i.test(reason || '')) {
     return zh
       ? [
@@ -1046,41 +205,17 @@ function formatCompactBlockedResponse(input: LumiResultFinalizerInput, reason?: 
           'Until then, this is an authorized handoff, not a verified platform result.',
         ].join('\n');
   }
-  if (contract.kind === 'legal_document' && /reasoning chain|triad|\u4e09\u6bb5\u8bba/i.test(reason || '')) {
-    return zh
-      ? [
-          '\u8fd9\u4efd\u6cd5\u5f8b\u6210\u679c\u8fd8\u4e0d\u80fd\u6807\u8bb0\u4e3a\u5b8c\u6210\u6216\u6b63\u5f0f\u53ef\u7528\u3002',
-          '\u7f3a\u5c11\u4e09\u6bb5\u8bba\u63a8\u7406\u94fe\uff1a\u9700\u8981 legal_case_reasoning_matrix\uff0c\u6216\u6587\u4e66/\u4ea4\u4ed8\u5305\u4e2d\u80fd\u770b\u5230\u6cd5\u5f8b\u4f9d\u636e\u3001\u4e8b\u5b9e\u8bc1\u636e\u3001\u6db5\u6444/\u9002\u7528\u7ed3\u8bba\u7684\u53ef\u9a8c\u6536\u8bb0\u5f55\u3002',
-          '\u6b63\u5f0f\u6587\u4e66\u5fc5\u987b\u80fd\u4ece\u5927\u524d\u63d0\u3001\u5c0f\u524d\u63d0\u5230\u7ed3\u8bba\u9010\u6b65\u590d\u6838\u3002',
-        ].join('\n')
-      : [
-          'This legal work product cannot be marked complete or formally usable yet.',
-          'Missing legal reasoning chain: run legal_case_reasoning_matrix, or provide product evidence showing legal authority, facts/evidence, and application/conclusion.',
-          'Formal legal documents must be reviewable from rule, to facts, to conclusion.',
-        ].join('\n');
-  }
   if (contract.kind === 'legal_document' && /current-law|current law|\u73b0\u884c\u6709\u6548/i.test(reason || '')) {
     return zh
       ? [
           '\u8fd9\u4efd\u6cd5\u5f8b\u6587\u4e66\u8fd8\u4e0d\u80fd\u6807\u8bb0\u4e3a\u5b8c\u6210\u6216\u6b63\u5f0f\u53ef\u7528\u3002',
-          '\u7f3a\u5c11\u73b0\u884c\u6709\u6548\u6cd5\u5f8b\u6838\u9a8c\uff1a\u9700\u8981\u8fd0\u884c legal_generate_citation_verification_report \u6216 legal_finalize_delivery_package\uff0c\u5e76\u786e\u8ba4\u6ca1\u6709\u5df2\u5e9f\u6b62\u3001\u5931\u6548\u6216\u672a\u786e\u8ba4\u7684\u6cd5\u6761\u5f15\u7528\u3002',
+          CN_ACTION_CONTRACT_COPY.legalDocument.lawVerificationMissing,
           '\u6211\u4e0d\u4f1a\u628a\u672a\u6838\u9a8c\u7684\u6cd5\u5f8b\u6587\u4e66\u8bf4\u6210\u6b63\u5f0f\u6210\u679c\u3002',
         ].join('\n')
       : [
           'This legal document cannot be marked complete or formally usable yet.',
-          'Missing current-law verification: run legal_generate_citation_verification_report or legal_finalize_delivery_package and confirm there are no repealed, invalid, or unverified statute citations.',
+          'Complete document review before presenting a legal document as ready for formal use.',
           'I will not present an unverified legal document as a formal result.',
-        ].join('\n');
-  }
-  if (contract.kind === 'legal_document' && /production evidence|document production/i.test(reason || '')) {
-    return zh
-      ? [
-          '\u8fd9\u4efd\u6cd5\u5f8b\u6587\u4e66\u8fd8\u4e0d\u80fd\u6807\u8bb0\u4e3a\u5b8c\u6210\u3002',
-          '\u7f3a\u5c11\u5b9e\u9645\u6587\u4e66\u4ea7\u7269\u8bc1\u636e\uff1a\u9700\u8981\u5148\u751f\u6210\u6216\u5199\u5165\u8d77\u8bc9\u72b6\u3001\u7b54\u8fa9\u72b6\u3001\u4ee3\u7406\u8bcd\u3001\u6cd5\u5f8b\u610f\u89c1\u4e66\u3001\u5408\u540c\u6216\u6807\u4e66\u7b49\u5b9e\u9645\u8349\u7a3f\uff0c\u518d\u8fdb\u884c\u73b0\u884c\u6709\u6548\u6cd5\u5f8b\u6838\u9a8c\u3002',
-        ].join('\n')
-      : [
-          'This legal document cannot be marked complete yet.',
-          'Missing legal document production evidence: generate or write the actual draft first, then run the current-law verification gate.',
         ].join('\n');
   }
   if (shouldUseCompactActionBlockedResponse(input)) {
@@ -1108,574 +243,6 @@ function formatCompactBlockedResponse(input: LumiResultFinalizerInput, reason?: 
         contractBlocker || CN_EXECUTION_EVIDENCE_MESSAGES.compactUnconfirmedFinalResult,
       )
     : 'This did not finish, and the final result is not confirmed yet.';
-}
-
-function formatGroundedDesktopEvidence(input: LumiResultFinalizerInput): string | null {
-  const evidence = evaluateDesktopObservationEvidence(input.toolRecords || [], resultTaskText(input));
-  return evidence.complete ? evidence.text : null;
-}
-
-function parseDesktopOpenResult(record: ToolExecutionRecord): Record<string, any> {
-  if (record.receipt && typeof record.receipt === 'object' && !Array.isArray(record.receipt)) {
-    return record.receipt as Record<string, any>;
-  }
-  try {
-    const parsed = JSON.parse(String(record.result || '{}'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, any>
-      : {};
-  } catch {
-    return {};
-  }
-}
-
-function normalizeSimpleOpenTarget(value: unknown): string {
-  const normalized = String(value || '')
-    .toLowerCase()
-    .replace(/^.*[\\/]/, '')
-    .replace(/\.(?:exe|lnk|url)$/i, '');
-  // i18n-allow -- Chinese desktop-target normalization; not user-visible copy.
-  return normalized.replace(/(?:桌面|上的|文件|文档|程序|应用|软件|快捷方式|给我|请|打开|启动|运行|一下)/gu, '')
-    .replace(/(?:the|my|desktop|file|document|program|application|app|shortcut|please|open|launch|start|run)/giu, '')
-    .replace(/[^\p{L}\p{N}]+/gu, '');
-}
-
-function desktopOpenTargetCandidates(record: ToolExecutionRecord, payload: Record<string, any>): string[] {
-  return [
-    record.arguments?.target,
-    record.arguments?.path,
-    record.arguments?.url,
-    payload.target,
-    payload.path,
-    payload.application,
-    payload.actualTarget?.title,
-    payload.actualTarget?.processName,
-    payload.verification?.actualTarget?.title,
-    payload.verification?.actualTarget?.processName,
-  ].map(value => String(value || '').trim()).filter(Boolean);
-}
-
-function desktopOpenTargetMatches(
-  requestedTarget: string,
-  record: ToolExecutionRecord,
-  payload: Record<string, any>,
-): boolean {
-  const candidates = desktopOpenTargetCandidates(record, payload);
-  // i18n-allow -- Chinese generic-browser target recognition; not user-visible copy.
-  const genericBrowser = /^(?:(?:默认|系统|网页|web)\s*)?(?:浏览器|browser|webbrowser)$/iu
-    .test(requestedTarget.replace(/\s+/g, ''));
-  // i18n-allow -- Browser application identity recognition; not user-visible copy.
-  if (genericBrowser && candidates.some(candidate => (
-    /(?:Google\s*Chrome|chrome(?:\.exe)?|Microsoft\s*Edge|msedge(?:\.exe)?|Firefox|firefox(?:\.exe)?|Safari|Brave|Opera|浏览器)/iu.test(candidate)
-  ))) return true;
-
-  const requested = normalizeSimpleOpenTarget(requestedTarget);
-  if (requested.length < 2) return false;
-  return candidates.some(candidate => {
-    const normalized = normalizeSimpleOpenTarget(candidate);
-    return normalized.length >= 2 && (
-      normalized === requested
-      || normalized.includes(requested)
-      || requested.includes(normalized)
-    );
-  });
-}
-
-function isVerifiedPrimaryDesktopOpen(record: ToolExecutionRecord, requestedTarget: string): boolean {
-  if (
-    !/^(?:desktop_open|browser_open_task)$/i.test(String(record.name || ''))
-    || record.error
-    || !String(record.result || '').trim()
-  ) return false;
-  const payload = parseDesktopOpenResult(record);
-  const status = String(payload.status || payload.verification?.status || '').trim().toLowerCase();
-  const targetMatched = payload.targetMatched === true
-    || payload.verification?.targetMatched === true;
-  const envelopeVerified = record.envelope?.status === 'verified_success'
-    && record.envelope.verification?.status === 'verified';
-  const terminalVerified = record.terminalVerification?.status === 'verified';
-  const payloadVerified = status === 'verified' && targetMatched;
-  if (
-    payload.ok === false
-    || payload.success === false
-    || payload.opened === false
-    || /^(?:failed|error|blocked|denied|forbidden|timeout|timed_out|cancelled|canceled|target_mismatch)$/.test(status)
-  ) return false;
-  const browserOpenedReceipt = record.name === 'browser_open_task'
-    && payload.opened === true
-    && /opened\s*:/iu.test(String(record.result || ''));
-  if (!(envelopeVerified || (terminalVerified && targetMatched) || payloadVerified || browserOpenedReceipt)) return false;
-  return desktopOpenTargetMatches(requestedTarget, record, payload);
-}
-
-function friendlyDesktopOpenTarget(
-  requestedTarget: string,
-  record: ToolExecutionRecord,
-  payload: Record<string, any>,
-): string {
-  const invoked = String(
-    record.arguments?.target
-    || record.arguments?.path
-    || record.arguments?.url
-    || payload.target
-    || requestedTarget,
-  ).trim();
-  const baseName = invoked.split(/[\\/]/).pop() || invoked;
-  // i18n-allow -- Chinese generic-browser target recognition; not user-visible copy.
-  if (/^(?:浏览器|browser|webbrowser)$/iu.test(requestedTarget.replace(/\s+/g, ''))) {
-    const actual = `${payload.actualTarget?.processName || ''} ${payload.actualTarget?.title || ''} ${invoked}`;
-    if (/chrome/iu.test(actual)) return 'Google Chrome';
-    if (/msedge|microsoft\s*edge/iu.test(actual)) return 'Microsoft Edge';
-    if (/firefox/iu.test(actual)) return 'Firefox';
-    if (/safari/iu.test(actual)) return 'Safari';
-  }
-  const invokedLooksLikeFile = /[\\/]/u.test(invoked) || /\.[a-z0-9]{1,10}$/iu.test(invoked);
-  // i18n-allow -- Chinese file-reference recognition; not user-visible copy.
-  const requestedIsFileReference = /(?:桌面|文件|文档|file|document)/iu.test(requestedTarget);
-  return invokedLooksLikeFile && requestedIsFileReference
-    ? (baseName || requestedTarget)
-    : requestedTarget;
-}
-
-function isFailedOptionalPostOpenObservation(record: ToolExecutionRecord): boolean {
-  const failed = Boolean(record.error)
-    || record.terminalVerification?.status === 'failed'
-    || record.terminalVerification?.status === 'unverified'
-    || Boolean(record.envelope && record.envelope.status !== 'verified_success');
-  if (!failed) return false;
-  const name = String(record.name || '');
-  if (/^(?:desktop_execution_plan_receipt|desktop_active_window|get_active_window_info|desktop_running_processes|get_running_processes|desktop_capture_screen|desktop_ocr|computer_vision)$/i.test(name)) {
-    return true;
-  }
-  if (!/^desktop_run_command$/i.test(name)) return false;
-  return /(?:fingerprint|target[_ ]?mismatch|focus|foreground|window|display|paused_for_user_activity)/iu
-    .test(`${record.error || ''}\n${record.result || ''}`);
-}
-
-function formatGroundedSimpleDesktopOpenResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const actionText = resultTaskText(input);
-  const primaryTask = actionText.split(/\n## Recent action continuation context\b/i, 1)[0].trim();
-  const requestedTarget = extractSimpleDesktopOpenTarget(actionText)
-    || (/^(?:你)?(?:直接)?(?:把)?(?:它|这个|那个|文件|文档)?(?:给我)?打开(?:一下)?[。！？.!?]*$/iu.test(primaryTask) // i18n-allow: Chinese referential-open recognition; not user-visible copy.
-      ? String([...(input.toolRecords || [])].reverse().find(record => /^(?:desktop_open|browser_open_task)$/i.test(record.name))?.arguments?.target || '')
-      : '');
-  if (!requestedTarget) return null;
-  const contract = buildActionContract(actionText);
-  if (contract.kind !== 'desktop_operation') return null;
-  const records = input.toolRecords || [];
-  let openIndex = -1;
-  for (let index = records.length - 1; index >= 0; index -= 1) {
-    if (isVerifiedPrimaryDesktopOpen(records[index], requestedTarget)) {
-      openIndex = index;
-      break;
-    }
-  }
-  if (openIndex < 0) return null;
-  const successfulOpen = records[openIndex];
-  const openPayload = parseDesktopOpenResult(successfulOpen);
-  const targetLabel = friendlyDesktopOpenTarget(requestedTarget, successfulOpen, openPayload);
-  const laterObservationFailed = records.slice(openIndex + 1).some(isFailedOptionalPostOpenObservation);
-
-  // A launch request may explicitly require the real foreground process and
-  // window as its completion proof. Keep that receipt detail instead of
-  // collapsing the answer to the generic "opened" acknowledgement below.
-  // This is intentionally derived from the desktop receipts, never from the
-  // model's prose, so the final response cannot invent verification evidence.
-  if (requiresActiveWindowObservation(actionText)) {
-    const activeRecord = [...(input.toolRecords || [])].reverse().find(record => (
-      /^(?:desktop_active_window|get_active_window_info)$/i.test(String(record.name || ''))
-      && !record.error
-      && String(record.result || '').trim()
-    ));
-    if (activeRecord) {
-      let openResult: Record<string, any> = {};
-      let activeResult: Record<string, any> = {};
-      try { openResult = JSON.parse(String(successfulOpen.result || '{}')); } catch {}
-      try { activeResult = JSON.parse(String(activeRecord.result || '{}')); } catch {}
-      const processName = String(
-        activeResult.process_name
-        || activeResult.processName
-        || activeResult.executable
-        || '',
-      ).trim().replace(/^.*[\\/]/, '');
-      const processId = Number(activeResult.pid || activeResult.processId) || 0;
-      const windowTitle = String(activeResult.title || activeResult.windowTitle || '').trim();
-      const verificationStatus = String(
-        openResult.verification?.status
-        || openResult.status
-        || '',
-      ).trim().toLowerCase();
-      const targetMatched = openResult.targetMatched === true
-        || openResult.verification?.targetMatched === true;
-      const verified = targetMatched
-        && Boolean(processName || windowTitle)
-        && !/^(?:failed|error|blocked|unknown|unverified)$/i.test(verificationStatus);
-      if (isChineseText(actionText)) {
-        return {
-          text: [
-          CN_VOICE_FAST_PATH_MESSAGES.opened(targetLabel),
-          `实际进程：${processName || '回执未记录'}${processId ? ` (PID ${processId})` : ''}`,
-          `窗口：${windowTitle || '回执未记录'}`,
-          `验证状态：${verified ? '已验证（目标精确匹配）' : '未验证'}`,
-          ].join('\n'),
-          blocked: false,
-          reason: 'Grounded exact desktop-open success from the requested target receipt.',
-        };
-      }
-      return {
-        text: [
-          `Opened ${targetLabel}.`,
-          `Actual process: ${processName || 'not recorded'}${processId ? ` (PID ${processId})` : ''}`,
-          `Window: ${windowTitle || 'not recorded'}`,
-          `Verification: ${verified ? 'verified (exact target match)' : 'unverified'}`,
-        ].join('\n'),
-        blocked: false,
-        reason: 'Grounded exact desktop-open success from the requested target receipt.',
-      };
-    }
-  }
-  const text = isChineseText(actionText)
-    ? [
-        CN_VOICE_FAST_PATH_MESSAGES.opened(targetLabel),
-        ...(laterObservationFailed
-          ? [CN_VOICE_FAST_PATH_MESSAGES.postOpenObservationIncomplete]
-          : []),
-      ].join('\n')
-    : [
-        `Opened ${targetLabel}.`,
-        ...(laterObservationFailed
-          ? ['A later window/focus check did not finish, but that does not undo the verified open action.']
-          : []),
-      ].join('\n');
-  return {
-    text,
-    blocked: false,
-    reason: laterObservationFailed
-      ? 'Primary desktop-open verified; optional post-open observation incomplete.'
-      : 'Grounded exact desktop-open success from the requested target receipt.',
-  };
-}
-
-function formatGroundedContractReviewResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const actionText = resultTaskText(input);
-  if (!/(?:合同审查|审查.{0,24}(?:合同|协议|条款)|(?:合同|协议|条款).{0,24}(?:审查|复核))/u.test(actionText)) {
-    return null;
-  }
-  const record = [...(input.toolRecords || [])].reverse().find(item => (
-    item.name === 'legal_review_contract'
-    && !item.error
-    && item.terminalVerification?.status === 'verified'
-  ));
-  if (!record) return null;
-  const receipt = record.receipt && typeof record.receipt === 'object' && !Array.isArray(record.receipt)
-    ? record.receipt as Record<string, any>
-    : null;
-  const content = String(receipt?.content || record.result || '').trim();
-  if (content.length < 80) return null;
-  return {
-    text: `${content}\n\n- 实际使用能力：legal_review_contract\n- 结果验证：已通过结构化工具回执验证。\n- 外部动作：未发送、未提交、未签署。`,
-    blocked: false,
-    reason: 'Grounded contract review from a verified legal_review_contract receipt.',
-  };
-}
-
-function recordHasTerminalSuccess(record: ToolExecutionRecord): boolean {
-  if (record.error || !String(record.result || '').trim()) return false;
-  const raw = String(record.result || '');
-  try {
-    const parsed = JSON.parse(raw);
-    const status = String(parsed?.status || parsed?.verification?.status || '').trim().toLowerCase();
-    if (parsed?.ok === false || parsed?.success === false || parsed?.opened === false) return false;
-    if (/^(?:failed|error|blocked|denied|forbidden|timeout|timed_out|cancelled|canceled|not_found)$/.test(status)) return false;
-  } catch {}
-  return !/(?:^|\b)(?:failed|error|blocked|not found|timed out|permission denied)(?:\b|:)/i.test(raw);
-}
-
-function parseVerifiedClientActionReceipt(record: ToolExecutionRecord): {
-  action: string;
-  mode: string;
-  enabled: boolean;
-  target: string;
-  say: string;
-} | null {
-  if (record.error || record.name !== 'client_action') return null;
-  try {
-    const payload = JSON.parse(String(record.result || '{}'));
-    const status = String(payload?.verification?.status || payload?.status || '').trim().toLowerCase();
-    if (payload?.ok !== true || !['verified', 'not_applicable'].includes(status)) return null;
-    return {
-      action: String(payload?.action || record.arguments?.action || '').trim(),
-      mode: String(payload?.mode || record.arguments?.mode || '').trim(),
-      enabled: Boolean(payload?.enabled ?? record.arguments?.enabled),
-      target: String(
-        payload?.target
-        || payload?.expectation?.target
-        || payload?.relayResult?.target
-        || record.arguments?.target
-        || '',
-      ).trim(),
-      say: String(payload?.say || payload?.verification?.message || '').trim(),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function formatGroundedClientActionResult(input: LumiResultFinalizerInput): string | null {
-  // The client-action-only route already performed exact target selection and
-  // state-diff verification. A verified native navigation receipt is stronger
-  // evidence than a model sentence that happens to claim the action failed.
-  const expectedIntent = normalizeActionIntent(resultTaskText(input));
-  if (
-    expectedIntent.kind !== 'client_navigation'
-    || !expectedIntent.clientAction
-  ) return null;
-  const expectedAction = expectedIntent.clientAction;
-  const expectedMode = String(expectedIntent.clientActionArguments?.mode || '').trim();
-  const expectedEnabled = expectedIntent.clientActionArguments?.enabled;
-  const receipts = (input.toolRecords || [])
-    .filter(record => recordMatchesCurrentTurnIdentity(input, record))
-    .map(parseVerifiedClientActionReceipt)
-    .filter((receipt): receipt is NonNullable<typeof receipt> => Boolean(receipt));
-  const receipt = [...receipts].reverse().find(item => (
-    item.action === expectedAction
-    && (expectedAction !== 'set_client_mode' || !expectedMode || item.mode === expectedMode)
-    && (expectedAction !== 'set_wallpaper_mode'
-      || typeof expectedEnabled !== 'boolean'
-      || item.enabled === expectedEnabled)
-  ));
-  if (!receipt) return null;
-
-  if (!isChineseText(resultTaskText(input))) {
-    return receipt.say || 'The requested Lumi client action is complete.';
-  }
-  if (receipt.action === 'set_client_mode') {
-    return CN_VOICE_FAST_PATH_MESSAGES.operationModeChanged(receipt.mode || 'assistant');
-  }
-  if (receipt.action === 'set_wallpaper_mode') {
-    return receipt.enabled ? '壁纸模式已开启。' : '壁纸模式已关闭。';
-  }
-  if (receipt.action === 'refresh_client_state') return '客户端状态已刷新。';
-  const label = formatCnClientActionTargetLabel(receipt.action, receipt.target || 'Lumi 界面');
-  if (/^(?:close_|exit_)/.test(receipt.action)) return `${label}已关闭。`;
-  if (/^(?:open_|show_|focus_|enter_)/.test(receipt.action)) {
-    return CN_VOICE_FAST_PATH_MESSAGES.opened(label);
-  }
-  return `已完成${label}操作。`;
-}
-
-function formatGroundedPartialActionResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const actionText = resultTaskText(input);
-  const contract = taskActionContract(input);
-  if (!contract.applies || hasResultCoreActionEvidence(input, contract, input.toolRecords || [], actionText)) return null;
-  if (requiresCurrentAppUiMutation(actionText) || requiresVisibleAutoCadExecution(actionText)) return null;
-
-  const openRecord = [...(input.toolRecords || [])].reverse().find(record => (
-    /^(?:desktop_open|browser_open_task)$/i.test(String(record.name || ''))
-    && recordHasTerminalSuccess(record)
-  ));
-  if (openRecord && contract.kind === 'desktop_operation') {
-    const target = String(
-      openRecord.arguments?.target
-      || openRecord.arguments?.url
-      || openRecord.arguments?.path
-      || extractSimpleDesktopOpenTarget(actionText)
-      || '',
-    ).trim();
-    const normalizedTarget = target.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-    const normalizedTask = actionText.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-    const targetMatchesTask = normalizedTarget.length >= 2
-      && (
-        normalizedTask.includes(normalizedTarget)
-        || normalizedTarget.includes(normalizedTask.replace(/^(?:\u8bf7|\u5e2e\u6211)?(?:\u6253\u5f00|open)/iu, ''))
-      );
-    if (target && targetMatchesTask) {
-      const zh = isChineseText(actionText);
-      const text = zh
-        ? CN_VOICE_FAST_PATH_MESSAGES.partialOpen(target)
-        : `Opened ${target}, but the remaining requested action has not been verified.`;
-      return {
-        text,
-        blocked: true,
-        reason: 'The open step succeeded, but the remaining requested action lacks verification.',
-        notification: {
-          type: 'work_product_guard',
-          level: 'warning',
-          message: 'The open step succeeded, but the remaining requested action lacks verification.',
-        },
-      };
-    }
-  }
-
-  return null;
-}
-
-function requestedMediaPlayerLabel(taskText: string, records: ToolExecutionRecord[]): string {
-  const requested = requestedMediaPlayerTarget(taskText);
-  if (requested) return requested;
-  const named = String(taskText || '').match(/(?:\u7f51\u6613\u4e91(?:\u97f3\u4e50)?|QQ\s*\u97f3\u4e50|\u9177\u72d7(?:\u97f3\u4e50)?|Spotify|Apple\s+Music|NetEase(?:\s+Cloud\s+Music)?|CloudMusic)/iu)?.[0];
-  if (named) return named;
-  const invoked = records.find(record => /^(?:desktop_open|browser_open_task)$/i.test(String(record.name || '')));
-  return String(
-    invoked?.arguments?.target
-    || invoked?.arguments?.url
-    || extractDesktopLaunchTarget(taskText)
-    || CN_EXECUTION_EVIDENCE_MESSAGES.genericMusicPlayer,
-  ).trim().slice(0, 100);
-}
-
-function visualFailureCategory(records: ToolExecutionRecord[]): 'billing' | 'unconfigured' | 'paused' | 'generic' {
-  const details = records.map(record => [
-    record.error,
-    record.terminalVerification?.reason,
-    toolRecordTerminalText(record),
-  ].map(value => String(value || '').slice(0, 1200)).join('\n')).join('\n');
-  if (/(?:account is not in good standing|overdue(?:-payment)?|insufficient balance|\b402\b|\u6b20\u8d39|\u4f59\u989d\u4e0d\u8db3)/iu.test(details)) {
-    return 'billing';
-  }
-  if (/(?:No configured visual-perception model|no vision (?:reader|model)|visual perception.{0,32}not configured|\u672a\u914d\u7f6e.{0,16}\u89c6\u89c9\u6a21\u578b)/iu.test(details)) {
-    return 'unconfigured';
-  }
-  if (/(?:paused_for_user_activity|user activity|\u7528\u6237.{0,12}\u64cd\u4f5c.{0,12}\u6682\u505c)/iu.test(details)) {
-    return 'paused';
-  }
-  return 'generic';
-}
-
-/** User-visible terminal wording for the two composite desktop goals that
- * previously accepted unrelated receipts. This consumes the existing action
- * contract verdict; it does not invent a second execution state machine. */
-function formatGoalSpecificDesktopResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const taskText = resultTaskText(input);
-  const records = input.toolRecords || [];
-  const zh = isChineseText(taskText) || isChineseText(input.responseText);
-
-  if (requiresVisualModelAvailabilityCheck(taskText)) {
-    if (hasVisualModelAvailabilityEvidence(records)) {
-      return {
-        text: zh
-          ? CN_EXECUTION_EVIDENCE_MESSAGES.visualModelAvailable
-          : 'The visual model is available; the live probe returned usable visual analysis.',
-        blocked: false,
-        reason: zh ? CN_EXECUTION_EVIDENCE_MESSAGES.visualProbeSucceeded : 'The live visual probe succeeded.',
-      };
-    }
-    const category = visualFailureCategory(records);
-    const text = zh
-      ? category === 'billing'
-        ? CN_EXECUTION_EVIDENCE_MESSAGES.visualModelBillingUnavailable
-        : category === 'unconfigured'
-          ? CN_EXECUTION_EVIDENCE_MESSAGES.visualModelUnconfigured
-          : category === 'paused'
-            ? CN_EXECUTION_EVIDENCE_MESSAGES.visualProbeInterrupted
-            : CN_EXECUTION_EVIDENCE_MESSAGES.visualProbeUnconfirmed
-      : category === 'billing'
-        ? 'The visual model is unavailable because the provider rejected the account for billing or account-status reasons. Restore the account and try again.'
-        : category === 'unconfigured'
-          ? 'No usable visual model is configured. Select and save one in settings, then try again.'
-          : category === 'paused'
-            ? 'The live visual check was interrupted by foreground activity, so availability is not confirmed yet.'
-            : 'The visual model did not return a usable result, so it is not confirmed available yet.';
-    return {
-      text,
-      blocked: true,
-      reason: text,
-      notification: { type: 'work_product_guard', level: 'warning', message: text },
-    };
-  }
-
-  if (requiresMediaPlaybackAction(taskText)) {
-    const label = requestedMediaPlayerLabel(taskText, records);
-    const video = isVideoPlaybackRequest(taskText);
-    const opened = hasRequestedDesktopOpenEvidence(records, taskText, label);
-    if (hasMediaPlaybackEvidence(records, taskText, { requestId: input.requestId, taskId: input.taskId })) {
-      const proofRecord = [...records].reverse().find(record => record.name === 'computer_use'
-        && hasMediaPlaybackEvidence([record], taskText, { requestId: input.requestId, taskId: input.taskId })
-        && validatePlaybackVerification(parseReceiptObject(toolRecordTerminalPayload(record))?.playbackVerification, taskText));
-      const proof = proofRecord && parseReceiptObject(toolRecordTerminalPayload(proofRecord))?.playbackVerification;
-      if (validatePlaybackVerification(proof, taskText)) {
-        const goal = proof.target;
-        const targetLabel = goal.player || label;
-        const contentLabel = [goal.title, goal.season ? `season ${goal.season}` : '', goal.episode ? `episode ${goal.episode}` : ''].filter(Boolean).join(', ');
-        return {
-          text: zh
-            ? CN_EXECUTION_EVIDENCE_MESSAGES.verifiedPlaybackTarget(targetLabel, goal.title, goal.season, goal.episode)
-            : `Confirmed ${contentLabel || 'the requested content'} is playing in ${targetLabel}; playback is advancing.`,
-          blocked: false,
-          reason: 'verified_playback_progress',
-        };
-      }
-      return {
-        text: zh
-          ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaPlaybackActive(label, video)
-          : `Opened ${label}; playback is active.`,
-        blocked: false,
-        reason: zh ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaPlaybackConfirmed : 'Playback state was confirmed.',
-      };
-    }
-    const text = opened
-      ? zh
-        ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaOpenedPlaybackUnconfirmed(label)
-        : `Opened ${label}, but the requested content is not confirmed playing.`
-      : zh
-        ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaOpenAndPlaybackUnconfirmed(label)
-        : `${label} was not confirmed open, and playback was not confirmed.`;
-    return {
-      text,
-      blocked: true,
-      reason: text,
-      notification: { type: 'work_product_guard', level: 'warning', message: text },
-    };
-  }
-
-  return null;
-}
-
-function friendlyObservedOpenLabel(target: string): string {
-  const raw = String(target || '').trim();
-  if (!raw) return '';
-  try {
-    const parsed = new URL(raw);
-    return parsed.hostname.replace(/^www\./i, '') || raw;
-  } catch {}
-  if (/[\\/]/u.test(raw)) return raw.split(/[\\/]/).pop() || raw;
-  return raw;
-}
-
-function formatObservedDesktopOpenResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const taskText = resultTaskText(input);
-  const target = extractDesktopLaunchTarget(taskText) || extractSimpleDesktopOpenTarget(taskText);
-  if (!target || !hasRequestedDesktopOpenEvidence(input.toolRecords || [], taskText, target)) return null;
-  const label = friendlyObservedOpenLabel(target);
-  const zh = isChineseText(taskText) || isChineseText(input.responseText);
-  return {
-    text: zh ? CN_EXECUTION_EVIDENCE_MESSAGES.desktopObservedOpen(label) : `Opened ${label}.`,
-    blocked: false,
-    reason: zh ? CN_EXECUTION_EVIDENCE_MESSAGES.desktopObservedOpenReason : 'The requested page or window was observed in the same turn.',
-  };
-}
-
-function formatCreatedArtifactWithoutInAppCompletion(input: LumiResultFinalizerInput): string | null {
-  const record = [...(input.toolRecords || [])].reverse().find(item => (
-    /^(?:create_docx|create_xlsx|create_ppt|create_pdf|write_file|cad_generate_dxf)$/i.test(String(item.name || ''))
-    && recordHasTerminalSuccess(item)
-    && artifactPathFromRecord(item)
-  ));
-  if (!record) return null;
-  const path = artifactPathFromRecord(record);
-  return isChineseText(resultTaskText(input))
-    ? CN_VOICE_FAST_PATH_MESSAGES.partialArtifact(path)
-    : `The file was created at ${path}, but the corresponding action was not completed in the target application.`;
 }
 
 function operationModeFromLabel(label: string): LumiClientMode | null {
@@ -1715,823 +282,6 @@ function sanitizeContradictoryOperationModeText(input: LumiResultFinalizerInput)
     : `The current mode is ${knownMode}.`;
 }
 
-function requiresSourceGroundedArtifactContent(actionText: string): boolean {
-  return /(?:\u4ee5|\u6839\u636e|\u57fa\u4e8e|\u53c2\u7167).{0,80}(?:\u771f\u5b9e\u5185\u5bb9|\u6e90\u6587\u4ef6|\u6750\u6599|\u6587\u4ef6\u5185\u5bb9).{0,100}(?:\u6765\u6e90|\u751f\u6210|\u521b\u5efa|\u586b\u5199|\u6574\u7406)|(?:\u771f\u5b9e\u5185\u5bb9|\u6e90\u6587\u4ef6).{0,100}(?:\u552f\u4e00\u6765\u6e90|\u751f\u6210|\u521b\u5efa|\u586b\u5199|\u6574\u7406)/iu.test(actionText);
-}
-
-function findUnresolvedArtifactPlaceholder(artifactText: string): string {
-  const line = String(artifactText || '')
-    .split(/\r?\n/u)
-    .map(value => value.trim())
-    .find(value => /(?:\u6839\u636e|\u57fa\u4e8e|\u53c2\u7167).{0,24}(?:\u586b\u5199|\u8865\u5145|\u751f\u6210|\u66ff\u6362)|\u5f85(?:\u586b\u5199|\u8865\u5145|\u751f\u6210|\u66ff\u6362)|\b(?:TBD|TODO)\b|\{\{[^}]+\}\}/iu.test(value));
-  return line || '';
-}
-
-function formatGroundedWorkflowProgress(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
-  const record = [...(input.toolRecords || [])].reverse().find(item =>
-      ['run_workflow', 'get_workflow_run', 'resume_workflow_run', 'decide_workflow_confirmation'].includes(item.name)
-      && !item.error && recordMatchesCurrentTurnIdentity(input, item)
-      && item.terminalVerification?.status === 'verified');
-  if (!record) return null;
-  const result = parseReceiptObject(toolRecordTerminalPayload(record));
-    if (result?.ok !== true || !result.runId || !result.workflowId) return null;
-    const zh = isChineseText(resultTaskText(input));
-    if (result.status === 'completed' && result.totalSteps > 0 && result.completedSteps === result.totalSteps) {
-      const output = [...(Array.isArray(result.outputs) ? result.outputs : [])].reverse().find(item => item.status === 'verified');
-      const payload = parseReceiptObject(output?.result);
-      const cell = (value: unknown) => String(value ?? '').replace(/[\r\n|]/g, ' ').replace(/([\\`*_<>])/g, '\\$1').slice(0, 180);
-      const render = (value: unknown, depth = 0): string => {
-        if (depth > 3) return '…';
-        if (Array.isArray(value)) {
-          const rows = value.slice(0, 12);
-          if (rows.length && rows.every(row => row && typeof row === 'object' && !Array.isArray(row))) {
-            const keys = [...new Set(rows.flatMap(row => Object.keys(row)))].slice(0, 8);
-            if (keys.length && rows.every(row => keys.every(key => row[key] == null || typeof row[key] !== 'object'))) {
-              return [`| ${keys.map(cell).join(' | ')} |`, `| ${keys.map(() => '---').join(' | ')} |`,
-                ...rows.map(row => `| ${keys.map(key => cell(row[key])).join(' | ')} |`), ...(value.length > 12 ? ['…'] : [])].join('\n');
-            }
-          }
-          return rows.map(row => render(row, depth + 1)).join('\n');
-        }
-        if (value && typeof value === 'object') return Object.entries(value).slice(0, 12)
-          .map(([key, item]) => `${cell(key)}: ${item && typeof item === 'object' ? '\n\n' : ''}${render(item, depth + 1)}`).join('\n\n');
-        return cell(value);
-      };
-      const detail = render(payload && Object.prototype.hasOwnProperty.call(payload, 'data') ? payload.data : output?.result);
-      // i18n-allow: bilingual completed workflow summary grounded in durable output.
-      return { text: `${zh ? '工作流已完成' : 'Workflow completed'} (${result.completedSteps}/${result.totalSteps})。${detail ? '\n\n' + detail : ''}`,
-        blocked: false, reason: 'workflow_completed' };
-    }
-    if (['blocked', 'cancelled', 'failed'].includes(result.status)) {
-      // i18n-allow: bilingual ledger-grounded failure, not an observation success claim.
-      return { text: zh
-        ? `工作流尚未完成：已完成 ${result.completedSteps}/${result.totalSteps} 步。${result.reconciliationRequired ? '上一步返回了数据，但还没有通过结果核验，不能算完成；请先核对，避免重复执行。' : '流程已停止，需要处理当前阻碍后再继续。'}\n运行编号：${result.runId}`
-        : `The workflow is not complete: ${result.completedSteps}/${result.totalSteps} steps completed. ${result.reconciliationRequired ? 'The last result needs reconciliation before any retry.' : 'Resolve the current blocker before continuing.'}\nRun: ${result.runId}`,
-        blocked: true, reason: 'workflow_incomplete' };
-    }
-  if (result.status === 'waiting_confirmation' && result.confirmation?.confirmationId) {
-    const pending = result.confirmation;
-    // i18n-allow: bilingual exact workflow progress, not business completion.
-    const text = zh
-      ? `工作流已开始，正在等待确认第 ${result.completedSteps + 1} 步，尚未全部完成。\n操作：${pending.capabilityId}\n参数：${JSON.stringify(pending.argumentPreview || {})}\n运行：${result.runId}\n版本：${result.revision}\n确认标识：${pending.confirmationId}`
-      : `The workflow has started and is waiting for step ${result.completedSteps + 1} confirmation; it is not complete.\nAction: ${pending.capabilityId}\nArguments: ${JSON.stringify(pending.argumentPreview || {})}\nRun: ${result.runId}\nRevision: ${result.revision}\nConfirmation: ${pending.confirmationId}`;
-    return { text, blocked: false, reason: 'waiting_confirmation' };
-  }
-  if (['started', 'running', 'queued'].includes(result.status)) {
-    // i18n-allow: bilingual nonterminal workflow status.
-    return { text: zh ? `工作流正在运行，尚未全部完成。运行编号：${result.runId}` : `The workflow is running and is not complete. Run: ${result.runId}`, blocked: false, reason: 'workflow_running' };
-  }
-  return null;
-}
-
-function formatGroundedSkillDraft(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
-  const actionText = resultTaskText(input);
-  const authoring = verifiedSkillAuthoringReceipt(actionText, input.toolRecords || [], { requestId: input.requestId, taskId: input.taskId });
-  if (authoring?.intent === 'publish') {
-    const published = authoring.result;
-    // i18n-allow: Verified local workflow publication, distinct from execution.
-    return { text: isChineseText(actionText)
-      ? `工作流已审核发布：${published.name}，版本 ${published.version}。\n本轮尚未运行。`
-      : `Workflow published: ${published.name}, version ${published.version}.\nIt has not been run in this turn.`,
-    blocked: false, reason: 'workflow_published' };
-  }
-  if (authoring?.intent === 'save') {
-    const draft = authoring.result;
-    // i18n-allow: Verified draft state; never imply publication or execution.
-    return { text: isChineseText(actionText)
-      ? `工作流草稿已保存：${draft.name || '未命名工作流'}，共 ${draft.stepCount || 0} 步。\n尚未审核发布，暂不能运行。`
-      : `Workflow draft saved: ${draft.name || 'Untitled workflow'}, ${draft.stepCount || 0} steps.\nIt has not been reviewed or published and cannot run yet.`,
-      blocked: false, reason: 'workflow_draft_saved' };
-  }
-  if (authoring?.intent === 'generate') {
-    const draft = authoring.result;
-    return {
-      // i18n-allow: bilingual receipt-grounded skill draft completion; does not claim execution.
-      text: isChineseText(actionText)
-        ? `技能草稿已生成：${draft.displayName || draft.skillName}。\n静态、类型和依赖检查已通过，尚未安装或执行。\n草稿目录：${draft.draftDirectory}\n审核标识：${draft.review.contentHash}\n安装后还需要用实际任务验证效果。`
-        : `Skill draft generated: ${draft.displayName || draft.skillName}.\nStatic, type and dependency checks passed; it has not been installed or executed.\nDraft: ${draft.draftDirectory}\nReview hash: ${draft.review.contentHash}\nBusiness behavior still requires testing after installation.`,
-      blocked: false, reason: 'Verified skill draft phase; installation and business execution remain separate.',
-    };
-  }
-  return null;
-}
-
-export function formatGroundedArtifactResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  if (taskActionContract(input).kind !== 'artifact_work') return null;
-  const records = input.toolRecords || [];
-  const delivery = resolveArtifactDelivery(records, record => isVerifiedCurrentTurnRecord(input, record));
-  if (!delivery) return null;
-  const { producer: created, outputPath: path, readback } = delivery;
-  const actionText = resultTaskText(input);
-  if (!matchesRequestedArtifactOutput(actionText, path)) return null;
-  const readbackRequired = requiresArtifactPostWriteReadback(actionText);
-  const asksToOpen = /(?:\u6253\u5f00|\u6253\u5f00\u770b\u770b|\u76f4\u63a5\u6253\u5f00)|\bopen\b/iu.test(actionText);
-  const openRecord = [...records].reverse().find(record => /^(?:desktop_open|browser_open_task)$/i.test(String(record.name || '')));
-  const verified = records.some(record => (
-    !record.error
-    && /^(?:desktop_path_info|work_product_verify)$/i.test(String(record.name || ''))
-    && String(record.result || '').trim()
-  ));
-  const zh = isChineseText(actionText);
-  if (asksToOpen && openRecord?.error) {
-    const failure = formatCnToolFailureDetail(String(openRecord.error || ''));
-    const text = formatArtifactCreatedOpenFailed(
-      actionText,
-      path,
-      verified,
-      zh ? failure : String(openRecord.error || ''),
-    );
-    return {
-      text,
-      blocked: true,
-      reason: 'Artifact creation succeeded, but the requested open step failed.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'Artifact creation succeeded, but the requested open step failed.',
-      },
-    };
-  }
-  if (asksToOpen && openRecord && !openRecord.error && String(openRecord.result || '').trim()) {
-    return {
-      text: formatArtifactCreatedAndOpened(actionText, path, verified),
-      blocked: false,
-      reason: 'Grounded artifact creation and open result from current-turn receipts.',
-    };
-  }
-  const artifactVerified = (
-    toolRecordSucceeded(created)
-    && created.terminalVerification?.status === 'verified'
-  );
-  if (artifactVerified) {
-    try {
-      const stats = fs.statSync(path);
-      if (stats.isFile() && stats.size > 0) {
-        const exactText = extractExplicitArtifactTextRequirements(actionText);
-        let artifactText = '';
-        if ((exactText.length || requiresSourceGroundedArtifactContent(actionText)) && /\.(?:txt|md|csv|json|xml|html?|css|svg|dxf|ya?ml|toml|tsx?|jsx?|py|rs)$/iu.test(path)) {
-          artifactText = fs.readFileSync(path, 'utf8');
-          if (requiresSourceGroundedArtifactContent(actionText)) {
-            const unresolvedPlaceholder = findUnresolvedArtifactPlaceholder(artifactText);
-            if (unresolvedPlaceholder) {
-              return {
-                text: zh
-                  ? `\u6587\u4ef6\u5df2\u5199\u5165\uff0c\u4f46\u4ecd\u5305\u542b\u672a\u7528\u6e90\u6587\u4ef6\u771f\u5b9e\u5185\u5bb9\u66ff\u6362\u7684\u5360\u4f4d\u7b26\u201c${unresolvedPlaceholder}\u201d\uff0c\u4e0d\u80fd\u62a5\u544a\u5b8c\u6210\u3002\u4ea7\u7269\u8def\u5f84\uff1a${path}`
-                  : `The file was written, but it still contains an unresolved source placeholder "${unresolvedPlaceholder}". It cannot be reported as complete. Artifact path: ${path}`,
-                blocked: true,
-                reason: 'Source-grounded artifact still contains unresolved placeholders.',
-              };
-            }
-          }
-          const missing = exactText.filter(value => !artifactText.includes(value));
-          if (missing.length) {
-            return {
-              text: zh
-                ? `文件已写入，但尚未满足当前要求：缺少精确文本“${missing[0]}”。我不会把它汇报为已完成。产物路径：${path}`
-                : `The file was written, but it is missing the exact required text "${missing[0]}". I will not mark it complete. Artifact path: ${path}`,
-              blocked: true,
-              reason: `Verified artifact is missing exact required text: ${missing[0]}`,
-              notification: {
-                type: 'work_product_guard',
-                level: 'warning',
-                message: `Verified artifact is missing exact required text: ${missing[0]}`,
-              },
-            };
-          }
-          if (/(?:只写入|仅写入|only\s+write)/iu.test(actionText)) {
-            const expected = exactText.join('\n').replace(/\r\n/g, '\n');
-            if (artifactText.replace(/\r\n/g, '\n') !== expected) {
-              return {
-                text: zh
-                  ? `文件已写入，但全文并非用户指定的逐行内容，不能报告完成。产物路径：${path}`
-                  : `The file was written, but its full text does not exactly match the requested lines. Artifact path: ${path}`,
-                blocked: true,
-                reason: 'Verified artifact contains extra, missing, or reordered text.',
-              };
-            }
-          }
-        }
-        if (readbackRequired && (!readback || readback.error || !String(readback.result || '').trim())) {
-          return {
-            text: zh
-              ? `文件已经写入，但没有取得同一路径的成功回读回执，不能报告完成。产物路径：${path}`
-              : `The file was written, but no successful same-path readback receipt was recorded. Artifact path: ${path}`,
-            blocked: true,
-            reason: 'Requested post-write readback is missing or failed.',
-          };
-        }
-        if (readbackRequired && readback && /\.(?:txt|md|csv|json|xml|html?|css|svg|dxf|ya?ml|toml|tsx?|jsx?|py|rs)$/iu.test(path)) {
-          if (!artifactText) artifactText = fs.readFileSync(path, 'utf8');
-          const receiptText = String(readback.result || '').replace(/\r\n/g, '\n');
-          const actualText = artifactText.replace(/\r\n/g, '\n');
-          if (receiptText !== actualText) {
-            return {
-              text: zh
-                ? `文件已经写入，但回读回执与磁盘全文不一致，不能报告完成。产物路径：${path}`
-                : `The file was written, but the readback receipt differs from the current file. Artifact path: ${path}`,
-              blocked: true,
-              reason: 'Post-write readback differs from the current artifact.',
-            };
-          }
-          if (/(?:\u7f16\u7801|\u603b\u884c\u6570|\u884c\u6570|\u5168\u6587|encoding|line\s*count|full\s*text)/iu.test(actionText)) {
-            const normalizedText = actualText.replace(/\n$/, '');
-            const lineCount = normalizedText ? normalizedText.split('\n').length : 0;
-            return {
-              text: zh
-                ? [
-                    '\u5df2\u5b8c\u6210\u672c\u5730\u6587\u4ef6\u521b\u5efa\u4e0e\u56de\u8bfb\u6838\u9a8c\u3002',
-                    `\u8def\u5f84\uff1a${path}`,
-                    '\u7f16\u7801\uff1aUTF-8',
-                    `\u603b\u884c\u6570\uff1a${lineCount}`,
-                    '\u5168\u6587\uff1a',
-                    normalizedText,
-                  ].join('\n')
-                : [
-                    'Completed the local file and verified it by reading it back.',
-                    `Path: ${path}`,
-                    'Encoding: UTF-8',
-                    `Line count: ${lineCount}`,
-                    'Full text:',
-                    normalizedText,
-                  ].join('\n'),
-              blocked: false,
-              reason: 'Grounded artifact completion with exact same-path post-write readback.',
-            };
-          }
-          if (/(?:编码|总行数|行数|全文|encoding|line\s*count|full\s*text)/iu.test(actionText)) {
-            const normalizedText = actualText.replace(/\n$/, '');
-            const lineCount = normalizedText ? normalizedText.split('\n').length : 0;
-            return {
-              text: zh
-                ? [
-                    '已完成本地文件创建与回读核验。',
-                    `路径：${path}`,
-                    '编码：UTF-8',
-                    `总行数：${lineCount}`,
-                    '全文：',
-                    normalizedText,
-                  ].join('\n')
-                : [
-                    'Completed the local file and verified it by reading it back.',
-                    `Path: ${path}`,
-                    'Encoding: UTF-8',
-                    `Line count: ${lineCount}`,
-                    'Full text:',
-                    normalizedText,
-                  ].join('\n'),
-              blocked: false,
-              reason: 'Grounded artifact completion with exact same-path post-write readback.',
-            };
-          }
-        }
-        if (readbackRequired && readback) {
-          const readbackText = String(readback.result || '').trim();
-          const limit = 12_000;
-          const excerpt = readbackText.slice(0, limit);
-          return {
-            text: [
-              zh ? CN_RESULT_GROUNDING_MESSAGES.artifactSavedReadback(path) : `Saved and read back the file: ${path}`,
-              zh ? CN_RESULT_GROUNDING_MESSAGES.artifactReadbackHeading : 'Readback result:',
-              excerpt,
-              readbackText.length > limit
-                ? (zh ? CN_RESULT_GROUNDING_MESSAGES.artifactReadbackExcerpt(limit) : 'Only the first 12000 characters of the readback are shown.')
-                : '',
-            ].filter(Boolean).join('\n'),
-            blocked: false,
-            reason: 'Grounded artifact completion with delivered same-path readback content.',
-          };
-        }
-        return {
-          text: zh
-            ? `已完成并验证本地文件：${path}（${stats.size} 字节）。`
-            : `Completed and verified the local file: ${path} (${stats.size} bytes).`,
-          blocked: false,
-          reason: 'Grounded artifact completion from a verified producer receipt and the current local file.',
-        };
-      }
-    } catch {}
-  }
-  // A declaration without a verified non-empty file remains subject to the
-  // generic completion guard below.
-  return null;
-}
-
-const CAD_GEOMETRY_ZH = {
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  failed: '\u51e0\u4f55\u63d0\u53d6\u672a\u6210\u529f\uff0c\u672a\u6267\u884c\u7ed8\u5236\u3002',
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  succeeded: '\u51e0\u4f55\u63d0\u53d6\u6210\u529f\uff0c\u672a\u6267\u884c\u7ed8\u5236\u3002',
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  reason: '\u539f\u56e0\uff1a',
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  source: '\u6765\u6e90\uff1a',
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  verificationState: '\u9a8c\u8bc1\u72b6\u6001\uff1a',
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  receipt: '\u51e0\u4f55\u56de\u6267\uff1a',
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  dimensions: '\u51e0\u4f55\u5c3a\u5bf8\uff1a',
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  counts: '\u51e0\u4f55\u8ba1\u6570\uff1a',
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  failedStage: '\u5931\u8d25\u9636\u6bb5\uff1a',
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  receiptState: '\u56de\u6267\u72b6\u6001\uff1a',
-  // i18n-allow: Reviewed Chinese CAD geometry receipt result copy.
-  next: '\u4e0b\u4e00\u6b65\uff1a',
-  // i18n-allow: Reviewed Chinese CAD geometry public failure copy.
-  retry: '\u8bf7\u68c0\u67e5\u6e90\u6587\u4ef6\u540e\u91cd\u8bd5\uff0c\u6216\u6362\u4e00\u4efd\u53ef\u8bfb\u7684\u56fe\u7eb8\u3002',
-} as const;
-
-function formatGroundedCadGeometryExtractionResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const actionText = resultTaskText(input);
-  if (!requiresCadGeometryExtractionOnly(actionText)) return null;
-  const record = [...(input.toolRecords || [])].reverse().find(item => (
-    /^floorplan_extract_geometry$/i.test(String(item.name || ''))
-  ));
-  if (!record) return null;
-
-  const zh = isChineseText(actionText);
-  if (record.error) {
-    const publicMessage = zh
-      ? `${CAD_GEOMETRY_ZH.failed}\n${CAD_GEOMETRY_ZH.retry}`
-      : 'Geometry extraction did not succeed; no drawing was executed. Check the source file and retry, or use another readable drawing.';
-    return {
-      text: publicMessage,
-      blocked: true,
-      reason: 'floorplan_geometry_extraction_failed',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: publicMessage,
-      },
-    };
-  }
-
-  let parsed: Record<string, any>;
-  try {
-    const value = JSON.parse(String(record.result || ''));
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('non-object receipt');
-    parsed = value as Record<string, any>;
-  } catch {
-    const blocker = 'floorplan_extract_geometry returned malformed structured JSON.';
-    return {
-      text: zh
-        ? [
-            CAD_GEOMETRY_ZH.failed,
-            `${CAD_GEOMETRY_ZH.reason}${blocker}`,
-          ].join('\n')
-        : [
-            'Geometry extraction did not succeed; no drawing was executed.',
-            `Reason: ${blocker}`,
-          ].join('\n'),
-      blocked: true,
-      reason: blocker,
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: blocker,
-      },
-    };
-  }
-
-  const sourcePath = String(parsed.path || record.arguments?.imagePath || '').trim();
-  const receiptPath = String(parsed.geometryReceiptPath || '').trim();
-  const flag = (value: unknown) => value === true ? 'true' : value === false ? 'false' : 'unknown';
-  const state = `parsed=${flag(parsed.parsed)}, geometryReady=${flag(parsed.geometryReady)}, geometryVerified=${flag(parsed.geometryVerified)}`;
-  const verified = hasVerifiedCadGeometryExtractionEvidence([record]);
-  if (verified) {
-    const width = Number(parsed?.geometryReview?.width || 0);
-    const height = Number(parsed?.geometryReview?.height || 0);
-    const countEntries = Object.entries(parsed?.geometryReview?.counts || {})
-      .filter(([, value]) => Number(value) > 0)
-      .map(([key, value]) => `${key}=${Number(value)}`);
-    const lines = zh
-      ? [
-          CAD_GEOMETRY_ZH.succeeded,
-          sourcePath ? `${CAD_GEOMETRY_ZH.source}${sourcePath}` : '',
-          `${CAD_GEOMETRY_ZH.verificationState}${state}\u3002`,
-          receiptPath ? `${CAD_GEOMETRY_ZH.receipt}${receiptPath}` : '',
-          width > 0 && height > 0 ? `${CAD_GEOMETRY_ZH.dimensions}${width} x ${height}\u3002` : '',
-          countEntries.length > 0 ? `${CAD_GEOMETRY_ZH.counts}${countEntries.join(', ')}\u3002` : '',
-        ]
-      : [
-          'Geometry extraction succeeded; no drawing was executed.',
-          sourcePath ? `Source: ${sourcePath}` : '',
-          `Verification state: ${state}.`,
-          receiptPath ? `Geometry receipt: ${receiptPath}` : '',
-          width > 0 && height > 0 ? `Geometry dimensions: ${width} x ${height}.` : '',
-          countEntries.length > 0 ? `Geometry counts: ${countEntries.join(', ')}.` : '',
-        ];
-    return {
-      text: lines.filter(Boolean).join('\n'),
-      blocked: false,
-      reason: 'Grounded geometry-extraction success from a verified floorplan_extract_geometry receipt.',
-    };
-  }
-
-  const failedStage = String(parsed.failedStage || 'verification').trim();
-  const parseError = String(
-    parsed.parseError
-    || parsed?.geometryReview?.validation?.errors?.[0]
-    || parsed?.geometryReview?.visualVerification?.criticalMismatches?.[0]
-    || 'The geometry receipt did not pass readiness and verification.',
-  ).trim();
-  const next = String(parsed.next || '').trim();
-  const lines = zh
-    ? [
-        CAD_GEOMETRY_ZH.failed,
-        `${CAD_GEOMETRY_ZH.failedStage}${failedStage}\u3002`,
-        `${CAD_GEOMETRY_ZH.receiptState}${state}\u3002`,
-        `${CAD_GEOMETRY_ZH.reason}${parseError}`,
-        next ? `${CAD_GEOMETRY_ZH.next}${next}` : '',
-      ]
-    : [
-        'Geometry extraction did not succeed; no drawing was executed.',
-        `Failed stage: ${failedStage}.`,
-        `Receipt state: ${state}.`,
-        `Reason: ${parseError}`,
-        next ? `Next: ${next}` : '',
-      ];
-  const blocker = `Geometry extraction receipt reported ${failedStage}: ${parseError}`;
-  return {
-    text: lines.filter(Boolean).join('\n'),
-    blocked: true,
-    reason: blocker,
-    notification: {
-      type: 'work_product_guard',
-      level: 'warning',
-      message: blocker,
-    },
-  };
-}
-
-function formatGroundedWpsMutationResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const actionText = resultTaskText(input);
-  const record = [...(input.toolRecords || [])].reverse().find(item => (
-    item.name === 'wps_create_document_with_text'
-    && !item.error
-    && String(item.result || '').trim()
-  ));
-  if (!record) return null;
-
-  const primaryText = String(actionText || '').split(/\n## Recent action continuation context\b/i, 1)[0].trim();
-  const target = extractCurrentAppTarget(actionText);
-  const targetsWps = /(?:^|\b)wps(?:\s+office|\s+writer)?(?:\b|$)|\u91d1\u5c71/iu.test(target);
-  // A direct "create a Word/document" request may not carry recovered
-  // appTarget context even though the current-turn native WPS receipt proves
-  // exactly which application performed the mutation. Accept that receipt as
-  // the surface identity instead of discarding a verified in-app result.
-  const directDocumentMutation = (
-    /(?:\u65b0\u5efa|\u521b\u5efa|\u5199\u5165|\u8f93\u5165|\u7f16\u8f91|\u4fee\u6539)|\b(?:new|create|write|type|edit|modify)\b/iu.test(primaryText)
-    && /(?:\bWPS\b|\bWord\b|\u6587\u6863)|\bdocument\b/iu.test(primaryText)
-  );
-  if (!targetsWps && !directDocumentMutation) return null;
-  if (!requiresCurrentAppUiMutation(actionText) && !directDocumentMutation) return null;
-
-  let receipt: Record<string, any>;
-  try {
-    const parsed = JSON.parse(String(record.result || ''));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    receipt = parsed as Record<string, any>;
-  } catch {
-    return null;
-  }
-
-  const requestedText = extractRequestedCurrentAppText(primaryText);
-  const suppliedText = String(record.arguments?.text || '');
-  const readBack = String(receipt.bodyTextWithoutTerminalParagraph || '');
-  const attachmentMode = String(receipt.attachmentMode || '');
-  const attachmentFlagsMatch = attachmentMode === 'attachedExisting'
-    ? receipt.attachedExisting === true && receipt.newVisibleInstance === false
-    : attachmentMode === 'newVisibleInstance'
-      ? receipt.attachedExisting === false && receipt.newVisibleInstance === true
-      : false;
-  const verified = (
-    receipt.ok === true
-    && receipt.status === 'verified'
-    && receipt.automation === 'KWPS.Application'
-    && receipt.visible === true
-    && receipt.documentCreated === true
-    && receipt.exactTextMatch === true
-    && receipt.processName === 'wps.exe'
-    && Number(receipt.processId) > 0
-    && attachmentFlagsMatch
-    && Boolean(String(receipt.documentName || '').trim())
-    && Boolean(String(receipt.windowTitle || '').trim())
-    && receipt.saved === false
-    && !String(receipt.savePath || '').trim()
-    && suppliedText === requestedText
-    && readBack === requestedText
-  );
-  if (!verified) return null;
-
-  const zh = isChineseText(actionText);
-  const userRequestedSave = /(?:\u4fdd\u5b58)|\b(?:save)\b/iu.test(primaryText);
-  const documentName = String(receipt.documentName).trim();
-  const windowTitle = String(receipt.windowTitle).trim();
-  const processId = Number(receipt.processId);
-  const lines = zh
-    ? [
-        requestedText
-          ? CN_RESULT_GROUNDING_MESSAGES.wpsExactTextWritten(documentName, requestedText)
-          : CN_RESULT_GROUNDING_MESSAGES.wpsBlankDocumentCreated(documentName),
-        CN_RESULT_GROUNDING_MESSAGES.wpsWindow(windowTitle),
-        CN_RESULT_GROUNDING_MESSAGES.wpsProcess(processId),
-        CN_RESULT_GROUNDING_MESSAGES.wpsUnsaved,
-      ]
-    : [
-        requestedText
-          ? `Created visible WPS document "${documentName}" and wrote the exact requested text: ${requestedText}`
-          : `Created visible blank WPS document "${documentName}".`,
-        `Window: ${windowTitle}`,
-        `Process: wps.exe (PID ${processId})`,
-        'The document is currently unsaved.',
-      ];
-  return {
-    text: lines.join('\n'),
-    blocked: userRequestedSave,
-    reason: userRequestedSave
-      ? 'WPS document creation and exact text entry were verified, but the requested save action was not completed.'
-      : requestedText
-        ? 'Grounded WPS document creation and exact text entry from a verified KWPS.Application receipt.'
-        : 'Grounded blank WPS document creation from a verified KWPS.Application receipt.',
-    notification: userRequestedSave
-      ? {
-          type: 'work_product_guard',
-          level: 'warning',
-          message: 'The WPS document was created and populated, but it is not saved.',
-        }
-      : undefined,
-  };
-}
-
-function formatGroundedCadRunResult(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
-  if (taskActionContract(input).kind !== 'cad_drafting') return null;
-  const record = [...(input.toolRecords || [])].reverse().find(item => (
-    !item.error
-    && /^(?:mcp_cad-drafting_autocad_playback_file|cad_draw_floorplan_in_autocad)$/i.test(String(item.name || ''))
-    && String(item.result || '').trim()
-  ));
-  if (!record) return null;
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(String(record.result || ''));
-  } catch {
-    return null;
-  }
-
-  const actionText = resultTaskText(input);
-  const zh = isChineseText(actionText);
-  const markerPath = String(parsed?.completionMarkerPath || '').trim();
-  const operationsPath = String(parsed?.operationsPath || parsed?.manifest?.operationsPath || '').trim();
-  const executable = String(parsed?.autocadExecutable || parsed?.manifest?.autocadExecutable || '').trim();
-  const executableSource = String(parsed?.autocadExecutableSource || parsed?.manifest?.autocadExecutableSource || '').trim();
-  const operationCount = Number(parsed?.operationCount || parsed?.manifest?.operationCount || 0);
-  const strokeDelayMs = Number(parsed?.strokeDelayMs || parsed?.manifest?.strokeDelayMs || 0);
-  const expectedEntityCount = Number(parsed?.expectedEntityCount || 0);
-  const entitiesAdded = Number(parsed?.entitiesAdded || 0);
-  const completed = parsed?.status === 'completed'
-    && parsed?.completionMarkerExists === true
-    && parsed?.transport === 'mcp_autocad_com'
-    && parsed?.visiblePlayback === true
-    && parsed?.geometryVerified === true
-    && parsed?.entityCountMatches === true
-    && operationCount > 0
-    && operationCount === expectedEntityCount
-    && entitiesAdded === expectedEntityCount
-    && Boolean(String(parsed?.operationSetId || '').trim());
-
-  if (completed) {
-    const lines = zh
-      ? [
-          CN_CAD_MESSAGES.playbackCompleted,
-          markerPath ? `完成标记：${markerPath}` : '',
-          operationsPath ? `${CN_CAD_MESSAGES.drawingOperations}${operationsPath}` : '',
-          executable ? `AutoCAD：${executable}${executableSource ? `（来源：${executableSource}）` : ''}` : '',
-          operationCount > 0 ? `已执行 ${operationCount} 个绘图操作。` : '',
-          parsed?.geometryVerified === true && parsed?.geometryVerificationRequired === true && Boolean(String(parsed?.geometryReceiptPath || '').trim())
-            ? CN_CAD_MESSAGES.sourceGeometryVerified
-            : '',
-          parsed?.entityCountMatches === true ? `${CN_CAD_MESSAGES.entityDeltaVerification}${entitiesAdded}/${expectedEntityCount}\u3002` : '',
-        ]
-      : [
-          'The visible stroke-by-stroke playback completed in the real AutoCAD application through Lumi CAD MCP/COM and passed marker verification.',
-          markerPath ? `Completion marker: ${markerPath}` : '',
-          operationsPath ? `Drawing operations: ${operationsPath}` : '',
-          executable ? `AutoCAD: ${executable}${executableSource ? ` (source: ${executableSource})` : ''}` : '',
-          operationCount > 0 ? `${operationCount} drawing operations completed.` : '',
-          strokeDelayMs > 0 ? `Visible stroke interval: ${strokeDelayMs} ms.` : '',
-          parsed?.geometryVerified === true && parsed?.geometryVerificationRequired === true && Boolean(String(parsed?.geometryReceiptPath || '').trim())
-            ? 'Source geometry verification: passed.'
-            : '',
-          parsed?.entityCountMatches === true ? `Entity delta verification: ${entitiesAdded}/${expectedEntityCount}.` : '',
-        ];
-    return {
-      text: lines.filter(Boolean).join('\n'),
-      blocked: false,
-      reason: 'Grounded AutoCAD MCP/COM visible-playback summary from the CAD completion marker.',
-    };
-  }
-
-  if (!requiresVisibleAutoCadExecution(actionText)) return null;
-  const blocker = String(parsed?.blocker || parsed?.note || (
-    parsed?.geometryVerified !== true
-      ? 'AutoCAD geometry did not pass source verification.'
-      : parsed?.entityCountMatches !== true
-        ? 'AutoCAD entity-count verification did not pass.'
-        : 'AutoCAD completion marker was not observed.'
-  )).trim();
-  const text = zh
-    ? [
-        '这次 AutoCAD 实际绘图还没有完成。',
-        `阻塞点：${blocker}`,
-        markerPath ? `待验收标记：${markerPath}` : '',
-      ].filter(Boolean).join('\n')
-    : [
-        'The real AutoCAD drawing run is not complete yet.',
-        `Blocker: ${blocker}`,
-        markerPath ? `Expected completion marker: ${markerPath}` : '',
-      ].filter(Boolean).join('\n');
-  return {
-    text,
-    blocked: true,
-    reason: blocker,
-    notification: {
-      type: 'work_product_guard',
-      level: 'warning',
-      message: blocker,
-    },
-  };
-}
-
-function formatGroundedBlankAutoCadDocumentResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  if (taskActionContract(input).kind !== 'cad_document') return null;
-  if (!hasBlankAutoCadDocumentEvidence(input.toolRecords || [])) return null;
-  const record = [...(input.toolRecords || [])].reverse().find(item => (
-    !item.error
-    && /^mcp_cad-drafting_autocad_new_document$/i.test(String(item.name || ''))
-    && String(item.result || '').trim()
-  ));
-  if (!record) return null;
-  let parsed: any;
-  try {
-    parsed = JSON.parse(String(record.result || ''));
-  } catch {
-    return null;
-  }
-  const document = String(parsed?.document || '').trim();
-  const entityCount = Number(parsed?.entityCount);
-  const zh = isChineseText(resultTaskText(input));
-  return {
-    text: zh
-      ? CN_CAD_MESSAGES.blankDocumentCreated(document, entityCount)
-      : `Created and focused the blank drawing ${document} in the real AutoCAD application; it currently contains ${entityCount} entities.`,
-    blocked: false,
-    reason: 'Grounded blank AutoCAD document result from a verified MCP/COM receipt.',
-  };
-}
-
-function formatExternalAiHistoryResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const record = [...(input.toolRecords || [])].reverse().find(item => (
-    !item.error
-    && /^external_ai_history_(?:source_register|source_list|source_revoke|sync|status|query)$/i.test(String(item.name || ''))
-    && String(item.result || '').trim()
-  ));
-  if (!record) return null;
-  let parsed: any;
-  try {
-    parsed = JSON.parse(String(record.result || ''));
-  } catch {
-    return null;
-  }
-  const zh = isChineseText(resultTaskText(input));
-  const sourceId = String(parsed?.sourceId || parsed?.source?.id || '').trim();
-  const targetId = String(parsed?.targetId || parsed?.source?.targetId || 'unknown').trim();
-  const status = String(parsed?.status || 'unknown').trim();
-
-  if (record.name === 'external_ai_history_sync') {
-    const jobId = String(parsed?.jobId || '').trim();
-    if (!sourceId || !jobId || parsed?.verified !== true) return null;
-    const counts = parsed?.counts || {};
-    const completeness = String(parsed?.completeness || 'unknown');
-    const nextCursor = String(parsed?.nextCursor || '');
-    const limitations = Array.isArray(parsed?.limitations)
-      ? parsed.limitations.map((item: unknown) => String(item || '').trim()).filter(Boolean)
-      : [];
-    const detail = String(parsed?.error || parsed?.blocker || '').trim();
-    const lines = zh
-      ? [
-          CN_EXTERNAL_AI_MESSAGES.historySyncStatus(targetId, status, String(parsed?.sourceKind || 'unknown'), jobId),
-          CN_EXTERNAL_AI_MESSAGES.historyCounts(
-            Number(counts.inserted || 0), Number(counts.updated || 0), Number(counts.skipped || 0),
-            Number(counts.conflicted || 0), Number(counts.attachments || 0), Number(parsed?.pageCount || 0),
-          ),
-          CN_EXTERNAL_AI_MESSAGES.historyCompleteness(completeness, nextCursor),
-          detail ? CN_EXTERNAL_AI_MESSAGES.historyBlocker(detail) : '',
-          limitations.length ? CN_EXTERNAL_AI_MESSAGES.historyLimitations(limitations.join('；')) : '',
-        ]
-      : [
-          `External AI history sync: ${status}; target ${targetId}; source ${String(parsed?.sourceKind || 'unknown')}; job ${jobId}.`,
-          `Receipt: ${Number(counts.inserted || 0)} inserted, ${Number(counts.updated || 0)} updated, ${Number(counts.skipped || 0)} deduplicated, ${Number(counts.conflicted || 0)} conflicts, ${Number(counts.attachments || 0)} attachments, ${Number(parsed?.pageCount || 0)} pages.`,
-          `Completeness: ${completeness}${nextCursor ? `; resume cursor ${nextCursor}` : ''}.`,
-          detail ? `Not completed: ${detail}` : '',
-          limitations.length ? `Limitations: ${limitations.join('; ')}` : '',
-        ];
-    return {
-      text: lines.filter(Boolean).join('\n'),
-      blocked: ['blocked', 'failed'].includes(status),
-      reason: `Grounded external AI history sync receipt: status=${status}; source=${sourceId}; job=${jobId}.`,
-    };
-  }
-
-  if (record.name === 'external_ai_history_query') {
-    if (parsed?.ok !== true || status !== 'queried' || !sourceId || !Array.isArray(parsed?.messages)) return null;
-    const messages = parsed.messages.slice(-50);
-    const completeness = String(parsed?.completeness || 'source_bounded');
-    const lines = [
-      zh
-        ? CN_EXTERNAL_AI_MESSAGES.historyQueryHeader(targetId, messages.length, completeness)
-        : `Read ${messages.length} locally synchronized message(s) from ${targetId}; completeness: ${completeness}.`,
-      ...messages.map((message: any) => {
-        const role = String(message?.role || 'unknown');
-        const messageId = String(message?.sourceExternalMessageId || message?.externalMessageId || 'derived');
-        const content = String(message?.content || '').trim().slice(0, 1_600);
-        return zh
-          ? CN_EXTERNAL_AI_MESSAGES.historyMessage(role, content, messageId)
-          : `- ${role} (${messageId}): ${content}`;
-      }),
-    ];
-    const limitations = Array.isArray(parsed?.limitations)
-      ? parsed.limitations.map((item: unknown) => String(item || '').trim()).filter(Boolean)
-      : [];
-    if (limitations.length) lines.push(zh
-      ? CN_EXTERNAL_AI_MESSAGES.historyLimitations(limitations.join('；'))
-      : `Limitations: ${limitations.join('; ')}`);
-    return {
-      text: lines.join('\n'),
-      blocked: false,
-      reason: `Grounded external AI history query receipt: source=${sourceId}; messages=${messages.length}.`,
-    };
-  }
-
-  if (record.name === 'external_ai_history_source_list') {
-    if (parsed?.ok !== true || !Array.isArray(parsed?.sources)) return null;
-    const lines = parsed.sources.map((source: any) => {
-      const itemStatus = String(source?.status || 'unknown');
-      const itemId = String(source?.id || 'unknown');
-      const itemTarget = String(source?.targetId || 'unknown');
-      return zh
-        ? CN_EXTERNAL_AI_MESSAGES.historySourceState(itemStatus, itemId, itemTarget)
-        : `External AI history source: ${itemStatus}; target ${itemTarget}; source id ${itemId}.`;
-    });
-    return {
-      text: lines.length ? lines.join('\n') : (zh ? CN_EXTERNAL_AI_MESSAGES.historyNoSources : 'No external AI history source is authorized in this scope.'),
-      blocked: false,
-      reason: 'Grounded external AI history source list receipt.',
-    };
-  }
-
-  if (record.name === 'external_ai_history_status') {
-    if (parsed?.ok !== true || !parsed?.source) return null;
-    const counts = parsed?.counts || {};
-    const base = zh
-      ? CN_EXTERNAL_AI_MESSAGES.historySourceState(status, sourceId, targetId)
-      : `External AI history source: ${status}; target ${targetId}; source id ${sourceId}.`;
-    const countLine = zh
-      ? CN_EXTERNAL_AI_MESSAGES.historyLedgerCounts(
-          Number(counts.conversations || 0), Number(counts.messages || 0),
-          Number(counts.attachments || 0), Number(counts.jobs || 0),
-        )
-      : `Local ledger: ${Number(counts.conversations || 0)} conversations, ${Number(counts.messages || 0)} messages, ${Number(counts.attachments || 0)} attachments, ${Number(counts.jobs || 0)} sync jobs.`;
-    return { text: `${base}\n${countLine}`, blocked: false, reason: `Grounded external AI history status receipt: source=${sourceId}.` };
-  }
-
-  if (record.name === 'external_ai_history_source_register' || record.name === 'external_ai_history_source_revoke') {
-    if (parsed?.ok !== true || !sourceId) return null;
-    const state = record.name.endsWith('revoke') ? 'revoked' : status;
-    return {
-      text: zh
-        ? CN_EXTERNAL_AI_MESSAGES.historySourceState(state, sourceId, targetId)
-        : `External AI history source: ${state}; target ${targetId}; source id ${sourceId}.`,
-      blocked: false,
-      reason: `Grounded external AI history authorization receipt: status=${state}; source=${sourceId}.`,
-    };
-  }
-  return null;
-}
-
 function correctCurrentTurnContractDrift(
   input: LumiResultFinalizerInput,
   taskContract: ReturnType<typeof buildActionContract>,
@@ -2567,8 +317,8 @@ function sanitizeUnsupportedRestatementAdditions(taskText: string, responseText:
   if (!/(?:只|仅)?(?:复述|重复|完整说出|原样说出)|其他不变|只(?:说|保留|复述)事实/u.test(taskText)) return responseText;
   const unsupportedClaim = /(?:写|放|记)(?:进|到|在).{0,8}(?:日程|计划|任务)|(?:已经|已|我)?\s*(?:记下|记录|保存)(?:了|好)?|(?:到时|到时候|出发前|之后).{0,16}(?:提醒|通知)|(?:创建|新建|安排).{0,8}(?:任务|提醒|日程)/u;
   const explicitInTask = unsupportedClaim.test(taskText);
-  if (explicitInTask) return responseText;
-  const clauses = String(responseText || '').match(/[^。！？!?\n]+[。！？!?]?/gu) || [];
+  if (explicitInTask || !unsupportedClaim.test(responseText)) return responseText;
+  const clauses = String(responseText || '').match(/[^。！？!?\r\n]+[。！？!?]?|[\r\n]+/gu) || [];
   const retained = clauses.filter(clause => !unsupportedClaim.test(clause)).join('').trim();
   return retained || responseText;
 }
@@ -2703,20 +453,24 @@ function formatStructuredEvidenceCorrection(
 function preserveModelWordingOnGroundedSuccess(
   input: LumiResultFinalizerInput,
   grounded: LumiResultFinalizerResult,
+  primaryOnly = false,
 ): LumiResultFinalizerResult {
+  if (primaryOnly && !input.completionGuard?.primaryGoalResult) return grounded;
   // Specific programme/season/episode claims come only from the target bound
   // to the verified progress samples, never an embellished model tail.
-  if (grounded.reason === 'verified_playback_progress') return grounded;
+  if (!input.completionGuard?.primaryGoalResult && grounded.reason === 'verified_playback_progress') return grounded;
   // The requested contents are part of delivery. A generic acknowledgement
   // or file path cannot replace the actual verified readback body.
-  if (grounded.reason === 'Grounded artifact completion with delivered same-path readback content.') return grounded;
-  const modelText = String(input.responseText || '').trim();
+  if (!input.completionGuard?.primaryGoalResult && grounded.reason === 'Grounded artifact completion with delivered same-path readback content.') return grounded;
+  const modelText = sanitizeUserFacingExecutionOutput(sanitizeInternalExecutionText(String(input.responseText || '').trim(),
+    isChineseText(resultTaskText(input)) || isChineseText(input.responseText)), { task: resultTaskText(input), toolRecords: input.toolRecords || [] });
+  if (input.completionGuard?.primaryGoalResult && modelText !== sanitizeInternalExecutionText(String(input.responseText || '').trim(), isChineseText(resultTaskText(input)) || isChineseText(input.responseText))) return { ...grounded, text: modelText + '\n\n' + CN_TASK_EXECUTION_MESSAGES.answerDeliveryIncomplete, blocked: true, reason: CN_TASK_EXECUTION_MESSAGES.answerDeliveryIncomplete };
   // Grounders reach this helper only after their structured receipt contract
   // has accepted the current outcome. Compatibility uses a domain-neutral
   // evidence fingerprint (stable identifiers plus text overlap), never a
   // tool/phrase-specific reply patch. A failed or conflicting outcome stays on
   // the structured correction path.
-  if (input.source !== 'chat' || grounded.blocked || !modelText) return grounded;
+  if ((input.source !== 'chat' && !input.completionGuard?.primaryGoalResult) || grounded.blocked || !modelText) return grounded;
   // Completion truth comes from the grounded receipt contract. A stray model
   // tail such as "executing now" is a presentation defect, not grounds for
   // turning an actually completed durable task back into a blocked one.
@@ -2725,6 +479,7 @@ function preserveModelWordingOnGroundedSuccess(
   }
   if (
     claimsCurrentAppSaveCompletion(modelText)
+    && currentAppMutationRequirements(resultTaskText(input)).required
     && !hasCurrentAppSaveEvidence(input.toolRecords || [], resultTaskText(input))
   ) {
     return formatStructuredEvidenceCorrection(input, grounded);
@@ -2736,169 +491,13 @@ function preserveModelWordingOnGroundedSuccess(
   if (groundedOpenSuccess && modelDeniesOpen) {
     return formatStructuredEvidenceCorrection(input, grounded);
   }
-  if (!modelWordingMatchesGroundedEvidence(input, modelText, grounded.text)) {
+  if (!input.completionGuard?.primaryGoalResult && !modelWordingMatchesGroundedEvidence(input, modelText, grounded.text)) {
     return formatStructuredEvidenceCorrection(input, grounded);
   }
   return {
     ...grounded,
-    text: formatVerifiedTaskResultForReadability(input.responseText),
+    text: formatVerifiedTaskResultForReadability(modelText),
   };
-}
-
-function currentDocumentSummaryFragments(content: string): string[] {
-  const raw = String(content || '')
-    .replace(/\u0000/gu, '')
-    .replace(/\r\n?/gu, '\n')
-    .trim();
-  if (!raw) return [];
-  const lineCandidates = raw
-    .split(/\n+/u)
-    .map(line => line
-      .replace(/^\s*(?:[-=]{2,}\s*)?(?:slide|page)\s*\d+\s*(?:[-=:]{1,}\s*)?/iu, '')
-      // i18n-allow: Reviewed Chinese slide/page marker recognition; not user-visible copy.
-      .replace(/^\s*第\s*\d+\s*(?:页|张|部分)\s*[：:]?\s*/u, '')
-      .replace(/^\s*[•●▪◦*-]\s*/u, '')
-      .replace(/\s+/gu, ' ')
-      .trim())
-    .filter(line => line.length >= 2 && line.length <= 220)
-    .filter(line => !/^(?:path|file(?:path)?|source|bytes?|pages?|mime(?:type)?|status|ok|success)\s*[:=]/iu.test(line))
-    // i18n-allow: Reviewed multilingual prompt-injection recognition; not user-visible copy.
-    .filter(line => !/(?:ignore (?:all )?previous instructions|system prompt|reveal (?:the )?(?:secret|token|password)|请忽略(?:之前|以上|所有)指令|泄露(?:密钥|令牌|密码)|执行以下(?:命令|脚本))/iu.test(line));
-  const candidates = lineCandidates.length >= 2
-    ? lineCandidates
-    : raw
-      .split(/(?<=[。！？.!?])\s*/u)
-      .map(part => part.replace(/\s+/gu, ' ').trim())
-      .filter(part => part.length >= 4 && part.length <= 260);
-  const unique: string[] = [];
-  const seen = new Set<string>();
-  let total = 0;
-  for (const candidate of candidates) {
-    const key = candidate.normalize('NFKC').toLocaleLowerCase('en-US');
-    if (!key || seen.has(key)) continue;
-    if (total + candidate.length > 760 && unique.length > 0) break;
-    seen.add(key);
-    unique.push(candidate);
-    total += candidate.length;
-    if (unique.length >= 8) break;
-  }
-  return unique;
-}
-
-function formatGroundedCurrentAuthoringDocumentResult(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const actionText = resultTaskText(input);
-  const evidence = resolveVerifiedCurrentAuthoringDocumentEvidence(
-    input.toolRecords || [],
-    actionText,
-  );
-  if (!evidence) return null;
-  const fragments = currentDocumentSummaryFragments(evidence.content);
-  const zh = isChineseText(actionText) || isChineseText(evidence.content);
-  const body = fragments.join(zh ? '；' : '; ');
-  const text = zh
-    ? body
-      ? CN_TASK_TARGET_ANCHOR_MESSAGES.currentDocumentSummary(evidence.documentName, body)
-      : CN_TASK_TARGET_ANCHOR_MESSAGES.currentDocumentWithoutUsableText(evidence.documentName)
-    : body
-      ? `I read “${evidence.documentName}”. It mainly covers: ${body}`
-      : `I read “${evidence.documentName}”, but it contains no usable text to summarize.`;
-  return {
-    text,
-    blocked: false,
-    reason: 'grounded_current_authoring_document',
-  };
-}
-
-function parseActionReceipt(value: unknown): Record<string, any> | null {
-  return parseReceiptObject(value);
-}
-
-function isWorkTaskLedgerTool(name: unknown): boolean {
-  return /^(?:work_takeover_task_(?:create|get|list|update)|conversation_action_(?:task|receipt).*)$/iu
-    .test(String(name || ''));
-}
-
-function hasVerifiedNonLedgerActionReceipt(records: ToolExecutionRecord[]): boolean {
-  return records.some(record => {
-    if (record.error || isWorkTaskLedgerTool(record.name)) return false;
-    if (record.terminalVerification?.status === 'verified') return true;
-    if (
-      record.envelope?.status === 'verified_success'
-      && record.envelope.verification?.status === 'verified'
-    ) return true;
-    const receipt = parseActionReceipt(record.receipt);
-    const receiptVerification = receipt?.terminalVerification?.status
-      || receipt?.verification?.status;
-    return receiptVerification === 'verified'
-      || receipt?.status === 'verified_success'
-      || receipt?.status === 'verified'
-      || (receipt?.ok === true && receipt?.verified === true);
-  });
-}
-
-function claimsPersistentTaskStepCompletion(responseText: string): boolean {
-  const response = String(responseText || '').trim();
-  if (!response) return false;
-  const explicitlyIncomplete = /(?:\u5c1a\u672a|\u672a|\u6ca1\u6709|\u4e0d\u80fd|\u4e0d\u5e94|\u4e0d\u53ef)[^\u3002\uff01\uff1f.!?\n]{0,20}(?:\u5b8c\u6210|\u6807\u8bb0[^\u3002\uff01\uff1f.!?\n]{0,6}\u5b8c\u6210)|\b(?:not|isn'?t|wasn'?t|cannot|can't)\b[^.!?\n]{0,32}\b(?:complete|completed|done)\b/iu
-    .test(response);
-  if (explicitlyIncomplete) return false;
-  return /(?:\u5df2\u7ecf|\u5df2)[^\u3002\uff01\uff1f.!?\n]{0,18}(?:\u5b8c\u6210|\u505a\u5b8c|\u63a8\u8fdb)|(?:\u5b8c\u6210|\u505a\u5b8c)\u4e86?\u7b2c[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\d]+\u6b65|\b(?:completed|finished|done)\b/iu
-    .test(response);
-}
-
-function unsupportedLedgerOnlyWorkTaskCompletion(
-  input: LumiResultFinalizerInput,
-): LumiResultFinalizerResult | null {
-  const taskText = resultTaskText(input);
-  if (!/\bwt_task_[A-Za-z0-9_-]+\b/u.test(taskText)) return null;
-  if (!/(?:\u7ee7\u7eed|\u7eed\u63a5|\u6062\u590d|\u63a8\u8fdb|\u6267\u884c|\u5904\u7406|\u5b8c\u6210|\u505a\u5b8c)/u.test(taskText)) return null;
-  if (!claimsPersistentTaskStepCompletion(input.responseText)) return null;
-  const records = input.toolRecords || [];
-  if (!records.some(record => isWorkTaskLedgerTool(record.name))) return null;
-  if (hasVerifiedNonLedgerActionReceipt(records)) return null;
-
-  const reason = 'Persistent task completion was claimed from ledger updates without a verified action receipt.';
-  return {
-    text: isChineseText(taskText) || isChineseText(input.responseText)
-      ? CN_EXECUTION_EVIDENCE_MESSAGES.ledgerOnlyTaskCompletion
-      : 'The task ledger proves only a bookkeeping update, not execution. No verified terminal receipt from a real action exists for this turn, so the step cannot be marked complete.',
-    blocked: true,
-    reason,
-    notification: {
-      type: 'work_product_guard',
-      level: 'warning',
-      message: reason,
-    },
-  };
-}
-
-function groundedMediaGeneration(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
-  const task = resultTaskText(input);
-  // A generator receipt proves generation only, not a requested publication,
-  // document, delivery or subsequent application action.
-  // i18n-allow: Media creation versus compound external-work input recognition.
-  if (!/(?:生成|创建|制作|绘制|画).{0,90}(?:图片|图像|插画|海报|视频)|\b(?:generate|create|draw|make).{0,80}(?:image|picture|video)\b/iu.test(task)
-    || /(?:发送|发给|上传|发布|打开|导出|写入|保存到|CAD|图纸|文档|PPT)|\b(?:send|upload|publish|open|export|document|save to|cad)\b/iu.test(task)) return null; // i18n-allow: Compound task boundaries.
-  const record = [...(input.toolRecords || [])].reverse().find(item => /^(?:generate_image|get_image_generation_status|ai_edit_image|generate_video)$/u.test(item.name));
-  if (!record || !isVerifiedCurrentTurnRecord(input, record)) return null;
-  const receipt = buildMediaArtifactReceipt(record.name, record.arguments, toolRecordTerminalPayload(record), record.error);
-  if (!receipt) return null;
-  // i18n-allow: Requested media kind and count, not output copy.
-  const videoRequested = /(?:视频(?![^。\n]*(?:封面|图片|图像|海报|缩略图))|\bvideo\b(?![^.\n]*\b(?:cover|image|thumbnail|poster)\b))/iu.test(task);
-  const requestedKind = videoRequested ? 'video' : 'image';
-  if (receipt.artifacts.some(artifact => artifact.kind !== requestedKind)) return null;
-  // i18n-allow: Multiple distinct media deliverables cannot share one receipt.
-  if (/(?:图片|图像).{0,12}(?:和|以及|再|并).{0,12}视频|\b(?:image|picture).{0,12}(?:and|then).{0,12}video\b/iu.test(task)) return null;
-  // i18n-allow: Explicit image counts are completion requirements.
-  const countText = task.match(/(?:生成|创建|制作|画|绘制)\s*([一二两三四五六七八九十\d]+)\s*张/u)?.[1];
-  const chineseCounts: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 }; // i18n-allow: Number recognition.
-  const requestedCount = countText ? chineseCounts[countText] || Number(countText) : 1;
-  if (!Number.isSafeInteger(requestedCount) || receipt.artifacts.length < requestedCount) return null;
-  const zh = isChineseText(task);
-  // i18n-allow: Verified media completion copy; the authenticated media card carries the artifact paths.
-  return { text: zh ? (receipt.artifacts[0].kind === 'video' ? '视频已生成。' : '图片已生成。') : 'The requested media was generated.', blocked: false, reason: 'Grounded verified generated-media artifact.' };
 }
 
 /**
@@ -2906,101 +505,110 @@ function groundedMediaGeneration(input: LumiResultFinalizerInput): LumiResultFin
  * verified receipt. This is deliberately not a generic "one tool succeeded"
  * shortcut: reading source data still needs the requested analysis/answer.
  */
-export function tryFinalizeVerifiedBoundedAction(
-  input: LumiResultFinalizerInput,
-  acceptedTaskTarget?: LumiTurnFlow['acceptedTaskTarget'],
-): LumiResultFinalizerResult | null {
-  if (!input.requestId || !input.taskId) return null;
+function groundedReadOnlyWindowObservation(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
   const task = resultTaskText(input);
-  const records = coalesceToolExecutionRecords(input.toolRecords || [])
-    .filter(record => recordMatchesCurrentTurnIdentity(input, record));
-  const scopedInput = { ...input, toolRecords: records, responseText: '' };
-  const cliStatus = verifiedExternalCliStatus(task, records, input);
-  if (cliStatus) return { text: formatExternalCliStatus(task, cliStatus), blocked: false, reason: 'verified_external_cli_status' };
-  // The same verified-media projection owns both loop termination and channel
-  // delivery. A complete generation needs no second model call; compound
-  // publication/delivery tasks and missing artifacts still fail this check.
-  const media = groundedMediaGeneration(scopedInput);
-  if (media) return media;
-  const workflow = formatGroundedWorkflowProgress(scopedInput);
-  if (workflow && ['workflow_completed', 'workflow_incomplete'].includes(workflow.reason || '')) return workflow;
-  const contract = taskActionContract(scopedInput);
-  if (!hasCoreActionEvidence(contract, records, task, undefined, {
-    requestId: input.requestId, taskId: input.taskId,
-  }, input.flow?.acceptedTaskTarget || acceptedTaskTarget)) return null;
-  if (findDesktopCompletionReview(records, { requestId: input.requestId, taskId: input.taskId })) return null;
-  if (contract.kind === 'desktop_operation' && extractSimpleDesktopOpenTarget(task)) {
-    if (!records.some(record => /^(?:desktop_open|browser_open_task)$/u.test(record.name)
-      && isVerifiedCurrentTurnRecord(scopedInput, record))) return null;
-    const result = formatGroundedSimpleDesktopOpenResult(scopedInput);
-    return result && !result.blocked ? result : null;
-  }
-  if (contract.kind === 'skill_authoring') return formatGroundedSkillDraft(scopedInput);
-  if (contract.kind !== 'artifact_work') return null;
-  // The tool loop and channel delivery consume the same producer/readback
-  // projection. An artifact's mere existence is not a second completion rule.
-  if (requiresArtifactPostWriteReadback(task)) {
-    const delivery = resolveArtifactDelivery(records, record => isVerifiedCurrentTurnRecord(scopedInput, record));
-    // Compound tasks and additional analysis still need their own outcome.
-    // i18n-allow: outstanding user action recognition, not user-facing copy.
-    const extraAction = /(?:打开|启动|运行|发送|发布|上传|分析|总结|解释|对比|比较|翻译|删除|移动|复制|重命名|安装|提醒|另外|还要|分别)|\b(?:open|launch|run|send|publish|upload|analy[sz]\w*|summari[sz]\w*|explain|compare|translate|delete|move|copy|rename|install|remind|another|each)\b/iu.test(task);
-    if (delivery?.readback && !extraAction) {
-      const result = formatGroundedArtifactResult(scopedInput);
-      if (result && !result.blocked) return result;
-    }
-    return null;
-  }
-  if (!extractExplicitArtifactTextRequirements(task).length) return null;
-  if (requiresSourceGroundedArtifactContent(task)) return null;
-  const instruction = extractExplicitArtifactTextRequirements(task)
-    .reduce((text, payload) => text.split(payload).join(''), task);
-  // Only exact local text production and its requested readback are bounded.
-  // A later open, calculation, delivery, or other mutation still needs its own result.
-  // i18n-allow: compound action recognition, not user-facing copy.
-  if (/(?:打开|启动|运行|发送|发布|上传|计算|分析|汇总|总结|翻译|删除|移动|复制|重命名|另存|导出|安装|提醒)|\b(?:open|launch|run|send|publish|upload|calculat\w*|analy[sz]\w*|summari[sz]\w*|translate|delete|move|copy|rename|export|install|remind)\b/iu.test(instruction)) return null;
-  const writes = records.filter(record => /^(?:write_file|desktop_write_text_file)$/u.test(record.name)
-    && isVerifiedCurrentTurnRecord(scopedInput, record));
-  if (writes.length !== 1) return null;
-  const requestedPath = buildTaskTargetAnchorProjection({
-    taskText: task,
-    previousTarget: (input.flow?.acceptedTaskTarget || acceptedTaskTarget)?.target,
-  }).target.path;
-  const normalizePath = (value: string) => /^[a-z]:[\\/]|^\\\\/iu.test(value)
-    ? value.replace(/\\/gu, '/').toLowerCase() : value.replace(/\\/gu, '/');
-  if (!requestedPath || normalizePath(requestedPath) !== normalizePath(artifactPathFromRecord(writes[0]))) return null;
-  const result = formatGroundedArtifactResult(scopedInput);
-  return result && !result.blocked ? result : null;
+  if (!hasExplicitNoMutationInstruction(task) || !hasVisionIntent(task) || taskActionContract(input).applies) return null;
+  // Only a bounded request to report visible facts can end at OCR. Analysis,
+  // calculations and other deliverables still need their own completion.
+  // i18n-allow: Explicit observation-only request scope, not output copy.
+  if (!/(?:只|仅)(?:需|要)?(?:查看|观察|看|读取)|\b(?:only|just)\s+(?:inspect|observe|read|look)\b/iu.test(task)
+    || /(?:计算|汇总|分析|总结|翻译|比较)|\b(?:calculate|summari[sz]e|analy[sz]e|translate|compare)\b/iu.test(task)) return null; // i18n-allow: Additional work beyond visible observation.
+  const record = [...(input.toolRecords || [])].reverse().find(record =>
+    record.name === 'ocr_screen' && isVerifiedCurrentTurnRecord(input, record));
+  if (!record) return null;
+  const payload = parseReceiptObject(toolRecordTerminalPayload(record));
+  if (payload?.status !== 'observed' || !String(payload.description || '').trim()) return null;
+  return { text: String(payload.description), blocked: false, reason: 'verified_readonly_window_observation' };
 }
 
+function groundedModelIdentity(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
+  if (!isModelConfigurationReadRequest(resultTaskText(input))) return null;
+  const record = (input.toolRecords || []).slice().reverse().find(row => row.name === 'model_configuration_get' && isVerifiedCurrentTurnRecord(input, row));
+  if (!record) return null;
+  const payload = parseReceiptObject(toolRecordTerminalPayload(record));
+  if (!payload) return null;
+  const active = payload.activeCall?.requestId === input.requestId ? payload.activeCall : null;
+  const configuration = payload.role === 'reasoning' ? payload.configuration : payload.roles?.reasoning;
+  const selected = active || configuration;
+  const model = String(selected?.model || '').trim();
+  const provider = String(selected?.provider || '').trim();
+  if (!model || !/^[\w./ :+-]{1,200}$/.test(model) || !/^[\w.-]{1,60}$/.test(provider)) return null;
+  const zh = isChineseText(resultTaskText(input));
+  return { text: zh ? CN_EXECUTION_EVIDENCE_MESSAGES.groundedModelIdentity(model, provider, Boolean(active))
+    : `${active ? 'This reply uses' : 'The configured primary chat model is'} ${model} (${provider === 'relay' ? 'Lumi Official API' : provider}).`,
+    blocked: false, reason: 'Model identity grounded in the current configuration-read receipt.' };
+}
+
+function groundedBusinessAnalysis(input: LumiResultFinalizerInput): LumiResultFinalizerResult | null {
+  if (!input.taskId || !input.requestId) return null;
+  const task = resultTaskText(input);
+  const contract = taskActionContract(input);
+  if (contract.kind !== 'ecommerce_operations' || contract.components?.length) return null;
+  // Persisted inline analysis is not proof that a requested file was created.
+  if (/\.(?:xlsx?|pdf|docx?|csv)\b|\b(?:Excel|PDF|Word)\b|(?:导出|生成|制作).{0,12}(?:文件|表格|报表)/iu.test(task)) return null; // i18n-allow: extra artifact obligations.
+  const records = (input.toolRecords || []).filter(record => isVerifiedCurrentTurnRecord(input, record));
+  if (!hasCoreActionEvidence(contract, records, task)) return null;
+  const record = [...records].reverse().find(record => /^industry_ecommerce_(?:today_snapshot|store_data_snapshot|listing_action_queue|customer_service_drafts)$/u.test(record.name));
+  if (!record) return null;
+  const payload = parseReceiptObject(toolRecordTerminalPayload(record));
+  if (payload?.ok !== true || payload.status !== 'verified' || payload.persisted !== true || payload.sourceBound !== true || payload.externalMutation !== false
+    || payload.conversationTaskId !== input.taskId || !String(payload.message || '').trim()) return null;
+  return { text: String(payload.message), blocked: false, reason: 'verified_source_bound_business_analysis' };
+}
+
+
 export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResultFinalizerResult {
-  if (input.completionGuard?.blocked && ['model_failed_before_tool_execution', 'media_generation_failed'].includes(input.completionGuard.reason || '')) {
-    return { text: input.completionGuard.text, blocked: true, reason: input.completionGuard.reason };
-  }
   input = {
     ...input,
     // Keep this projection local to finalization. Legacy/MCP adapters may put
     // their only machine result in `receipt`; downstream completion guards and
     // grounded formatters historically read `result`. A verified receipt must
     // not become a failure merely because the display-result string is empty.
-    toolRecords: coalesceToolExecutionRecords(input.toolRecords || []).map(record => (
+    toolRecords: coalesceToolExecutionRecords((input.toolRecords || []).filter(record => artifactRecordMatchesTurn(record, input))).map(record => (
       String(record.result || '').trim()
         ? record
         : { ...record, result: toolRecordTerminalText(record) }
     )),
   };
+  if (input.completionGuard?.blocked) return { ...input.completionGuard };
   const actionText = resultTaskText(input);
-  if (isMediaPauseRequest(actionText)) {
-    const verified = hasMediaPauseEvidence(input.toolRecords || [], actionText, { requestId: input.requestId, taskId: input.taskId });
-    const zh = isChineseText(actionText);
-    return { text: verified
-      ? zh ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaPaused : 'The requested player is confirmed paused.'
-      : zh ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaPauseUnconfirmed : 'The requested player is not yet confirmed paused.',
-      blocked: !verified, reason: verified ? 'verified_media_pause' : 'media_pause_unconfirmed' };
-  }
-  const composite = taskActionContract(input);
+  const missingInput = missingTaskInputResult(actionText,
+    (input.toolRecords || []).filter(record => artifactRecordMatchesTurn(record, input)));
+  if (missingInput) return missingInput;
+  const business = groundedBusinessAnalysis(input);
+  if (business) return preserveModelWordingOnGroundedSuccess(input, business, true);
+  const windowObservation = groundedReadOnlyWindowObservation(input);
+  if (windowObservation) return preserveModelWordingOnGroundedSuccess(input, windowObservation, true);
+  const actionContract = taskActionContract(input);
+  const artifactProgress = actionContract.kind === 'artifact_work'
+    ? getArtifactTaskProgress(actionText, input.toolRecords || [], input) : null;
+  if (artifactProgress && !artifactProgress.complete) return {
+    text: formatArtifactProgress(artifactProgress, actionText), blocked: true,
+    reason: `artifact_step_pending:${artifactProgress.next}`,
+    progress: artifactProgressFeedback(artifactProgress, actionText),
+  };
+  const sessionObservation = browserSessionObservation((input.toolRecords || []).filter(record => isVerifiedCurrentTurnRecord(input, record)), actionText);
+  if (sessionObservation) return preserveModelWordingOnGroundedSuccess(input, { text: sessionObservation, blocked: false, reason: 'verified_browser_session_inspection' }, true);
+  const missingSpreadsheet = missingSpreadsheetRequirements(actionText,
+    (input.toolRecords || []).filter(record => artifactRecordMatchesTurn(record, input)));
+  if (missingSpreadsheet.length) return {
+    text: isChineseText(actionText) ? CN_EXECUTION_EVIDENCE_MESSAGES.spreadsheetIncomplete(missingSpreadsheet)
+      : `The workbook was saved, but these requested features are not verified: ${missingSpreadsheet.join(', ')}. The task is incomplete.`,
+    blocked: true, reason: `spreadsheet_requirements_missing:${missingSpreadsheet.join(',')}`,
+  };
+  const pauseVerified = actionContract.mediaPlayback === 'pause'
+    && hasMediaPauseEvidence(input.toolRecords || [], actionText, { requestId: input.requestId, taskId: input.taskId });
+  const groundedPause: LumiResultFinalizerResult | null = actionContract.mediaPlayback === 'pause'
+    ? { text: pauseVerified
+      ? isChineseText(actionText) ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaPaused : 'The requested player is confirmed paused.'
+      : isChineseText(actionText) ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaPauseUnconfirmed : 'The requested player is not yet confirmed paused.',
+      blocked: !pauseVerified, reason: pauseVerified ? 'verified_media_pause' : 'media_pause_unconfirmed' } : null;
+  if (groundedPause?.blocked) return groundedPause;
+
+  const composite = actionContract;
   if (composite.kind === 'external_cli_status') {
     const status = verifiedExternalCliStatus(actionText, input.toolRecords || [], input);
-    return status ? { text: formatExternalCliStatus(actionText, status), blocked: false, reason: 'verified_external_cli_status' }
+    return status ? preserveModelWordingOnGroundedSuccess(input, { text: formatExternalCliStatus(actionText, status), blocked: false, reason: 'verified_external_cli_status' }, true)
       : { text: isChineseText(actionText) ? CN_EXTERNAL_CLI_MESSAGES.unverified : 'The local CLI status could not be verified.',
         blocked: true, reason: 'Missing verified current-turn external CLI status.' };
   }
@@ -3012,11 +620,11 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       return { complete, text: complete ? result.text
         : isChineseText(actionText) ? CN_EXECUTION_EVIDENCE_MESSAGES.incompleteComponent(component.text) : `Not completed: ${component.text}` };
     });
-    return { text: outcomes.map(outcome => outcome.text).join('\n'), blocked: outcomes.some(outcome => !outcome.complete),
-      reason: outcomes.every(outcome => outcome.complete) ? 'All requested operations verified.' : 'Some requested operations remain unverified.' };
+    return preserveModelWordingOnGroundedSuccess(input, { text: outcomes.map(outcome => outcome.text).join('\n'), blocked: outcomes.some(outcome => !outcome.complete),
+      reason: outcomes.every(outcome => outcome.complete) ? 'All requested operations verified.' : 'Some requested operations remain unverified.' }, true);
   }
   const workflowProgress = formatGroundedWorkflowProgress(input);
-  if (workflowProgress) return workflowProgress;
+  if (workflowProgress) return preserveModelWordingOnGroundedSuccess(input, workflowProgress, true);
   // Lifecycle completion is a receipt verdict, independent of model wording
   // or output redaction. A successful input read cannot complete a failed save.
   if (composite.kind === 'skill_authoring'
@@ -3029,7 +637,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     // A verified save owns this phase even if capture failed before authoring
     // succeeded. Keep those failures in the audit trail, not in its verdict.
     const draft = formatGroundedSkillDraft(input);
-    if (draft) return draft;
+    if (draft) return preserveModelWordingOnGroundedSuccess(input, draft, true);
   }
   const operationModeFacts = buildOperationModeMetaResponse({
     text: actionText,
@@ -3037,11 +645,11 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     source: input.source,
   });
   if (operationModeFacts) {
-    return {
+    return preserveModelWordingOnGroundedSuccess(input, {
       text: operationModeFacts,
       blocked: false,
       reason: 'canonical_operation_mode_facts',
-    };
+    }, true);
   }
   const protocolLeak = leakedLegacyToolProtocol(input);
   const knowledgeObservation = formatGroundedKnowledgeObservation({
@@ -3050,14 +658,14 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     taskId: input.taskId,
     requestId: input.requestId,
   });
-  if (knowledgeObservation) return { text: knowledgeObservation, blocked: false, reason: 'Grounded current-turn knowledge observation.' };
+  if (knowledgeObservation) return preserveModelWordingOnGroundedSuccess(input, { text: knowledgeObservation, blocked: false, reason: 'Grounded current-turn knowledge observation.' }, true);
   const mediaGeneration = groundedMediaGeneration(input);
-  if (mediaGeneration) return mediaGeneration;
-  const mediaIntent = normalizeActionIntent(actionText);
-  const mediaFailures = mediaIntent.kind === 'media_generation'
-    ? (input.toolRecords || []).filter(record => record.name === mediaIntent.target && record.error && recordMatchesCurrentTurnIdentity(input, record))
+  if (mediaGeneration) return preserveModelWordingOnGroundedSuccess(input, mediaGeneration, true);
+  const mediaTool = actionContract.mediaGeneration?.toolName;
+  const mediaFailures = mediaTool
+    ? (input.toolRecords || []).filter(record => record.name === mediaTool && record.error && artifactRecordMatchesTurn(record, input))
     : [];
-  if (mediaFailures.length && !(input.toolRecords || []).some(record => record.name === mediaIntent.target
+  if (mediaFailures.length && !(input.toolRecords || []).some(record => record.name === mediaTool
     && buildMediaArtifactReceipt(record.name, record.arguments, toolRecordTerminalPayload(record), record.error))) {
     // i18n-allow: Receipt-grounded failed-generation result and bounded retry offer.
     const text = isChineseText(actionText)
@@ -3079,6 +687,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     task: actionText,
     toolRecords: input.toolRecords || [],
   });
+  if (input.completionGuard?.primaryGoalResult && protectedResponseText !== input.responseText) return { text: protectedResponseText + '\n\n' + CN_TASK_EXECUTION_MESSAGES.answerDeliveryIncomplete, blocked: true, reason: CN_TASK_EXECUTION_MESSAGES.answerDeliveryIncomplete };
   if (protectedResponseText !== input.responseText) {
     input = { ...input, responseText: protectedResponseText };
   }
@@ -3139,16 +748,17 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       reason: 'Grounded Lumi client action from a verified state-diff receipt.',
     });
   }
-  const actionContract = taskActionContract(input);
   const groundedRuntimeWork = formatGroundedRuntimeWorkResult(input, actionContract);
-  if (groundedRuntimeWork) return groundedRuntimeWork;
+  if (groundedRuntimeWork) return preserveModelWordingOnGroundedSuccess(input, groundedRuntimeWork, true);
+  const modelIdentity = groundedModelIdentity(input);
+  if (modelIdentity) return preserveModelWordingOnGroundedSuccess(input, modelIdentity, true);
   const groundedCurrentAuthoringDocument = formatGroundedCurrentAuthoringDocumentResult(input);
   if (groundedCurrentAuthoringDocument) {
     return preserveModelWordingOnGroundedSuccess(input, groundedCurrentAuthoringDocument);
   }
   const goalSpecificDesktopResult = formatGoalSpecificDesktopResult(input);
-  if (goalSpecificDesktopResult) return goalSpecificDesktopResult;
-  const verifiedDocumentObservation = groundedVerifiedDocumentObservation(input);
+  if (goalSpecificDesktopResult) return preserveModelWordingOnGroundedSuccess(input, goalSpecificDesktopResult, true);
+  const verifiedDocumentObservation = !input.completionGuard?.primaryGoalResult && !input.completionGuard?.blocked ? groundedVerifiedDocumentObservation(input) : null;
   if (verifiedDocumentObservation) return verifiedDocumentObservation;
   const currentVerifiedRecords = (input.toolRecords || []).filter(record => isVerifiedCurrentTurnRecord(input, record));
   const verifiedInputReads = currentVerifiedRecords.filter(record => (
@@ -3157,9 +767,13 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     // the input document contract; it cannot excuse reading an unrelated input.
     && !isVerifiedProducedDocumentTarget(artifactPathFromRecord(record), currentVerifiedRecords)
   ));
+  const verifiedSourceBodies = verifiedInputReads.filter(record => record.name === 'read_file'
+    && isCanonicalToolExecutionRecord(record) && isSuccessfulExactDocumentRead(record)
+    && documentReadMatchesRequestedTarget(record, actionText, input.flow?.acceptedTaskTarget, input.flow?.currentAttachmentPaths))
+    .map(record => actualDocumentReadContent(record)).filter((body): body is string => Boolean(body));
   const hasMismatchedVerifiedDocumentRead = /(?:附件|文件|文档|PDF|\.(?:pdf|docx?|xlsx?|pptx?|txt|md|csv)\b|\b(?:attachment|document|file)\b)/iu.test(actionText) // i18n-allow: reviewed document-target intent.
     && verifiedInputReads.length > 0
-    && !verifiedInputReads.some(record => documentReadMatchesRequestedTarget(record, actionText, input.flow?.acceptedTaskTarget));
+    && !verifiedInputReads.some(record => documentReadMatchesRequestedTarget(record, actionText, input.flow?.acceptedTaskTarget, input.flow?.currentAttachmentPaths));
   if (hasMismatchedVerifiedDocumentRead) {
     return {
       text: isChineseText(actionText)
@@ -3184,7 +798,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       && hasExplicitNoMutationInstruction(actionText)
     )
   );
-  const guard = input.completionGuard?.blocked ? input.completionGuard : ordinaryConversation
+  const guard = ordinaryConversation
     ? { text: input.responseText, blocked: false as const }
     : guardCompletionClaims({
         task: actionText,
@@ -3194,6 +808,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
         requestId: input.requestId,
         taskId: input.taskId,
         acceptedTaskTarget: input.flow?.acceptedTaskTarget,
+        acceptedActionContract: input.flow?.acceptedActionContract,
       });
   const unsupportedDiagnostic = unsupportedPriorDiagnosticClaim(input);
   if (unsupportedDiagnostic) {
@@ -3243,6 +858,19 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
         message: 'Response claimed tool execution without matching tool records.',
       },
     };
+  }
+  if (
+    hasLegalExternalPlatformSignal(actionText) &&
+    claimsExternalLegalPlatformFinalAction(input.responseText || '')
+  ) {
+    return blockedCompletionClaim(input, 'External legal platform final action requires authorized collaboration.');
+  }
+  if (
+    hasLegalExternalPlatformSignal(actionText) &&
+    claimsExternalLegalPlatformResult(input.responseText || '') &&
+    !hasLegalExternalPlatformResultEvidence(input.toolRecords || [])
+  ) {
+    return blockedCompletionClaim(input, 'Missing external legal platform result evidence.');
   }
   // Domain contracts below have stronger target-specific verdicts (for
   // example exact desktop windows, legal gates, and in-app saves). This guard
@@ -3299,16 +927,40 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   ) {
     return { text: input.responseText, blocked: false };
   }
-  const groundedContractReview = formatGroundedContractReviewResult(input);
-  if (groundedContractReview) return groundedContractReview;
+  const responseClaimsIncomplete = /(?:\u8fd8|\u5c1a|\u4ecd)?(?:\u6ca1\u6709|\u6ca1|\u672a|\u5e76\u672a|\u4e0d\u7b97|\u4e0d\u80fd\u8bf4)[^\u3002\uFF01\uFF1F.!?\n]{0,18}(?:\u5b8c\u6210|\u53d1\u9001|\u53d1\u51fa|\u6253\u5f00|\u8bfb\u53d6|\u751f\u6210)|\b(?:not|isn'?t|wasn'?t|didn'?t|incomplete|unfinished)\b[^.!?\n]{0,40}\b(?:complete|completed|sent|opened|read|created|generated)\b/iu
+    .test(actionContract.kind === 'artifact_work' || groundedPause
+      ? [...verifiedSourceBodies, ...extractExplicitArtifactTextRequirements(actionText)].filter(Boolean)
+        .reduce((text, body) => text.split(body).join(''), input.responseText || '')
+      : input.responseText || '');
   const groundedBlankCadDocument = formatGroundedBlankAutoCadDocumentResult(input);
   if (groundedBlankCadDocument) return preserveModelWordingOnGroundedSuccess(input, groundedBlankCadDocument);
   const groundedWpsMutation = formatGroundedWpsMutationResult(input);
   if (groundedWpsMutation) return preserveModelWordingOnGroundedSuccess(input, groundedWpsMutation);
   const groundedSkillDraft = formatGroundedSkillDraft(input);
-  if (groundedSkillDraft) return groundedSkillDraft;
-  const groundedArtifact = formatGroundedArtifactResult(input);
-  if (groundedArtifact) return preserveModelWordingOnGroundedSuccess(input, groundedArtifact);
+  if (groundedSkillDraft) return preserveModelWordingOnGroundedSuccess(input, groundedSkillDraft, true);
+  const outputRecords = currentVerifiedRecords.filter(isArtifactProducerRecord).filter((record, index, records) =>
+    !records.slice(index + 1).some(candidate => sameArtifactPath(artifactPathFromRecord(candidate), artifactPathFromRecord(record))));
+  const artifactFacts = outputRecords.map(producer => {
+    const records = (input.toolRecords || []).filter(record => !isArtifactProducerRecord(record)
+      || sameArtifactPath(artifactPathFromRecord(record), artifactPathFromRecord(producer)));
+    const scoped = { ...input, toolRecords: records };
+    return { result: formatGroundedArtifactResult(scoped), progress: getArtifactTaskProgress(actionText, records, scoped) };
+  }).filter(fact => fact.result);
+  const groundedArtifact = artifactFacts.find(fact => fact.result?.blocked)?.result
+    || (artifactFacts.length ? { text: artifactFacts.map(fact => fact.result!.text).join('\n'), blocked: false } : formatGroundedArtifactResult(input));
+  const artifactFeedback = artifactFacts.flatMap(fact => fact.progress ? [artifactProgressFeedback(fact.progress, actionText)] : []);
+  const combinedArtifactProgress = artifactFeedback.length ? {
+    completed: [...new Set(artifactFeedback.flatMap(progress => progress.completed))],
+    incomplete: [...new Set(artifactFeedback.flatMap(progress => progress.incomplete))],
+    nextSteps: [...new Set(artifactFeedback.flatMap(progress => progress.nextSteps))],
+    evidence: [...new Set(artifactFeedback.flatMap(progress => progress.evidence))],
+  } : undefined;
+  if (groundedArtifact?.blocked) return { ...groundedArtifact, ...(combinedArtifactProgress ? { progress: combinedArtifactProgress } : {}) };
+  const artifactDelivery = groundedArtifact && resolveArtifactDelivery(input.toolRecords || [], record => isVerifiedCurrentTurnRecord(input, record));
+  const deliveredSourceBody = groundedArtifact && !guard.blocked && hasGroundedCoreAction
+    && input.requestId && input.taskId && artifactDelivery && isCanonicalToolExecutionRecord(artifactDelivery.producer)
+    && (!artifactDelivery.readback || isCanonicalToolExecutionRecord(artifactDelivery.readback))
+    && verifiedSourceBodies.some(body => input.responseText.includes(body));
   const groundedCadGeometry = formatGroundedCadGeometryExtractionResult(input);
   if (groundedCadGeometry) return preserveModelWordingOnGroundedSuccess(input, groundedCadGeometry);
   const groundedExternalAiHistory = formatExternalAiHistoryResult(input);
@@ -3318,7 +970,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     return preserveModelWordingOnGroundedSuccess(input, groundedSimpleOpen);
   }
   const observedDesktopOpen = formatObservedDesktopOpenResult(input);
-  if (observedDesktopOpen) return observedDesktopOpen;
+  if (observedDesktopOpen) return preserveModelWordingOnGroundedSuccess(input, observedDesktopOpen, true);
   const groundedPartialAction = formatGroundedPartialActionResult(input);
   if (groundedPartialAction) return preserveModelWordingOnGroundedSuccess(input, groundedPartialAction);
   const groundedDriftCorrection = correctCurrentTurnContractDrift(input, actionContract);
@@ -3354,17 +1006,17 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   // task. Do not let an unrelated auxiliary failure (for example an extra
   // write_file attempt after the process list was already returned)
   // overwrite that evidence with a generic incomplete-work guard.
-  const desktopObservation = evaluateDesktopObservationEvidence(input.toolRecords || [], actionText);
+  const desktopObservation = evaluateDesktopObservationEvidence(input.toolRecords || [], actionContract.kind === 'desktop_operation' ? actionText : '');
   if (desktopObservation.complete && desktopObservation.text) {
     // Observation tasks exist to return the sampled facts. A generic model
     // acknowledgement such as "check complete" is not a useful result and
     // must not hide the structured window/process/app/system evidence that
     // actually completed the contract.
-    return {
+    return preserveModelWordingOnGroundedSuccess(input, {
       text: desktopObservation.text,
       blocked: false,
       reason: 'Grounded desktop observation from current-turn tool receipts.',
-    };
+    }, true);
   }
   // A live desktop question is itself an execution contract. The model can
   // answer it in factual prose without saying "I checked", so claim-wording
@@ -3398,8 +1050,6 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       },
     };
   }
-  const responseClaimsIncomplete = /(?:\u8fd8|\u5c1a|\u4ecd)?(?:\u6ca1\u6709|\u6ca1|\u672a|\u5e76\u672a|\u4e0d\u7b97|\u4e0d\u80fd\u8bf4)[^\u3002\uFF01\uFF1F.!?\n]{0,18}(?:\u5b8c\u6210|\u53d1\u9001|\u53d1\u51fa|\u6253\u5f00|\u8bfb\u53d6|\u751f\u6210)|\b(?:not|isn'?t|wasn'?t|didn'?t|incomplete|unfinished)\b[^.!?\n]{0,40}\b(?:complete|completed|sent|opened|read|created|generated)\b/iu
-    .test(input.responseText || '');
   const reportsToolIterationLimit = TOOL_ITERATION_LIMIT_RESPONSE_RE.test(input.responseText || '');
   const failedToolRecord = [...(input.toolRecords || [])].reverse().find(record => Boolean(record.error));
   const reportsFailedExecutionIncomplete = Boolean(
@@ -3428,6 +1078,30 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       },
     };
   }
+  const finalized = finalizeActionCompletionClaims(input, actionText, actionContract, guard, responseClaimsIncomplete, Boolean(groundedArtifact || groundedPause));
+  const grounded = groundedArtifact || groundedPause;
+  if (!grounded) return finalized;
+  const modelText = groundedArtifact && !groundedArtifact.blocked && !finalized.blocked
+    ? withoutUnsupportedOngoingExecutionTail({ ...input, responseText: finalized.text },
+      [...verifiedSourceBodies, ...extractExplicitArtifactTextRequirements(actionText)])
+    : finalized.text;
+  const text = deliveredSourceBody && !finalized.blocked ? modelText
+    : [...new Set([grounded.text, modelText].filter(Boolean))].join('\n');
+  return { ...grounded, ...finalized, text, ...(combinedArtifactProgress ? { progress: combinedArtifactProgress } : {}) };
+
+}
+export { type LumiResultFinalizerInput, type LumiResultFinalizerResult } from "./result_finalizer_types";
+export { formatGroundedArtifactResult } from "./result_artifact_presenter";
+
+function finalizeActionCompletionClaims(
+  input: LumiResultFinalizerInput,
+  actionText: string,
+  actionContract: ReturnType<typeof taskActionContract>,
+  guard: NonNullable<LumiResultFinalizerInput["completionGuard"]> | ReturnType<typeof guardCompletionClaims>,
+  responseClaimsIncomplete: boolean,
+  compositionResult: boolean,
+): LumiResultFinalizerResult {
+
   const claimsActionDone = !responseClaimsIncomplete && /(?:\u5df2\u7ecf|\u5df2|\u5b8c\u6210|\u53d1\u9001|\u53d1\u51fa|\u6253\u5f00\u4e86|\u770b\u5230|\u8bfb\u5230|\u8bfb\u53d6|\u603b\u7ed3|\u751f\u6210|done|complete|completed|success|sent|opened|read|viewed|created|generated)/iu
     .test(input.responseText || '');
   const claimsStockWatchStarted = /(?:\u5df2\u7ecf|\u5df2|\u5f00\u59cb|\u6b63\u5728|\u6301\u7eed|\u76ef\u76d8|\u76d1\u63a7|started|watching|monitoring|tracking)/iu
@@ -3439,53 +1113,13 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     !claimsExternalLegalPlatformFinalAction(input.responseText || '') &&
     !claimsExternalLegalPlatformResult(input.responseText || '');
   if (
-    hasLegalExternalPlatformSignal(actionText) &&
-    claimsExternalLegalPlatformFinalAction(input.responseText || '')
-  ) {
-    return {
-      text: formatCompactBlockedResponse(input, 'External legal platform final action requires authorized collaboration.'),
-      blocked: true,
-      reason: 'External legal platform final action requires authorized collaboration.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'External legal platform final action requires authorized collaboration.',
-      },
-    };
-  }
-  if (
-    hasLegalExternalPlatformSignal(actionText) &&
-    claimsExternalLegalPlatformResult(input.responseText || '') &&
-    !hasLegalExternalPlatformResultEvidence(input.toolRecords || [])
-  ) {
-    return {
-      text: formatCompactBlockedResponse(input, 'Missing external legal platform result evidence.'),
-      blocked: true,
-      reason: 'Missing external legal platform result evidence.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'Missing external legal platform result evidence.',
-      },
-    };
-  }
-  if (
     actionContract.kind === 'desktop_operation'
     && currentAppMutationTask
     && claimsActionDone
     && !hasCurrentAppUiMutationEvidence(input.toolRecords || [], actionText)
   ) {
-    return {
-      text: formatCreatedArtifactWithoutInAppCompletion(input)
-        || formatCompactBlockedResponse(input, 'Missing verified in-app UI mutation evidence.'),
-      blocked: true,
-      reason: 'Missing verified in-app UI mutation evidence.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'Missing verified in-app UI mutation evidence.',
-      },
-    };
+    return blockedCompletionClaim(input, 'Missing verified in-app UI mutation evidence.', formatCreatedArtifactWithoutInAppCompletion(input)
+        || formatCompactBlockedResponse(input, 'Missing verified in-app UI mutation evidence.'));
   }
   if (
     actionContract.kind === 'desktop_operation'
@@ -3493,16 +1127,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     && claimsCurrentAppSaveCompletion(input.responseText || '')
     && !hasCurrentAppSaveEvidence(input.toolRecords || [], actionText)
   ) {
-    return {
-      text: formatCompactBlockedResponse(input, 'Missing verified in-app save evidence.'),
-      blocked: true,
-      reason: 'Missing verified in-app save evidence.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'Missing verified in-app save evidence.',
-      },
-    };
+    return blockedCompletionClaim(input, 'Missing verified in-app save evidence.');
   }
   if (
     actionContract.kind === 'stock_monitor' &&
@@ -3510,16 +1135,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     hasContinuousStockWatchIntent(actionText) &&
     !hasContinuousStockWatchEvidence(input.toolRecords || [])
   ) {
-    return {
-      text: formatCompactBlockedResponse(input, 'Missing continuous stock watch evidence.'),
-      blocked: true,
-      reason: 'Missing continuous stock watch evidence.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'Missing continuous stock watch evidence.',
-      },
-    };
+    return blockedCompletionClaim(input, 'Missing continuous stock watch evidence.');
   }
   if (
     actionContract.kind === 'cad_drafting' &&
@@ -3527,16 +1143,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     requiresVisibleAutoCadExecution(actionText) &&
     !hasVisibleAutoCadExecutionEvidence(input.toolRecords || [], actionText)
   ) {
-    return {
-      text: formatCompactBlockedResponse(input, 'Missing visible AutoCAD execution evidence.'),
-      blocked: true,
-      reason: 'Missing visible AutoCAD execution evidence.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'Missing visible AutoCAD execution evidence.',
-      },
-    };
+    return blockedCompletionClaim(input, 'Missing visible AutoCAD execution evidence.');
   }
   if (
     actionContract.kind === 'browser_account' &&
@@ -3545,69 +1152,16 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     !legalExternalHandoffOnly &&
     !hasAuthenticatedWebResultEvidence(input.toolRecords || [], actionText)
   ) {
-    return {
-      text: formatCompactBlockedResponse(input, 'Missing authenticated browser result evidence.'),
-      blocked: true,
-      reason: 'Missing authenticated browser result evidence.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'Missing authenticated browser result evidence.',
-      },
-    };
+    return blockedCompletionClaim(input, 'Missing authenticated browser result evidence.');
   }
-  if (
-    actionContract.kind === 'legal_document' &&
-    claimsLegalDocumentCompletion(input.responseText || '') &&
-    requiresLegalCurrentLawGate(actionText) &&
-    !hasLegalDocumentProductionEvidence(input.toolRecords || [])
-  ) {
-    return {
-      text: formatCompactBlockedResponse(input, 'Missing legal document production evidence.'),
-      blocked: true,
-      reason: 'Missing legal document production evidence.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'Missing legal document production evidence.',
-      },
-    };
+  const legalDocumentCompletionClaim = actionContract.kind === 'legal_document'
+    && claimsLegalDocumentCompletion(input.responseText || '') && requiresLegalCurrentLawGate(actionText);
+  if (legalDocumentCompletionClaim && !hasLegalCurrentLawGateEvidence(
+    (input.toolRecords || []).filter(record => isVerifiedCurrentTurnRecord(input, record)),
+  )) {
+    return blockedCompletionClaim(input, 'Missing current-law verification gate for legal document.');
   }
-  if (
-    actionContract.kind === 'legal_document' &&
-    claimsLegalDocumentCompletion(input.responseText || '') &&
-    requiresLegalCurrentLawGate(actionText) &&
-    !hasLegalCurrentLawGateEvidence(input.toolRecords || [])
-  ) {
-    return {
-      text: formatCompactBlockedResponse(input, 'Missing current-law verification gate for legal document.'),
-      blocked: true,
-      reason: 'Missing current-law verification gate for legal document.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'Missing current-law verification gate for legal document.',
-      },
-    };
-  }
-  if (
-    actionContract.kind === 'legal_document' &&
-    claimsLegalDocumentCompletion(input.responseText || '') &&
-    requiresLegalCurrentLawGate(actionText) &&
-    !hasLegalReasoningChainEvidence(input.toolRecords || [])
-  ) {
-    return {
-      text: formatCompactBlockedResponse(input, 'Missing legal reasoning chain evidence.'),
-      blocked: true,
-      reason: 'Missing legal reasoning chain evidence.',
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: 'Missing legal reasoning chain evidence.',
-      },
-    };
-  }
-  if (shouldEnforceCoreActionContract(actionContract, actionText) && claimsActionDone && !legalExternalHandoffOnly && !hasResultCoreActionEvidence(input, actionContract, input.toolRecords || [], actionText)) {
+  if (shouldEnforceCoreActionContract(actionContract, actionText) && !legalExternalHandoffOnly && !hasResultCoreActionEvidence(input, actionContract, input.toolRecords || [], actionText)) {
     if (guard.blocked && /content-read\/open\/review/i.test(guard.reason || '')) {
       return {
         text: formatCompactBlockedResponse(input, guard.reason),
@@ -3632,19 +1186,13 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
         },
       };
     }
-    return {
-      text: formatCompactBlockedResponse(input, `Missing core evidence for ${actionContract.kind}.`),
-      blocked: true,
-      reason: `Missing core evidence for ${actionContract.kind}.`,
-      notification: {
-        type: 'work_product_guard',
-        level: 'warning',
-        message: `Missing core evidence for ${actionContract.kind}.`,
-      },
-    };
+    return blockedCompletionClaim(input, `Missing core evidence for ${actionContract.kind}.`);
   }
 
   if (!guard.blocked) {
+    if (responseClaimsIncomplete && compositionResult) {
+      return blockedCompletionClaim(input, 'Some requested operations remain unverified.', input.responseText);
+    }
     return { text: input.responseText, blocked: false };
   }
 
@@ -3659,5 +1207,12 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       level: 'warning',
       message: guard.reason || 'Completion claim needs verification.',
     },
+  };
+}
+
+function blockedCompletionClaim(input: LumiResultFinalizerInput, reason: string, text = formatCompactBlockedResponse(input, reason)): LumiResultFinalizerResult {
+  return {
+    text, blocked: true, reason,
+    notification: { type: "work_product_guard", level: "warning", message: reason },
   };
 }

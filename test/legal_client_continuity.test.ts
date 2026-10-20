@@ -37,37 +37,6 @@ function caseFile(material: LegalCaseFile['materials'][number]): LegalCaseFile {
   };
 }
 
-function workflowTask(id: string, status: string, entryId: string, caseIdentity: string) {
-  return {
-    id,
-    status,
-    metadata: {
-      industryWorkflow: {
-        entryId,
-        context: { caseIdentity },
-      },
-    },
-  };
-}
-
-function startedWorkflow(id: string, entryId: string) {
-  return {
-    task: { id, status: 'in_progress' },
-    conversationId: `conversation-${id}`,
-    conversationTaskId: `action-${id}`,
-    requestId: `request-${id}`,
-    handoffPrompt: 'continue',
-    contract: {
-      productLine: 'legal',
-      entryId,
-      title: entryId,
-      requiredArtifactLabels: [],
-      expectedContentTerms: [],
-      requiresFileArtifact: false,
-    },
-  };
-}
-
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
@@ -110,81 +79,25 @@ describe('legal client continuity', () => {
       .toBe('D:\\LumiCore\\legal_delivery\\verified-delivery.docx');
   });
 
-  it('reuses only a matching active entry and case task and sends the native proof', async () => {
-    sessionStorage.setItem('lumi_legal_industry_task', JSON.stringify({
-      taskId: 'task-active',
-      entryId: 'contract-review',
-      caseIdentity: 'id:case-1',
-      createdAt: Date.now(),
-    }));
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-      const url = String(input);
-      if (url.endsWith('/api/industry/workflows/task-active')) {
-        return jsonResponse({ task: workflowTask('task-active', 'in_progress', 'contract-review', 'id:case-1') });
-      }
-      if (url.includes('/api/legal/tool/legal_review_contract')) {
-        const headers = new Headers(init?.headers);
-        expect(headers.get('x-lumi-desktop-session')).toBe('desktop-proof-for-client-test');
-        expect(JSON.parse(String(init?.body))).toMatchObject({ industryWorkflowTaskId: 'task-active' });
-        return jsonResponse({ text: 'reviewed', receipt: { ok: true, status: 'reviewed' }, caseUpdates: [] });
-      }
-      throw new Error(`Unexpected request: ${url}`);
+  it('executes exactly once with native proof and returns verified artifacts without creating a second task', async () => {
+    sessionStorage.setItem('lumi_legal_industry_task', JSON.stringify({ taskId: 'stale-task' }));
+    const mock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      expect(new Headers(init?.headers).get('x-lumi-desktop-session')).toBe('desktop-proof-for-client-test');
+      expect(JSON.parse(String(init?.body))).toEqual({ args: { contract: 'source', persistCase: false } });
+      return jsonResponse({ text: 'reviewed', receipt: { ok: true }, artifacts: ['verified.docx'], caseUpdates: [] });
     });
-
-    await expect(runLegalToolExecution('legal_review_contract', {
-      contract: 'contract body',
-      caseId: 'case-1',
-      persistCase: true,
-    })).resolves.toMatchObject({ text: 'reviewed' });
-    expect(fetchMock.mock.calls.some(([input, init]) => (
-      String(input) === '/api/industry/workflows' && init?.method === 'POST'
-    ))).toBe(false);
+    await expect(runLegalToolExecution('legal_review_contract', { contract: 'source', persistCase: false })).resolves.toMatchObject({ text: 'reviewed', receipt: { ok: true }, artifacts: ['verified.docx'] });
+    expect(mock).toHaveBeenCalledTimes(1);
+    expect(String(mock.mock.calls[0][0])).toContain('/api/legal/tool/legal_review_contract');
   });
-
-  it.each([
-    ['terminal task', 'contract-review', 'id:case-1', 'delivered'],
-    ['different entry', 'asset-trace', 'id:case-1', 'in_progress'],
-    ['different case', 'contract-review', 'id:case-2', 'in_progress'],
-  ])('starts a new task for a %s', async (_label, entryId, caseIdentity, status) => {
-    sessionStorage.setItem('lumi_legal_industry_task', JSON.stringify({
-      taskId: 'task-stale',
-      entryId,
-      caseIdentity,
-      createdAt: Date.now(),
-    }));
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-      const url = String(input);
-      if (url.endsWith('/api/industry/workflows/task-stale')) {
-        return jsonResponse({ task: workflowTask('task-stale', status, entryId, caseIdentity) });
-      }
-      if (url === '/api/industry/workflows' && init?.method === 'POST') {
-        const body = JSON.parse(String(init.body));
-        expect(body).toMatchObject({
-          entryId: 'contract-review',
-          context: { caseIdentity: 'id:case-1' },
-        });
-        return jsonResponse(startedWorkflow('task-new', 'contract-review'), 201);
-      }
-      if (url.includes('/api/legal/tool/legal_review_contract')) {
-        expect(JSON.parse(String(init?.body))).toMatchObject({ industryWorkflowTaskId: 'task-new' });
-        return jsonResponse({ text: 'reviewed', receipt: { ok: true, status: 'reviewed' }, caseUpdates: [] });
-      }
-      throw new Error(`Unexpected request: ${url}`);
-    });
-
-    await runLegalToolExecution('legal_review_contract', {
-      contract: 'contract body',
-      caseId: 'case-1',
-      persistCase: true,
-    });
-    const stored = JSON.parse(sessionStorage.getItem('lumi_legal_industry_task') || '{}');
-    expect(stored).toMatchObject({
-      taskId: 'task-new',
-      entryId: 'contract-review',
-      caseIdentity: 'id:case-1',
-    });
-    expect(fetchMock.mock.calls.filter(([input, init]) => (
-      String(input) === '/api/industry/workflows' && init?.method === 'POST'
-    ))).toHaveLength(1);
+  it('does not merge late case updates after cancellation', async () => {
+    let release!: (response: Response) => void;
+    vi.spyOn(globalThis, 'fetch').mockReturnValue(new Promise(resolve => { release = resolve; }));
+    const request = new AbortController();
+    const pending = runLegalToolExecution('legal_review_contract', { contract: 'source' }, request.signal);
+    request.abort();
+    release(jsonResponse({ text: 'stale', caseUpdates: [caseFile({ id: 'stale', type: 'note', title: 'stale', createdAt: '' })] }));
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(readLegalCaseFiles()).toEqual([]);
   });
 });

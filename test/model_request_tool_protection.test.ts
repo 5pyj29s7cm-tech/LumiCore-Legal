@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../server/llm/providers', async () => {
   const actual = await vi.importActual<typeof import('../server/llm/providers')>('../server/llm/providers');
-  return { ...actual, makeLLMCall: mocks.makeLLMCall };
+  return { ...actual, makeLLMCall: mocks.makeLLMCall, makeLLMCallStreaming: mocks.makeLLMCall };
 });
 
 import { initDatabase } from '../db_layer';

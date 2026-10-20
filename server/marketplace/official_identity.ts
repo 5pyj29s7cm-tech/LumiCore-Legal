@@ -1,3 +1,4 @@
+import { canonicalJson } from '../../shared/stable_json';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -40,19 +41,9 @@ export interface OfficialSkillIdentityProjection {
 const IGNORED_DIRECTORY_NAMES = new Set(['node_modules', '.git']);
 const IGNORED_FILE_NAMES = new Set(['.lumi-pending', '.lumi-disabled']);
 
-function stableJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableJson);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.keys(value as Record<string, unknown>)
-      .sort()
-      .map(key => [key, stableJson((value as Record<string, unknown>)[key])]),
-  );
-}
-
 function identitySignaturePayload(identity: ManagedSkillIdentity): string {
   const { signature: _signature, ...unsigned } = identity;
-  return JSON.stringify(stableJson(unsigned));
+  return canonicalJson(unsigned);
 }
 
 export function signManagedSkillIdentity(
@@ -94,7 +85,7 @@ function normalizedPackageJson(filePath: string): Buffer {
     delete lumi.draftReview;
     parsed.lumi = lumi;
   }
-  return Buffer.from(JSON.stringify(stableJson(parsed)), 'utf8');
+  return Buffer.from(canonicalJson(parsed), 'utf8');
 }
 
 /**
@@ -134,7 +125,24 @@ export function computeSkillContentDigest(rootDirectory: string): string {
   return `sha256:${hash.digest('hex')}`;
 }
 
+let discoveryDigests: Map<string, string> | undefined;
+
+/** Synchronous read-only discovery only. Never retain hashes for a later install or execution. */
+export function readRuntimeIdentitySnapshot<T>(read: () => T): T {
+  const previous = discoveryDigests;
+  discoveryDigests = new Map();
+  try { return read(); } finally { discoveryDigests = previous; }
+}
+
 export function computeRuntimePathDigest(targetPath: string): string {
+  const resolved = path.resolve(targetPath), cached = discoveryDigests?.get(resolved);
+  if (cached !== undefined) return cached;
+  const digest = hashRuntimePath(resolved);
+  discoveryDigests?.set(resolved, digest);
+  return digest;
+}
+
+function hashRuntimePath(targetPath: string): string {
   const resolved = path.resolve(targetPath);
   if (!fs.existsSync(resolved)) throw new Error(`Managed runtime path is unavailable: ${resolved}`);
   const stat = fs.statSync(resolved);

@@ -1,7 +1,7 @@
 import { Socket } from "socket.io";
-import { readDB } from "../../db_layer";
+import { conversationAccessStatus, listConversationHeaders, listUserInteractions } from '../conversation/history_repository';
 import { resolveAuthorizedSocketScope } from './scope';
-import { collectChatArtifacts } from '../conversation/chat_artifacts';
+import { projectPublicArtifactPayload, capturePublicArtifactEvidenceSnapshot } from '../conversation/chat_artifacts';
 
 export function registerConversationHandlers(socket: Socket, getUserId: (s: Socket) => string) {
   socket.on("chat:conversations", async () => {
@@ -9,20 +9,11 @@ export function registerConversationHandlers(socket: Socket, getUserId: (s: Sock
       const uid = getUserId(socket);
       const scope = resolveAuthorizedSocketScope(socket, uid);
       if (!scope) { socket.emit('chat:conversations', { conversations: [], error: 'Workspace access is unavailable.' }); return; }
-      const orgId = scope.orgId;
-      const db = readDB();
-
-      const convs = (db.conversations || [])
-        .filter((c: any) => {
-          if (c.userId !== uid) return false;
-          if (orgId) return c.orgId === orgId;
-          return (!c.orgId || c.orgId === '');
-        })
-        .sort((a: any, b: any) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime())
-        .slice(0, 30);
+      const owner = { userId: uid, ...scope };
+      const convs = listConversationHeaders(owner, 30);
 
       const interactionsByConv = new Map<string, any[]>();
-      for (const i of (db.interactions || [])) {
+      for (const i of listUserInteractions(uid, { conversationIds: convs.map(c => c.id) })) {
         const cid = i.conversationId;
         if (!cid) continue;
         if (!interactionsByConv.has(cid)) interactionsByConv.set(cid, []);
@@ -59,37 +50,14 @@ export function registerConversationHandlers(socket: Socket, getUserId: (s: Sock
       const uid = getUserId(socket);
       const scope = resolveAuthorizedSocketScope(socket, uid);
       if (!scope) { socket.emit('chat:messages', { conversationId: data.conversationId, messages: [], error: 'Workspace access is unavailable.' }); return; }
-      const orgId = scope.orgId;
-      const db = readDB();
-
-      // Ownership + domain verification
-      const conv = (db.conversations || []).find((c: any) => c.id === data.conversationId);
-      if (!conv) {
-        socket.emit("chat:messages", { conversationId: data.conversationId, messages: [] });
+      if (conversationAccessStatus(data.conversationId, { userId: uid, ...scope }) !== 'allowed') {
+        socket.emit('chat:messages', { conversationId: data.conversationId, messages: [] });
         return;
       }
-      if (conv.userId !== uid) {
-        socket.emit("chat:messages", { conversationId: data.conversationId, messages: [] });
-        return;
-      }
-      if (orgId) {
-        if (conv.orgId !== orgId) {
-          socket.emit("chat:messages", { conversationId: data.conversationId, messages: [] });
-          return;
-        }
-      } else {
-        if (conv.orgId && conv.orgId !== '') {
-          socket.emit("chat:messages", { conversationId: data.conversationId, messages: [] });
-          return;
-        }
-      }
-
-      const interactions = (db.interactions || [])
-        .filter((i: any) => i.conversationId === data.conversationId)
-        .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
-        .slice(-100);
+      const interactions = listUserInteractions(uid, { conversationId: data.conversationId, order: 'oldest' }).slice(-100);
 
       const messages: any[] = [];
+      const evidenceSnapshot = capturePublicArtifactEvidenceSnapshot();
       for (const i of interactions) {
         const body = i.content || i.message;
         if (body && (!i.role || i.role === 'user')) {
@@ -101,8 +69,10 @@ export function registerConversationHandlers(socket: Socket, getUserId: (s: Sock
         }
         const response = i.role === 'assistant' ? (body || i.response) : i.response;
         if (response && (!i.role || i.role === 'user' || i.role === 'assistant')) {
-          messages.push({ id: i.id + '_r', type: 'lumi', content: response, timestamp: i.timestamp,
-            conversationId: data.conversationId, fileArtifacts: collectChatArtifacts(i.toolCalls, data.conversationId) });
+          const projected = projectPublicArtifactPayload({ text: response }, i.toolCalls, data.conversationId,
+            { userId: uid, requestId: i.requestId }, evidenceSnapshot);
+          messages.push({ id: i.id + '_r', type: 'lumi', content: projected.text, timestamp: i.timestamp,
+            conversationId: data.conversationId, fileArtifacts: projected.fileArtifacts });
         }
       }
       socket.emit("chat:messages", { conversationId: data.conversationId, messages });

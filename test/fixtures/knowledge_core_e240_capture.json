@@ -1,0 +1,238 @@
+{
+  "description": "Exact fictional task and canonical tool receipts captured from e24013ac. No provider answer body is retained; response used by tests is explicitly synthetic.",
+  "requestId": "knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+  "taskId": "task_05733e72-1ad7-4af5-8c78-d8b0d96ecb16",
+  "taskText": "只依据个人知识库中的这三份虚构资料回答，逐题引用对应文件及原句；没有取得或仅是计划的内容请按原文区分，不自行补充。文件：KB-QA-20261016-7D42-A-原告陈述.txt（fileId=KB-QA-20261016-7D42-A-原告陈述.txt）；KB-QA-20261016-7D42-B-被告陈述.txt（fileId=KB-QA-20261016-7D42-B-被告陈述.txt）；KB-QA-20261016-7D42-C-材料核对记录.txt（fileId=KB-QA-20261016-7D42-C-材料核对记录.txt）。\nQ01 原告请求的金额是多少，这个数字能否直接当作已核实的合同总价？\nQ02 谁自述向谁付款多少，当前是否取得了可核实这笔款项的银行原始流水？\nQ03 两份陈述的金额相减后，是否能认定被告承认了剩余债务？\nQ04 本轮实际收到过货物照片或转账截图的图片像素吗，可以描述画面或交易信息吗？\nQ05 4箱的记录究竟证明了什么，能认定双方已验收或质量合格吗？\nQ06 两次排期表中的拟交付日期有什么变化，哪一天可以写成实际交货日？\nQ07 能从现有材料确认合同签署日期、具体付款到期条件和管辖法院吗，未提供等不等于双方未约定？\nQ08 质量异议由谁提出，原告承认了吗，缺陷有鉴定或双方复检记录支持吗？\nQ09 下一次材料复核会是什么时间，这个日期能代替合同生效、付款到期或法院立案时间吗？\nQ10 请分别给出三份文件各自尾段的核验码，并引用每个代码实际所在的文件。",
+  "records": [
+    {
+      "id": "call_138b938c9c5049fa90ff5a63",
+      "resolutionId": "resolution:knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+      "taskId": "task_05733e72-1ad7-4af5-8c78-d8b0d96ecb16",
+      "requestId": "knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+      "turnRowId": "action_turn_d2aa8a8b80328327fe28542fda6f40ed",
+      "turnId": "knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+      "executionOrigin": "model_selected",
+      "name": "knowledge_file_stats",
+      "arguments": {
+        "fileIds": [
+          "KB-QA-20261016-7D42-A-原告陈述.txt",
+          "KB-QA-20261016-7D42-B-被告陈述.txt",
+          "KB-QA-20261016-7D42-C-材料核对记录.txt"
+        ]
+      },
+      "result": "{\"ok\":true,\"status\":\"observed\",\"mode\":\"source_text\",\"userId\":\"admin-uid\",\"domain\":\"personal\",\"files\":[{\"fileId\":\"KB-QA-20261016-7D42-A-原告陈述.txt\",\"name\":\"KB-QA-20261016-7D42-A-原告陈述.txt\",\"text\":\"虚构检索验收专用项目：KB-QA-20261016-7D42。本文件是原告陈述摘记，所有公司与事项均为虚构，不是司法认定。\\nA01 金额归属：虚构晨杉公司作为原告，主张向虚构海岚公司请求支付90000元；90000元是原告的诉请金额，不是已经核实的合同总价。\\nA02 材料范围：原告提供的只有一份自行列出的供货清单和一页请求说明；本轮没有收到签署合同原件、发票原件、送货单原件或双方确认的对账单。清单记载不能替代原件真实性核查。\\nA03 未知事项：合同签署日期、具体付款到期条件和管辖法院均未提供。未提供这些条款，不证明双方没有作出约定，更不能推断某法院已获得双方同意。\\nA04 初始计划：2026年10月20日是原告早期工作表写的拟交付日，表内标注“计划”；它不是已证实的交货日、合同成立日、生效日或文件编写日期。\\nA05 立场限制：原告说其已经完成全部供货，但这只是原告陈述。原告没有提供可在本轮独立核实的签收凭证；不得把“原告陈述已供货”改写成“被告已验收且质量无异议”。\\nA06 证据索引：请求说明列有“货物照片”这个名称，但附件列表未附图片像素或照片文件，不能声称已经看过图片、辨认出具体瑕疵或据此鉴定货物状态。\\nA07 尾段核验码：A745218。该码只用于本次虚构检索原文完整性验收，不代表任何真实案号或合同编号。\",\"characters\":564,\"truncated\":false,\"format\":\"text\",\"sourceRevision\":\"d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155\",\"sourceHash\":\"d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155\",\"textHash\":\"d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155\"},{\"fileId\":\"KB-QA-20261016-7D42-B-被告陈述.txt\",\"name\":\"KB-QA-20261016-7D42-B-被告陈述.txt\",\"text\":\"虚构检索验收专用项目：KB-QA-20261016-7D42。本文件记录被告立场，陈述的真伪和证明力仍待原始证据核对。\\nB01 付款归属：虚构海岚公司作为被告，自述已向虚构晨杉公司转账70000元；当前材料没有银行原始流水，只列了“转账截图”这一待补证据名称。不能称该70000元付款事实已经核实。\\nB02 差额性质：90000减去70000的算术差额是20000元，但被告没有承认尚欠20000元，该差额也不是双方确认的结算余额、已到期债务或本案必然判付金额。\\nB03 质量立场：被告提出过质量异议并要求复检；这只是被告的意见，不表示原告承认存在质量问题，也不表示存在经过鉴定确认的缺陷。本轮没有质量鉴定报告或双方复检记录。\\nB04 请求保留：被告要求先核清交付数量、质量、价款基数和付款条件，再讨论是否还需付款；这不是已经成立的减价、抵销或拒付权，也不是对原告诉请金额的自认。\\nB05 文件用途：本文件是核对立场的虚构材料。若问原告是否收到异议通知、何时收到、通知通过什么渠道送达，目前均无送达凭证，须回答待核实。\\nB06 日期限制：本文件整理时间为2026年10月16日，整理时间不替代合同签署、实际付款、送货、收货、提出异议或异议送达日期。不得把统一整理日期填进所有事件。\\nB07 尾段核验码：B862631。该码只用于本次虚构检索原文完整性验收，不是付款凭证、收款确认或证据真实性认证。\",\"characters\":598,\"truncated\":false,\"format\":\"text\",\"sourceRevision\":\"1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7\",\"sourceHash\":\"1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7\",\"textHash\":\"1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7\"},{\"fileId\":\"KB-QA-20261016-7D42-C-材料核对记录.txt\",\"name\":\"KB-QA-20261016-7D42-C-材料核对记录.txt\",\"text\":\"虚构检索验收专用项目：KB-QA-20261016-7D42。本文件是程序验收用材料接收与计划更新记录，不是双方签认的合同。\\nC01 实收范围：核对员记录本次接收到4箱货物的清点清单，但没有货物实物、验收签认、质量检测或付款到期证明。记录收到4箱，不等于双方确认数量无争议、完成验收或质量合格。\\nC02 图片边界：本轮仅收到一个写有“货物照片、转账截图”的文件名称索引，没有收到任何图片文件或图片像素。可报告图片未取得，不能描述照片画面、锤子形状、包装颜色或截图上的交易信息。\\nC03 计划更新：早期工作表拟交付日为2026年10月20日，后续排期表将拟交付日改为2026年10月25日；两个日期都仍是计划，实际交付日期待提供原件核实。不能选择较新计划就声称已经交货。\\nC04 下次工作安排：2026年10月28日14时是拟召开的材料复核会，不是已经召开的会议、合同生效时点、付款到期日或法院立案日期。地点与出席人员仍待确认。\\nC05 尚待接收：需要取得合同原件、流水原件、送货及签收凭证、质量异议通知和送达依据，再逐一核对事实；这份待补清单不能反过来证明相关文件或约定客观不存在。\\nC06 归属说明：原告诉请90000元、被告自述付款70000元分别来源于两份当事人陈述。本记录没有形成双方对账合意，没有确认20000元余额，也没有评价任何一方已经违约。\\nC07 尾段核验码：C508947。该码只用于本次虚构检索原文完整性验收，不是核验通过状态或案件材料真实性结论。\",\"characters\":635,\"truncated\":false,\"format\":\"text\",\"sourceRevision\":\"0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27\",\"sourceHash\":\"0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27\",\"textHash\":\"0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27\"}]}",
+      "capability": {
+        "capabilityId": "knowledge_file_stats",
+        "lane": "files",
+        "operation": "observe",
+        "risk": "low",
+        "sideEffects": [],
+        "verification": {
+          "strategy": "terminal_receipt",
+          "required": true,
+          "requiredFields": [],
+          "successSignals": [
+            "terminal tool receipt"
+          ],
+          "limitations": [
+            "The receipt proves observation returned, not that the observed external state is complete."
+          ]
+        }
+      },
+      "idempotencyKey": "099b2af717b46349805a692bface98fa1167bc3dcbe07cb32d7991cc92c6a243",
+      "adapterStarted": true,
+      "adapterSettlements": [
+        {
+          "name": "knowledge_file_stats",
+          "attempt": 1,
+          "status": "fulfilled",
+          "timedOut": false,
+          "settledAt": "2026-10-16T07:46:59.748Z"
+        }
+      ],
+      "terminalVerification": {
+        "status": "verified",
+        "strategy": "terminal_receipt",
+        "reason": "The receipt proves observation returned, not that the observed external state is complete."
+      },
+      "envelope": {
+        "version": 1,
+        "status": "verified_success",
+        "toolName": "knowledge_file_stats",
+        "resolutionId": "resolution:knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+        "taskId": "task_05733e72-1ad7-4af5-8c78-d8b0d96ecb16",
+        "requestId": "knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+        "turnRowId": "action_turn_d2aa8a8b80328327fe28542fda6f40ed",
+        "turnId": "knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+        "idempotencyKey": "099b2af717b46349805a692bface98fa1167bc3dcbe07cb32d7991cc92c6a243",
+        "targetIdentity": "",
+        "startedAt": "2026-10-16T07:46:59.725Z",
+        "completedAt": "2026-10-16T07:46:59.749Z",
+        "durationMs": 24,
+        "result": {
+          "ok": true,
+          "status": "observed",
+          "mode": "source_text",
+          "userId": "admin-uid",
+          "domain": "personal",
+          "files": [
+            {
+              "fileId": "KB-QA-20261016-7D42-A-原告陈述.txt",
+              "name": "KB-QA-20261016-7D42-A-原告陈述.txt",
+              "text": "虚构检索验收专用项目：KB-QA-20261016-7D42。本文件是原告陈述摘记，所有公司与事项均为虚构，不是司法认定。\nA01 金额归属：虚构晨杉公司作为原告，主张向虚构海岚公司请求支付90000元；90000元是原告的诉请金额，不是已经核实的合同总价。\nA02 材料范围：原告提供的只有一份自行列出的供货清单和一页请求说明；本轮没有收到签署合同原件、发票原件、送货单原件或双方确认的对账单。清单记载不能替代原件真实性核查。\nA03 未知事项：合同签署日期、具体付款到期条件和管辖法院均未提供。未提供这些条款，不证明双方没有作出约定，更不能推断某法院已获得双方同意。\nA04 初始计划：2026年10月20日是原告早期工作表写的拟交付日，表内标注“计划”；它不是已证实的交货日、合同成立日、生效日或文件编写日期。\nA05 立场限制：原告说其已经完成全部供货，但这只是原告陈述。原告没有提供可在本轮独立核实的签收凭证；不得把“原告陈述已供货”改写成“被告已验收且质量无异议”。\nA06 证据索引：请求说明列有“货物照片”这个名称，但附件列表未附图片像素或照片文件，不能声称已经看过图片、辨认出具体瑕疵或据此鉴定货物状态。\nA07 尾段核验码：A745218。该码只用于本次虚构检索原文完整性验收，不代表任何真实案号或合同编号。",
+              "characters": 564,
+              "truncated": false,
+              "format": "text",
+              "sourceRevision": "d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155",
+              "sourceHash": "d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155",
+              "textHash": "d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155"
+            },
+            {
+              "fileId": "KB-QA-20261016-7D42-B-被告陈述.txt",
+              "name": "KB-QA-20261016-7D42-B-被告陈述.txt",
+              "text": "虚构检索验收专用项目：KB-QA-20261016-7D42。本文件记录被告立场，陈述的真伪和证明力仍待原始证据核对。\nB01 付款归属：虚构海岚公司作为被告，自述已向虚构晨杉公司转账70000元；当前材料没有银行原始流水，只列了“转账截图”这一待补证据名称。不能称该70000元付款事实已经核实。\nB02 差额性质：90000减去70000的算术差额是20000元，但被告没有承认尚欠20000元，该差额也不是双方确认的结算余额、已到期债务或本案必然判付金额。\nB03 质量立场：被告提出过质量异议并要求复检；这只是被告的意见，不表示原告承认存在质量问题，也不表示存在经过鉴定确认的缺陷。本轮没有质量鉴定报告或双方复检记录。\nB04 请求保留：被告要求先核清交付数量、质量、价款基数和付款条件，再讨论是否还需付款；这不是已经成立的减价、抵销或拒付权，也不是对原告诉请金额的自认。\nB05 文件用途：本文件是核对立场的虚构材料。若问原告是否收到异议通知、何时收到、通知通过什么渠道送达，目前均无送达凭证，须回答待核实。\nB06 日期限制：本文件整理时间为2026年10月16日，整理时间不替代合同签署、实际付款、送货、收货、提出异议或异议送达日期。不得把统一整理日期填进所有事件。\nB07 尾段核验码：B862631。该码只用于本次虚构检索原文完整性验收，不是付款凭证、收款确认或证据真实性认证。",
+              "characters": 598,
+              "truncated": false,
+              "format": "text",
+              "sourceRevision": "1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7",
+              "sourceHash": "1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7",
+              "textHash": "1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7"
+            },
+            {
+              "fileId": "KB-QA-20261016-7D42-C-材料核对记录.txt",
+              "name": "KB-QA-20261016-7D42-C-材料核对记录.txt",
+              "text": "虚构检索验收专用项目：KB-QA-20261016-7D42。本文件是程序验收用材料接收与计划更新记录，不是双方签认的合同。\nC01 实收范围：核对员记录本次接收到4箱货物的清点清单，但没有货物实物、验收签认、质量检测或付款到期证明。记录收到4箱，不等于双方确认数量无争议、完成验收或质量合格。\nC02 图片边界：本轮仅收到一个写有“货物照片、转账截图”的文件名称索引，没有收到任何图片文件或图片像素。可报告图片未取得，不能描述照片画面、锤子形状、包装颜色或截图上的交易信息。\nC03 计划更新：早期工作表拟交付日为2026年10月20日，后续排期表将拟交付日改为2026年10月25日；两个日期都仍是计划，实际交付日期待提供原件核实。不能选择较新计划就声称已经交货。\nC04 下次工作安排：2026年10月28日14时是拟召开的材料复核会，不是已经召开的会议、合同生效时点、付款到期日或法院立案日期。地点与出席人员仍待确认。\nC05 尚待接收：需要取得合同原件、流水原件、送货及签收凭证、质量异议通知和送达依据，再逐一核对事实；这份待补清单不能反过来证明相关文件或约定客观不存在。\nC06 归属说明：原告诉请90000元、被告自述付款70000元分别来源于两份当事人陈述。本记录没有形成双方对账合意，没有确认20000元余额，也没有评价任何一方已经违约。\nC07 尾段核验码：C508947。该码只用于本次虚构检索原文完整性验收，不是核验通过状态或案件材料真实性结论。",
+              "characters": 635,
+              "truncated": false,
+              "format": "text",
+              "sourceRevision": "0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27",
+              "sourceHash": "0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27",
+              "textHash": "0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27"
+            }
+          ]
+        },
+        "verification": {
+          "status": "verified",
+          "basis": "terminal_verification",
+          "reason": "The receipt proves observation returned, not that the observed external state is complete."
+        }
+      },
+      "modelRoutingReceiptId": "ee819d4d-2e2d-46c0-aaea-0eaa136f987e"
+    },
+    {
+      "id": "call_de06c4f063704042a789c7d4",
+      "resolutionId": "resolution:knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+      "taskId": "task_05733e72-1ad7-4af5-8c78-d8b0d96ecb16",
+      "requestId": "knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+      "turnRowId": "action_turn_d2aa8a8b80328327fe28542fda6f40ed",
+      "turnId": "knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+      "executionOrigin": "model_selected",
+      "name": "knowledge_file_stats",
+      "arguments": {
+        "fileIds": [
+          "KB-QA-20261016-7D42-A-原告陈述.txt",
+          "KB-QA-20261016-7D42-B-被告陈述.txt",
+          "KB-QA-20261016-7D42-C-材料核对记录.txt"
+        ]
+      },
+      "result": "{\"ok\":true,\"status\":\"observed\",\"mode\":\"source_text\",\"userId\":\"admin-uid\",\"domain\":\"personal\",\"files\":[{\"fileId\":\"KB-QA-20261016-7D42-A-原告陈述.txt\",\"name\":\"KB-QA-20261016-7D42-A-原告陈述.txt\",\"text\":\"虚构检索验收专用项目：KB-QA-20261016-7D42。本文件是原告陈述摘记，所有公司与事项均为虚构，不是司法认定。\\nA01 金额归属：虚构晨杉公司作为原告，主张向虚构海岚公司请求支付90000元；90000元是原告的诉请金额，不是已经核实的合同总价。\\nA02 材料范围：原告提供的只有一份自行列出的供货清单和一页请求说明；本轮没有收到签署合同原件、发票原件、送货单原件或双方确认的对账单。清单记载不能替代原件真实性核查。\\nA03 未知事项：合同签署日期、具体付款到期条件和管辖法院均未提供。未提供这些条款，不证明双方没有作出约定，更不能推断某法院已获得双方同意。\\nA04 初始计划：2026年10月20日是原告早期工作表写的拟交付日，表内标注“计划”；它不是已证实的交货日、合同成立日、生效日或文件编写日期。\\nA05 立场限制：原告说其已经完成全部供货，但这只是原告陈述。原告没有提供可在本轮独立核实的签收凭证；不得把“原告陈述已供货”改写成“被告已验收且质量无异议”。\\nA06 证据索引：请求说明列有“货物照片”这个名称，但附件列表未附图片像素或照片文件，不能声称已经看过图片、辨认出具体瑕疵或据此鉴定货物状态。\\nA07 尾段核验码：A745218。该码只用于本次虚构检索原文完整性验收，不代表任何真实案号或合同编号。\",\"characters\":564,\"truncated\":false,\"format\":\"text\",\"sourceRevision\":\"d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155\",\"sourceHash\":\"d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155\",\"textHash\":\"d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155\"},{\"fileId\":\"KB-QA-20261016-7D42-B-被告陈述.txt\",\"name\":\"KB-QA-20261016-7D42-B-被告陈述.txt\",\"text\":\"虚构检索验收专用项目：KB-QA-20261016-7D42。本文件记录被告立场，陈述的真伪和证明力仍待原始证据核对。\\nB01 付款归属：虚构海岚公司作为被告，自述已向虚构晨杉公司转账70000元；当前材料没有银行原始流水，只列了“转账截图”这一待补证据名称。不能称该70000元付款事实已经核实。\\nB02 差额性质：90000减去70000的算术差额是20000元，但被告没有承认尚欠20000元，该差额也不是双方确认的结算余额、已到期债务或本案必然判付金额。\\nB03 质量立场：被告提出过质量异议并要求复检；这只是被告的意见，不表示原告承认存在质量问题，也不表示存在经过鉴定确认的缺陷。本轮没有质量鉴定报告或双方复检记录。\\nB04 请求保留：被告要求先核清交付数量、质量、价款基数和付款条件，再讨论是否还需付款；这不是已经成立的减价、抵销或拒付权，也不是对原告诉请金额的自认。\\nB05 文件用途：本文件是核对立场的虚构材料。若问原告是否收到异议通知、何时收到、通知通过什么渠道送达，目前均无送达凭证，须回答待核实。\\nB06 日期限制：本文件整理时间为2026年10月16日，整理时间不替代合同签署、实际付款、送货、收货、提出异议或异议送达日期。不得把统一整理日期填进所有事件。\\nB07 尾段核验码：B862631。该码只用于本次虚构检索原文完整性验收，不是付款凭证、收款确认或证据真实性认证。\",\"characters\":598,\"truncated\":false,\"format\":\"text\",\"sourceRevision\":\"1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7\",\"sourceHash\":\"1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7\",\"textHash\":\"1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7\"},{\"fileId\":\"KB-QA-20261016-7D42-C-材料核对记录.txt\",\"name\":\"KB-QA-20261016-7D42-C-材料核对记录.txt\",\"text\":\"虚构检索验收专用项目：KB-QA-20261016-7D42。本文件是程序验收用材料接收与计划更新记录，不是双方签认的合同。\\nC01 实收范围：核对员记录本次接收到4箱货物的清点清单，但没有货物实物、验收签认、质量检测或付款到期证明。记录收到4箱，不等于双方确认数量无争议、完成验收或质量合格。\\nC02 图片边界：本轮仅收到一个写有“货物照片、转账截图”的文件名称索引，没有收到任何图片文件或图片像素。可报告图片未取得，不能描述照片画面、锤子形状、包装颜色或截图上的交易信息。\\nC03 计划更新：早期工作表拟交付日为2026年10月20日，后续排期表将拟交付日改为2026年10月25日；两个日期都仍是计划，实际交付日期待提供原件核实。不能选择较新计划就声称已经交货。\\nC04 下次工作安排：2026年10月28日14时是拟召开的材料复核会，不是已经召开的会议、合同生效时点、付款到期日或法院立案日期。地点与出席人员仍待确认。\\nC05 尚待接收：需要取得合同原件、流水原件、送货及签收凭证、质量异议通知和送达依据，再逐一核对事实；这份待补清单不能反过来证明相关文件或约定客观不存在。\\nC06 归属说明：原告诉请90000元、被告自述付款70000元分别来源于两份当事人陈述。本记录没有形成双方对账合意，没有确认20000元余额，也没有评价任何一方已经违约。\\nC07 尾段核验码：C508947。该码只用于本次虚构检索原文完整性验收，不是核验通过状态或案件材料真实性结论。\",\"characters\":635,\"truncated\":false,\"format\":\"text\",\"sourceRevision\":\"0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27\",\"sourceHash\":\"0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27\",\"textHash\":\"0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27\"}]}",
+      "capability": {
+        "capabilityId": "knowledge_file_stats",
+        "lane": "files",
+        "operation": "observe",
+        "risk": "low",
+        "sideEffects": [],
+        "verification": {
+          "strategy": "terminal_receipt",
+          "required": true,
+          "requiredFields": [],
+          "successSignals": [
+            "terminal tool receipt"
+          ],
+          "limitations": [
+            "The receipt proves observation returned, not that the observed external state is complete."
+          ]
+        }
+      },
+      "idempotencyKey": "24a6b161000e2fac9e598e5d50375b65ea2523ac1eca18e14b88fc1167c355fb",
+      "adapterStarted": true,
+      "adapterSettlements": [
+        {
+          "name": "knowledge_file_stats",
+          "attempt": 1,
+          "status": "fulfilled",
+          "timedOut": false,
+          "settledAt": "2026-10-16T07:47:31.878Z"
+        }
+      ],
+      "terminalVerification": {
+        "status": "verified",
+        "strategy": "terminal_receipt",
+        "reason": "The receipt proves observation returned, not that the observed external state is complete."
+      },
+      "envelope": {
+        "version": 1,
+        "status": "verified_success",
+        "toolName": "knowledge_file_stats",
+        "resolutionId": "resolution:knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+        "taskId": "task_05733e72-1ad7-4af5-8c78-d8b0d96ecb16",
+        "requestId": "knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+        "turnRowId": "action_turn_d2aa8a8b80328327fe28542fda6f40ed",
+        "turnId": "knowledge-native-contract-final-4174871e-3af6-4af2-aa99-997883faa1bf",
+        "idempotencyKey": "24a6b161000e2fac9e598e5d50375b65ea2523ac1eca18e14b88fc1167c355fb",
+        "targetIdentity": "",
+        "startedAt": "2026-10-16T07:47:31.855Z",
+        "completedAt": "2026-10-16T07:47:31.879Z",
+        "durationMs": 24,
+        "result": {
+          "ok": true,
+          "status": "observed",
+          "mode": "source_text",
+          "userId": "admin-uid",
+          "domain": "personal",
+          "files": [
+            {
+              "fileId": "KB-QA-20261016-7D42-A-原告陈述.txt",
+              "name": "KB-QA-20261016-7D42-A-原告陈述.txt",
+              "text": "虚构检索验收专用项目：KB-QA-20261016-7D42。本文件是原告陈述摘记，所有公司与事项均为虚构，不是司法认定。\nA01 金额归属：虚构晨杉公司作为原告，主张向虚构海岚公司请求支付90000元；90000元是原告的诉请金额，不是已经核实的合同总价。\nA02 材料范围：原告提供的只有一份自行列出的供货清单和一页请求说明；本轮没有收到签署合同原件、发票原件、送货单原件或双方确认的对账单。清单记载不能替代原件真实性核查。\nA03 未知事项：合同签署日期、具体付款到期条件和管辖法院均未提供。未提供这些条款，不证明双方没有作出约定，更不能推断某法院已获得双方同意。\nA04 初始计划：2026年10月20日是原告早期工作表写的拟交付日，表内标注“计划”；它不是已证实的交货日、合同成立日、生效日或文件编写日期。\nA05 立场限制：原告说其已经完成全部供货，但这只是原告陈述。原告没有提供可在本轮独立核实的签收凭证；不得把“原告陈述已供货”改写成“被告已验收且质量无异议”。\nA06 证据索引：请求说明列有“货物照片”这个名称，但附件列表未附图片像素或照片文件，不能声称已经看过图片、辨认出具体瑕疵或据此鉴定货物状态。\nA07 尾段核验码：A745218。该码只用于本次虚构检索原文完整性验收，不代表任何真实案号或合同编号。",
+              "characters": 564,
+              "truncated": false,
+              "format": "text",
+              "sourceRevision": "d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155",
+              "sourceHash": "d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155",
+              "textHash": "d2e9ffa758af8a1b11907d6eee0db571e33a67ff74f8b0c44e543930f0104155"
+            },
+            {
+              "fileId": "KB-QA-20261016-7D42-B-被告陈述.txt",
+              "name": "KB-QA-20261016-7D42-B-被告陈述.txt",
+              "text": "虚构检索验收专用项目：KB-QA-20261016-7D42。本文件记录被告立场，陈述的真伪和证明力仍待原始证据核对。\nB01 付款归属：虚构海岚公司作为被告，自述已向虚构晨杉公司转账70000元；当前材料没有银行原始流水，只列了“转账截图”这一待补证据名称。不能称该70000元付款事实已经核实。\nB02 差额性质：90000减去70000的算术差额是20000元，但被告没有承认尚欠20000元，该差额也不是双方确认的结算余额、已到期债务或本案必然判付金额。\nB03 质量立场：被告提出过质量异议并要求复检；这只是被告的意见，不表示原告承认存在质量问题，也不表示存在经过鉴定确认的缺陷。本轮没有质量鉴定报告或双方复检记录。\nB04 请求保留：被告要求先核清交付数量、质量、价款基数和付款条件，再讨论是否还需付款；这不是已经成立的减价、抵销或拒付权，也不是对原告诉请金额的自认。\nB05 文件用途：本文件是核对立场的虚构材料。若问原告是否收到异议通知、何时收到、通知通过什么渠道送达，目前均无送达凭证，须回答待核实。\nB06 日期限制：本文件整理时间为2026年10月16日，整理时间不替代合同签署、实际付款、送货、收货、提出异议或异议送达日期。不得把统一整理日期填进所有事件。\nB07 尾段核验码：B862631。该码只用于本次虚构检索原文完整性验收，不是付款凭证、收款确认或证据真实性认证。",
+              "characters": 598,
+              "truncated": false,
+              "format": "text",
+              "sourceRevision": "1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7",
+              "sourceHash": "1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7",
+              "textHash": "1949108b9a06f5740aff9f74aac6ad328edb5268e096702bdd673f538a8c43e7"
+            },
+            {
+              "fileId": "KB-QA-20261016-7D42-C-材料核对记录.txt",
+              "name": "KB-QA-20261016-7D42-C-材料核对记录.txt",
+              "text": "虚构检索验收专用项目：KB-QA-20261016-7D42。本文件是程序验收用材料接收与计划更新记录，不是双方签认的合同。\nC01 实收范围：核对员记录本次接收到4箱货物的清点清单，但没有货物实物、验收签认、质量检测或付款到期证明。记录收到4箱，不等于双方确认数量无争议、完成验收或质量合格。\nC02 图片边界：本轮仅收到一个写有“货物照片、转账截图”的文件名称索引，没有收到任何图片文件或图片像素。可报告图片未取得，不能描述照片画面、锤子形状、包装颜色或截图上的交易信息。\nC03 计划更新：早期工作表拟交付日为2026年10月20日，后续排期表将拟交付日改为2026年10月25日；两个日期都仍是计划，实际交付日期待提供原件核实。不能选择较新计划就声称已经交货。\nC04 下次工作安排：2026年10月28日14时是拟召开的材料复核会，不是已经召开的会议、合同生效时点、付款到期日或法院立案日期。地点与出席人员仍待确认。\nC05 尚待接收：需要取得合同原件、流水原件、送货及签收凭证、质量异议通知和送达依据，再逐一核对事实；这份待补清单不能反过来证明相关文件或约定客观不存在。\nC06 归属说明：原告诉请90000元、被告自述付款70000元分别来源于两份当事人陈述。本记录没有形成双方对账合意，没有确认20000元余额，也没有评价任何一方已经违约。\nC07 尾段核验码：C508947。该码只用于本次虚构检索原文完整性验收，不是核验通过状态或案件材料真实性结论。",
+              "characters": 635,
+              "truncated": false,
+              "format": "text",
+              "sourceRevision": "0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27",
+              "sourceHash": "0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27",
+              "textHash": "0e5b9e26875dd82882b5c32dcb535e8abf6a4fadf51bc9eb407ec8accca67c27"
+            }
+          ]
+        },
+        "verification": {
+          "status": "verified",
+          "basis": "terminal_verification",
+          "reason": "The receipt proves observation returned, not that the observed external state is complete."
+        }
+      },
+      "modelRoutingReceiptId": "f6423e74-2f99-4eac-9eec-dd05514e464c"
+    }
+  ]
+}

@@ -3,7 +3,7 @@
  *
  * Attaches to the existing Socket.IO server and adds org-scoped rooms.
  * Branches join their org room on connect; the company server broadcasts
- * events (member changes, template status, KB updates) to all branches in the org.
+ * events (member changes and knowledge updates) to all branches in the org.
  */
 
 import { Server as SocketIOServer, Socket } from 'socket.io';
@@ -115,43 +115,13 @@ export function broadcastToOrg(orgId: string, event: string, data: any) {
   }
 }
 
-export function broadcastToUser(userId: string, event: string, data: any) {
-  if (!io) return;
-  const sockets = branchSockets.get(userId);
-  if (!sockets) return;
-  for (const socketId of sockets) {
-    io.to(socketId).emit(event, data);
-  }
-}
-
-// ── Event emitters ──────────────────────────────────────────────────────
-
-export function emitMemberJoined(orgId: string, userId: string, username: string) {
-  broadcastToOrg(orgId, 'member:joined', { userId, username, orgId });
-}
-
-export function emitMemberLeft(orgId: string, userId: string) {
-  broadcastToOrg(orgId, 'member:left', { userId, orgId });
-}
-
-export function emitKbUpdated(orgId: string, articleId: string, action: 'created' | 'updated' | 'deleted') {
-  broadcastToOrg(orgId, 'kb:article', { articleId, action, orgId });
-}
-
 // ── Auth helpers ────────────────────────────────────────────────────────
 
 function countSyncItems(payload: any): number {
   let count = 0;
   if (payload?.memories) count += payload.memories.length;
   if (payload?.interactions) count += payload.interactions.length;
-  if (payload?.agents) count += payload.agents.length;
   return count;
-}
-
-// ── Status ──────────────────────────────────────────────────────────────
-
-export function getBranchConnectionCount(): number {
-  return branchSockets.size;
 }
 
 export function getOrgConnectionCount(orgId: string): number {

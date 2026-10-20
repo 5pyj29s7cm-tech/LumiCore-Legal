@@ -1,3 +1,5 @@
+import { readImplementationSource } from './implementation_source';
+import { readVoiceImplementationSource } from './voice_implementation_source';
 import './helpers';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -228,10 +230,9 @@ describe('Lumi learning interface', () => {
   });
 
   it('keeps model-owned chat and voice terminal paths wired into post-turn learning', () => {
-    const chatSource = readFileSync(path.join(process.cwd(), 'server/socket/chat.ts'), 'utf8');
-    const voiceSource = readFileSync(path.join(process.cwd(), 'server/socket/voice.ts'), 'utf8');
-    const taskSource = readFileSync(path.join(process.cwd(), 'server/socket/task.ts'), 'utf8');
-    const postTurnSource = readFileSync(path.join(process.cwd(), 'server/cognition/post_turn_learning.ts'), 'utf8');
+    const chatSource = readImplementationSource(path.join(process.cwd(), 'server/socket/chat.ts'), 'utf8');
+    const voiceSource = readVoiceImplementationSource();
+    const postTurnSource = readImplementationSource(path.join(process.cwd(), 'server/cognition/post_turn_learning.ts'), 'utf8');
 
     expect(postTurnSource).toContain('export function persistLumiPostTurnLearning');
     expect(postTurnSource).toContain('persistLumiLearningTurn');
@@ -245,20 +246,13 @@ describe('Lumi learning interface', () => {
 
     expect(voiceSource).toContain('const persistVoiceLearning');
     expect(voiceSource).toContain('persistLumiPostTurnLearning');
-    expect(voiceSource).toContain("channel: 'workflow'");
-    expect(voiceSource).toContain('voice quick command');
-    expect(voiceSource).toContain('voice cognition direct');
+    expect(voiceSource).not.toContain('executeSkillWorkflowAdapter');
+    expect(voiceSource).not.toContain('preMatchedQuickResult');
+    expect(voiceSource).not.toContain('voice cognition direct');
     expect(voiceSource).toContain('voice confirmation');
     expect(voiceSource).not.toContain('voice music execution');
     expect(voiceSource).not.toContain('voice music shortcut');
-    expect(voiceSource.match(/persistVoiceLearning\(/g)?.length || 0).toBeGreaterThanOrEqual(8);
+    expect(voiceSource.match(/persistVoiceLearning\(/g)?.length || 0).toBe(5);
 
-    expect(taskSource).toContain('const persistTaskLearning');
-    expect(taskSource).toContain('persistLumiPostTurnLearning');
-    expect(taskSource).toContain('task confirmation');
-    expect(taskSource).toContain('task direct cognition');
-    expect(taskSource).toContain('task cancelled');
-    expect(taskSource).toContain("logLabel: 'task'");
-    expect(taskSource.match(/persistTaskLearning\(/g)?.length || 0).toBeGreaterThanOrEqual(4);
   });
 });

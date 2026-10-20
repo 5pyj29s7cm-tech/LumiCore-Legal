@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ChatMessageMarkdown } from '../src/components/ChatMessageMarkdown';
 import { ChatFilePreview, type ChatPreviewFile } from '../src/components/ChatFilePreview';
+import { NodeDetailPanel } from '../src/components/NodeDetailPanel';
 import { chatArtifactFromLink, legacyChatArtifacts } from '../src/lib/chatArtifactLinks';
 
 const fetchMock = vi.fn();
@@ -84,4 +85,59 @@ it('recognizes both Windows path styles and rejects unsafe or remote resource sc
   expect(chatArtifactFromLink('/api/files/download/%E0%A4')).toBeNull();
   const file = chatArtifactFromLink('/api/files/generated?path=C%3A%2FDocuments%2Ftest.csv', 'owned-chat');
   expect(new URL(file!.url, 'http://local.invalid').searchParams.get('conversationId')).toBe('owned-chat');
+});
+
+it('opens the full authenticated archive from knowledge details and keeps download and close available', async () => {
+  const text = '案件归档正文\n'.repeat(2000) + 'ARCHIVE_END_MARKER';
+  fetchMock.mockResolvedValue({ ok: true, json: async () => ({ kind: 'text', text, truncated: false }) });
+  render(<NodeDetailPanel node={{ id: 'legal-case-preview.md', type: 'file', title: '模拟案件归档', hue: 180,
+    fileData: { id: 'legal-case-preview.md', name: 'legal-case-preview.md', source: 'generated', domain: 'personal', status: 'indexed', sourceTitle: '模拟案件归档' } }}
+    onClose={() => {}} onDelete={() => {}} />);
+  fireEvent.click(screen.getByRole('button', { name: /预览|Preview/ }));
+  await screen.findByText(/ARCHIVE_END_MARKER/);
+  const [url, options] = fetchMock.mock.calls[0];
+  expect(new URL(url).searchParams.get('domain')).toBe('personal');
+  expect(new URL(url).searchParams.get('preview')).toBe('1');
+  expect(new Headers(options.headers).get('Authorization')).toBe('Bearer synthetic-preview-token');
+  expect(screen.getByRole('button', { name: /下载|保存文件|Save file/ })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: /关闭预览|Close preview/ }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.getByRole('button', { name: /预览|Preview/ })).toBeTruthy();
+});
+
+ it('expands and restores only the video, preserves its element and position, and gives Escape to the player first', async () => {
+  fetchMock.mockResolvedValue({ ok: true, blob: async () => new Blob(['synthetic video']) });
+  const requestFullscreen = vi.fn(); Object.defineProperty(HTMLElement.prototype, 'requestFullscreen', { configurable: true, value: requestFullscreen });
+  try {
+    render(<Conversation text={'[查看视频](C:/Documents/test.mp4)'} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看视频' }));
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+    const video = document.querySelector('video')!; video.currentTime = 12;
+    expect(video.getAttribute('controlslist')).toContain('nofullscreen');
+    fireEvent.click(screen.getByRole('button', { name: '放大视频' }));
+    expect(document.querySelector('[data-video-expanded="true"]')).not.toBeNull();
+    expect(document.querySelector('video')).toBe(video); expect(video.currentTime).toBe(12);
+    fireEvent.click(screen.getByRole('button', { name: '还原视频' }));
+    expect(document.querySelector('[data-video-expanded="true"]')).toBeNull();
+    expect(document.querySelector('video')).toBe(video); expect(video.currentTime).toBe(12);
+    fireEvent.click(screen.getByRole('button', { name: '放大视频' }));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(document.querySelector('[data-video-expanded="true"]')).toBeNull();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '放大视频' }));
+    expect(requestFullscreen).not.toHaveBeenCalled();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.querySelector('[data-video-player]')).toBeNull();
+    expect(revokeObjectURL).toHaveBeenCalledOnce();
+  } finally { delete (HTMLElement.prototype as any).requestFullscreen; }
+ });
+
+it('removes an expanded video and releases its resource when the preview unmounts', async () => {
+  fetchMock.mockResolvedValue({ ok: true, blob: async () => new Blob(['synthetic video']) });
+  const view = render(<ChatFilePreview file={{ fileName: 'test.mp4', url: '/api/files/download/test.mp4', kind: 'video' }} isZh onClose={() => {}} />);
+  await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole('button', { name: '放大视频' })); view.unmount();
+  expect(document.querySelector('[data-video-player]')).toBeNull();
+  expect(revokeObjectURL).toHaveBeenCalledOnce();
 });

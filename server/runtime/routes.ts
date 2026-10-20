@@ -1,3 +1,5 @@
+import { type ProviderGetters as SharedProviderGetters } from "../llm/provider_getters";
+import { mountIndustryWorkflowRoutes } from '../routes/industry_workflow_routes';
 // Route aggregator — mounts all shared routes on the API router
 import { Router } from "express";
 import { Server } from "socket.io";
@@ -11,8 +13,9 @@ import { mountInteractionsRoutes } from "../routes/interactions_routes";
 import { mountAuthRoutes } from "../routes/auth";
 import { mountMemoryRoutes } from "../routes/memory_routes";
 import { mountConversationRoutes } from "../routes/conversations";
-import { mountCreativeRoutes } from "../routes/creative_routes";
-import { mountMemoryAvatarRoutes } from "../routes/memory_avatar_routes";
+import { mountCreativeRoutes } from '../routes/creative_routes';
+import { mountChatSongRoutes } from '../routes/chat_song_routes';
+import { mountMemoryAvatarRoutes } from '../routes/memory_avatar_routes';
 import { mountSkillRoutes } from "../routes/skill_routes";
 import { mountMarketplaceRoutes } from "../routes/marketplace_routes";
 import { mountMiscRoutes } from "../routes/misc_routes";
@@ -22,7 +25,6 @@ import { mountNotificationRoutes } from "../routes/notifications";
 import { autonomyRoutes } from "../routes/autonomy_routes";
 import { mountExploreRoutes, mountPlanRoutes } from "../routes/plan_explore_routes";
 import { mountCommandCenterPlanRoutes } from "../routes/command_center_plan_routes";
-import { mountIndustryWorkflowRoutes } from "../routes/industry_workflow_routes";
 import { mountTaskRegressionEvidenceRoutes } from "../evidence/task_truth_snapshot_route";
 import { mountExternalCapabilityRoutes } from "../routes/external_capability_routes";
 import { mountPrivacyRoutes } from '../routes/privacy_routes';
@@ -30,10 +32,7 @@ import { mountPrivacyRoutes } from '../routes/privacy_routes';
 interface RouteContext {
   apiRouter: Router;
   jwtSecret: string;
-  llm: {
-    getDeepSeek: any; getGemini: any; getOpenAI: any; getAnthropic: any; getQwen: any; getArk: any; getGlm: any;
-    getOllama?: any; getLmStudio?: any; getXiaomi?: any; getKimi?: any; getRelay?: any;
-  };
+  llm: SharedProviderGetters & Required<Pick<SharedProviderGetters, 'getOpenAI' | 'getAnthropic' | 'getQwen' | 'getArk' | 'getGlm'>>;
   getCookieOptions: () => { httpOnly: true; secure: boolean; sameSite: "none" | "lax"; maxAge: number };
   io: Server;
 }
@@ -65,13 +64,16 @@ export function mountAllRoutes({ apiRouter, jwtSecret, llm, getCookieOptions, io
 
   // AI Chat
   mountChatRoutes(apiRouter, jwtSecret, llmGetters);
+  mountIndustryWorkflowRoutes(apiRouter);
 
   // Auth
   mountAuthRoutes(apiRouter, jwtSecret, getCookieOptions);
 
-  // Personal creative tools and single-persona Memory Avatars. These are
-  // independent of the retired local Agent/team runtime.
+  // Creative generation
   mountCreativeRoutes(apiRouter, jwtSecret, llmGetters);
+  mountChatSongRoutes(apiRouter, llmGetters);
+  // Personal Memory Avatars are single-persona and tool-free; they are not
+  // part of the retired local Agent/team runtime.
   mountMemoryAvatarRoutes(apiRouter, llmGetters);
 
   // Preferences & Interactions
@@ -100,7 +102,6 @@ export function mountAllRoutes({ apiRouter, jwtSecret, llm, getCookieOptions, io
   mountExploreRoutes(apiRouter);
   mountPlanRoutes(apiRouter);
   mountCommandCenterPlanRoutes(apiRouter, { io, getters: llmGetters });
-  mountIndustryWorkflowRoutes(apiRouter);
 
   // Autonomy
   apiRouter.use('/autonomy', autonomyRoutes());

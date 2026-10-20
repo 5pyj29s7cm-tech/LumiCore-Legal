@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import { extractSourceExpression } from '../../test/source_expression';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import {
   MediaGenerationStudio,
+  EMPTY_MEDIA_GENERATION_SOURCES,
   type MediaGenerationRequest,
   type MediaGenerationStudioProps,
 } from './MediaGenerationStudio';
+import { videoGenerationOptions } from '../../shared/video_generation_options';
 import type { MediaGenerationArtifact } from '@/lib/mediaGenerationArtifacts';
 
 const sourceArtifact: MediaGenerationArtifact = {
@@ -19,6 +22,8 @@ const sourceArtifact: MediaGenerationArtifact = {
 
 function studioProps(overrides: Partial<MediaGenerationStudioProps> = {}): MediaGenerationStudioProps {
   return {
+    ...EMPTY_MEDIA_GENERATION_SOURCES,
+    onSourceChange: vi.fn(),
     mode: 'image',
     locale: 'en',
     busy: false,
@@ -34,13 +39,22 @@ function studioProps(overrides: Partial<MediaGenerationStudioProps> = {}): Media
   };
 }
 
+function StudioHarness(props: MediaGenerationStudioProps) {
+  const { primaryImage, referenceImages, referenceImage, primaryArtifactId, referenceArtifactIds, referenceArtifactId } = props;
+  const initial = { primaryImage, referenceImages, referenceImage, primaryArtifactId, referenceArtifactIds, referenceArtifactId };
+  const [sources, setMediaSources] = useState(initial);
+  useEffect(() => { setMediaSources(initial); }, [primaryImage, referenceImages, referenceImage, primaryArtifactId, referenceArtifactIds, referenceArtifactId]);
+  const change = extractSourceExpression('src/components/AgentChatPage.tsx', 'handleMediaSourceChange', { setMediaSources });
+  return <MediaGenerationStudio {...props} {...sources} onSourceChange={value => { change(value); props.onSourceChange(value); }} />;
+}
+
 afterEach(cleanup);
 
 describe('MediaGenerationStudio operations', () => {
   it('previews and references archived content while keeping current generation status separate', () => {
     const archived = { ...sourceArtifact, id: 'archive-1', fileId: 'archived.png', url: '/api/files/download/archived.png?inline=1' };
     const props = studioProps({ libraryArtifacts: [archived], onReferenceArtifact: vi.fn(), onRefreshLibrary: vi.fn() });
-    const { container, rerender } = render(<MediaGenerationStudio {...props} />);
+    const { container, rerender } = render(<StudioHarness {...props} />);
     expect(screen.getByRole('tab', { name: 'Image library (1)' }).getAttribute('aria-selected')).toBe('true');
     const image = container.querySelector('[data-media-generation-results] img')!;
     fireEvent.load(image); fireEvent.error(image);
@@ -49,17 +63,17 @@ describe('MediaGenerationStudio operations', () => {
     expect(props.onReferenceArtifact).toHaveBeenCalledWith(archived);
     fireEvent.change(screen.getByRole('textbox', { name: 'Search archived files' }), { target: { value: 'unmatched' } });
     expect(container.querySelectorAll('[data-media-generation-results] article')).toHaveLength(0);
-    rerender(<MediaGenerationStudio {...props} busy status="generating" />);
+    rerender(<StudioHarness {...props} busy status="generating" />);
     expect(screen.getByRole('tab', { name: 'This generation' }).getAttribute('aria-selected')).toBe('true');
     expect(container.querySelectorAll('[data-media-generation-results] article')).toHaveLength(0);
     fireEvent.click(screen.getByRole('tab', { name: 'Image library (1)' }));
     expect(props.onRefreshLibrary).toHaveBeenCalled();
   });
-  it('offers all four operations and submits an image edit with a selected source artifact', () => {
+  it('offers image operations and submits an image edit with a selected source artifact', () => {
     const onGenerate = vi.fn();
     const onOperationChange = vi.fn();
     const onSourceChange = vi.fn();
-    const { container } = render(<MediaGenerationStudio {...studioProps({
+    const { container } = render(<StudioHarness {...studioProps({
       sourceArtifacts: [sourceArtifact, {
         id: 'video-1',
         kind: 'video',
@@ -70,7 +84,7 @@ describe('MediaGenerationStudio operations', () => {
       onSourceChange,
     })} />);
 
-    expect(container.querySelectorAll('[data-media-generation-tab]')).toHaveLength(4);
+    expect(container.querySelectorAll('[data-media-generation-tab]')).toHaveLength(2);
     fireEvent.click(container.querySelector('[data-media-generation-tab="image_edit"]')!);
     fireEvent.click(screen.getAllByRole('button', { name: 'source.png' })[0]);
     fireEvent.change(screen.getByRole('textbox', { name: 'Describe what to generate' }), {
@@ -96,6 +110,32 @@ describe('MediaGenerationStudio operations', () => {
     });
   });
 
+  it('groups creation types under one header and preserves work when switching to the song workflow', () => {
+    function Studio() {
+      const [mode, setMode] = React.useState<'image' | 'video'>('image');
+      const [song, setSong] = React.useState(false);
+      return <StudioHarness {...studioProps()} mode={mode} onModeChange={setMode}
+        chatSongActive={song} onOpenChatSong={() => setSong(true)}
+        onSelectMedia={kind => { setMode(kind); setSong(false); }}
+        chatSongContent={<input aria-label="Episode draft" defaultValue="" />} />;
+    }
+    const { container } = render(<Studio />);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Describe what to generate' }), { target: { value: 'Keep this prompt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Video' }));
+    expect(screen.getByRole('button', { name: 'Text to video' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Image to video' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Edit image' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Chat-song' }));
+    expect(screen.getByRole('heading', { name: 'AI Creation' })).toBeTruthy();
+    expect(container.querySelector('header')?.textContent).not.toContain('Chat-song');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Episode draft' }), { target: { value: 'Keep this dialogue' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Image' }));
+    expect(screen.queryByRole('textbox', { name: 'Episode draft' })).toBeNull();
+    expect((screen.getByRole('textbox', { name: 'Describe what to generate' }) as HTMLTextAreaElement).value).toBe('Keep this prompt');
+    fireEvent.click(screen.getByRole('button', { name: 'Chat-song' }));
+    expect((screen.getByRole('textbox', { name: 'Episode draft' }) as HTMLInputElement).value).toBe('Keep this dialogue');
+  });
+
   it('uses a result as the first frame and exposes open, save, and continuation actions', () => {
     const onGenerate = vi.fn();
     const onModeChange = vi.fn();
@@ -103,7 +143,7 @@ describe('MediaGenerationStudio operations', () => {
     const onSaveArtifact = vi.fn();
     const onContinueEdit = vi.fn();
     const onUseAsVideoReference = vi.fn();
-    const { container } = render(<MediaGenerationStudio {...studioProps({
+    const { container } = render(<StudioHarness {...studioProps({
       artifacts: [sourceArtifact],
       onGenerate,
       onModeChange,
@@ -142,9 +182,10 @@ describe('MediaGenerationStudio operations', () => {
     });
   });
 
-  it('cancels active generation and retries the exact supplied request', () => {
+  it('cancels active generation, checks an uncertain task, and retries only after a definite rejection', () => {
     const onCancel = vi.fn();
     const onRetry = vi.fn();
+    const onCheckTaskStatus = vi.fn();
     const retryRequest: MediaGenerationRequest = {
       mode: 'video',
       operation: 'image_to_video',
@@ -154,7 +195,7 @@ describe('MediaGenerationStudio operations', () => {
       referenceImage: 'D:\\media\\original.png',
       referenceArtifactId: 'original-artifact',
     };
-    const { rerender } = render(<MediaGenerationStudio {...studioProps({
+    const { rerender } = render(<StudioHarness {...studioProps({
       mode: 'video',
       operation: 'image_to_video',
       status: 'generating',
@@ -168,7 +209,7 @@ describe('MediaGenerationStudio operations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cancel generation' }));
     expect(onCancel).toHaveBeenCalledTimes(1);
 
-    rerender(<MediaGenerationStudio {...studioProps({
+    rerender(<StudioHarness {...studioProps({
       mode: 'video',
       operation: 'image_to_video',
       status: 'cancelled',
@@ -176,9 +217,122 @@ describe('MediaGenerationStudio operations', () => {
       onCancel,
       onRetry,
     })} />);
+    expect(screen.queryByRole('button', { name: 'Retry same settings' })).toBeNull();
+    rerender(<StudioHarness {...studioProps({ mode: 'video', operation: 'image_to_video', status: 'cancelled', retryRequest, onCancel, onRetry, onCheckTaskStatus })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Check task status' }));
+    expect(onCheckTaskStatus).toHaveBeenCalledTimes(1);
+    expect(onRetry).not.toHaveBeenCalled();
+    rerender(<StudioHarness {...studioProps({ mode: 'video', operation: 'image_to_video', status: 'error', statusDetail: 'The request was rejected before submission.', retryRequest, onCancel, onRetry })} />);
     fireEvent.click(screen.getByRole('button', { name: 'Retry same settings' }));
 
     expect(onRetry).toHaveBeenCalledTimes(1);
     expect(onRetry).toHaveBeenCalledWith(retryRequest);
   });
+  it.each(['image_edit', 'image_to_video'] as const)('clears stale artifact identity when a %s source is replaced manually', operation => {
+    const onGenerate = vi.fn();
+    const props = studioProps({ onGenerate, operation, mode: operation === 'image_edit' ? 'image' : 'video', sourceArtifacts: [sourceArtifact] });
+    const { container } = render(<StudioHarness {...props} />);
+    fireEvent.click(screen.getAllByRole('button', { name: 'source.png' })[0]);
+    const input = container.querySelector('fieldset input:not([type=file])')!;
+    fireEvent.change(input, { target: { value: 'D:/media/replacement.png' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Describe what to generate' }), { target: { value: 'Animate this image' } });
+    fireEvent.submit(container.querySelector('form')!);
+    const request = onGenerate.mock.calls[0][0];
+    expect(request[operation === 'image_edit' ? 'primaryImage' : 'referenceImage']).toBe('D:/media/replacement.png');
+    expect(request).not.toHaveProperty(operation === 'image_edit' ? 'primaryArtifactId' : 'referenceArtifactId');
+    expect(screen.getAllByRole('button', { name: 'source.png' })[0].getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('uses the parent selection after recovery, clearing old source identities and supporting an optional reference', () => {
+    const onGenerate = vi.fn();
+    const props = studioProps({ operation: 'image_edit', sourceArtifacts: [sourceArtifact, { ...sourceArtifact, id: 'style-id', fileName: 'style.png', path: 'D:/style.png' }], onGenerate });
+    const { container, rerender } = render(<StudioHarness {...props} />);
+    fireEvent.click(screen.getAllByRole('button', { name: 'source.png' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'style.png' })[1]);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Describe what to generate' }), { target: { value: 'Keep both characters' } });
+    fireEvent.submit(container.querySelector('form')!);
+    expect(onGenerate.mock.calls[0][0]).toMatchObject({ primaryArtifactId: 'image-1', referenceArtifactIds: ['style-id'] });
+    fireEvent.change(container.querySelectorAll('fieldset input:not([type=file])')[1], { target: { value: '' } });
+    fireEvent.submit(container.querySelector('form')!);
+    expect(onGenerate.mock.calls[1][0]).toMatchObject({ primaryArtifactId: 'image-1', referenceImages: [] });
+    expect(onGenerate.mock.calls[1][0]).not.toHaveProperty('referenceArtifactIds');
+    rerender(<StudioHarness {...props} primaryImage="D:/media/recovered.png" primaryArtifactId="recovered-id" />);
+    fireEvent.submit(container.querySelector('form')!);
+    expect(onGenerate.mock.calls[2][0]).toMatchObject({ primaryImage: 'D:/media/recovered.png', primaryArtifactId: 'recovered-id', referenceImages: [] });
+    expect(onGenerate.mock.calls[2][0]).not.toHaveProperty('referenceArtifactIds');
+    rerender(<StudioHarness {...props} />);
+    fireEvent.submit(container.querySelector('form')!);
+    expect(onGenerate).toHaveBeenCalledTimes(3);
+    expect(container.querySelector('fieldset input')).toHaveProperty('value', '');
+  });
+
 });
+
+ it('uploads an external first frame from the source field, previews it, and submits its exact path', () => {
+   const upload = vi.fn();
+   const generate = vi.fn();
+   const props = studioProps({ mode: 'video', operation: 'image_to_video', onUploadSourceImage: upload, onGenerate: generate });
+   const { container, rerender } = render(<StudioHarness {...props} />);
+   const source = screen.getByRole('group', { name: 'First-frame image' });
+   const prompt = screen.getByRole('textbox', { name: 'Describe what to generate' });
+   expect(source.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+   const file = new File(['external image bytes'], 'my-photo.png', { type: 'image/png' });
+   fireEvent.change(screen.getByLabelText('Upload image: First-frame image'), { target: { files: [file] } });
+   expect(upload).toHaveBeenCalledWith('image_to_video', 'first_frame', [file]);
+   const uploaded = { ...sourceArtifact, id: 'uploaded-source', fileName: file.name };
+   rerender(<StudioHarness {...props} referenceImage={uploaded.path!} referenceArtifactId={uploaded.id} sourceArtifacts={[uploaded]} />);
+   expect(container.querySelector('[data-media-source-preview] img')?.getAttribute('alt')).toBe(file.name);
+   fireEvent.change(prompt, { target: { value: 'Slow camera movement' } });
+   fireEvent.submit(container.querySelector('form')!);
+   expect(generate).toHaveBeenCalledWith(expect.objectContaining({ operation: 'image_to_video', referenceImage: uploaded.path, referenceArtifactId: uploaded.id }));
+ });
+
+it('uses the selected video model sizes and fixed duration instead of unsupported six-second defaults', () => {
+  const generate = vi.fn();
+  const { container } = render(<StudioHarness {...studioProps({ mode: 'video', operation: 'image_to_video', referenceImage: sourceArtifact.path!, onGenerate: generate,
+    videoOptions: { image_to_video: { sizes: ['1920x1080', '1080x1920', '1440x1440'], durations: [5], fixedDuration: 5 } } })} />);
+  fireEvent.change(screen.getByRole('textbox', { name: 'Describe what to generate' }), { target: { value: 'Slow camera movement' } });
+  fireEvent.submit(container.querySelector('form')!);
+  expect(generate).toHaveBeenCalledWith(expect.objectContaining({ size: '1920x1080', duration: 5 }));
+  expect(container.querySelectorAll('option[value="6"]')).toHaveLength(0);
+  expect(container.querySelector('option[value="1280x720"]')).toBeNull();
+  expect(screen.getByText(/automatically combined/)).toBeTruthy();
+});
+
+it('submits a 30-second final length using the current model composition options', () => {
+  const generate = vi.fn();
+  const { container } = render(<StudioHarness {...studioProps({ mode: 'video', operation: 'image_to_video', referenceImage: sourceArtifact.path!, onGenerate: generate,
+    videoOptions: { image_to_video: { sizes: ['1920x1080'], durations: [5, 10, 15, 30, 60, 120], fixedDuration: 5 } } })} />);
+  const duration = container.querySelectorAll('select')[1];
+  fireEvent.change(duration, { target: { value: '30' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Describe what to generate' }), { target: { value: 'Slow camera movement' } });
+  fireEvent.submit(container.querySelector('form')!);
+  expect(generate).toHaveBeenCalledWith(expect.objectContaining({ duration: 30 }));
+});
+
+it.each([[true, '已检测到音轨'], [false, '无音轨'], [undefined, '音轨尚未核实']] as const)('shows measured audio state in a video result (%s)', (hasAudio, label) => {
+  render(<MediaGenerationStudio {...studioProps({ mode: 'video', locale: 'zh', status: 'completed', artifacts: [
+    { id: 'video-audio', kind: 'video', url: '/api/files/generated?path=clip.mp4&inline=1', hasAudio },
+  ] })} />);
+  expect(screen.getByText(label)).toBeTruthy();
+});
+
+ it.each(['text_to_video', 'image_to_video'] as const)('offers Wan3 quality in %s and forwards the selected dimensions without composition', operation => {
+  const generate = vi.fn();
+  const { container } = render(<StudioHarness {...studioProps({ mode: 'video', operation, referenceImage: sourceArtifact.path!, onGenerate: generate,
+    videoOptions: { [operation]: videoGenerationOptions({ provider: 'relay', model: 'aliyun/wan3.0-video' }) } })} />);
+  const size = screen.getByRole('combobox', { name: 'Quality / frame ratio' });
+  const duration = screen.getByRole('combobox', { name: 'Duration' });
+  expect(screen.getByRole('option', { name: '1080p · 9:16 · 1080x1920' })).toBeTruthy();
+  expect(screen.getByRole('option', { name: '720p · 9:16 · 720x1280' })).toBeTruthy();
+  expect(screen.getByRole('option', { name: '480p · 9:16 · 480x832' })).toBeTruthy();
+  expect(container.querySelector('option[value="60"]')).toBeNull();
+  expect(screen.queryByText(/automatically combined/)).toBeNull();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Describe what to generate' }), { target: { value: 'Holiday toy promotion' } });
+  fireEvent.change(duration, { target: { value: '15' } });
+  for (const value of ['1080x1920', '720x1280', '480x832']) {
+    fireEvent.change(size, { target: { value } });
+    fireEvent.submit(container.querySelector('form')!);
+    expect(generate).toHaveBeenLastCalledWith(expect.objectContaining({ operation, size: value, duration: 15 }));
+  }
+ });

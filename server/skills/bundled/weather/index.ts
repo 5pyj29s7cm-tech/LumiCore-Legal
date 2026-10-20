@@ -3,10 +3,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 async function handler(args: any) {
-  const city = String(args.city || 'Beijing');
+  const city = String(args.city || '').trim();
+  if (!city) return { content: [{ type: 'text' as const, text: 'A city is required.' }], isError: true };
   try {
     const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'LumiCore/3.0' } });
+    const res = await fetch(url, { headers: { 'User-Agent': 'LumiCore/3.0' }, signal: AbortSignal.timeout(5000) });
     if (!res.ok) throw new Error(`Weather API returned ${res.status}`);
     const data: any = await res.json();
     const current = data.current_condition?.[0];
@@ -28,7 +29,7 @@ async function handler(args: any) {
   }
 }
 
-const server = new McpServer({ name: 'weather', version: '1.0.0' }, { capabilities: { tools: {} } });
+const server = new McpServer({ name: 'weather', version: '1.0.1' }, { capabilities: { tools: {} } });
 server.registerTool('get_weather', {
   description: 'Get real-time weather for any city. Returns temperature, humidity, wind, and forecast.',
   inputSchema: { city: z.string().describe('City name in English, e.g. "Tokyo" or "London"') },

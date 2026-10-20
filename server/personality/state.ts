@@ -1,10 +1,9 @@
-import { readDB, writeDB } from '../../db_layer';
+import { readSettingRecord, writeSetting } from "../persistence/settings_repository";
+
 import { addMemory } from '../memory/store';
 import { PersonalityVector } from './types';
-import { getSeasonInfo, getNearbyHoliday, isWeekend, getTimeOfDay } from '../time/utils';
-import { himTick, loadHIMState, saveHIMState, getBestPeak, formatPeakForPrompt, type HIMState } from './him';
-
-const emotionWriteQueues = new Map<string, Promise<void>>();
+import { getSeasonInfo, getNearbyHoliday, isWeekend } from '../time/utils';
+import { himTick, loadHIMState, saveHIMState, type HIMState } from './him';
 
 export interface EmotionalState {
   valence: number;        // -1 (unpleasant) ~ +1 (pleasant)
@@ -45,10 +44,7 @@ export function createDefaultEmotionalState(): EmotionalState {
 }
 
 export function loadEmotionalState(userId: string): EmotionalState {
-  const db = readDB();
-  if (!db.settings) return createDefaultEmotionalState();
-
-  const setting = db.settings.find((s: any) => s.key === `emotion_${userId}`);
+  const setting = readSettingRecord(`emotion_${userId}`);
   if (!setting) return createDefaultEmotionalState();
 
   try {
@@ -74,28 +70,10 @@ export function loadEmotionalState(userId: string): EmotionalState {
 }
 
 export function saveEmotionalState(userId: string, state: EmotionalState): void {
-  const prev = emotionWriteQueues.get(userId) || Promise.resolve();
-  let release: () => void;
-  const next = new Promise<void>(r => { release = r; });
-  emotionWriteQueues.set(userId, next);
-
-  prev.then(() => {
-    try {
-      const db = readDB();
-      if (!db.settings) db.settings = [];
-
-      state.lastUpdated = new Date().toISOString();
-      const existing = db.settings.findIndex((s: any) => s.key === `emotion_${userId}`);
-      if (existing >= 0) {
-        db.settings[existing].value = JSON.stringify(state);
-      } else {
-        db.settings.push({ key: `emotion_${userId}`, value: JSON.stringify(state) });
-      }
-      writeDB(db);
-    } finally {
-      release!();
-    }
-  }).catch(() => release!());
+  try {
+    state.lastUpdated = new Date().toISOString();
+    writeSetting(`emotion_${userId}`, JSON.stringify(state));
+  } catch { /* Emotional telemetry remains best effort. */ }
 }
 
 /**
@@ -119,7 +97,7 @@ export function updateEmotionalStateWithHIM(
 }
 
 // ── Re-export for convenience ──
-export { loadHIMState, saveHIMState, getBestPeak, formatPeakForPrompt };
+export { loadHIMState, saveHIMState };
 export type { HIMState };
 
 /** Rules engine — updates emotional state based on events, no LLM required */

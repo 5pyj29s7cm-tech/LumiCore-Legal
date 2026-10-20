@@ -206,7 +206,7 @@ describe('hard per-turn tool invocation budget', () => {
     expect(result.toolCalls).toHaveLength(HARD_MAX_TOOL_INVOCATIONS_PER_TURN + 1);
   });
 
-  it('counts required enum expansion against the response limit', async () => {
+  it('rejects an explicit model batch above the response limit without automatic enum expansion', async () => {
     const registry = new ToolRegistry();
     const expanded = vi.fn(async args => `checked-${args.target}`);
     const enumValues = Array.from(
@@ -233,7 +233,7 @@ describe('hard per-turn tool invocation budget', () => {
     });
     mocks.makeLLMCall.mockResolvedValueOnce({
       text: 'check every target',
-      toolCalls: [{ id: 'enum-one', name: 'enum_budget_probe', arguments: { target: enumValues[0] } }],
+      toolCalls: enumValues.map((target,index) => ({ id: 'explicit-enum-'+index, name: 'enum_budget_probe', arguments: { target } })),
     });
 
     const result = await runWithTools(
@@ -249,11 +249,11 @@ describe('hard per-turn tool invocation budget', () => {
     expect(budgetReceipt(result)?.receipt).toMatchObject({
       code: 'TOOL_INVOCATION_BUDGET_EXCEEDED',
       boundary: 'model_response',
-      rawPlannedCalls: 1,
+      rawPlannedCalls: enumValues.length,
       normalizedPlannedCalls: enumValues.length,
-      enumExpansionApplied: true,
+      enumExpansionApplied: false,
       overLimitBatchExecuted: false,
     });
-    expect(result.text).toContain('Schema-enum expansion');
+    expect(result.text).toContain('left unexecuted');
   });
 });

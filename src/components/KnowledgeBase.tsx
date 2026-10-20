@@ -1,19 +1,22 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Loader2, Search, Upload, ArrowRight, File, FileText, Trash2, Eye, ChevronRight, AlertCircle, CheckCircle2, Clock, FolderOpen, BookOpen, RefreshCw, Link2 } from 'lucide-react';
+import { X, Loader2, Search, Upload, ArrowRight, File, FileText, Trash2, ChevronRight, AlertCircle, CheckCircle2, Clock, FolderOpen, BookOpen, RefreshCw, Link2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSocket } from '@/hooks/useSocket';
-import { appConfirm } from '@/lib/appConfirm';
+import { useGeneratedLibrary } from '@/hooks/useGeneratedLibrary';
+import { useAppConfirm } from '@/lib/appConfirm';
 import { NodeDetailPanel } from './NodeDetailPanel';
 import { MemoryTreeScene, layoutTree3D } from './MemoryTree';
-import type { TreeNode3D, BranchCurve3D, MemoryNode as MemNode, FileEntry } from './MemoryTree';
+import type { MemoryNode as MemNode, FileEntry } from './MemoryTree';
 import { formatUiMessage, uiMessage } from '../i18n/uiMessages';
-import { CN_BROKEN_TEXT_MARKERS } from '../i18n/regions/cn/recognition';
 import type { ChatAttachmentRequest } from '@/lib/chatAttachmentReferences';
+import { useFileDrop } from '../hooks/useFileDrop';
+import { importKnowledgeFiles, type KnowledgeFileSource } from '../lib/knowledgeFileImport';
+import { fileImportCopy } from '../i18n/locales/fileImport';
 
 interface MemoryTree { node: MemNode; children: MemoryTree[]; }
 
-interface KnowledgeBaseProps {
+export interface KnowledgeBaseProps {
   t?: any;
   isOpen: boolean;
   onClose: () => void;
@@ -38,58 +41,22 @@ interface ObsidianVault {
   };
 }
 
-const BROKEN_FILENAME_MARKERS = [
-  '\u00c3',
-  '\u00c2',
-  '\ufffd',
-  ...CN_BROKEN_TEXT_MARKERS,
-];
-
-function looksBrokenFilename(value: string): boolean {
-  return /[\u0080-\u009f]/.test(value)
-    || /[\u00c0-\u00ff][\u0080-\u00bf]/.test(value)
-    || BROKEN_FILENAME_MARKERS.some(marker => value.includes(marker));
-}
-
-function scoreFilenameText(value: string): number {
-  const replacement = (value.match(/\ufffd/g) || []).length;
-  const cjk = (value.match(/[\u4e00-\u9fff]/g) || []).length;
-  const ascii = (value.match(/[A-Za-z0-9._ -]/g) || []).length;
-  const controls = (value.match(/[\u0080-\u009f]/g) || []).length;
-  const brokenMarkers = BROKEN_FILENAME_MARKERS.reduce((sum, marker) => sum + (value.includes(marker) ? 1 : 0), 0);
-  return cjk * 2 + ascii * 0.15 - replacement * 8 - controls * 6 - brokenMarkers * 2;
-}
-
-function repairKnowledgeFilename(value: string | undefined): string {
-  const original = String(value || '').normalize('NFC');
-  if (!original || !looksBrokenFilename(original)) return original;
-  const candidates = new Set<string>([original]);
-  try {
-    const bytes = Uint8Array.from(Array.from(original, ch => ch.charCodeAt(0) & 0xff));
-    candidates.add(new TextDecoder('utf-8', { fatal: false }).decode(bytes).normalize('NFC'));
-  } catch {}
-  return [...candidates].sort((a, b) => scoreFilenameText(b) - scoreFilenameText(a))[0] || original;
-}
-
 export function KnowledgeBase(props: KnowledgeBaseProps) {
   // Lists, editor state and in-flight completions belong to one owner. A new
   // scope gets a new view; late old reads cannot write into that view.
   return <KnowledgeBaseScope key={props.scopeKey || props.domain || 'personal'} {...props} />;
 }
 
-function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: KnowledgeBaseProps) {
+function useKnowledgeBaseScopeState({ t, isOpen, onClose, domain = 'personal', scopeKey }: KnowledgeBaseProps) {
+
+  const appConfirm = useAppConfirm(JSON.stringify([isOpen, domain, scopeKey]));
   const socket = useSocket();
   const isZh = t?.langCode !== 'en';
 
-  const [files, setFiles] = useState<FileEntry[]>([]);
-  const [memories, setMemories] = useState<MemNode[]>([]);
-  const [treeNodes, setTreeNodes] = useState<TreeNode3D[]>([]);
-  const [branchCurves, setBranchCurves] = useState<BranchCurve3D[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [tree, setTree] = useState<{ memories: MemNode[]; loading: boolean; error: number | 'network' | null }>({ memories: [], loading: true, error: null });
+  const treeRevision = React.useRef(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  const [cardPos, setCardPos] = useState<{ x: number; y: number } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [bulkIngesting, setBulkIngesting] = useState(false);
   const [ingestingFiles, setIngestingFiles] = useState<Set<string>>(() => new Set());
@@ -98,24 +65,22 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
   const [obsidianVaults, setObsidianVaults] = useState<ObsidianVault[]>([]);
   const [obsidianSyncing, setObsidianSyncing] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const archiveReconciled = React.useRef(false);
-  const archivePending = React.useRef<Promise<void> | null>(null);
-  const lastLoadErrorRef = React.useRef<string | null>(null);
-
-  const reportLoadError = useCallback((message: string) => {
-    setLoadError(message);
-    lastLoadErrorRef.current = message;
-  }, []);
-
-  const scopedMemoryUrl = useCallback((path: string) => {
-    const separator = path.includes('?') ? '&' : '?';
-    return `${path}${separator}domain=${encodeURIComponent(domain)}`;
-  }, [domain]);
-
+  const uploadRequest = React.useRef<AbortController | null>(null);
+  useEffect(() => {
+    setUploading(false);
+    return () => { uploadRequest.current?.abort(); uploadRequest.current = null; };
+  }, [isOpen]);
   const scopedFileUrl = useCallback((path: string) => {
     const separator = path.includes('?') ? '&' : '?';
     return `${path}${separator}domain=${encodeURIComponent(domain)}`;
   }, [domain]);
+  const { files, loading: filesLoading, error: filesError, refresh: refreshFiles } = useGeneratedLibrary(scopeKey || domain, scopedFileUrl);
+  const { memories } = tree;
+  const loading = filesLoading || tree.loading;
+  const loadError = [
+    filesError !== null && `${t.kbFilesLoadFailed || 'Files failed to load'} (${filesError})`,
+    tree.error !== null && `${t.kbMemoriesLoadFailed || 'Memories failed to load'} (${tree.error})`,
+  ].filter(Boolean).join(' / ');
   const notifyKnowledgeUpdated = useCallback((files?: Array<{ id?: string; name?: string; displayName?: string }>) => {
     window.dispatchEvent(new CustomEvent('lumi:knowledge-updated', { detail: { domain, files } }));
     window.dispatchEvent(new CustomEvent('lumi:client-state-refresh'));
@@ -128,7 +93,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
       domain: file.domain || domain,
       orgId: file.orgId,
       fileId: file.id,
-      fileName: file.displayName || file.name || file.id,
+      fileName: file.sourceTitle || file.displayName || file.name || file.id,
       path: file.path,
       rawSize: file.rawSize,
       kind: 'file',
@@ -146,62 +111,25 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
     }
   }, [scopedFileUrl]);
 
-  // Fetch data — parallel, no dependency between files and memory tree
   const fetchAll = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    if (!archiveReconciled.current) {
-      archivePending.current ||= fetch(scopedFileUrl('/api/files/archive-generated'), { method: 'POST', credentials: 'include' })
-        .then(response => { archiveReconciled.current = response.ok; }).catch(() => {});
-      await archivePending.current;
-      archivePending.current = null;
-    }
-    const [filesRes, treeRes] = await Promise.allSettled([
-      fetch(scopedFileUrl('/api/files/list'), { credentials: 'include' }),
-      fetch(scopedMemoryUrl('/api/memory/tree')),
-    ]);
-    const errors: string[] = [];
-
-    if (filesRes.status === 'fulfilled' && filesRes.value.ok) {
+    const request = ++treeRevision.current;
+    setTree(previous => ({ ...previous, loading: true, error: null }));
+    await Promise.all([refreshFiles(), (async () => {
       try {
-        const d = await filesRes.value.json();
-        setFiles((d.files || []).map((file: FileEntry) => {
-          const readableName = repairKnowledgeFilename(file.displayName || file.name || file.id);
-          return {
-            ...file,
-            name: readableName,
-            displayName: readableName,
-            domain: file.domain || domain,
-          };
-        }));
-      } catch {}
-    } else {
-      const status = filesRes.status === 'fulfilled' ? filesRes.value.status : 'network';
-      errors.push(`${t.kbFilesLoadFailed || 'Files failed to load'} (${status})`);
-    }
-
-    if (treeRes.status === 'fulfilled' && treeRes.value.ok) {
-      try {
-        const d = await treeRes.value.json();
-        const flat: MemNode[] = [];
+        const response = await fetch(scopedFileUrl('/api/memory/tree'));
+        if (!response.ok) throw Object.assign(new Error('Memory tree unavailable'), { status: response.status });
+        const data = await response.json(), memories: MemNode[] = [];
         const walk = (nodes: MemoryTree[]) => {
-          for (const n of nodes) { flat.push(n.node); walk(n.children); }
+          for (const { node, children } of nodes) { memories.push(node); walk(children); }
         };
-        walk(d.tree || []);
-        setMemories(flat);
-      } catch {}
-    } else {
-      const status = treeRes.status === 'fulfilled' ? treeRes.value.status : 'network';
-      errors.push(`${t.kbMemoriesLoadFailed || 'Memories failed to load'} (${status})`);
-    }
-
-    if (errors.length > 0) {
-      reportLoadError(errors.join(' / '));
-    } else {
-      lastLoadErrorRef.current = null;
-    }
-    setLoading(false);
-  }, [domain, reportLoadError, scopedFileUrl, scopedMemoryUrl, t.kbFilesLoadFailed, t.kbMemoriesLoadFailed]);
+        walk(data.tree || []);
+        if (request === treeRevision.current) setTree({ memories, loading: false, error: null });
+      } catch (error: any) {
+        if (request === treeRevision.current) setTree(previous => ({ ...previous, loading: false, error: error?.status || 'network' }));
+      }
+    })()]);
+  }, [refreshFiles, scopedFileUrl]);
+  useEffect(() => () => { treeRevision.current++; }, []);
 
   useEffect(() => { if (isOpen) fetchAll(); }, [isOpen, fetchAll]);
   useEffect(() => { if (isOpen) void fetchObsidianStatus(); }, [isOpen, fetchObsidianStatus]);
@@ -214,13 +142,10 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
     return () => { socket.off('memories:changed', fetchAll); socket.off('chat:conversation_updated', fetchAll); };
   }, [socket, isOpen, fetchAll]);
 
-  // Build tree
-  useEffect(() => {
-    if (!isOpen) return;
-    const { nodes, curves } = layoutTree3D(memories, files);
-    setTreeNodes(nodes);
-    setBranchCurves(curves);
-  }, [memories, files, isOpen]);
+  const { nodes: treeNodes, curves: branchCurves } = useMemo(
+    () => isOpen ? layoutTree3D(memories, files) : { nodes: [], curves: [] },
+    [memories, files, isOpen],
+  );
 
   // Find selected node data
   const selectedNode = selectedId ? treeNodes.find(n => n.id === selectedId) : null;
@@ -252,7 +177,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
     });
     if (!q) return sorted;
     return sorted.filter(file => [
-      file.displayName || file.name,
+      file.sourceTitle || file.displayName || file.name,
       file.name,
       file.source || '',
       file.status || '',
@@ -287,22 +212,22 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
     });
     if (!ok) return;
     try {
-      const endpoint = n.type === 'file' ? scopedFileUrl(`/api/files/delete/${encodeURIComponent(id)}`) : scopedMemoryUrl(`/api/memories/${id}`);
+      const endpoint = n.type === 'file' ? scopedFileUrl(`/api/files/delete/${encodeURIComponent(id)}`) : scopedFileUrl(`/api/memories/${id}`);
       const res = await fetch(endpoint, { method: 'DELETE', credentials: 'include' });
       if (res.ok) { toast.success(t.kbDeleted || 'Deleted'); fetchAll(); setSelectedId(null); }
       else toast.error(t.kbDeleteFailed || 'Delete failed');
     } catch { toast.error(t.kbDeleteFailed || 'Delete failed'); }
   };
 
-  const handleIngest = async (id: string) => {
-    const agentId = targetAgentId;
+  const handleIngest = async (id: string, quiet = false): Promise<boolean> => {
     setIngestingFiles(prev => new Set(prev).add(id));
     try {
       const res = await fetch(scopedFileUrl('/api/files/ingest'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ fileId: id, agentId, domain }),
+        body: JSON.stringify({ fileId: id, agentId: targetAgentId, domain }),
       });
+      if (quiet) return res.ok;
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
         const count = data.chunkCount || data.memoryIds?.length || 0;
@@ -315,8 +240,10 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
         const data = await res.json().catch(() => ({}));
         toast.error(data.error || t.kbIngestFailed || 'Ingest failed');
       }
+      return res.ok;
     } catch {
-      toast.error(t.kbIngestFailed || 'Ingest failed');
+      if (!quiet) toast.error(t.kbIngestFailed || 'Ingest failed');
+      return false;
     } finally {
       setIngestingFiles(prev => {
         const next = new Set(prev);
@@ -333,31 +260,13 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
       return;
     }
 
-    const agentId = targetAgentId;
     setBulkIngesting(true);
     let absorbed = 0;
     let failed = 0;
     try {
       for (const file of targets) {
-        setIngestingFiles(prev => new Set(prev).add(file.id));
-        try {
-          const res = await fetch(scopedFileUrl('/api/files/ingest'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ fileId: file.id, agentId, domain }),
-          });
-          if (res.ok) absorbed++;
-          else failed++;
-        } catch {
-          failed++;
-        } finally {
-          setIngestingFiles(prev => {
-            const next = new Set(prev);
-            next.delete(file.id);
-            return next;
-          });
-        }
+        if (await handleIngest(file.id, true)) absorbed++;
+        else failed++;
       }
       await fetchAll();
       notifyKnowledgeUpdated(targets.map(file => ({ id: file.id, name: file.name, displayName: file.displayName })));
@@ -375,7 +284,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
     const memory = memories.find(item => item.id === id);
     if (!memory) return;
     try {
-      const res = await fetch(scopedMemoryUrl(`/api/memory/${id}/protect`), {
+      const res = await fetch(scopedFileUrl(`/api/memory/${id}/protect`), {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ protected: memory.tier !== 'core_identity' }),
       });
@@ -388,7 +297,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
 
   const handleChangeTier = async (id: string, tier: string, confirmed = false) => {
     try {
-      const res = await fetch(scopedMemoryUrl(`/api/memory/${id}/tier`), {
+      const res = await fetch(scopedFileUrl(`/api/memory/${id}/tier`), {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tier, confirmed }),
       });
@@ -412,7 +321,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
 
   const handleEdit = async (id: string, content: string) => {
     try {
-      const res = await fetch(scopedMemoryUrl(`/api/memories/${id}`), {
+      const res = await fetch(scopedFileUrl(`/api/memories/${id}`), {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content }),
       });
@@ -421,30 +330,32 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
     } catch { toast.error(t.kbUpdateFailed || 'Update failed'); }
   };
 
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  const handleUpload = async (source: React.ChangeEvent<HTMLInputElement> | KnowledgeFileSource) => {
+    const files = Array.isArray(source) ? source : Array.from(source.currentTarget.files || []);
+    if (!Array.isArray(source)) source.currentTarget.value = '';
+    if (!isOpen || !files.length || uploadRequest.current) return;
+    const controller = new AbortController();
+    uploadRequest.current = controller;
     setUploading(true);
     try {
-      const formData = new FormData();
-      for (let i = 0; i < files.length; i++) formData.append('files', files[i]);
-      const res = await fetch(scopedFileUrl('/api/files/upload'), { method: 'POST', body: formData, credentials: 'include' });
-      if (res.ok) {
-        const d = await res.json();
-        const uploaded = d.files?.length || files.length;
+        const d = await importKnowledgeFiles(files as KnowledgeFileSource, scopedFileUrl, controller.signal);
+        const uploaded = d.files.length;
         const absorbed = (d.files || []).filter((file: any) => file.ingested).length;
         const partial = (d.files || []).filter((file: any) => file.partial || file.extractionStatus === 'partial').length;
         const needsAttention = (d.files || []).filter((file: any) => file.syncError || ['failed', 'unsupported'].includes(String(file.extractionStatus || ''))).length;
-        toast.success(`${t.kbUploadedFiles || 'Uploaded'}: ${uploaded}${absorbed ? ` | ${t.kbIngested || 'Absorbed'}: ${absorbed}` : ''}${partial ? ` | Partial: ${partial}` : ''}${needsAttention ? ` | Needs review: ${needsAttention}` : ''}`);
+        const failed = d.failed;
+        const message = `${t.kbUploadedFiles || 'Uploaded'}: ${uploaded}${absorbed ? ` | ${t.kbIngested || 'Absorbed'}: ${absorbed}` : ''}${partial ? ` | Partial: ${partial}` : ''}${needsAttention ? ` | Needs review: ${needsAttention}` : ''}`;
+        if (failed.length || partial || needsAttention) toast.warning(message + (failed.length ? ` | ${fileImportCopy[isZh ? 'zh' : 'en'].failed} ${failed.map(file => file.fileName || file.path).join(', ')}` : ''));
+        else toast.success(message);
         notifyKnowledgeUpdated((d.files || []).map((file: any) => ({ id: file.id, name: file.name, displayName: file.displayName })));
         fetchAll();
-      } else toast.error(t.kbUploadFailed || 'Upload failed');
-    } catch { toast.error(t.kbUploadFailed || 'Upload failed'); }
+    } catch (error: any) { if (!controller.signal.aborted) toast.error(error?.message || t.kbUploadFailed || 'Upload failed'); }
     finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (uploadRequest.current === controller) uploadRequest.current = null;
+      if (!controller.signal.aborted) setUploading(false);
     }
   };
+  const drop = useFileDrop(handleUpload, !isOpen || uploading);
 
   const handleOpenKnowledgeFolder = async () => {
     try {
@@ -554,19 +465,26 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
   }, [isOpen, onClose, selectedId]);
 
   const totalFiles = files.length;
+  return { drop, memories, isOpen, treeNodes, branchCurves, search, selectedId, setSelectedId, loading, t, loadError, visibleFiles, totalFiles, absorbedFileCount, pendingFileCount, isZh, partialFileCount, needsAttentionFileCount, files, fileIsAbsorbed, ingestingFiles, handleIngest, setSearch, fileSearchResults, searchResults, fileInputRef, handleUpload, uploading, handleOpenKnowledgeFolder, setObsidianOpen, obsidianOpen, obsidianVaults, ingestableFiles, handleIngestAll, bulkIngesting, onClose, fetchObsidianStatus, obsidianSyncing, obsidianPath, setObsidianPath, handleObsidianConnect, syncObsidianVault, handleObsidianDisconnect, selectedNode, selectedFileData, selectedMemoryData, handleDelete, handleToggleProtect, handleChangeTier, handleEdit, referenceKnowledgeFileInChat };
+}
+
+function KnowledgeBaseScope(props: Parameters<typeof useKnowledgeBaseScopeState>[0]) {
+  return renderKnowledgeBaseScope(useKnowledgeBaseScopeState(props));
+}
+
+function renderKnowledgeBaseScope(input: ReturnType<typeof useKnowledgeBaseScopeState>) {
+  const { drop, memories, isOpen, treeNodes, branchCurves, search, selectedId, setSelectedId, loading, t, loadError, visibleFiles, totalFiles, absorbedFileCount, pendingFileCount, isZh, partialFileCount, needsAttentionFileCount, files, fileIsAbsorbed, ingestingFiles, handleIngest, setSearch, fileSearchResults, searchResults, fileInputRef, handleUpload, uploading, handleOpenKnowledgeFolder, setObsidianOpen, obsidianOpen, obsidianVaults, ingestableFiles, handleIngestAll, bulkIngesting, onClose, fetchObsidianStatus, obsidianSyncing, obsidianPath, setObsidianPath, handleObsidianConnect, syncObsidianVault, handleObsidianDisconnect, selectedNode, selectedFileData, selectedMemoryData, handleDelete, handleToggleProtect, handleChangeTier, handleEdit, referenceKnowledgeFileInChat } = input;
+
   const totalMemories = memories.filter(m => m.nodeType !== 'branch').length;
   const totalBranches = memories.filter(m => m.nodeType === 'branch').length;
 
+  if (!isOpen) return null;
   return (
-    <AnimatePresence>
-      {isOpen && (
-        <motion.div
+        <div
+          {...drop.props}
+          data-knowledge-base
           data-theme-scope="dark"
-          initial={{ clipPath: 'circle(0% at 50% 95%)', opacity: 0 }}
-          animate={{ clipPath: 'circle(150% at 50% 95%)', opacity: 1 }}
-          exit={{ clipPath: 'circle(0% at 50% 95%)', opacity: 0 }}
-          transition={{ duration: 0.75, ease: [0.25, 0.1, 0.25, 1] }}
-          className="lumi-below-topbar fixed inset-x-0 bottom-0 z-[90]"
+          className={`lumi-below-topbar fixed inset-x-0 bottom-0 z-[90] ${drop.dragging ? 'ring-2 ring-inset ring-emerald-400' : ''}`}
           style={{
             background: 'radial-gradient(ellipse at 50% 30%, #0f0f23 0%, #080812 40%, #020205 100%)',
           }}
@@ -577,11 +495,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
             curves={branchCurves}
             searchQuery={search}
             highlightedNodeId={selectedId}
-            onNodeClick={(id, sx, sy) => {
-              if (!id) { setSelectedId(null); setCardPos(null); return; }
-              setSelectedId(prev => prev === id ? null : id);
-              setCardPos(prev => prev ? null : { x: sx, y: sy });
-            }}
+            onNodeClick={(id) => setSelectedId(prev => prev === id ? null : id)}
             onNodeDoubleClick={(id) => setSelectedId(id)}
           />
 
@@ -659,7 +573,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
                     return (
                     <div
                       key={f.id}
-                      onClick={() => { setSelectedId(f.id); setCardPos(null); }}
+                      onClick={() => setSelectedId(f.id)}
                       className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-left transition-all group cursor-pointer ${
                         selectedId === f.id
                           ? 'bg-white/10 border border-white/15 shadow-[0_0_20px_rgba(59,130,246,0.08)]'
@@ -676,7 +590,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
                         <File size={13} className="text-blue-400/60 shrink-0" />
                       )}
                       <div className="flex-1 min-w-0">
-                        <span className="text-xs text-white/70 truncate block">{f.name}</span>
+                        <span className="text-xs text-white/70 truncate block">{f.sourceTitle || f.displayName || f.name}</span>
                         <div className="mt-1 flex flex-wrap items-center gap-1.5">
                           {f.source && (
                             <span className="text-[10px] font-black uppercase tracking-[0.12em] text-white/25">{f.source}</span>
@@ -761,7 +675,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
                           >
                             <File size={12} className="text-blue-400/50 shrink-0 group-hover:text-blue-300 transition-colors" />
                             <span className="text-xs text-white/60 group-hover:text-white/80 transition-colors truncate">
-                              {f.displayName || f.name}
+                              {f.sourceTitle || f.displayName || f.name}
                             </span>
                             <span className="ml-auto text-[10px] font-black uppercase tracking-[0.12em] text-white/24">{t.kbFiles || 'file'}</span>
                           </button>
@@ -799,7 +713,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
                   <button
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploading}
-                    title={t.kbImport || (uiMessage('knowledge-base.import-files.dbcb99aedf', (isZh) ? 'zh' : 'en'))}
+                    title={fileImportCopy[isZh ? 'zh' : 'en'].drop}
                     aria-label={t.kbImport || (uiMessage('knowledge-base.import-files.dbcb99aedf', (isZh) ? 'zh' : 'en'))}
                     className="group flex h-9 min-w-9 items-center justify-center gap-2 rounded-xl px-2.5 text-[11px] font-bold text-emerald-100/72 transition-all hover:bg-emerald-300/10 hover:text-emerald-100 disabled:pointer-events-none disabled:opacity-60 xl:px-3"
                   >
@@ -1002,8 +916,7 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
               isCore: selectedNode.tier === 'core_identity',
               isBranch: selectedNode.type === 'branch',
             } : null}
-            position={cardPos}
-            onClose={() => { setSelectedId(null); setCardPos(null); }}
+            onClose={() => setSelectedId(null)}
             onDelete={handleDelete}
             onIngest={handleIngest}
             onToggleProtect={handleToggleProtect}
@@ -1018,10 +931,10 @@ function KnowledgeBaseScope({ t, isOpen, onClose, domain = 'personal' }: Knowled
               {t.kbEscHint || 'ESC to close · Click nodes to inspect · Drag to rotate'}
             </span>
           </div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+        </div>
   );
 }
+
+
 
 export { layoutTree3D };

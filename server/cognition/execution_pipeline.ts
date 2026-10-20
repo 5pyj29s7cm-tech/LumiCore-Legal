@@ -1,11 +1,16 @@
+import { mediaContractForRequest } from './contracts/media_contract';
+import { TurnAnalysis } from './turn_analysis';
+import { resolveUserTurn, type TurnResolution } from './turn_resolution';
+import { restrictToolPolicyForExecutionBoundary, restrictVisibleToolRouteForExecutionBoundary } from '../tools/remote_policy';
 import type { ToolPolicy } from '../personality/types';
-import { normalizeStructuredMediaRequest, structuredMediaToolCall, type StructuredMediaRequest } from '../../shared/media_generation';
+import { localBusinessAnalysisBoundary } from "../regions/routing/business_routing";
+import { normalizeStructuredMediaRequest, structuredMediaRoutingEnvelope, structuredMediaToolCall, type StructuredMediaRequest } from '../../shared/media_generation';
 import type { ToolRegistry } from '../tools/registry';
-import { isExplicitUnfinishedTaskContinuation, isTaskPreparationContinuation, type ConversationActionContinuationState } from './action_continuation';
+import { isCurrentContinuationTask, isTaskPreparationContinuation, type ConversationActionContinuationState, type RecentActionFollowupIntent } from './action_continuation';
+import { revalidateAcceptedTaskRelation, resolveActiveTaskMessageRelation, taskRelationFollowupIntent, formatActiveTaskRelationContext, type ActiveTaskMessageResolution } from './task_concurrency';
 import {
   isExplicitArtifactCreationText,
   isExternalCommitConfirmationOnlyRequest,
-  normalizeActionIntent,
   type NormalizedActionIntent,
 } from './normalized_action_intent';
 import {
@@ -17,6 +22,7 @@ import {
 import { trustedContinuationEvidenceTools } from './tool_router';
 import {
   buildLumiExecutionDecision,
+  restrictLumiExecutionTools,
   type LumiExecutionDecision,
 } from './execution_decision';
 import {
@@ -25,25 +31,19 @@ import {
 } from './intent_trace';
 import {
   buildLumiTurnDispatch,
+  restrictLumiDispatchToUnboundConversation,
   type LumiTurnDispatch,
   type LumiTurnDispatchInput,
 } from './turn_dispatch';
-import {
-  applyLumiRoutingShadowGuard,
-  compareLumiRoutingShadow,
-  type LumiRoutingShadowComparison,
-} from './routing_shadow_guard';
-import {
-  buildCapabilityExecutionPlan,
-  formatCapabilityExecutionPlanPrompt,
-  type CapabilityExecutionPlan,
-} from './capability_execution_plan';
-import { recordRoutingShadowComparison } from '../runtime/capability_metrics';
-import { hasExplicitNoMutationInstruction } from './tool_intent';
-import { classifySkillAuthoringIntent, executionBeforeWorkflowSave } from '../skills/authoring_intent';
+import { restrictMediaGenerationTools } from './external_capability_boundary';
+import type { CapabilityExecutionPlan } from './capability_execution_plan';
+import { observeLayaDecision } from '../runtime/laya_shadow';
+import { hasExplicitNoMutationInstruction, hasExplicitNoToolInstruction, explicitNoMutationScope } from './tool_intent';
+import { avatarAuthoringMutationInstruction } from './media_creation_intent';
+import { executionBeforeWorkflowSave } from '../skills/authoring_intent';
 import type { PendingAssistantOfferContext } from './pending_assistant_offer';
-import { buildActionContract } from './action_contract';
-import type { ToolContext } from '../tools/types';
+import type { ToolContext, ServerBoundCapabilitySelection } from '../tools/types';
+import { frozenCapabilitySnapshot } from '../tools/definitions/workflow/capability_snapshot';
 import { resolveAcceptedTaskTarget } from '../conversation/task_target_anchor';
 import { resolveAcceptedFilePlan } from '../conversation/task_plan_reference';
 import { isPreservedSourceOutputTool, preservedSourceOutputScope, preservedSourceOutputTools, requestedSingleArtifact } from './artifact_write_scope';
@@ -55,10 +55,12 @@ export interface LumiCapabilityPlan extends LumiCapabilitySelection {
 }
 
 export interface LumiExecutionPipeline {
+  resolution: TurnResolution;
   normalizedIntent: NormalizedActionIntent;
   turnIntent: LumiTurnDispatch;
   capabilityPlan: LumiCapabilityPlan;
-  executionPlan: CapabilityExecutionPlan;
+  executionPlan?: CapabilityExecutionPlan;
+  taskId?: string;
   execution: LumiExecutionDecision;
   authorizationPolicy: ToolPolicy;
   modelToolProjection: ReturnType<typeof buildModelToolProjection>;
@@ -70,25 +72,31 @@ export interface LumiExecutionPipeline {
    * this bit.
    */
   trustedActionContinuation: boolean;
+  actionFollowupIntent: RecentActionFollowupIntent;
+  taskRelation: ActiveTaskMessageResolution;
   intentTrace: LumiIntentTrace;
-  shadowComparison: LumiRoutingShadowComparison;
 }
 
 export interface BuildLumiExecutionPipelineInput {
-  /** Validated workbench operation; a projection hint, never an authorization grant. */
+  requestId?: string;
+  /** Server-owned semantic snapshot captured at admission, never accepted from a client. */
+  acceptedResolution?: TurnResolution;
+  /** Original visible user wording, before channel envelopes or model hints. */
+  userText?: string;
+  /** Explicit creation operation; still subject to ordinary authorization and current-turn vetoes. */
   structuredMediaRequest?: StructuredMediaRequest | null;
+  /** Complete server-owned pending choice. It can select a registered call, never widen policy. */
+  serverBoundCapability?: Readonly<ServerBoundCapabilitySelection>;
   dispatch: LumiTurnDispatchInput;
-  /**
-   * A caller may precompute the dispatch when it needs to apply a channel
-   * identity boundary before the rest of the shared pipeline runs. The
-   * normalized intent, capability plan, policy and execution plan are still
-   * produced here; callers must not rebuild those pieces independently.
-   */
-  prebuiltDispatch?: LumiTurnDispatch;
+  /** An unbound remote sender can only narrow the shared dispatch to conversation. */
+  unboundRemoteSender?: boolean;
   registry: ToolRegistry;
   personalityToolPolicy?: ToolPolicy;
   actionTaskState?: ConversationActionContinuationState | null;
+  /** Already resolved by the accepted-turn/queue boundary, never client input. */
+  taskRelation?: ActiveTaskMessageResolution;
   isSanctuary?: boolean;
+  executionBoundary?: ToolContext['executionBoundary'];
   /** Additional channel/role denies, applied after all semantic adapters. */
   additionalForbiddenTools?: string[];
   decisionText?: string;
@@ -101,74 +109,46 @@ export interface BuildLumiExecutionPipelineInput {
   persistedConversationHistory?: Parameters<typeof resolveAcceptedTaskTarget>[0]['persistedHistory'];
 }
 
-function applyAdditionalForbiddenTools(
-  execution: LumiExecutionDecision,
-  forbiddenTools: string[] | undefined,
-): LumiExecutionDecision {
-  const additions = Array.from(new Set((forbiddenTools || []).filter(Boolean)));
-  if (additions.length === 0) return execution;
-  const forbidden = new Set([...(execution.toolPolicy.forbiddenTools || []), ...additions]);
-  const blockAll = forbidden.has('*');
-  const restrictPolicy = (policy: ToolPolicy | null): ToolPolicy | null => policy && ({
-    ...policy,
-    allowedTools: blockAll
-      ? []
-      : (policy.allowedTools || []).filter(name => !forbidden.has(name)),
-    requireConfirmation: (policy.requireConfirmation || []).filter(name => !forbidden.has(name)),
-    forbiddenTools: Array.from(forbidden),
-    maxIterations: blockAll ? 0 : policy.maxIterations,
-  });
-  const toolPolicy = restrictPolicy(execution.toolPolicy)!;
-  const toolRoute = execution.toolRoute
-    ? {
-        ...execution.toolRoute,
-        toolNames: blockAll
-          ? []
-          : execution.toolRoute.toolNames.filter(name => !forbidden.has(name)),
-        reasons: Array.from(new Set([
-          ...execution.toolRoute.reasons,
-          'the entry identity/role boundary removed forbidden tools',
-        ])),
-      }
-    : null;
-  return {
-    ...execution,
-    allowToolUse: blockAll ? false : execution.allowToolUse,
-    baseToolPolicy: restrictPolicy(execution.baseToolPolicy)!,
-    selfRepairToolPolicy: restrictPolicy(execution.selfRepairToolPolicy),
-    clientActionToolPolicy: restrictPolicy(execution.clientActionToolPolicy),
-    toolRoute,
-    toolPolicy,
-    maxIterations: blockAll ? 0 : execution.maxIterations,
-    promptOverlay: [
-      execution.promptOverlay,
-      additions.length
-        ? `Entry authorization boundary forbids: ${additions.join(', ')}.`
-        : '',
-    ].filter(Boolean).join('\n'),
-  };
-}
-
 function applyCurrentTurnNoMutationConstraint(
   execution: LumiExecutionDecision,
   registry: ToolRegistry,
   text: string,
-  flow?: LumiTurnDispatch['flow'],
   visibilityContext?: Pick<ToolContext, 'userId' | 'domain' | 'orgId' | 'autonomous' | 'source'>,
+  acceptedIntent?: Readonly<NormalizedActionIntent>,
+  analysis = new TurnAnalysis(),
 ): LumiExecutionDecision {
+  const originalText = text;
   // A confirmation-only external-commit request deliberately says both
   // "prepare to send" and "do not send now". It must expose the exact
   // external tool so the executor can create a bound pending confirmation;
   // the confirmation gate, not the generic read-only filter, prevents the
   // side effect. Ordinary negative commands remain fully read-only.
   if (isExternalCommitConfirmationOnlyRequest(text)) return execution;
-  if (classifySkillAuthoringIntent(text) === 'use') {
+  const prohibition = explicitNoMutationScope(text);
+  if (prohibition.external && !prohibition.local) {
+    // A ban on sending/submitting never grants opaque actions or existing-state mutation.
+    const retrievalOnly = analysis.contract(text).artifactMode === 'retrieve';
+    const forbidden = registry.getCapabilityManifest(undefined, { context: visibilityContext }).filter(entry => {
+      const declaredLocalCreate = !retrievalOnly && entry.operation === 'create'
+        && entry.metadataSources.operation === 'tool_definition' && entry.metadataSources.sideEffects === 'tool_definition'
+        && entry.sideEffects.length > 0 && entry.sideEffects.every(effect => effect.reversible === true
+          && ['none', 'local_read', 'local_write', 'local_state_change', 'network_read'].includes(effect.type));
+      const controlledObservation = entry.operation === 'observe'
+        && entry.sideEffects.every(effect => effect.type === 'local_read' || effect.reversible === true && (effect.type === 'network_read'
+          || effect.type === 'local_write' && entry.verification.required && entry.verification.strategy === 'artifact'
+            && Boolean(entry.verification.requiredArtifacts?.length || entry.verification.requiredArtifactCollections?.length)
+            && Boolean(entry.reconciliation?.reconcilesCapabilityIds?.length)));
+      return !declaredLocalCreate && !controlledObservation;
+    }).map(entry => entry.toolName);
+    return restrictLumiExecutionTools(execution, forbidden);
+  }
+  if (analysis.authoring(text) === 'use') {
     // A prohibition on creating another run must still forbid run_workflow,
     // but does not revoke approval of one step in the existing run.
     // i18n-allow: narrowly scoped workflow run creation prohibition.
     const withoutNewRunFence = text.replace(/(?:不要|不|别|禁止)\s*(?:再)?(?:创建|新建)\s*(?:新(?:的)?|另一个|另外的)运行/gu, ' ');
     if (withoutNewRunFence !== text) {
-      execution = applyAdditionalForbiddenTools(execution, ['run_workflow']);
+      execution = restrictLumiExecutionTools(execution, ['run_workflow']);
       text = withoutNewRunFence;
     }
   }
@@ -179,7 +159,7 @@ function applyCurrentTurnNoMutationConstraint(
   // launch tools, while the executor still binds the write to the explicit
   // path supplied in this turn.
   if (isExplicitArtifactCreationText(text) && !preservedOutput) return execution;
-  const normalizedIntent = normalizeActionIntent(text);
+  const normalizedIntent = acceptedIntent && text === originalText ? acceptedIntent : analysis.intent(text);
   // A bounded Lumi client navigation request may explicitly prohibit opening
   // other applications or changing content. That wording is a scope fence,
   // not a veto of the requested in-client navigation itself. The hardened
@@ -206,15 +186,15 @@ function applyCurrentTurnNoMutationConstraint(
     && normalizedIntent.operation === 'create'
     && normalizedIntent.sideEffectClass === 'local_write'
   ) return execution;
-  // An edition workflow may ask for a local deliverable while explicitly
-  // fencing send/submit/publish. The semantic tool route already removes
-  // those external commits; do not let the generic read-only adapter also
-  // erase the internal workflow ledger and local production capabilities.
-  if (flow?.industryWorkflowEntryId) return execution;
   if (!hasExplicitNoMutationInstruction(text)) return execution;
+  const avatarInstruction = avatarAuthoringMutationInstruction(text);
+  const scopedAvatarAuthoring = avatarInstruction !== null && !hasExplicitNoMutationInstruction(avatarInstruction);
+  const businessBoundary = localBusinessAnalysisBoundary(text);
+  const scopedBusinessTools = businessBoundary && !hasExplicitNoMutationInstruction(businessBoundary.instruction) ? businessBoundary.tools : [];
   const requestedWorkflowCapture = preservedOutput && executionBeforeWorkflowSave(text);
   const scopedTools = new Set([
-    ...(flow?.workflowHint?.requiredTools || []),
+    ...scopedBusinessTools,
+    ...(scopedAvatarAuthoring ? ['memory_avatar_create', 'memory_avatar_import_image', 'memory_avatar_configure_animation', 'generate_image', 'ai_edit_image', 'get_image_generation_status'] : []),
     ...(preservedOutput ? ['code_execution'] : []),
     ...(requestedWorkflowCapture ? ['capture_recent_workflow', 'save_workflow'] : []),
   ]);
@@ -222,102 +202,40 @@ function applyCurrentTurnNoMutationConstraint(
     .filter(entry => !scopedTools.has(entry.toolName) && (!preservedOutput || !isPreservedSourceOutputTool(entry.toolName)) && (
       entry.operation === 'create'
       || entry.operation === 'mutate'
-      || entry.sideEffects.some(effect => effect.type !== 'local_read')
+      || entry.sideEffects.some(effect => effect.type !== 'local_read' && !(
+        entry.operation === 'observe' && effect.reversible === true && (effect.type === 'network_read'
+          || effect.type === 'local_write' && entry.verification.required && entry.verification.strategy === 'artifact'
+            && (entry.verification.requiredArtifacts?.length || entry.verification.requiredArtifactCollections?.length)
+            && entry.reconciliation?.reconcilesCapabilityIds?.length)
+      ))
     ))
     .map(entry => entry.toolName);
-  const restricted = applyAdditionalForbiddenTools(execution, mutationTools);
+  const restricted = restrictLumiExecutionTools(execution, mutationTools);
   return {
     ...restricted,
     promptOverlay: [
       execution.promptOverlay,
-      preservedOutput
+      scopedBusinessTools.length
+        ? 'Only source-bound local business analysis and its task receipts may persist. Do not write personal memory, access store accounts, mutate external state, or perform unrelated local writes.'
+        : scopedAvatarAuthoring
+        ? 'Only the requested memory-person authoring and image operations may mutate state. Preserve existing people and all implementation files. Do not edit code/databases, send messages, or start a livestream.'
+        : preservedOutput
         ? 'Preserve the original input file. Read and calculate, then save only the separately requested local output. Do not modify the source or send, submit, launch, or mutate unrelated state.'
         : 'Current-turn read-only boundary: the user explicitly prohibited modification. Read/inspect/answer only; do not create, edit, save, send, submit, control, or mutate any state.',
     ].join('\n'),
   };
 }
 
-function hasTrustedActionContinuation(input: BuildLumiExecutionPipelineInput): boolean {
+function hasTrustedActionContinuation(input: BuildLumiExecutionPipelineInput, relation: ActiveTaskMessageResolution): boolean {
   const state = input.actionTaskState;
-  const context = String(input.dispatch.continuationContext || '');
-  if (!state?.unfinished || !state.taskId || !context) return false;
-  const followup = context.match(/(?:^|\n)-\s*followupIntent:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase();
-  const taskId = context.match(/(?:^|\n)-\s*taskId:\s*([^\r\n]+)/i)?.[1]?.trim();
-  // Corrections and retries are continuations of the same server-owned task,
-  // not new authorization requests.  Requiring the exact durable task id
-  // keeps this boundary fail-closed while allowing a voice-to-text handoff
-  // (whose classifier labels the turn `correction`) to retain the original
-  // capability envelope.  `status` remains observational and must never
-  // reacquire an execution lease.
-  const executionFollowups = new Set(['execute', 'correction', 'retry', 'accept', 'confirm']);
-  return executionFollowups.has(followup || '') && taskId === state.taskId;
-}
-
-function applySelectedWorkflowAdapterPolicy(
-  execution: LumiExecutionDecision,
-  turnIntent: LumiTurnDispatch,
-  registry: ToolRegistry,
-  personalityToolPolicy?: ToolPolicy,
-  isSanctuary?: boolean,
-  visibilityContext?: Pick<ToolContext, 'userId' | 'domain' | 'orgId' | 'autonomous' | 'source'>,
-): LumiExecutionDecision {
-  const workflow = turnIntent.flow.specialWorkflow;
-  if (!workflow || isSanctuary) return execution;
-  const configuredAllowed = new Set(personalityToolPolicy?.allowedTools || []);
-  const configuredForbidden = new Set(personalityToolPolicy?.forbiddenTools || []);
-  const configuredWildcard = configuredAllowed.has('*');
-  const hasConfiguredBoundary = Boolean(personalityToolPolicy);
-  const executable = new Map(registry
-    .getCapabilityManifest(undefined, { executableOnly: true, context: visibilityContext })
-    .map(entry => [entry.toolName, entry]));
-  const requiredTools = workflow.requiredTools.filter(toolName => (
-    executable.has(toolName)
-    && (!hasConfiguredBoundary || configuredWildcard || configuredAllowed.has(toolName))
-    && !configuredForbidden.has('*')
-    && !configuredForbidden.has(toolName)
-  ));
-  if (requiredTools.length === 0) return execution;
-  const route = execution.toolRoute || {
-    toolNames: [],
-    categories: [],
-    reasons: [],
-    totalAvailable: registry.getToolDeclarations({ context: visibilityContext }).length,
-    maxTools: requiredTools.length,
-    truncated: false,
-  };
-  return {
-    ...execution,
-    allowToolUse: true,
-    toolRoute: {
-      ...route,
-      toolNames: Array.from(new Set([...route.toolNames, ...requiredTools])),
-      categories: Array.from(new Set([...route.categories, 'skill_workflow_adapter'])),
-      reasons: Array.from(new Set([
-        ...route.reasons,
-        `semantic plan selected workflow adapter ${workflow.skillId}/${workflow.id}`,
-      ])),
-      maxTools: Math.max(route.maxTools, route.toolNames.length + requiredTools.length),
-    },
-    toolPolicy: {
-      ...execution.toolPolicy,
-      allowedTools: Array.from(new Set([
-        ...(execution.toolPolicy.allowedTools || []).filter(name => name !== '*'),
-        ...requiredTools,
-      ])),
-      requireConfirmation: Array.from(new Set([
-        ...(execution.toolPolicy.requireConfirmation || []),
-        ...requiredTools.filter(name => executable.get(name)?.requiresConfirmation),
-      ])),
-      forbiddenTools: (execution.toolPolicy.forbiddenTools || [])
-        .filter(name => name !== '*' && !requiredTools.includes(name)),
-      maxIterations: Math.max(execution.toolPolicy.maxIterations || 0, requiredTools.length + 2),
-    },
-    maxIterations: Math.max(execution.maxIterations, requiredTools.length + 2),
-    promptOverlay: [
-      execution.promptOverlay,
-      `Selected workflow adapter is restricted to: ${requiredTools.join(', ')}.`,
-    ].filter(Boolean).join('\n'),
-  };
+  // A formatted prompt is presentation, not authority. Only the server's
+  // accepted task binding may restore the existing execution envelope.
+  return Boolean(state?.unfinished && state.taskId
+    && relation.binding === 'active_task'
+    && relation.taskId === state.taskId
+    && relation.revision === state.revision
+    && taskRelationFollowupIntent(relation) === 'execute'
+    && isCurrentContinuationTask(input.dispatch.text, state));
 }
 
 /**
@@ -331,53 +249,123 @@ function applySelectedWorkflowAdapterPolicy(
 export function buildLumiExecutionPipeline(
   input: BuildLumiExecutionPipelineInput,
 ): LumiExecutionPipeline {
-  const acceptedPlan = resolveAcceptedFilePlan({ text: input.dispatch.text, history: input.persistedConversationHistory });
-  const effectiveText = acceptedPlan?.text || input.dispatch.text;
-  const dispatched = acceptedPlan
-    ? buildLumiTurnDispatch({ ...input.dispatch, text: effectiveText })
-    : input.prebuiltDispatch || buildLumiTurnDispatch(input.dispatch);
+  const mediaRequest = normalizeStructuredMediaRequest(input.structuredMediaRequest);
+  // The operation is an explicit workbench instruction; its prompt is media
+  // content, not a second instruction about Lumi's tools/UI. Keep any separate
+  // user veto in the routing text and retain the normal policy/visibility gates.
+  // Exact tool arguments still come from the validated, task-bound envelope.
+  const mediaDecisionText = mediaRequest ? [
+    structuredMediaRoutingEnvelope(mediaRequest),
+    input.dispatch.text.split(mediaRequest.prompt).join('[media brief]'),
+  ].join('\n\n') : null;
+  const acceptedPlan = mediaRequest ? null : resolveAcceptedFilePlan({ text: input.dispatch.text, history: input.persistedConversationHistory });
+  const effectiveText = mediaDecisionText || acceptedPlan?.text || input.dispatch.text;
+  const resolution = input.acceptedResolution || resolveUserTurn({
+    requestId:input.requestId, userText:input.userText ?? input.dispatch.text,
+    state:input.actionTaskState, taskRelation:input.taskRelation,
+    options:{pendingAssistantOfferContext:input.pendingAssistantOfferContext},
+  });
+  if (input.acceptedResolution && (resolution.userText !== (input.userText ?? input.dispatch.text)
+    || input.requestId && resolution.requestId !== input.requestId)) throw new Error('Accepted turn resolution does not match this request');
+  const analysis = new TurnAnalysis(resolution);
+  // Admit the structured requirements before dispatch first reads the shared contract.
+  if (mediaRequest) analysis.contract(effectiveText, mediaContractForRequest(mediaRequest));
+  const bindingContext = {
+    executionBoundary: input.executionBoundary, userId: input.dispatch.userId,
+    domain: input.dispatch.domain === 'work' ? 'work' as const : 'personal' as const,
+    orgId: input.dispatch.orgId, source: input.dispatch.source || input.dispatch.channel,
+    autonomous: input.dispatch.operationMode === 'autonomous' || ['autonomy', 'scheduler'].includes(input.dispatch.channel),
+  };
+  const bound = input.serverBoundCapability;
+  if (bound) {
+    const definition = input.registry.get(bound.toolName);
+    const manifest = input.registry.getCapabilityManifestEntry(bound.toolName, input.personalityToolPolicy, bindingContext);
+    if (input.unboundRemoteSender || bound.scope.userId !== input.dispatch.userId
+      || bound.scope.domain !== bindingContext.domain || bound.scope.orgId !== (input.dispatch.orgId || '')
+      || bound.selectionText !== resolution.userText || !bound.sourceId || !bound.targetIdentity || !bound.argumentsDigest
+      || !definition || !manifest || manifest.capabilityId !== bound.capabilityId
+      || frozenCapabilitySnapshot(manifest, definition.parameters).contractHash !== bound.capabilityContractHash) {
+      throw new Error('The server-bound capability choice no longer matches this registered turn.');
+    }
+  }
+  const taskRelation = acceptedPlan || mediaRequest || bound
+    ? resolveActiveTaskMessageRelation(effectiveText, null)
+    : revalidateAcceptedTaskRelation(input.taskRelation || resolution.taskRelation, input.actionTaskState);
+  const boundTaskState = taskRelation.taskId === input.actionTaskState?.taskId
+    && (taskRelation.binding === 'active_task' || taskRelation.binding === 'previous_task') ? input.actionTaskState : undefined;
+  const actionFollowupIntent = acceptedPlan || mediaRequest || bound ? 'none' : taskRelationFollowupIntent(taskRelation);
+  const queryTarget = resolution.queryTarget;
+  const observationalFollowup = queryTarget === 'conversation_receipts'
+    && (actionFollowupIntent === 'status' || actionFollowupIntent === 'repeat');
+  const trustedActionContinuation = !acceptedPlan && !mediaRequest && !bound && hasTrustedActionContinuation(input, taskRelation);
+  const continuationContext = input.dispatch.continuationContext
+    || (trustedActionContinuation ? formatActiveTaskRelationContext(taskRelation, input.actionTaskState) : '');
+  const resolvedDispatch = buildLumiTurnDispatch({ ...input.dispatch, analysis, text: effectiveText, continuationContext, actionFollowupIntent,
+      continuationAppTarget: !mediaRequest && !acceptedPlan && !bound && taskRelation.binding !== 'stale'
+        && input.actionTaskState && isCurrentContinuationTask(input.dispatch.text, input.actionTaskState)
+        ? input.actionTaskState.appTarget : undefined });
+  const dispatched = input.unboundRemoteSender
+    ? restrictLumiDispatchToUnboundConversation(resolvedDispatch) : resolvedDispatch;
   const acceptedTaskTarget = resolveAcceptedTaskTarget({
     text: input.dispatch.text,
     persistedHistory: input.persistedConversationHistory,
-    previousTask: input.actionTaskState?.taskCapsule,
+    previousTask: boundTaskState?.taskCapsule,
   });
   const turnIntent = {
     ...dispatched,
-    flow: { ...dispatched.flow, acceptedTaskTarget },
+    flow: { ...dispatched.flow, acceptedTaskTarget, ...(mediaRequest ? { structuredMediaRequest: mediaRequest } : {}) },
     promptOverlay: [dispatched.promptOverlay, acceptedPlan
       ? 'The current user accepted this immediately preceding user-authored file plan: ' + JSON.stringify(acceptedPlan)
         + '. Execute this goal using current file evidence. Do not merge older task revisions or ask the user to choose an older version. Normal tool authorization and confirmation boundaries still apply.'
       : ''].filter(Boolean).join('\n'),
   };
-  let decisionText = acceptedPlan ? turnIntent.flow.routeText : input.decisionText || turnIntent.flow.routeText;
-  const trustedActionContinuation = !acceptedPlan && hasTrustedActionContinuation(input);
+  let decisionText = mediaDecisionText || (acceptedPlan ? turnIntent.flow.routeText : input.decisionText || turnIntent.flow.routeText);
   if (trustedActionContinuation) turnIntent.flow.rootTaskText = input.actionTaskState?.goal;
   // Bind the planning input as well as the ledger id. Detailed "continue the
   // unfinished task" messages can themselves resemble authoring requests;
   // routing that fragment alone discards the still-pending business actions.
   // Only an exact server-bound resumption may use the durable user's goal.
-  const resumesExplicitGoal = trustedActionContinuation
-    && isExplicitUnfinishedTaskContinuation(input.dispatch.text, input.actionTaskState);
-  const actionText = resumesExplicitGoal
+  // A short confirmation has no standalone capability semantics. Route the
+  // exact bound root goal while the tool executor still consumes only the
+  // approved call; further side effects retain their ordinary confirmation gate.
+  const actionText = trustedActionContinuation
     ? [input.actionTaskState!.goal, effectiveText].join('\n\n')
     : effectiveText;
-  if (resumesExplicitGoal) {
+  if (trustedActionContinuation) {
     decisionText = actionText;
-    turnIntent.flow.routeText = [actionText, input.dispatch.continuationContext].filter(Boolean).join('\n\n');
+    // Prompt hints include historical errors and advice such as "do not
+    // restart/cancel". They describe state; they are not additional user
+    // operations or completion requirements. Route and verify only the
+    // durable goal plus the user's current instruction.
+    turnIntent.flow.routeText = actionText;
   }
-  if (trustedActionContinuation && isTaskPreparationContinuation(input.dispatch.text, input.actionTaskState)) {
+  if (trustedActionContinuation && isTaskPreparationContinuation(input.dispatch.text, input.actionTaskState,
+    input.dispatch.text === resolution.userText ? resolution.userIntent : undefined, analysis)) {
     turnIntent.flow.preparationRootText = input.actionTaskState?.goal;
   }
   // A bound retry inherits its authorized goal, not the side-effect class of
   // the acknowledgement ("yes"). Keep current-turn denials authoritative below.
-  const currentIntent = normalizeActionIntent(decisionText);
-  const priorIntent = normalizeActionIntent(input.actionTaskState?.goal || '');
-  const resumesMediaGoal = trustedActionContinuation && currentIntent.kind === 'none' && priorIntent.kind === 'media_generation';
-  const normalizedIntent = resumesMediaGoal ? priorIntent : currentIntent;
+  const currentIntent = decisionText === resolution.userText
+    ? { ...resolution.userIntent } : { ...analysis.intent(decisionText) };
+  const requestedArtifact = requestedSingleArtifact(actionText, analysis);
+  // An input/output transformation writes the destination, never the first
+  // source path that a generic action recognizer happened to encounter.
+  if (requestedArtifact && currentIntent.operation === 'create') {
+    currentIntent.target = requestedArtifact.path;
+  }
+  const priorIntent = trustedActionContinuation && currentIntent.kind === 'none'
+    ? analysis.intent(input.actionTaskState?.goal || '') : undefined;
+  const resumesMediaGoal = priorIntent?.kind === 'media_generation';
+  const normalizedIntent = resumesMediaGoal ? priorIntent! : currentIntent;
   if (resumesMediaGoal && input.actionTaskState?.goal) {
     turnIntent.flow.routeText = [input.actionTaskState.goal, turnIntent.flow.routeText].join('\n\n');
   }
+  turnIntent.flow.acceptedActionContract = Object.freeze({
+    taskText: turnIntent.flow.routeText,
+    contract: analysis.contract(turnIntent.flow.routeText, mediaRequest ? mediaContractForRequest(mediaRequest) : undefined),
+  });
   const visibilityContext = {
+    executionBoundary: input.executionBoundary,
     userId: input.dispatch.userId,
     domain: input.dispatch.domain === 'work' ? 'work' as const : 'personal' as const,
     orgId: input.dispatch.orgId,
@@ -385,44 +373,50 @@ export function buildLumiExecutionPipeline(
       || ['autonomy', 'scheduler'].includes(input.dispatch.channel),
     source: input.dispatch.source || input.dispatch.channel,
   };
-  const legacyExecution = buildLumiExecutionDecision({
+  if (bound && !hasExplicitNoToolInstruction(resolution.userText)) {
+    turnIntent.flow.allowToolUseForTurn = true;
+    turnIntent.boundary = 'tool_action';
+  }
+  const routedExecution = buildLumiExecutionDecision({
     flow: turnIntent.flow,
+    serverBoundToolName: bound?.toolName,
+    analysis,
     text: decisionText,
+    userText: resolution.userText,
+    queryTarget,
     toolDeclarations: input.registry.getToolDeclarations({ context: visibilityContext }),
     toolRegistry: input.registry,
     personalityToolPolicy: input.personalityToolPolicy,
     actionTaskState: input.actionTaskState,
     trustedActionContinuation,
     pendingAssistantOfferContext: input.pendingAssistantOfferContext,
-    isSanctuary: input.isSanctuary,
+    isSanctuary: input.isSanctuary || input.unboundRemoteSender,
     visibilityContext,
   });
-  const unrestrictedManifest = input.registry.getCapabilityManifest(legacyExecution.toolPolicy, { context: visibilityContext });
-  const shadowComparison = compareLumiRoutingShadow({
-    normalizedIntent,
-    execution: legacyExecution,
-    manifest: unrestrictedManifest,
-  });
-  const execution = applyAdditionalForbiddenTools(
+  const unrestrictedManifest = input.registry.getCapabilityManifest(routedExecution.toolPolicy, { context: visibilityContext });
+  const constraintText = trustedActionContinuation && !preservedSourceOutputScope(actionText) ? effectiveText : actionText;
+  const execution = restrictLumiExecutionTools(
     applyCurrentTurnNoMutationConstraint(
-      applySelectedWorkflowAdapterPolicy(
-        applyLumiRoutingShadowGuard(legacyExecution, shadowComparison),
-        turnIntent,
-        input.registry,
-        input.personalityToolPolicy,
-        input.isSanctuary,
-        visibilityContext,
-      ),
+      restrictMediaGenerationTools({ normalizedIntent, execution: routedExecution, manifest: unrestrictedManifest }),
       input.registry,
-      resumesExplicitGoal && !preservedSourceOutputScope(actionText) ? effectiveText : actionText,
-      turnIntent.flow,
+      constraintText,
       visibilityContext,
+      constraintText === resolution.userText ? resolution.userIntent : undefined,
+      analysis,
     ),
-    input.additionalForbiddenTools,
+    observationalFollowup || taskRelation.binding === 'stale'
+      ? ['*', ...(input.additionalForbiddenTools || [])] : input.additionalForbiddenTools,
   );
+  // Resolve the entry ceiling before publishing any capability, plan or schema.
+  // Consumers use this same policy/projection; the registry still enforces it.
+  const authorizationPolicy = restrictToolPolicyForExecutionBoundary(buildModelCapabilityPolicy(execution), input.executionBoundary);
+  execution.toolRoute = restrictVisibleToolRouteForExecutionBoundary(execution.toolRoute, input.executionBoundary);
+  execution.baseToolPolicy = execution.toolPolicy = authorizationPolicy;
+  execution.maxIterations = authorizationPolicy.maxIterations;
   const selection = buildLumiCapabilitySelection({
     dispatch: turnIntent,
     execution,
+    analysis,
     text: decisionText,
     userId: input.dispatch.userId,
     domain: input.dispatch.domain,
@@ -436,17 +430,12 @@ export function buildLumiExecutionPipeline(
       .map(toolName => manifest.find(entry => entry.toolName === toolName)?.capabilityId)
       .filter(Boolean) as string[],
   ));
-  const authorizationPolicy = buildModelCapabilityPolicy(execution);
   const pinnedContinuationTools = trustedContinuationEvidenceTools({
     actionTaskState: input.actionTaskState,
     trustedActionContinuation,
   }, new Set(input.registry.getToolDeclarations({ context: visibilityContext }).map(declaration => declaration.function.name)));
-  const workflowRequiredTools = (
-    turnIntent.flow.workflowHint || turnIntent.flow.specialWorkflow
-  )?.requiredTools || [];
-  const actionVerificationTools = buildActionContract(decisionText).verificationTools || [];
-  const requestedArtifact = requestedSingleArtifact(actionText);
-  const mediaRequest = normalizeStructuredMediaRequest(input.structuredMediaRequest);
+  const workflowRequiredTools = turnIntent.flow.workflowHint?.requiredTools || [];
+  const actionVerificationTools = analysis.contract(decisionText).verificationTools || [];
   const modelToolProjection = buildModelToolProjection(execution, {
     lane: selection.lane,
     preferredTools: selection.preferredTools,
@@ -468,6 +457,8 @@ export function buildLumiExecutionPipeline(
   // canonical tool loop.
   const turnOwnsExecution = Boolean(
     turnIntent.flow.allowToolUseForTurn
+    || Boolean(turnIntent.flow.workflowHint)
+    || queryTarget === 'runtime_work'
     || trustedActionContinuation
     || turnIntent.boundary === 'task_center'
     || turnIntent.boundary === 'work_takeover',
@@ -477,58 +468,51 @@ export function buildLumiExecutionPipeline(
     && execution.allowToolUse
     && modelToolProjection.toolNames.length > 0,
   );
+  // Publish the actual projection state; catalog visibility is not execution.
+  execution.promptOverlay = execution.promptOverlay.replace(/tools=(?:available|off)/u,
+    'tools=' + (executionRequested ? 'available' : 'off'));
+  if (!executionRequested) {
+    turnIntent.flow.allowToolUseForTurn = false;
+    turnIntent.flow.promptOverlay = turnIntent.flow.promptOverlay.replace(/Tool access: [^.]+\./u, 'Tool access: chat-only.');
+  }
   const capabilityPlan: LumiCapabilityPlan = {
     ...selection,
     schemaVersion: 1,
     capabilityIds,
     taskLedgerRequired: Boolean(
-      !turnIntent.flow.industryGuidanceRequest
-      && (!turnIntent.flow.industryWorkflowEntryId || turnIntent.flow.domain === 'work')
-      && (
-        turnIntent.flow.completionEvidenceNeeded
-        || executionRequested
-        || turnIntent.boundary === 'task_center'
-        || turnIntent.boundary === 'work_takeover'
-      ),
+      executionRequested
+      || turnIntent.boundary === 'task_center'
+      || turnIntent.boundary === 'work_takeover',
     ),
   };
-  const executionPlan = buildCapabilityExecutionPlan({
-    intent: normalizedIntent,
-    capabilityPlan,
-    execution,
-    manifest,
-    taskId: input.taskId || (acceptedPlan ? undefined : input.actionTaskState?.taskId),
-    sourcePaths: input.actionTaskState?.sourcePaths,
-  });
-  capabilityPlan.promptOverlay = [
-    capabilityPlan.promptOverlay,
-    formatCapabilityExecutionPlanPrompt(executionPlan),
-  ].filter(Boolean).join('\n\n');
   const intentTrace = buildLumiIntentTrace({
+    normalizedActionIntent: normalizedIntent,
     dispatch: turnIntent,
     execution,
     text: input.traceText || decisionText,
     source: input.source || input.dispatch.source || input.dispatch.channel,
+  }, analysis);
+  // Observation is one-way and asynchronous. Laya cannot change this plan,
+  // permissions, task ownership, completion receipts or the user's response.
+  if (!input.isSanctuary) observeLayaDecision({
+    text: input.dispatch.text,
+    task: input.actionTaskState ? { goal: input.actionTaskState.goal, status: input.actionTaskState.status,
+      unfinished: input.actionTaskState.unfinished, latestBlocker: input.actionTaskState.latestBlocker } : undefined,
+    decision: { followup: actionFollowupIntent, skill: analysis.authoring(input.dispatch.text), executionRequested },
   });
-  recordRoutingShadowComparison(shadowComparison.aligned, shadowComparison.externalCommitBlocked);
-  if (!shadowComparison.aligned) {
-    intentTrace.matchedRules.push({ layer: 'shadow_route', name: 'normalized-legacy-divergence' });
-    intentTrace.reasons.push(`shadow route:${shadowComparison.reason}`);
-    if (shadowComparison.externalCommitBlocked) {
-      intentTrace.blockedBy.push('external_commit_route_divergence');
-    }
-  }
   return {
+    resolution: Object.freeze({ ...resolution, taskRelation:Object.freeze({ ...taskRelation }) }),
     normalizedIntent,
     turnIntent,
     capabilityPlan,
-    executionPlan,
+    taskId: input.taskId || boundTaskState?.taskId,
     execution,
     authorizationPolicy,
     modelToolProjection,
     executionRequested,
     trustedActionContinuation,
     intentTrace,
-    shadowComparison,
+    actionFollowupIntent,
+    taskRelation,
   };
 }

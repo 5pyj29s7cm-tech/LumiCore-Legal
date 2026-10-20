@@ -6,7 +6,7 @@ import { buildActionContract, hasCoreActionEvidence } from '../server/cognition/
 import { routeToolsForTurn } from '../server/cognition/tool_router';
 import { hasExplicitToolIntent } from '../server/cognition/tool_intent';
 import { classifyRecentActionFollowupIntent } from '../server/cognition/action_continuation';
-import { finalizeLumiResponse, tryFinalizeVerifiedBoundedAction } from '../server/cognition/result_finalizer';
+import { finalizeLumiResponse } from '../server/cognition/result_finalizer';
 import { recordsToTaskReceipts, taskCompletionFromReceipts } from '../server/cognition/task_execution_ledger';
 import { buildForegroundTaskCompletionFeedback } from '../server/cognition/acceptance_evidence';
 import { executeExternalCli } from '../server/external_agents/cli_runtime';
@@ -39,7 +39,7 @@ describe('CLI inquiry versus delegation', () => {
   it.each(['你能用 Codex CLI 修复 D:/project 里的问题吗？', 'Can you use Codex CLI to fix this project?', '检查 Codex CLI 是否可用，然后让它修改代码', '让 Codex 检查这个项目', '调用 Codex CLI', '继续 Codex CLI 的任务'])('preserves concrete execution: %s', text => {
     expect(classifyExternalCliIntent(text)).toBe('delegate');
     expect(buildActionContract(text).preferredTools[0]).toBe('external_cli_run');
-    expect(tryFinalizeVerifiedBoundedAction({ taskText: text, responseText: '', toolRecords: [receipt()], source: 'chat', ...turn })).toBeNull();
+    expect(hasCoreActionEvidence(buildActionContract(text), [receipt()], text, undefined, turn)).toBe(false);
   });
   it.each(['Codex CLI 是什么', '如何使用 Claude Code 修改文件', 'How does Codex CLI run tasks?'])('does not turn explanation into execution: %s', text => {
     expect(classifyExternalCliIntent(text)).toBe('explain');
@@ -59,9 +59,9 @@ describe('one CLI receipt verdict across loop, transcript, feedback and ledger',
     const final = finalizeLumiResponse(input);
     expect(final).toMatchObject({ blocked: false, reason: 'verified_external_cli_status' });
     expect(final.text).toContain('0.154.0'); expect(final.text).toContain('没有验证模型额度');
-    expect(tryFinalizeVerifiedBoundedAction(input)).toEqual(final);
+    expect(finalizeLumiResponse(input)).toEqual(final);
     expect(taskCompletionFromReceipts(task, recordsToTaskReceipts(records), undefined, turn).complete).toBe(true);
-    expect(buildForegroundTaskCompletionFeedback({ taskId: turn.taskId, taskLabel: task, toolRecords: records, blocked: final.blocked })?.status).toBe('completed');
+    expect(buildForegroundTaskCompletionFeedback({ taskId: turn.taskId, taskLabel: task, toolRecords: records, finalization: final })?.status).toBe('completed');
   });
   it.each([
     { requestId: 'old-request' }, { taskId: 'other-task' }, { error: 'inspection failed' },
@@ -73,7 +73,7 @@ describe('one CLI receipt verdict across loop, transcript, feedback and ledger',
     const final = finalizeLumiResponse({ taskText: task, responseText: '可以，已经完成。', toolRecords: records, source: 'chat', ...turn });
     expect(final.blocked).toBe(true);
     expect(taskCompletionFromReceipts(task, recordsToTaskReceipts(records), undefined, turn).complete).toBe(false);
-    expect(buildForegroundTaskCompletionFeedback({ taskId: turn.taskId, taskLabel: task, toolRecords: records, blocked: final.blocked })?.status).toBe('blocked');
+    expect(buildForegroundTaskCompletionFeedback({ taskId: turn.taskId, taskLabel: task, toolRecords: records, finalization: final })?.status).toBe('blocked');
   });
   it('reports unavailable CLI truthfully while completing the inspection', () => {
     const records = [receipt({ result: JSON.stringify({ ok: true, status: 'completed', targets: [{ ...target, installed: false, ready: false, status: 'not_installed' }] }) })];
@@ -84,7 +84,8 @@ describe('one CLI receipt verdict across loop, transcript, feedback and ledger',
   it('does not let installation prove task completion or the wrong provider prove delegation', () => {
     const goal = '让 Codex CLI 检查这个项目';
     expect(hasCoreActionEvidence(buildActionContract(goal), [receipt()], goal, undefined, turn)).toBe(false);
-    expect(buildForegroundTaskCompletionFeedback({ taskId: turn.taskId, taskLabel: goal, toolRecords: [receipt()] })?.status).toBe('blocked');
+    const final = finalizeLumiResponse({ ...turn, taskText: goal, responseText: 'Completed.', toolRecords: [receipt()], source: 'chat' });
+    expect(buildForegroundTaskCompletionFeedback({ taskId: turn.taskId, taskLabel: goal, toolRecords: [receipt()], finalization: final })?.status).toBe('blocked');
     const wrong = receipt({ name: 'external_cli_run', result: JSON.stringify({ ok: true, status: 'completed', provider: 'claude', runId: 'wrong-provider', exitCode: 0, response: 'done' }) });
     expect(hasCoreActionEvidence(buildActionContract(goal), [wrong], goal, undefined, turn)).toBe(false);
   });

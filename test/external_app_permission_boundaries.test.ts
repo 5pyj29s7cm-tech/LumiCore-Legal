@@ -34,7 +34,7 @@ describe('external app permission boundaries', () => {
       },
       desktopRelay: async (name, args) => {
         relayCalls.push({ name, args });
-        return 'opened';
+        return `Opened: ${args.target}`;
       },
     } as any);
 
@@ -43,6 +43,17 @@ describe('external app permission boundaries', () => {
     expect(result.opened).toBe(true);
     expect(confirmationCalls).toBe(0);
     expect(relayCalls).toEqual([{ name: 'desktop_open', args: { target: 'https://example.com' } }]);
+  });
+
+  it('does not report a website as opened when the native receipt opened a same-named file', async () => {
+    const { ToolRegistry } = await import('../server/tools/registry');
+    const { registerExternalAppTools } = await import('../server/tools/definitions/external_app_tools');
+    const registry = new ToolRegistry();
+    registerExternalAppTools(registry);
+    const result = JSON.parse(await registry.execute('browser_open_task', { url: 'https://chat.deepseek.com/', open: true }, {
+      desktopRelay: async () => 'Opened: C:/Desktop/deepseek.txt',
+    } as any));
+    expect(result).toMatchObject({ opened: false, navigationVerified: false, loginVerified: false, status: 'target_unverified' });
   });
 
   it('allows draft clipboard preparation without treating it as external app automation or a permission popup', async () => {
@@ -92,7 +103,7 @@ describe('external app permission boundaries', () => {
       userConfirmed: true,
       desktopRelay: async (name, args) => {
         relayCalls.push({ name, args });
-        return 'opened';
+        return `Opened: ${args.target}`;
       },
     } as any);
 
@@ -261,7 +272,8 @@ describe('external app permission boundaries', () => {
           }
           if (name === 'desktop_ui_snapshot') {
             snapshotCount++;
-            return snapshotCount > 1 ? `new outgoing file ${path.basename(filePath)}` : 'existing chat content';
+            if (snapshotCount === 1) return JSON.stringify({ root: { name: '微信', bounds: { y: 0, height: 800 }, children: [{ name: '文件传输助手', controlType: 'Text' }, { name: '消息输入', controlType: 'Edit', bounds: { y: 650, width: 700 } }] } });
+            return snapshotCount > 2 ? `new outgoing file ${path.basename(filePath)}` : 'existing chat content';
           }
           return JSON.stringify({ ok: true });
         },

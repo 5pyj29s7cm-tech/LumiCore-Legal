@@ -1,3 +1,4 @@
+import { readImplementationSource } from './implementation_source';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -7,9 +8,11 @@ import {
   sanitizeAgentStreamingTextForDisplay,
 } from '../src/lib/agentResponseDelivery';
 import { containsInternalExecutionLanguage } from '../shared/public_execution_language';
+import { normalizeChatHistoryRecord } from '../server/socket/chat/history';
+import { normalizeVoiceHistoryRecord } from '../server/socket/voice_history';
 
 const root = process.cwd();
-const source = (relativePath: string) => fs.readFileSync(path.join(root, relativePath), 'utf8');
+const source = (relativePath: string) => readImplementationSource(path.join(root, relativePath), 'utf8');
 const code = (relativePath: string) => ts.createPrinter({ removeComments: true }).printFile(
   ts.createSourceFile(relativePath, source(relativePath), ts.ScriptTarget.Latest, true,
     relativePath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS),
@@ -75,11 +78,46 @@ describe('customer-facing assistant output projection', () => {
       .not.toMatch(/状态|证据|回执/u);
   });
 
+  it.each(['zh', 'en'] as const)('hides old confirmation instructions in history and every stream prefix (%s)', locale => {
+    const old = locale === 'zh'
+      ? '这项操作还没有执行，需要你确认后才能继续。\n操作：computer_use\n内容摘要：' + 'a'.repeat(64) + '\n参数：{"task":"把WPS切到前台并等待下一步指令","max_steps":20}'
+      : 'Confirmation is required before this action can run.\nAction: computer_use\nPayload digest: ' + 'a'.repeat(64) + '\nArguments: {"task":"Wait for the next model instruction","max_steps":20}';
+    const history = sanitizeAgentResponseTextForDisplay(old, locale);
+    expect(history).toMatch(/确认|confirm/u);
+    expect(history).not.toMatch(/computer_use|max_steps|下一步指令|next model instruction|a{64}/u);
+    for (let i = 1; i <= old.length; i += 1) {
+      expect(sanitizeAgentStreamingTextForDisplay(old.slice(0, i), locale)).not.toMatch(/computer_use|max_steps|下一步指令|next model instruction|a{64}/u);
+    }
+  });
+
+  it('projects old confirmation replies into public dialogue without their model instructions', () => {
+    const leaked = '这项操作还没有执行，需要你确认后才能继续。\n参数：{"task":"读取WPS并等待下一步模型指令","max_steps":20}';
+    for (const normalize of [normalizeChatHistoryRecord, normalizeVoiceHistoryRecord]) {
+      expect(normalize({ role: 'assistant', message: leaked })).toEqual([{ role: 'assistant', content: '这项操作还未执行。请先查看本次操作的目标和内容，再回复“确认”或“取消”。' }]);
+      expect(normalize({ role: 'user', message: '帮我打印会议安排', response: leaked }))
+        .toEqual([{ role: 'user', content: '帮我打印会议安排' }]);
+    }
+  });
+
+  it('hides tool markup after prose in final, history, voice, and every stream prefix', () => {
+    const prose = '我先把客户端当前状态拉出来看一眼，按真实界面给你讲，不凭印象说。\n\n';
+    for (const protocol of ['<client_get_state>\n</client_get_state>', '&lt;client_get_state&gt;&lt;/client_get_state&gt;']) {
+      const leaked = prose + protocol;
+      expect(containsInternalExecutionLanguage(leaked)).toBe(true);
+      const projected = sanitizeAgentResponseTextForDisplay(leaked, 'zh');
+      expect(projected).not.toMatch(/client_get_state|&lt;|<\//u);
+      for (const normalize of [normalizeChatHistoryRecord, normalizeVoiceHistoryRecord]) {
+        expect(JSON.stringify(normalize({ role: 'assistant', message: leaked }))).not.toContain('client_get_state');
+      }
+      for (let i = 1; i <= leaked.length; i += 1) {
+        expect(sanitizeAgentStreamingTextForDisplay(leaked.slice(0, i), 'zh')).not.toMatch(/client_get|<client|&lt;client/u);
+      }
+    }
+  });
+
   it('applies the shared sanitizer at every secondary assistant surface', () => {
     const surfaces = [
-      'src/components/ChatPanel.tsx',
       'src/hooks/useMemoryAvatarConversation.ts',
-      'src/components/org/CentralLumiChat.tsx',
       'src/hooks/useVoiceCall.ts',
       'src/components/ProactiveNotifications.tsx',
     ];
@@ -87,15 +125,11 @@ describe('customer-facing assistant output projection', () => {
     for (const relativePath of surfaces) {
       expect(source(relativePath), relativePath).toContain('sanitizeAgentResponseTextForDisplay');
     }
-
-    expect(source('src/components/ChatPanel.tsx')).toMatch(
-      /onMessages[\s\S]*sanitizeAgentResponseTextForDisplay[\s\S]*onResponse[\s\S]*sanitizeAgentResponseTextForDisplay[\s\S]*onProgress[\s\S]*sanitizeAgentResponseTextForDisplay/,
-    );
-    expect(source('src/components/ChatPanel.tsx')).toContain(
-      "const streamingPublicText = sanitizeAgentStreamingTextForDisplay(streamingText, isZh ? 'zh' : 'en')",
+    expect(source('src/components/agent_chat/chat_stream_receivers.ts')).toMatch(
+      /onChunk[\s\S]*streamingRawTextRef[\s\S]*sanitizeAgentStreamingTextForDisplay\(rawText/,
     );
     expect(source('src/components/AgentChatPage.tsx')).toMatch(
-      /onChunk[\s\S]*streamingRawTextRef[\s\S]*sanitizeAgentStreamingTextForDisplay\(rawText[\s\S]*onError[\s\S]*sanitizeAgentResponseTextForDisplay/,
+      /onError[\s\S]*sanitizeAgentResponseTextForDisplay/,
     );
     const territoryConversation = code('src/hooks/useMemoryAvatarConversation.ts');
     expect(territoryConversation).toMatch(
@@ -106,12 +140,6 @@ describe('customer-facing assistant output projection', () => {
     );
     expect(territoryConversation).toMatch(
       /const appendVoiceResponse[\s\S]*put\('assistant', sanitizeAgentResponseTextForDisplay\(text, locale\)/,
-    );
-    expect(source('src/components/org/CentralLumiChat.tsx')).toMatch(
-      /normalizeHistoryMessage[\s\S]*sanitizeAgentResponseTextForDisplay[\s\S]*onResponse[\s\S]*sanitizeAgentResponseTextForDisplay/,
-    );
-    expect(source('src/components/org/CentralLumiChat.tsx')).toMatch(
-      /onChunk[\s\S]*streamingRawTextRef[\s\S]*sanitizeAgentStreamingTextForDisplay/,
     );
     expect(source('src/hooks/useVoiceCall.ts')).toMatch(
       /onAgentResponse[\s\S]*sanitizeAgentResponseTextForDisplay[\s\S]*onAudioWorkProgress[\s\S]*sanitizeAgentResponseTextForDisplay/,

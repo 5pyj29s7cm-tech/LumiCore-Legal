@@ -1,8 +1,9 @@
-import { makeApp, JWT_SECRET, COOKIE_OPTS } from './helpers';
+import { ChatExecutionWatch } from '../src/lib/chatExecutionWatch';
+import { chatRecoveryCopy } from '../src/i18n/locales/chatRecovery';
+import { readImplementationSource } from './implementation_source';
 import fs from 'node:fs';
-import path from 'node:path';
-import vm from 'node:vm';
-import ts from 'typescript';
+import { extractSourceExpression as extract } from './source_expression';
+import { makeApp, JWT_SECRET, COOKIE_OPTS } from './helpers';
 import jwt from 'jsonwebtoken';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { readDB, writeDB } from '../db_layer';
@@ -13,27 +14,7 @@ import { ChatViewWorkRegistry } from '../src/lib/chatViewWork';
 import { mergeNotificationState, notificationClearStorageKey } from '../src/lib/notificationState';
 
 // Exercise the real auth response, context refresh and page recovery callbacks.
-function extract(file: string, name: string, dependencies: Record<string, unknown>) {
-  const source = fs.readFileSync(path.resolve(file), 'utf8');
-  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let expression = '';
-  function visit(node: ts.Node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name && node.initializer) {
-      const init = node.initializer;
-      expression = ts.isCallExpression(init) && ['useCallback', 'useMemo'].includes(init.expression.getText(ast))
-        ? init.arguments[0].getText(ast) : init.getText(ast);
-    }
-    if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
-      expression = node.getText(ast).replace(/^export\s+/, '');
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(ast);
-  if (!expression) throw new Error(`Missing production expression ${file}:${name}`);
-  return vm.runInNewContext(ts.transpileModule(`(${expression})`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText, dependencies);
-}
+
 const page = 'src/components/AgentChatPage.tsx';
 const noop = () => {};
 let app: Awaited<ReturnType<typeof makeApp>>;
@@ -58,9 +39,10 @@ async function authenticatedPageUser(role: string) {
   });
   let user: any;
   const refresh = extract('src/contexts/AppContext.tsx', 'refreshUser', {
-    authService: { getMe }, setUser: (value: any) => { user = value; },
+    authService: { getMe }, setSessionUser: (value: any) => { user = value; },
     notificationService: { fetchNotifications: async () => ({ notifications: [] }) },
     notificationClearStorageKey, mergeNotificationState,
+    notificationRevisionRef: { current: 0 }, notificationWriteRef: { current: null },
     localStorage: { getItem: () => null, setItem: noop },
     setNotifications: (update: any) => update([]),
     apiFetch: async () => ({ ok: true, json: async () => ({}) }),
@@ -85,8 +67,8 @@ function recoveryHarness(user: any, data = new Map<string, string>()) {
     setItem: (name: string, value: string) => { data.set(name, value); },
     removeItem: (name: string) => { data.delete(name); },
   };
-  const socket = { emit: vi.fn() };
-  const dependencies = {
+  const socket = { connected: true, emit: vi.fn() };
+  const dependencies: Record<string, any> = {
     activeExecutionStorageKey: key, chatRecoveryUserId, recoveryOwner,
     activeDomain: 'personal', activeOrgId: undefined, chatExecutionSource: 'command-center-chat', agentId: 'lumi',
     localStorage, ownedPendingChatExecutions, upsertPersistedPendingChatExecution,
@@ -95,11 +77,14 @@ function recoveryHarness(user: any, data = new Map<string, string>()) {
     recoveryAttempt: 0, disposed: false, chatViewWorkRef: { current: new ChatViewWorkRegistry() },
     ACTIVE_CHAT_EXECUTION_TTL_MS: 86400000, clearPersistedExecution: noop,
     isOfficeCommandCenter: true, chatRequestLedgerRef: { current: new ChatRequestLedger() },
-    activeChatRequestIdRef: { current: null }, textChatActiveRef: { current: false },
+
     chatTurnTimerGuardRef: { current: { begin: noop } }, setIsTyping: noop,
-    lastResumedRequestIdsRef: { current: new Set() }, pushChatProgress: noop,
-    uiMessage: (key: string) => key, isZh: true, socket,
+    lastResumedRequestIdsRef: { current: new Set() }, pushChatProgress: noop, clearChatProgress: noop,
+    uiMessage: (key: string) => key, isZh: true, socket, chatRecoveryCopy,
+    chatExecutionWatchesRef: { current: new Map() },
+    ChatExecutionWatch: class extends ChatExecutionWatch { constructor(options: ConstructorParameters<typeof ChatExecutionWatch>[0]) { super(options, { setTimeout: (() => 1) as any, clearTimeout: noop }); } },
   };
+  dependencies.attachChatExecutionWatch = extract(page, 'attachChatExecutionWatch', dependencies);
   return {
     key, data, socket,
     persist: extract(page, 'persistActiveExecution', dependencies),
@@ -144,11 +129,47 @@ it('does not assign an unverified legacy display identity to a recovery owner', 
 });
 
 it('passes the context user through the shell and desktop to AgentChatPage', () => {
-  const shell = fs.readFileSync('src/entries/useAppShell.ts', 'utf8');
-  const entry = fs.readFileSync('src/entries/desktop.tsx', 'utf8');
-  const desktop = fs.readFileSync('src/components/DesktopUI.tsx', 'utf8');
+  const shell = readImplementationSource('src/entries/useAppShell.ts', 'utf8');
+  const entry = readImplementationSource('src/entries/desktop.tsx', 'utf8');
+  const desktop = readImplementationSource('src/components/DesktopUI.tsx', 'utf8');
   expect(shell).toContain('const { user, loading, logout, refreshUser } = useApp()');
   expect(shell).toMatch(/return\s*\{\s*user, loading/);
   expect(entry).toMatch(/<DesktopUI[^>]*user=\{shell.user\}/);
   expect(desktop).toMatch(/<AgentChatPage\s+t=\{t\}\s+user=\{user\}/);
+});
+
+it.each([
+  ['personal', 'known', true, { success: true, token: 'personal-token', orgId: null, orgRole: null }, true],
+  ['work', 'known', true, { success: true, token: 'work-token', orgId: 'known-org', orgRole: 'admin' }, true],
+  ['work', 'discover', true, { success: true, token: 'work-token', orgId: 'discovered-org', orgRole: 'member' }, true],
+  ['work', 'empty', true, {}, false],
+  ['work', 'known', true, {}, false],
+  ['work', 'known', false, { error: 'denied' }, false],
+  ['personal', 'known', false, { error: 'denied' }, false],
+] as const)('switches %s/%s only after the server accepts the scope (%s)', async (domain, initial, ok, response, success) => {
+  const orgConnection = initial === 'known' ? { orgId: 'known-org', orgRole: 'member', orgName: 'Known', connected: true } : null;
+  const stored = new Map<string, string>();
+  const apiFetch = vi.fn(async (route: string) => ({ ok, status: ok ? 200 : 403, json: async () => route.endsWith('/orgs')
+    ? { orgs: initial === 'discover' ? [{ id: 'discovered-org', name: 'Discovered' }] : [] } : response }));
+  const setWorkDomain = vi.fn(), setOrgConnection = vi.fn(), dispatchEvent = vi.fn(), refreshAuth = vi.fn();
+  const switchDomain = extract('src/contexts/AppContext.tsx', 'switchDomain', {
+    orgConnection, apiJson: extract('src/services/apiClient.ts', 'apiJson', { apiFetch }), setWorkDomain, setOrgConnection, CustomEvent,
+    authGenerationRef: { current: 0 }, domainSwitchRequest: { current: null }, AbortController, AbortSignal,
+    translate: (key: string) => key, localStorage: { setItem: (key: string, value: string) => stored.set(key, value) },
+    socketService: { refreshAuth }, window: { dispatchEvent },
+  });
+  expect(await switchDomain(domain)).toMatchObject({ success, domain });
+  if (!success) {
+    expect(stored.size).toBe(0);
+    for (const callback of [setWorkDomain, setOrgConnection, dispatchEvent, refreshAuth]) expect(callback).not.toHaveBeenCalled();
+    return;
+  }
+  expect(setWorkDomain).toHaveBeenCalledExactlyOnceWith(domain);
+  expect(stored.get('lumi_work_domain')).toBe(domain);
+  expect(dispatchEvent).toHaveBeenCalledTimes(1);
+  expect(dispatchEvent.mock.calls[0][0].detail).toMatchObject({ domain, orgId: domain === 'work' ? (response as any).orgId : null });
+  expect(refreshAuth).toHaveBeenCalledTimes('token' in response ? 1 : 0);
+  const request = (apiFetch.mock.calls.at(-1) as unknown as [string, RequestInit])[1];
+  expect(JSON.parse(String(request.body))).toEqual({ orgId: domain === 'personal' ? null : initial === 'known' ? 'known-org' : 'discovered-org' });
+  if (domain === 'personal') expect(setOrgConnection).not.toHaveBeenCalled();
 });

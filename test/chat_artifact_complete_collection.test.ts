@@ -1,0 +1,31 @@
+import './helpers';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { beforeAll, expect, it } from 'vitest';
+import { collectChatArtifacts } from '../server/conversation/chat_artifacts';
+import { resolveGeneratedDownloadPath } from '../server/files/knowledge/paths';
+import { archiveGeneratedOutputs, listGeneratedArchive } from '../server/files/generated_archive';
+import { startIsolatedConversation, addMessage } from '../server/conversation/manager';
+import { initDatabase, readDB, writeDB } from '../db_layer';
+import type { ToolExecutionRecord } from '../server/tools/types';
+const fixture = JSON.parse(fs.readFileSync(fileURLToPath(new URL('./fixtures/declared-26-output-metadata.json', import.meta.url)), 'utf8'));
+beforeAll(initDatabase);
+it('retains all26 declared output paths through cards, owned downloads and the existing archive', async () => {
+ const owner='full-collection-owner', directory=path.join(process.env.LUMI_DATA_DIR!, 'Documents','all26');fs.mkdirSync(directory,{recursive:true});
+ const files:string[]=fixture.fileNames.map((name:string,index:number)=>{const file=path.join(directory,name);fs.writeFileSync(file,'Synthetic declared output '+index);return file;});
+ expect(files).toHaveLength(26);expect(new Set(files).size).toBe(26);
+ const db=readDB();db.users.push({uid:owner,role:'admin',username:owner,password:'fixture-only',balance:0,createdAt:new Date().toISOString()} as any);writeDB(db);
+ const conversationId=startIsolatedConversation(owner,'lumi','personal','').id;
+ const record:ToolExecutionRecord={id:'fixture26-record',name:fixture.name,arguments:{writeFiles:true},requestId:'fixture26-request',taskId:'fixture26-task',result:'Synthetic proposed document body.',receipt:{ok:true,status:fixture.status,artifacts:files,content:'Synthetic proposed document body.'},capability:fixture.capability,terminalVerification:fixture.terminalVerification,envelope:{status:'verified_success'} as any};
+ const original=JSON.stringify(record);const cards=collectChatArtifacts([record],conversationId);
+ expect(cards.map(card=>card.path)).toEqual(files);expect(cards.slice(-2).map(card=>card.fileName)).toEqual(['27_evidence-catalog.docx','99_manifest.docx']);expect(record).toEqual(JSON.parse(original));
+ addMessage({userId:owner,agentId:'lumi',conversationId,role:'assistant',content:'Proposed documents only; task completion remains independent.',toolCalls:[record]});
+ const request=(uid=owner,id=conversationId)=>({user:{uid},query:{conversationId:id}} as any);
+ for(const file of files.slice(-2)){expect(resolveGeneratedDownloadPath(file,request())).toBe(fs.realpathSync.native(file));expect(()=>resolveGeneratedDownloadPath(file,request('other-owner'))).toThrow('verified output');expect(()=>resolveGeneratedDownloadPath(file,request(owner,'another-conversation'))).toThrow('verified output');}
+ const unlisted=path.join(directory,'unlisted.md');fs.writeFileSync(unlisted,'Not in the verified receipt');expect(()=>resolveGeneratedDownloadPath(unlisted,request())).toThrow('verified output');
+ const saved=await archiveGeneratedOutputs([record],{userId:owner,domain:'personal',source:'desktop-chat',conversationId,requestId:record.requestId,taskId:record.taskId});expect(saved).toHaveLength(26);expect(saved.map(entry=>entry.sourcePath)).toEqual(files);
+ const entries=await listGeneratedArchive({userId:owner,domain:'personal'});expect(entries.filter(entry=>entry.sourceRequestId===record.requestId).map(entry=>entry.sourcePath).sort()).toEqual([...files].sort());
+ expect(await archiveGeneratedOutputs([record],{userId:owner,domain:'personal',source:'desktop-chat',conversationId,requestId:record.requestId,taskId:record.taskId})).toHaveLength(26);
+ expect((await listGeneratedArchive({userId:owner,domain:'personal'})).filter(entry=>entry.sourceRequestId===record.requestId)).toHaveLength(26);
+});

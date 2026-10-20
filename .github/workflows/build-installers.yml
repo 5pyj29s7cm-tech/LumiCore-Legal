@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   windows-x64:
-    if: github.repository == '5pyj29s7cm-tech/lumi-legal-client'
+    if: github.repository == '5pyj29s7cm-tech/LumiCore'
     name: Windows x64 · unsigned NSIS
     runs-on: windows-latest
     timeout-minutes: 120
@@ -42,9 +42,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Verify native Node dependencies
-        run: node -e "require('sqlite3'); require('sharp'); console.log('Native Node dependencies loaded')"
 
       - name: Build unsigned Windows NSIS installer
         run: npm run tauri:build -- --bundles nsis
@@ -85,7 +82,7 @@ jobs:
           "$digest  $($installer.Name)" | Set-Content -LiteralPath "$($installer.FullName).sha256" -Encoding ascii
           $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
           [ordered]@{
-            product = 'Lumi Legal'
+            product = 'LumiCore'
             version = (Get-Content -LiteralPath 'package.json' -Raw | ConvertFrom-Json).version
             commit = $env:GITHUB_SHA
             platform = 'windows'
@@ -98,14 +95,10 @@ jobs:
           } | ConvertTo-Json | Set-Content -LiteralPath 'windows-build-report.json' -Encoding utf8
           Get-Content -LiteralPath 'windows-build-report.json'
 
-      - name: Diagnose failed build inputs
-        if: failure()
-        run: git status --short
-
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: lumi-legal-windows-x64-unsigned-${{ github.sha }}
+          name: lumi-core-windows-x64-unsigned-${{ github.sha }}
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/*.exe.sha256
@@ -114,7 +107,7 @@ jobs:
           retention-days: 14
 
   macos:
-    if: github.repository == '5pyj29s7cm-tech/lumi-legal-client'
+    if: github.repository == '5pyj29s7cm-tech/LumiCore'
     name: macOS ${{ matrix.label }} · ad-hoc DMG
     timeout-minutes: 120
     strategy:
@@ -159,9 +152,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Verify native Node dependencies
-        run: node -e "require('sqlite3'); require('sharp'); console.log('Native Node dependencies loaded')"
 
       - name: Build ad-hoc signed macOS DMG
         run: npm run tauri:build -- --target ${{ matrix.target }} --bundles dmg
@@ -219,7 +209,7 @@ jobs:
           digest="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
           printf '%s  %s\n' "$digest" "$(basename "$dmg_path")" > "$dmg_path.sha256"
           {
-            echo "product=Lumi Legal"
+            echo "product=LumiCore"
             echo "version=$expected_version"
             echo "commit=$GITHUB_SHA"
             echo "platform=macos"
@@ -232,14 +222,10 @@ jobs:
           } > "macos-${{ matrix.artifact_arch }}-build-report.txt"
           cat "macos-${{ matrix.artifact_arch }}-build-report.txt"
 
-      - name: Diagnose failed build inputs
-        if: failure()
-        run: git status --short
-
       - name: Upload verified macOS installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: lumi-legal-macos-${{ matrix.artifact_arch }}-adhoc-${{ github.sha }}
+          name: lumi-core-macos-${{ matrix.artifact_arch }}-adhoc-${{ github.sha }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg.sha256

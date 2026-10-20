@@ -191,7 +191,7 @@ describe('Lumi runtime action pressure coverage', () => {
       },
       {
         id: 'legal-argument',
-        text: '\u5f8b\u5e08\u7684\u4ee3\u7406\u8bcd',
+        text: '起草律师代理词',
         kind: 'legal_document',
         categories: ['legal'],
         tools: ['legal_generate_argument_or_opinion', 'legal_analyze_folder_and_draft_argument', 'read_docx', 'create_docx'],
@@ -200,7 +200,7 @@ describe('Lumi runtime action pressure coverage', () => {
       {
         id: 'legal-asset-trace',
         text: '\u67e5\u88ab\u6267\u884c\u4eba\u8d22\u4ea7\u7ebf\u7d22\u548c\u80a1\u6743\u7a7f\u900f',
-        kind: 'legal_document',
+        kind: 'none',
         categories: ['legal'],
         tools: ['legal_trace_assets', 'legal_equity_penetration', 'legal_company_database_lookup'],
         earlyTools: ['legal_trace_assets', 'legal_equity_penetration'],

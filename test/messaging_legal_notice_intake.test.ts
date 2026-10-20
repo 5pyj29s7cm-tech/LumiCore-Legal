@@ -5,10 +5,11 @@ import { registerLegalTools } from '../server/tools/definitions/legal_tools';
 import {
   classifyRemoteLegalNoticeIntakeIntent,
   handleRemoteLegalNoticeIntake,
-} from '../server/messaging/legal_notice_intake';
+} from '../server/regions/packs/cn/legal_notice_intake';
 import * as LegalCases from '../server/org/legal_cases';
 import { addMember, createOrg } from '../server/org/db';
 import { readDB } from '../db_layer';
+import { processWithPersonality } from '../server/regions/packs/cn/messaging_routes';
 import type { IncomingMessage } from '../server/messaging/types';
 
 function message(partial: Partial<IncomingMessage>): IncomingMessage {
@@ -147,12 +148,15 @@ describe('remote messaging legal notice intake', () => {
         boundUserId: userId,
         text: `请归档到已有案件：【人民法院】${caseNumber} 有新的开庭通知，请查看 https://court.example.test/notice/personal-321`,
       });
-      const reply = await handleRemoteLegalNoticeIntake(incoming);
+      const waiting = await processWithPersonality(incoming);
+      expect(waiting).toContain('目前不能唯一确定组织案件');
+      expect(LegalCases.getCase(orgId, caseFile.id)!.materials).toHaveLength(0);
+      const reply = await processWithPersonality({ ...incoming, text: '归档到 1', messageId: incoming.messageId + '-selection' });
 
       expect(reply).toContain('远程法律消息已入案');
-      expect(reply).toContain(`案件ID：${caseFile.id}`);
+      expect(reply).not.toContain(caseFile.id);
       expect(reply).toContain('案件提醒：已生成/更新');
-      expect(incoming.boundOrgId).toBe(orgId);
+      expect(incoming.boundOrgId).toBeUndefined();
       const refreshed = LegalCases.getCase(orgId, caseFile.id)!;
       expect(refreshed.hearingDate).toBe('2027-08-15 09:30');
       expect(refreshed.materials.some(material => material.content.includes('court.example.test/notice/personal-321'))).toBe(true);
@@ -292,7 +296,7 @@ describe('remote messaging legal notice intake', () => {
       }],
     }));
 
-    expect(archivedReply).toContain(`案件ID：${existing.id}`);
+    expect(archivedReply).not.toContain(existing.id);
     expect(LegalCases.getCase(orgId, existing.id, userId)!.materials.length).toBeGreaterThan(beforeMaterials);
     expect(LegalCases.listCases(orgId, '', 20, userId)).toHaveLength(1);
   });

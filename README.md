@@ -1,15 +1,15 @@
-# Lumi Legal
+# LumiCore
 
 面向个人与组织的私有化本地智能体系统。
 
 **浙江灵序科技有限公司 · [lumiai.asia](https://lumiai.asia)**
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-orange.svg)](./LICENSE)
-[![Lumi Legal CI](https://github.com/5pyj29s7cm-tech/lumi-legal-client/actions/workflows/ci.yml/badge.svg)](https://github.com/5pyj29s7cm-tech/lumi-legal-client/actions/workflows/ci.yml)
+[![LumiCore CI](https://github.com/5pyj29s7cm-tech/LumiCore/actions/workflows/ci.yml/badge.svg)](https://github.com/5pyj29s7cm-tech/LumiCore/actions/workflows/ci.yml)
 
 > LumiCore 不只是一个聊天助手。
 >
-> 它把模型、语音、记忆、知识、人格、技能、工具、桌面程序和外部智能体组织成一套可持续工作的个人 AI 系统。
+> 它把模型、语音、记忆、知识、人格、技能、工具和桌面程序收敛到一个可持续工作的 LumiCore 中。
 
 ## 当前状态
 
@@ -27,7 +27,7 @@ LumiCore 是一款以用户行为为导向、以语音和自然语言交互为�
 
 - 使用云端模型、本地模型或自定义 OpenAI 兼容服务；
 - 保存用户自己的会话、记忆、知识库、任务和人格配置；
-- 根据任务选择技能、工具、MCP 服务、桌面程序或外部智能体；
+- 根据任务选择技能、工具、MCP 服务、桌面程序或一个明确授权的外部 AI 工具；
 - 在指挥中心持续沟通、拆解任务、记录进度并核验结果；
 - 在个人域和组织域之间保持清晰的数据与权限边界；
 - 通过行业定制版把通用能力收敛成更轻、更稳定的业务流程。
@@ -73,9 +73,9 @@ LumiCore 不把能力锁死在某一个模型上。模型负责理解和推理�
 
 - 文字对话与语音状态共享同一会话上下文；
 - 新建对话、历史会话和任务账本分别管理；
-- 办公室场景显示智能体和任务状态；
+- 指挥中心以 LumiCore 圆球与任务轨道显示实时工作状态；
 - 正在执行的任务以独立组件呈现，不与聊天记录混为一谈；
-- 支持每日固定任务、长期追求、周期汇报与智能体协作；
+- 支持每日固定任务、长期追求、周期汇报与单核连续执行；
 - 个人模式、组织模式和指挥中心共享统一的执行入口。
 
 ## 模型与语音
@@ -182,7 +182,7 @@ LumiCore 把行业能力放在技能层，把具体执行放在工具和适配�
 
 ### 环境要求
 
-- Node.js `>=18`，推荐使用 Node.js 24；
+- Node.js `^22.12.0 || >=24.0.0`，当前构建固定使用 `.node-version` 中的 Node.js 24.19.0；
 - npm；
 - Git；
 - Rust stable 与平台构建依赖，仅桌面客户端需要。
@@ -190,8 +190,8 @@ LumiCore 把行业能力放在技能层，把具体执行放在工具和适配�
 ### 获取源码
 
 ```bash
-git clone https://github.com/5pyj29s7cm-tech/lumi-legal-client.git
-cd lumi-legal-client
+git clone https://github.com/5pyj29s7cm-tech/LumiCore.git
+cd LumiCore
 npm ci
 ```
 
@@ -248,14 +248,14 @@ DOUBAO_SPEECH_KEY=
 
 ## 数据与隐私
 
-Lumi Legal 的默认用户数据目录为 `~/LumiCore-Legal/`，与源码仓库分离。升级时会在独占数据租约下将旧版 `~/LumiOS-Legal/` 原地迁移，不复制会话或凭据。
+默认用户数据目录为 `~/LumiCore/`，与源码仓库分离。升级时会在独占数据租约下将旧版 `~/LumiOS/` 原地迁移，不复制会话或凭据。
 
 | 路径 | 内容 |
 | --- | --- |
-| `~/LumiCore-Legal/data/lumi.db` | 会话、记忆、任务、回执与智能体数据 |
-| `~/LumiCore-Legal/data/keys.json` | 本地凭证存储 |
-| `~/LumiCore-Legal/data/knowledge/` | 知识库文件与索引 |
-| `~/LumiCore-Legal/data/voice_samples/` | 用户授权保存的语音样本 |
+| `~/LumiCore/data/lumi.db` | 会话、记忆、任务、回执与 LumiCore 数据 |
+| `~/LumiCore/data/keys.json` | 本地凭证存储 |
+| `~/LumiCore/data/knowledge/` | 知识库文件与索引 |
+| `~/LumiCore/data/voice_samples/` | 用户授权保存的语音样本 |
 | `~/lumi_skills/` | 用户安装的 MCP 技能包 |
 
 提交 Issue 或 Pull Request 时，不要上传 API Key、访问令牌、客户资料、个人数据库、语音样本或可识别真实账号的配置。发现安全问题请先阅读 [安全策略](./SECURITY.md)。
@@ -287,7 +287,7 @@ npm run release:check
 - 语音打断、连续对话和低延迟交互；
 - 桌面视觉控制与结果验证；
 - 本地模型、MCP 和行业软件适配；
-- 长任务、跨智能体协作和故障恢复；
+- 长任务、跨入口任务连续性和故障恢复；
 - Windows、macOS 与 Linux 实机兼容性；
 - 行业工作流的通用能力反哺。
 
@@ -306,7 +306,7 @@ npm run release:check
 **使命：让人类本身得以延伸。**
 
 - 官网：[lumiai.asia](https://lumiai.asia)
-- GitHub：[5pyj29s7cm-tech/lumi-legal-client](https://github.com/5pyj29s7cm-tech/lumi-legal-client)
+- GitHub：[5pyj29s7cm-tech/LumiCore](https://github.com/5pyj29s7cm-tech/LumiCore)
 - 邮箱：3565286431@qq.com
 
 ## 许可证

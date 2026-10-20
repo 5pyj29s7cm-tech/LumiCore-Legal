@@ -73,7 +73,7 @@ describe('product variant runtime slimming', () => {
   });
 
   it('keeps retired local-agent persistence and organization template teams migration-only', () => {
-    const database = read('db_layer.ts');
+    const database = ['db_layer.ts', ...fs.readdirSync('server/db').filter(file => file.endsWith('.ts')).map(file => 'server/db/' + file)].map(read).join('\n');
     const orgHub = read('src/components/org/OrgHub.tsx');
     const adapters = read('server/adapters/registry.ts');
     const desktopPlan = read('server/desktop/execution_plan.ts');

@@ -1,9 +1,14 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { readDB } from '../../../db_layer';
+import { readDatabaseTables } from '../../../db_layer';
 import { getDataPath } from '../../config/data_path';
 import { ToolRegistry } from '../registry';
+import { getMessageByRequestId } from '../../conversation/manager/request_identity';
+import { getMember } from '../../org/db';
+import { getPersonalKnowledgeDirectory } from '../../files/knowledge_directory';
+import { readKnowledgeSourceText } from '../../files/knowledge/access_routes';
+import { isStrictPrivacy } from '../../config/privacy';
 import {
   evaluateKnowledgeManifest,
   type KnowledgeIngestionManifest,
@@ -12,7 +17,7 @@ import {
 
 function scopeDirectory(userId: string, domain: string, orgId: string): string {
   if (domain === 'work' && orgId) return getDataPath(path.join('org', orgId, 'knowledge'));
-  const db = readDB();
+  const db = readDatabaseTables(["knowledgeFiles","memories","users"]);
   const primaryAdmin = (db.users || []).find((user: any) => user?.role === 'admin');
   if (primaryAdmin?.uid === userId) return getDataPath('knowledge');
   const directoryId = crypto.createHash('sha256').update(userId).digest('hex').slice(0, 24);
@@ -56,7 +61,7 @@ function buildKnowledgeCoverageSnapshot(context: any, filename = ''): Record<str
   const orgId = domain === 'work' ? String(context?.orgId || '') : '';
   if (domain === 'work' && !orgId) throw new Error('Organization context is required for work knowledge statistics.');
 
-  const db = readDB();
+  const db = readDatabaseTables(["knowledgeFiles","memories","users"]);
   const primaryAdmin = (db.users || []).find((user: any) => user?.role === 'admin');
   const primaryOwner = Boolean(primaryAdmin?.uid && primaryAdmin.uid === userId);
   const dir = scopeDirectory(userId, domain, orgId);
@@ -129,10 +134,31 @@ function buildKnowledgeCoverageSnapshot(context: any, filename = ''): Record<str
 export function registerKnowledgeTools(registry: ToolRegistry): void {
   registry.register({
     name: 'knowledge_file_stats',
-    description: 'Return the exact current-workspace Lumi knowledge-file count, indexing status, and visible filenames. Use this for questions about how many files are currently in the knowledge base; do not substitute client_get_state.',
-    parameters: { type: 'object', properties: {}, required: [] },
-    handler: async (_args, context) => {
-      return JSON.stringify(buildKnowledgeCoverageSnapshot(context));
+    description: 'Return current-workspace knowledge inventory. With explicit fileIds from the current user request, return the full authorized source text and revision hashes for those exact files; use this to answer their contents. fileId is a knowledge identifier, never a guessed local path. Source reading does not certify full absorption.',
+    parameters: { type: 'object', properties: { fileIds: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Exact knowledge fileIds explicitly referenced by the current user. Omit for inventory only.' } }, required: [] },
+    handler: async (args, context) => {
+      if (args.fileIds === undefined) return JSON.stringify(buildKnowledgeCoverageSnapshot(context));
+      if (!Array.isArray(args.fileIds) || !args.fileIds.length || args.fileIds.some((id: unknown) => typeof id !== 'string' || !id.trim() || id !== id.trim() || /[\\/]/.test(id))) throw new Error('fileIds must contain exact knowledge file identifiers.');
+      if (!context?.authenticated || !context.userId || !context.conversationId || !context.requestId || !['trusted_local', 'trusted_system'].includes(context.executionBoundary || '')) throw new Error('A bound authorized request is required to read knowledge source text.');
+      const userId = context.userId, domain = context.domain === 'work' ? 'work' as const : 'personal' as const, orgId = domain === 'work' ? String(context.orgId || '') : '';
+      const original = getMessageByRequestId({ userId, conversationId: context.conversationId, requestId: context.requestId, role: 'user', domain, orgId });
+      const raw = String(original?.message || '');
+      if (!original || args.fileIds.some((id: string) => !new RegExp('(^|[^A-Za-z0-9_.-])' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=$|[^A-Za-z0-9_.-])', 'u').test(raw))) throw new Error('Only knowledge fileIds explicitly referenced by the current user request may be read.');
+      const member = orgId ? getMember(orgId, userId) : undefined;
+      const memberIdentity = member && { id: member.id, role: member.role };
+      const getScope = () => {
+        if (domain === 'work') {
+          const current = orgId ? getMember(orgId, userId) : undefined;
+          if (!memberIdentity || !current || current.status !== 'active' || current.id !== memberIdentity.id || current.role !== memberIdentity.role) throw new Error('Active unchanged organization membership is required.');
+          return { userId, domain, orgId, dir: scopeDirectory(userId, domain, orgId) };
+        }
+        return { userId, domain, ...getPersonalKnowledgeDirectory(userId) };
+      };
+      const permission = context.dataRoutingPolicy === 'local_only' || isStrictPrivacy() ? 'read' : 'share';
+      const files = [];
+      for (const fileId of [...new Set<string>(args.fileIds)]) files.push(await readKnowledgeSourceText(fileId, getScope, { signal: context.executionSignal, permission }));
+      for (const file of files) file.assertCurrent();
+      return JSON.stringify({ ok: true, status: 'observed', mode: 'source_text', userId, domain, orgId: orgId || undefined, files });
     },
     permission: 'user',
     securityLevel: 'safe',

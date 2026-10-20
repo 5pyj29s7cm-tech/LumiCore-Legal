@@ -1,9 +1,10 @@
+import { readImplementationSource } from './implementation_source';
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 function source(relativePath: string): string {
-  return readFileSync(path.join(process.cwd(), relativePath), 'utf8');
+  return readImplementationSource(path.join(process.cwd(), relativePath), 'utf8');
 }
 
 describe('focus thread client projection', () => {
@@ -13,9 +14,9 @@ describe('focus thread client projection', () => {
   it('projects active durable focus into the transient task widget instead of the chat stream', () => {
     const chat = source('src/components/AgentChatPage.tsx');
     const widget = source('src/components/ActiveTaskWidget.tsx');
-    expect(chat).toContain('useFocusThreads({');
+    expect(chat).not.toContain('useFocusThreads');
     expect(chat).toContain('<ActiveTaskWidget');
-    expect(chat).toContain('focusThreads={focusThreads}');
+    expect(chat).toContain('status={runtimeStatus}');
     expect(chat).not.toContain('<FocusThreadPanel');
     expect(widget).toContain('primaryThread?.goal');
     expect(widget).toContain('primaryThread?.waitingFor');
@@ -23,7 +24,7 @@ describe('focus thread client projection', () => {
   });
 
   it('binds explicit task channels to durable focus without prebuilding Chat tasks', () => {
-    for (const file of ['server/socket/task.ts', 'server/socket/voice.ts']) {
+    for (const file of ['server/socket/voice.ts']) {
       const contents = source(file);
       expect(contents).toContain('updateConversationActionFocus({');
     }

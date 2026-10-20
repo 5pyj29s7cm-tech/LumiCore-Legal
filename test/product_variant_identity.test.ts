@@ -11,6 +11,7 @@ describe('legal product identity', () => {
     const localWhisper = fs.readFileSync('server/stt/providers/local-whisper.ts', 'utf8');
     const nativeShell = fs.readFileSync('src-tauri/src/lib.rs', 'utf8');
     const nativeBootstrap = fs.readFileSync('src-tauri/src/local_bootstrap.rs', 'utf8');
+    const nativeApps = fs.readFileSync('src-tauri/src/native_apps.rs', 'utf8');
     expect(PRODUCT_VARIANT.runtime.productName).toBe('Lumi Legal');
     expect(PRODUCT_VARIANT.runtime.dataDirectoryName).toBe('LumiCore-Legal');
     expect(PRODUCT_VARIANT.runtime.legacyDataDirectoryName).toBe('LumiOS-Legal');
@@ -19,8 +20,11 @@ describe('legal product identity', () => {
     expect(dataPath).toContain('PRODUCT_VARIANT.runtime.legacyDataDirectoryName');
     expect(localWhisper).toContain('PRODUCT_VARIANT.runtime.legacyDataDirectoryName');
     expect(localWhisper).not.toContain("os.homedir(), 'LumiOS'");
-    expect(nativeShell).toContain('.join("LumiCore-Legal")');
-    expect(nativeShell).toContain('base.join("LumiOS-Legal")');
+    expect(nativeShell).toContain('const AUTOSTART_VALUE_NAME: &str = "LumiLegal";');
+    expect(nativeShell).toContain('const LEGACY_AUTOSTART_VALUE_NAME: &str = "LumiOS-Legal";');
+    expect(nativeBootstrap).toContain('home.join(PRODUCT_DATA_DIRECTORY)');
+    expect(nativeApps).toContain('.join("LumiCore-Legal")');
+    expect(nativeApps).toContain('base.join("LumiOS-Legal")');
     expect(nativeBootstrap).toContain('const PRODUCT_DATA_DIRECTORY: &str = "LumiCore-Legal";');
   });
 

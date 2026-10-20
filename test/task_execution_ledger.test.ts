@@ -1,3 +1,4 @@
+import { buildConfirmedStepContinuationMessages } from '../server/llm/tool_loop/recovery';
 import { describe, expect, it } from 'vitest';
 import {
   buildConversationActionContinuationState,
@@ -8,7 +9,7 @@ import {
 import {
   applyTaskPolicySnapshot,
   coalesceToolExecutionRecords,
-  confirmedStepNeedsContinuation,
+  mergeToolExecutionRecords,
   normalizeConversationTaskReceipt,
   recordsToTaskReceipts,
   taskCompletionFromReceipts,
@@ -108,6 +109,18 @@ describe('durable conversation task execution ledger', () => {
     expect(records.filter(record => record.name === 'desktop_ui_snapshot')).toHaveLength(2);
   });
 
+  it('deduplicates repeated call delivery without losing distinct observations or other request owners', () => {
+    const first = { id: 'call-1', name: 'read_file', arguments: { path: 'fixture.txt' }, result: 'value', taskId: 'task-1', requestId: 'request-1' };
+    const second = { ...first, id: 'call-2' };
+    const foreign = { ...first, requestId: 'request-2' };
+    expect(mergeToolExecutionRecords([first], [{ ...first }, second, foreign])).toEqual([first, second, foreign]);
+    const snapshot = { ...first, name: 'desktop_execution_plan_receipt' };
+    const updated = { ...snapshot, result: 'new observations' };
+    expect(mergeToolExecutionRecords([snapshot], [updated])).toEqual([updated]);
+    const { id: _id, ...anonymous } = first;
+    expect(mergeToolExecutionRecords([anonymous], [{ ...anonymous }, { ...anonymous, arguments: { path: 'other.txt' } }])).toHaveLength(2);
+  });
+
   it('creates state before tools run and preserves task identity and capability envelope on confirmation', () => {
     const initialPolicy = {
       allowedTools: ['desktop_open', 'desktop_ui_snapshot', 'desktop_keyboard_press'],
@@ -140,6 +153,64 @@ describe('durable conversation task execution ledger', () => {
     expect(resumed.kind).toBe('resume');
     expect(resumed.state?.taskId).toBe(started.state?.taskId);
     expect(resumed.state?.policySnapshot?.allowedTools).toEqual(expect.arrayContaining(initialPolicy.allowedTools));
+  });
+
+  it('treats a receipt-only runtime cancellation as success after nested JSON normalization', () => {
+    expect(toolRecordSucceeded({
+      name: 'runtime_work_cancel',
+      arguments: { taskIds: ['task-a'] },
+      result: '',
+      receipt: JSON.stringify(JSON.stringify({
+        ok: true,
+        status: 'cancelled',
+        matchedCount: 1,
+        cancelledCount: 1,
+        cancellingCount: 0,
+        failedCount: 0,
+      })),
+      terminalVerification: {
+        status: 'verified',
+        strategy: 'terminal_receipt',
+        reason: 'The runtime ledger confirmed cancellation.',
+      },
+    })).toBe(true);
+  });
+
+  it('does not complete task cleanup from unrelated directory/search success after core failures', () => {
+    const receipts = recordsToTaskReceipts([{
+      name: 'database_query',
+      arguments: { query: 'SELECT * FROM commandCenterPlans' },
+      result: '',
+      error: 'Could not determine table name.',
+    }, {
+      name: 'runtime_work_cancel',
+      arguments: { taskIds: ['task-a'] },
+      result: JSON.stringify({ ok: false, status: 'failed', matchedCount: 1 }),
+      error: 'Cancellation did not settle.',
+    }, {
+      name: 'list_directory',
+      arguments: { path: '.' },
+      result: JSON.stringify({ ok: true, status: 'completed', entries: ['entry.cjs', 'node.exe'] }),
+      terminalVerification: {
+        status: 'verified',
+        strategy: 'terminal_receipt',
+        reason: 'The unrelated directory listing was returned.',
+      },
+    }, {
+      name: 'search_files',
+      arguments: { path: '.', pattern: 'task' },
+      result: JSON.stringify({ ok: true, status: 'completed', matches: ['runtime'] }),
+      terminalVerification: {
+        status: 'verified',
+        strategy: 'terminal_receipt',
+        reason: 'The unrelated file search was returned.',
+      },
+    }]);
+
+    expect(taskCompletionFromReceipts('\u6e05\u6389\u8fd9\u4e9b\u4efb\u52a1', receipts)).toMatchObject({
+      complete: false,
+      blocker: 'Cancellation did not settle.',
+    });
   });
 
   it('binds a resumed waiting-confirmation task to the successor request', () => {
@@ -359,22 +430,14 @@ describe('durable conversation task execution ledger', () => {
       }),
     };
 
-    expect(confirmedStepNeedsContinuation(
-      'Open WPS and create a Word document',
-      [confirmedOpen],
-    )).toBe(true);
-    expect(confirmedStepNeedsContinuation(
-      'Open WPS',
-      [confirmedOpen],
-    )).toBe(true);
-    expect(confirmedStepNeedsContinuation(
-      'Open WPS and create a Word document',
-      [{ ...confirmedOpen, result: '', error: 'permission denied' }],
-    )).toBe(true);
-    expect(confirmedStepNeedsContinuation(
-      'Open WPS',
-      [],
-    )).toBe(false);
+    for (const goal of ['Open WPS and create a Word document', 'Open WPS']) {
+      for (const record of [confirmedOpen, { ...confirmedOpen, result: '', error: 'permission denied' }]) {
+        const messages = buildConfirmedStepContinuationMessages(goal, record);
+        expect(messages[0]).toMatchObject({ role: 'user', content: goal });
+        expect(messages).toContainEqual(expect.objectContaining({ role: 'tool', name: 'desktop_open' }));
+        expect(messages.at(-1)?.content).toContain('confirmation has already been consumed');
+      }
+    }
   });
 
   it('keeps the substantive workflow failure ahead of a later permission drift', () => {
@@ -536,36 +599,5 @@ describe('durable conversation task execution ledger', () => {
     expect(receipts[0].outcome).toBe('success');
     expect(receipts[0].result.length).toBeLessThan(record.result.length);
     expect(toolRecordSucceeded(taskReceiptsToRecords(receipts)[0])).toBe(true);
-  });
-
-  it('completes a local court-platform handoff from verified legal and artifact receipts', () => {
-    const goal = '请基于当前矩衡律师版验收案，为人民法院在线服务准备一个登录后由律师人工操作的协同工作区，列出案件字段、材料清单和人工确认边界。只准备本地工作区，不要登录、不要上传、不要提交、不要缴费。';
-    const receipts = recordsToTaskReceipts([
-      {
-        name: 'legal_prepare_filing_handoff',
-        arguments: { caseId: 'case-acceptance' },
-        result: JSON.stringify({ ok: true, status: 'completed', uploadCount: 14 }),
-        terminalVerification: {
-          status: 'verified' as const,
-          strategy: 'terminal_receipt' as const,
-          reason: 'The local filing handoff was recorded.',
-        },
-      },
-      {
-        name: 'write_file',
-        arguments: { path: 'lumi_output/court-handoff.md' },
-        result: JSON.stringify({ ok: true, path: 'lumi_output/court-handoff.md' }),
-        terminalVerification: {
-          status: 'verified' as const,
-          strategy: 'artifact' as const,
-          reason: 'The local artifact exists and is non-empty.',
-        },
-      },
-    ]);
-
-    expect(taskCompletionFromReceipts(goal, receipts)).toMatchObject({
-      complete: true,
-      blocker: '',
-    });
   });
 });

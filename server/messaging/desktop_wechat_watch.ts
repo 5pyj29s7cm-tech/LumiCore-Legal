@@ -1,3 +1,4 @@
+import { type ProviderGetters as SharedProviderGetters, providerGetterArguments } from "../llm/provider_getters";
 import fs from 'fs';
 import path from 'path';
 import { createHash, randomUUID } from 'crypto';
@@ -9,7 +10,7 @@ import { pushNotification } from '../routes/notifications';
 import { toolRegistry } from '../tools/registry';
 import { executeToolCallOrThrow } from '../tools/execution_engine';
 import type { ToolContext } from '../tools/types';
-import { DESKTOP_WECHAT_WATCH_MESSAGES } from '../regions/packs/cn/desktop_wechat_watch_messages';
+import { DESKTOP_WECHAT_WATCH_MESSAGES } from "../regions/messages/desktop_wechat_watch_messages";
 
 export type DesktopWechatWatchEventStatus =
   | 'detected'
@@ -83,20 +84,7 @@ interface DesktopWechatWatchStore {
   events: DesktopWechatWatchEvent[];
 }
 
-interface DesktopWechatWatchLlmGetters {
-  getDeepSeek: () => any;
-  getGemini: () => any;
-  getOpenAI?: () => any;
-  getAnthropic?: () => any;
-  getQwen?: () => any;
-  getOllama?: () => any;
-  getLmStudio?: () => any;
-  getArk?: () => any;
-  getXiaomi?: () => any;
-  getKimi?: () => any;
-  getGlm?: () => any;
-  getRelay?: () => any;
-}
+type DesktopWechatWatchLlmGetters = SharedProviderGetters;
 
 interface DesktopWechatWatchDependencies {
   io: SocketIOServer;
@@ -798,18 +786,7 @@ export class DesktopWechatWatchService {
         [{ role: 'user', content: prompt }],
         [],
         { ...getUserPreferredLLMConfig(userId, { maxTokens: 500, domain: 'personal' }), signal },
-        dependencies.llmGetters.getDeepSeek,
-        dependencies.llmGetters.getGemini,
-        dependencies.llmGetters.getOpenAI,
-        dependencies.llmGetters.getAnthropic,
-        dependencies.llmGetters.getQwen,
-        dependencies.llmGetters.getOllama,
-        dependencies.llmGetters.getLmStudio,
-        dependencies.llmGetters.getArk,
-        dependencies.llmGetters.getXiaomi,
-        dependencies.llmGetters.getKimi,
-        dependencies.llmGetters.getGlm,
-        dependencies.llmGetters.getRelay,
+        ...providerGetterArguments(dependencies.llmGetters),
       );
       signal?.throwIfAborted();
       const parsed = parseJsonObject(String(result.text || ''));

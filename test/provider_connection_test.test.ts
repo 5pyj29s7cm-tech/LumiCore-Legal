@@ -2,6 +2,20 @@ import { describe, expect, it, vi } from 'vitest';
 import { testLLMProviderConnection, testVisionProviderConnection } from '../server/routes/system_routes';
 
 describe('provider live connection test', () => {
+  it.each([
+    ['qwen', 'qwen-plus', 'getQwen', { enable_thinking: false }],
+    ['relay', 'aliyun/qwen-plus', 'getRelay', { enable_thinking: false }],
+    ['kimi', 'kimi-k2.5', 'getKimi', { thinking: { type: 'disabled' } }],
+    ['relay', 'aliyun/kimi-k3', 'getRelay', { thinking: { type: 'disabled' } }],
+    ['relay', 'aliyun/deepseek-v4-flash', 'getRelay', { thinking: { type: 'disabled' } }],
+  ] as const)('sends the requested non-thinking mode to %s/%s', async (provider, model, getter, expected) => {
+    const create = vi.fn().mockResolvedValue({ choices: [{ message: { content: 'OK' } }] });
+    await testLLMProviderConnection(provider, model, {
+      [getter]: () => ({ chat: { completions: { create } } }),
+    });
+    expect(create).toHaveBeenCalledOnce();
+    expect(create.mock.calls[0][0]).toMatchObject(expected);
+  });
   it('performs a real minimal chat-completions call through the configured client', async () => {
     const create = vi.fn().mockResolvedValue({ choices: [{ message: { content: 'OK' } }] });
     const result = await testLLMProviderConnection('openai', 'gpt-test-model', {
@@ -11,7 +25,14 @@ describe('provider live connection test', () => {
     expect(result.ok).toBe(true);
     expect(result.provider).toBe('openai');
     expect(create).toHaveBeenCalledOnce();
-    expect(create.mock.calls[0][0]).toMatchObject({ model: 'gpt-test-model', max_tokens: 8 });
+    expect(create.mock.calls[0][0]).toMatchObject({ model: 'gpt-test-model', max_tokens: 64 });
+  });
+
+  it('rejects an HTTP-successful response containing no usable answer', async () => {
+    const create = vi.fn().mockResolvedValue({ choices: [{ message: { content: '', reasoning_content: 'Thinking only' } }] });
+    await expect(testLLMProviderConnection('openai', 'gpt-test-model', {
+      getOpenAI: () => ({ chat: { completions: { create } } }),
+    })).rejects.toThrow('empty response');
   });
 
   it('rejects configured-looking providers that have no runtime client', async () => {

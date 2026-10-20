@@ -1,5 +1,8 @@
+import { LEGAL_BATCH_TOOL_TIMEOUT_MS, LEGAL_BID_TOOL_TIMEOUT_MS, LEGAL_CONTRACT_TOOL_TIMEOUT_MS, LEGAL_REASONING_TOOL_TIMEOUT_MS } from '../legal/budgets';
+import { prepareToolExecutionFence } from './tool_execution_fence';
+export { executionIdempotencyKey, externalCommitInputDigest, resetExternalCommitRuntimeCacheForTests } from './tool_execution_fence';
+import { cloneDatabaseValue } from '../db/snapshot_changes';
 import { isStrictPrivacy, requireNotStrict } from '../config/privacy';
-import { isDefiniteOfficialImageRejection } from '../llm/official_api';
 import {
   CapabilityAdapterContract,
   CapabilityLane,
@@ -25,22 +28,16 @@ import {
   projectToolDeclarationForRouting,
   type CapabilityRoutingProjection,
 } from './capability_projection';
-import crypto from 'node:crypto';
-import { getJwtSecret } from '../config/local_identity';
 import { beginToolMetric, recordToolRetry } from '../runtime/tool_metrics';
-import {
-  claimExternalCommitAttempt,
-  settleExternalCommitAttempt,
-} from './external_commit_journal';
+import { decodeToolResult } from './result_envelope';
+import { verifyCapabilityReceipt } from './capability_verification';
+import { buildToolExecutionEnvelope } from './execution_envelope';
 import {
   adapterFailureIsTransient,
   beforeAdapterExecution,
-  cancelAdapterExecutionPermit,
   getAdapterRetryPolicy,
-  recordAdapterExecutionFailure,
-  recordAdapterExecutionSuccess,
 } from './adapter_resilience';
-import { readDB } from '../../db_layer';
+import { readDatabaseTables } from '../../db_layer';
 import {
   isRemoteRestrictedExecution,
   isRemoteRestrictedToolAllowed,
@@ -62,29 +59,6 @@ export type { CapabilityRoutingProjection };
 
 export type EffectiveSecurity = { level: SecurityLevel; reason: string };
 
-type ExternalCommitAttempt = {
-  state: 'preparing' | 'running' | 'verified' | 'unknown';
-  ready?: Promise<void>;
-  promise?: Promise<string>;
-  result?: string;
-  expiresAt: number;
-};
-
-const externalCommitAttempts = new Map<string, ExternalCommitAttempt>();
-
-type SideEffectAttempt = {
-  state: 'running' | 'verified' | 'unknown';
-  inputDigest: string;
-  promise?: Promise<string>;
-  result?: string;
-  expiresAt: number;
-};
-
-// Non-external mutations do not have the durable provider journal, but an
-// explicit caller idempotency key still owns an in-process single-flight fence.
-// This prevents timeout/cancellation from creating an overlapping resend.
-const sideEffectAttempts = new Map<string, SideEffectAttempt>();
-
 type PermissionExecutionContext = ToolContext & {
   authenticated?: boolean;
   authRole?: string;
@@ -99,7 +73,7 @@ function isAnonymousToolIdentity(userId: unknown): boolean {
 
 function isRegisteredAdmin(userId: string): boolean {
   try {
-    const user = (readDB().users || []).find((candidate: any) => candidate?.uid === userId);
+    const user = (readDatabaseTables(["users"]).users || []).find((candidate: any) => candidate?.uid === userId);
     return user?.role === 'admin';
   } catch {
     return false;
@@ -230,116 +204,6 @@ function assertToolPermission(tool: ToolDefinition, context?: ToolContext): void
   throw new Error(`Tool "${tool.name}" requires trusted system permission.`);
 }
 
-/** Test-only process restart simulation; durable journal rows are preserved. */
-export function resetExternalCommitRuntimeCacheForTests(): void {
-  externalCommitAttempts.clear();
-  sideEffectAttempts.clear();
-}
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.keys(value as Record<string, unknown>).sort().map(key => [
-    key,
-    stableValue((value as Record<string, unknown>)[key]),
-  ]));
-}
-
-export function executionIdempotencyKey(name: string, args: Record<string, any>, context?: ToolContext): string {
-  if (context?.idempotencyKey) return context.idempotencyKey;
-  return crypto.createHash('sha256').update(JSON.stringify(stableValue({
-    userId: context?.userId || '',
-    taskId: context?.taskId || '',
-    actionIntent: context?.actionIntent || '',
-    name,
-    args,
-  }))).digest('hex');
-}
-
-function localSideEffectFenceKey(name: string, context?: ToolContext): string {
-  const idempotencyKey = String(context?.idempotencyKey || '').trim();
-  if (!idempotencyKey) return '';
-  const userId = String(context?.userId || '').trim() || 'anonymous';
-  const domain = String(context?.domain || '').trim() || 'personal';
-  const orgId = String(context?.orgId || '').trim();
-  return JSON.stringify([name, userId, domain, orgId, idempotencyKey]);
-}
-
-export function externalCommitInputDigest(name: string, args: Record<string, any>): string {
-  return crypto.createHmac('sha256', getJwtSecret())
-    .update('lumi.external-commit.input.v1\0')
-    .update(JSON.stringify(stableValue({ name, args })))
-    .digest('hex');
-}
-
-const EXTERNAL_REPLAY_SECRET_KEY_RE = /password|passphrase|passkey|secret|token|api.?key|credential|authorization|cookie|otp|captcha|verification.?code|pin/i;
-const EXTERNAL_REPLAY_SECRET_VALUE_RE = /(?:bearer\s+[a-z0-9._~+/=-]{8,}|\bsk-[a-z0-9_-]{12,}\b)/i;
-
-function sanitizeExternalCommitReplayValue(value: unknown, depth = 0): unknown {
-  if (depth > 4) return '[nested data omitted]';
-  if (typeof value === 'string') {
-    if (EXTERNAL_REPLAY_SECRET_VALUE_RE.test(value)) return '[redacted]';
-    return value.slice(0, 500);
-  }
-  if (Array.isArray(value)) return value.slice(0, 30).map(item => sanitizeExternalCommitReplayValue(item, depth + 1));
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .slice(0, 40)
-      .map(([key, item]) => [
-        key,
-        EXTERNAL_REPLAY_SECRET_KEY_RE.test(key)
-          ? '[redacted]'
-          : sanitizeExternalCommitReplayValue(item, depth + 1),
-      ]),
-  );
-}
-
-function persistedExternalCommitReplay(result: string, idempotencyKey: string): string {
-  const safeKeys = /^(?:sent|submitted|published|verified|verificationStatus|verificationMethod|verificationConfidence|verificationReason|providerReceipt|messageId|submissionId|publicationId|paymentId|signatureId|status|targetMatched|conversationVerified|contactVerified|sendAttempted|sessionId|taskId|questionDigest|counts|routePriority|reconciled|completedAt|timestamp)$/i;
-  try {
-    const parsed = JSON.parse(result || '{}');
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const safe = Object.fromEntries(
-        Object.entries(parsed)
-          .filter(([key]) => safeKeys.test(key))
-          .slice(0, 40)
-          .map(([key, value]) => [key, sanitizeExternalCommitReplayValue(value)]),
-      );
-      const replay = JSON.stringify({
-        ...safe,
-        verified: true,
-        verificationStatus: 'verified',
-        deduplicated: true,
-        idempotencyKey,
-      });
-      if (replay.length <= 8_192) return replay;
-      return JSON.stringify({
-        verified: true,
-        verificationStatus: 'verified',
-        deduplicated: true,
-        receiptTruncated: true,
-        idempotencyKey,
-      });
-    }
-  } catch {}
-  return JSON.stringify({
-    verified: true,
-    verificationStatus: 'verified',
-    deduplicated: true,
-    idempotencyKey,
-    resultDigest: crypto.createHash('sha256').update(String(result || '')).digest('hex'),
-  });
-}
-
-function externalCommitUnknownError(name: string, detail: string): Error {
-  const error = new Error(
-    `Tool "${name}" external commit outcome is unknown and automatic resend was stopped. ${detail}`.trim(),
-  ) as Error & { externalCommitUnknown?: boolean };
-  error.externalCommitUnknown = true;
-  return error;
-}
-
 export class ToolHandlerSettledAfterTimeoutError extends Error {
   readonly toolExecutionTimedOut = true;
   readonly handlerSettlement = 'rejected' as const;
@@ -355,26 +219,6 @@ export class ToolHandlerSettledAfterTimeoutError extends Error {
   }
 }
 
-function externalResultIsVerified(result: string): boolean {
-  try {
-    const payload = JSON.parse(result || '{}');
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
-    if (payload.sent === false || payload.submitted === false || payload.published === false) return false;
-    if (Object.prototype.hasOwnProperty.call(payload, 'verificationStatus')) {
-      return payload.verificationStatus === 'verified';
-    }
-    if (Object.prototype.hasOwnProperty.call(payload, 'verified')) {
-      return payload.verified === true;
-    }
-  } catch {
-    // External side effects must never become durable successes from prose or
-    // malformed provider output. Only an explicit verified receipt may close
-    // the idempotency fence; every other result remains unknown and blocks a
-    // resend until host-owned reconciliation can prove the outcome.
-  }
-  return false;
-}
-
 /**
  * Canonical tool-name visibility rule shared by model declarations, routed
  * workflows and the executor. Security level/confirmation is resolved later;
@@ -388,19 +232,29 @@ export function isToolNameAllowedByPolicy(toolName: string, policy?: ToolPolicy)
   return allowed.includes('*') || allowed.includes(toolName);
 }
 
-export function getToolExecutionTimeoutMs(name: string): number {
+export function getToolExecutionTimeoutMs(name: string, args?: Record<string, any>): number {
   if (name === 'external_cli_run') return 16 * 60_000;
   if (name === 'external_cli_status') return 60_000;
   if (name === 'computer_use') return 10 * 60_000;
-  if (name === 'generate_video') return 15 * 60_000;
+  if (name === 'generate_video') {
+    const seconds = Number(args?.duration);
+    const clips = Number.isFinite(seconds) ? Math.ceil(Math.min(120, Math.max(1, seconds)) / 5) : 1;
+    return Math.max(15, clips * 2 + 5) * 60_000;
+  }
   if (name === 'generate_image' || name === 'generate_image_dalle' || name === 'ai_edit_image') return 3 * 60_000;
   if (/^model_configuration_(?:update|test)$/i.test(name)) return 2 * 60_000;
   if (name === 'transcribe_audio_to_text_file') return 60 * 60_000;
+  if (name === 'chat_song_draft_dialogue') return 180_000;
+  if (name === 'chat_song_render') return 660_000;
   if (/^mcp_cad-drafting_autocad_playback_file$/i.test(name)) return 30 * 60_000;
   if (name === 'cad_draw_floorplan_in_autocad') return 45 * 60_000;
   if (/^cad_prepare_autocad_operations$/i.test(name)) return 5 * 60_000;
   if (/^(web_login_|url_fetch_logged_in)/i.test(name)) return 5 * 60_000;
   if (name === 'legal_refresh_authoritative_sources') return 3 * 60_000;
+  if (name === 'legal_generate_bid' || name === 'legal_generate_litigation_packet') return LEGAL_BID_TOOL_TIMEOUT_MS;
+  if (name === 'legal_draft_contract') return LEGAL_CONTRACT_TOOL_TIMEOUT_MS;
+  if (['legal_case_reasoning_matrix', 'legal_case_strategy', 'legal_generate_argument_or_opinion'].includes(name)) return LEGAL_REASONING_TOOL_TIMEOUT_MS;
+  if (name.startsWith('legal_')) return LEGAL_BATCH_TOOL_TIMEOUT_MS;
   if (name === 'self_improvement_stage_patch' || name === 'self_improvement_activate') return 60 * 60_000;
   if (/^(wechat_|desktop_ai_|external_ai_)/i.test(name)) return 3 * 60_000;
   if (/^(work_takeover_|capability_gap_autofix|generate_skill|install_skill)/i.test(name)) return 10 * 60_000;
@@ -632,7 +486,7 @@ export class ToolRegistry {
     if (!tool) throw new Error(`Tool "${name}" not found in registry`);
     assertToolPermission(tool, context);
     const bound = tool.serverOwnedArgumentBinder
-      ? tool.serverOwnedArgumentBinder(structuredClone(args || {}), context)
+      ? tool.serverOwnedArgumentBinder(cloneDatabaseValue(args || {}), context)
       : args || {};
     if (!bound || typeof bound !== 'object' || Array.isArray(bound)) {
       throw new Error(`Tool "${name}" produced invalid server-owned arguments.`);
@@ -690,7 +544,7 @@ export class ToolRegistry {
 
   /**
    * Generic lexical capability discovery. Domain vocabulary lives in each
-   * tool description; the orchestrator does not need a branch per tool.
+   * tool description; LumiCore does not need a branch per tool.
    */
   findRelevant(text: string, options?: {
     limit?: number;
@@ -767,8 +621,8 @@ export class ToolRegistry {
   private buildCapabilityManifestEntry(
     tool: ToolDefinition,
     policy?: ToolPolicy,
+    effective: EffectiveSecurity = this.resolveSecurity(tool.name, policy),
   ): CapabilityManifestEntry {
-    const effective = this.resolveSecurity(tool.name, policy);
     const source = tool.capability?.source || 'builtin';
     const provider = tool.capability?.provider;
     const family = String(tool.capability?.family || provider || inferCapabilityFamily(tool.name));
@@ -1023,11 +877,16 @@ export class ToolRegistry {
     return { level: builtIn, reason: 'tool default' };
   }
 
-  async execute(name: string, args: Record<string, any>, context?: ToolContext): Promise<string> {
+  async execute(
+    name: string, args: Record<string, any>, context?: ToolContext,
+    onTerminalMetric?: (finish: ReturnType<typeof beginToolMetric>) => void,
+  ): Promise<string> {
+    // Capture transport-owned fields; signal objects and lifecycle callbacks stay live.
+    context = context ? { ...context } : undefined;
     // Tools can invoke browsers, MCP servers and child processes. Side-effect
     // labels alone cannot prove that their execution stays on this computer.
     requireNotStrict('Automatic tool execution');
-    const finishMetric = beginToolMetric(name);
+    let finishMetric = beginToolMetric(name);
     const tool = this.get(name);
     if (!tool) {
       finishMetric('failed');
@@ -1050,10 +909,10 @@ export class ToolRegistry {
       throw error;
     }
 
-    let executionArgs = args || {};
+    let executionArgs = cloneDatabaseValue(args || {});
     if (pinnedArgumentBinder) {
       try {
-        executionArgs = pinnedArgumentBinder(structuredClone(executionArgs), context);
+        executionArgs = pinnedArgumentBinder(executionArgs, context);
       } catch (error) {
         finishMetric('forbidden');
         throw error;
@@ -1069,7 +928,24 @@ export class ToolRegistry {
       throw new Error(`Tool "${name}" is forbidden: ${effective.reason}.`);
     }
 
-    const capability = this.buildCapabilityManifestEntry(tool, policy);
+    const capability = cloneDatabaseValue(this.buildCapabilityManifestEntry(tool, policy, effective));
+    const externalCommit = capability.sideEffects.some(effect => (
+      effect.type === 'external_communication' || effect.type === 'external_state_change'
+    ));
+    const hasSideEffect = capability.operation === 'mutate'
+      || capability.operation === 'create'
+      || capability.operation === 'communicate'
+      || capability.operation === 'unknown'
+      || capability.sideEffects.some(effect => ![
+        'local_read',
+        'network_read',
+        'none',
+      ].includes(effect.type));
+    if (context?.autonomous && externalCommit
+      && !(semanticToolName === 'desktop_ai_ask' && executionArgs.send === false)) {
+      finishMetric('forbidden');
+      throw new Error('Autonomous external commit blocked: an action-time immutable user confirmation is required.');
+    }
     const constitutional = evaluateActionConstitution(
       semanticToolName,
       executionArgs,
@@ -1101,7 +977,7 @@ export class ToolRegistry {
       if (context?.userConfirmed === true) {
         userConfirmed = true;
       } else if (context?.requestConfirmation) {
-        const allowed = await context.requestConfirmation(name, executionArgs);
+        const allowed = await context.requestConfirmation(name, executionArgs, capability);
         if (!allowed) {
           finishMetric('waiting_confirmation');
           return `Tool "${name}" requires user confirmation and was not approved.`;
@@ -1125,220 +1001,29 @@ export class ToolRegistry {
     }
 
     // Wrap with timeouts to prevent hanging. Vision/CAD extraction needs more room than simple tools.
-    const timeoutMs = getToolExecutionTimeoutMs(semanticToolName);
-    const externalCommit = capability.sideEffects.some(effect => (
-      effect.type === 'external_communication' || effect.type === 'external_state_change'
-    ));
-    const hasSideEffect = capability.operation === 'mutate'
-      || capability.operation === 'create'
-      || capability.operation === 'communicate'
-      || capability.operation === 'unknown'
-      || capability.sideEffects.some(effect => ![
-        'local_read',
-        'network_read',
-        'none',
-      ].includes(effect.type));
-    const idempotencyKey = externalCommit ? executionIdempotencyKey(name, executionArgs, context) : '';
-    const sideEffectFenceKey = !externalCommit && hasSideEffect
-      ? localSideEffectFenceKey(name, context)
-      : '';
-    const sideEffectInputDigest = sideEffectFenceKey ? externalCommitInputDigest(name, executionArgs) : '';
-    const inputDigest = externalCommit ? externalCommitInputDigest(name, executionArgs) : '';
-    let claimToken = externalCommit ? crypto.randomUUID() : '';
-    let releasePreparation: (() => void) | null = null;
-    if (sideEffectFenceKey) {
-      let existing = sideEffectAttempts.get(sideEffectFenceKey);
-      if (existing?.expiresAt && existing.expiresAt <= Date.now() && !existing.promise) {
-        sideEffectAttempts.delete(sideEffectFenceKey);
-        existing = undefined;
-      }
-      if (existing && existing.inputDigest !== sideEffectInputDigest) {
-        cancelAdapterExecutionPermit(adapterPermit);
-        finishMetric('target_mismatch');
-        throw new Error(`Tool "${name}" target mismatch: this idempotency key is already bound to different input.`);
-      }
-      if (existing?.state === 'verified') {
-        cancelAdapterExecutionPermit(adapterPermit);
-        finishMetric('verified_success');
-        return existing.result || '';
-      }
-      if ((existing?.state === 'running' || existing?.state === 'unknown') && existing.promise) {
-        cancelAdapterExecutionPermit(adapterPermit);
-        try {
-          const result = await existing.promise;
-          finishMetric('verified_success');
-          return result;
-        } catch (error) {
-          finishMetric(existing.state === 'unknown' ? 'unknown_outcome' : 'failed');
-          throw error;
-        }
-      }
-      if (existing?.state === 'unknown') {
-        cancelAdapterExecutionPermit(adapterPermit);
-        finishMetric('unknown_outcome');
-        throw new Error(`Tool "${name}" has an unknown prior outcome for this idempotency key; automatic resend was stopped.`);
-      }
-    }
-    if (externalCommit) {
-      let existing = externalCommitAttempts.get(idempotencyKey);
-      // A pending handler owns the idempotency fence until its exact promise
-      // settles. TTL cleanup is only safe for terminal cache entries.
-      if (existing?.expiresAt && existing.expiresAt <= Date.now() && !existing.promise) {
-        externalCommitAttempts.delete(idempotencyKey);
-        existing = undefined;
-      } else if (existing?.state === 'preparing' && existing.ready) {
-        await existing.ready;
-        existing = externalCommitAttempts.get(idempotencyKey);
-      }
-      if (existing?.state === 'verified') {
-        cancelAdapterExecutionPermit(adapterPermit);
-        finishMetric('verified_success');
-        return existing.result || '';
-      } else if ((existing?.state === 'running' || existing?.state === 'unknown') && existing.promise) {
-        cancelAdapterExecutionPermit(adapterPermit);
-        try {
-          const result = await existing.promise;
-          finishMetric(externalResultIsVerified(result) ? 'verified_success' : 'unknown_outcome');
-          return result;
-        } catch (error) {
-          finishMetric(/unknown|timed?\s*out|timeout/i.test(String((error as any)?.message || error))
-            ? 'unknown_outcome'
-            : 'failed');
-          throw error;
-        }
-      } else if (existing?.state === 'unknown') {
-        cancelAdapterExecutionPermit(adapterPermit);
-        finishMetric('unknown_outcome');
-        throw new Error(`Tool "${name}" has an unknown prior outcome for this idempotency key; automatic resend was stopped.`);
-      }
-
-      let release!: () => void;
-      const ready = new Promise<void>(resolve => { release = resolve; });
-      releasePreparation = release;
-      externalCommitAttempts.set(idempotencyKey, {
-        state: 'preparing',
-        ready,
-        expiresAt: Date.now() + 24 * 60 * 60_000,
-      });
-
-      let claim;
+    const timeoutMs = getToolExecutionTimeoutMs(semanticToolName, executionArgs);
+    let metricDeferred = false;
+    if (!externalCommit && onTerminalMetric) {
       try {
-        const now = new Date().toISOString();
-        claim = await claimExternalCommitAttempt({
-          idempotencyKey,
-          taskId: String(context?.taskId || ''),
-          userId: String(context?.userId || ''),
-          toolName: name,
-          inputDigest,
-          state: 'not_started',
-          replayResult: '',
-          claimToken,
-          createdAt: now,
-          updatedAt: now,
-        });
-      } catch (error: any) {
-        externalCommitAttempts.delete(idempotencyKey);
-        cancelAdapterExecutionPermit(adapterPermit);
-        releasePreparation?.();
-        releasePreparation = null;
-        finishMetric('forbidden');
-        throw new Error(
-          `Tool "${name}" external commit was stopped before execution because the durable idempotency journal is unavailable: ${String(error?.message || error)}`,
-        );
-      }
-
-      if (!claim.claimed) {
-        const prior = claim.entry;
-        if (prior.toolName !== name || prior.inputDigest !== inputDigest) {
-          externalCommitAttempts.set(idempotencyKey, {
-            state: 'unknown',
-            expiresAt: Date.now() + 24 * 60 * 60_000,
-          });
-          releasePreparation?.();
-          releasePreparation = null;
-          cancelAdapterExecutionPermit(adapterPermit);
-          finishMetric('target_mismatch');
-          throw new Error(
-            `Tool "${name}" target mismatch: this idempotency key is already bound to different external commit input.`,
-          );
-        }
-        if (prior.state === 'verified') {
-          const replay = prior.replayResult || persistedExternalCommitReplay('', idempotencyKey);
-          externalCommitAttempts.set(idempotencyKey, {
-            state: 'verified',
-            result: replay,
-            expiresAt: Date.now() + 24 * 60 * 60_000,
-          });
-          releasePreparation?.();
-          releasePreparation = null;
-          cancelAdapterExecutionPermit(adapterPermit);
-          finishMetric('verified_success');
-          return replay;
-        }
-
-        if (prior.state === 'not_started') {
-          // A previous attempt durably proved that the adapter handler never
-          // started. Reuse the same claim identity and arm it only at the next
-          // handler-entry barrier.
-          claimToken = prior.claimToken;
-        } else {
-        let reconciled: string | null = null;
-        if (pinnedReconcileExternalCommit) {
-          let reconciliationTimeout: ReturnType<typeof setTimeout> | undefined;
-          try {
-            reconciled = await Promise.race([
-              pinnedReconcileExternalCommit(executionArgs, context, idempotencyKey),
-              new Promise<null>(resolve => {
-                reconciliationTimeout = setTimeout(() => resolve(null), 8_000);
-              }),
-            ]);
-          } catch {
-            reconciled = null;
-          } finally {
-            if (reconciliationTimeout) clearTimeout(reconciliationTimeout);
-          }
-        }
-        if (reconciled && externalResultIsVerified(reconciled)) {
-          const replay = persistedExternalCommitReplay(reconciled, idempotencyKey);
-          await settleExternalCommitAttempt({
-            idempotencyKey,
-            claimToken: prior.claimToken,
-            state: 'verified',
-            replayResult: replay,
-            updatedAt: new Date().toISOString(),
-            recoverExisting: true,
-          }).catch(() => false);
-          externalCommitAttempts.set(idempotencyKey, {
-            state: 'verified',
-            result: reconciled,
-            expiresAt: Date.now() + 24 * 60 * 60_000,
-          });
-          releasePreparation?.();
-          releasePreparation = null;
-          recordAdapterExecutionSuccess(adapterPermit);
-          finishMetric('verified_success');
-          return reconciled;
-        }
-        await settleExternalCommitAttempt({
-          idempotencyKey,
-          claimToken: prior.claimToken,
-          state: 'unknown',
-          replayResult: '',
-          updatedAt: new Date().toISOString(),
-          recoverExisting: true,
-        }).catch(() => false);
-        externalCommitAttempts.set(idempotencyKey, {
-          state: 'unknown',
-          expiresAt: Date.now() + 24 * 60 * 60_000,
-        });
-        releasePreparation?.();
-        releasePreparation = null;
-        cancelAdapterExecutionPermit(adapterPermit);
-        finishMetric('unknown_outcome');
-        throw externalCommitUnknownError(name, 'A prior running or unknown attempt could not be verified by read-only reconciliation.');
-        }
-      }
+        onTerminalMetric(finishMetric);
+        metricDeferred = true;
+        finishMetric = () => {};
+      } catch { /* A metric observer cannot change tool execution. */ }
     }
+    const finishResultMetric = (result: string) => {
+      if (metricDeferred) return;
+      const decoded = decodeToolResult(result);
+      const record: ToolExecutionRecord = {
+        name, arguments: executionArgs, result: decoded.content, receipt: decoded.receipt, capability,
+      };
+      record.terminalVerification = verifyCapabilityReceipt(capability, record);
+      finishMetric(buildToolExecutionEnvelope(record).status);
+    };
+    const fence = await prepareToolExecutionFence({
+      name, executionArgs, context, externalCommit, hasSideEffect, adapterPermit, finishMetric, finishResultMetric,
+      pinnedLocalIdempotencyReplay, pinnedReconcileExternalCommit,
+    });
+    if ('replay' in fence) return fence.replay;
     let timedOut = false;
     const executionContextBase: ToolContext = {
       ...(context || {}),
@@ -1352,6 +1037,7 @@ export class ToolRegistry {
       for (let attempt = 1; attempt <= retryPolicy.maxAttempts; attempt += 1) {
         timedOut = false;
         let attemptTimedOut = false;
+        let attemptHandlerEntered = false;
         let attemptTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
         let timeoutJournalPersistence: Promise<boolean> | null = null;
         const attemptAbortController = new AbortController();
@@ -1372,57 +1058,32 @@ export class ToolRegistry {
             || context?.isCancelled?.() === true
           ),
         };
+        const assertHandlerCurrent = () => {
+          executionContext.executionSignal?.throwIfAborted();
+          if (executionContext.isCancelled?.()) {
+            throw new DOMException(
+              'Tool execution cancelled before handler entry.',
+              'AbortError',
+            );
+          }
+        };
         try {
+          assertHandlerCurrent();
           try {
-            await executionContext.onAdapterStart?.({ name, attempt });
+            await executionContext.onAdapterStart?.({
+              name, attempt, arguments: cloneDatabaseValue(executionArgs), capability: cloneDatabaseValue(capability),
+            });
           } catch (error) {
             throw brandToolLifecyclePersistenceFailure(error);
           }
-          if (externalCommit) {
-            const armed = await settleExternalCommitAttempt({
-              idempotencyKey,
-              claimToken,
-              state: 'running',
-              replayResult: '',
-              updatedAt: new Date().toISOString(),
-            });
-            if (!armed) {
-              throw new Error(`Tool "${name}" external commit was stopped because its durable handler-entry barrier could not be armed.`);
-            }
-          }
-          handlerEntered = true;
+          assertHandlerCurrent();
+          await fence.beforeHandler();
           attemptTimeoutHandle = setTimeout(() => {
             attemptTimedOut = true;
             timedOut = true;
             const timeoutError = new Error(`Tool "${name}" timed out after ${timeoutMs / 1000}s`);
             if (!attemptAbortController.signal.aborted) attemptAbortController.abort(timeoutError);
-            if (externalCommit) {
-              const active = externalCommitAttempts.get(idempotencyKey);
-              if (active?.promise) {
-                externalCommitAttempts.set(idempotencyKey, {
-                  ...active,
-                  state: 'unknown',
-                  expiresAt: Date.now() + 24 * 60 * 60_000,
-                });
-              }
-              timeoutJournalPersistence = settleExternalCommitAttempt({
-                idempotencyKey,
-                claimToken,
-                state: 'unknown',
-                replayResult: '',
-                updatedAt: new Date().toISOString(),
-              }).catch(() => false);
-            }
-            if (sideEffectFenceKey) {
-              const active = sideEffectAttempts.get(sideEffectFenceKey);
-              if (active?.promise) {
-                sideEffectAttempts.set(sideEffectFenceKey, {
-                  ...active,
-                  state: 'unknown',
-                  expiresAt: Date.now() + 24 * 60 * 60_000,
-                });
-              }
-            }
+            timeoutJournalPersistence = fence.onTimeout();
           }, timeoutMs);
           attemptTimeoutHandle.unref?.();
 
@@ -1432,7 +1093,12 @@ export class ToolRegistry {
           try {
             // Normalize synchronous throws while retaining the exact pinned
             // handler promise as the sole owner of this execution attempt.
-            handlerResult = await Promise.resolve().then(() => pinnedHandler(executionArgs, executionContext));
+            handlerResult = await Promise.resolve().then(() => {
+              assertHandlerCurrent();
+              handlerEntered = true;
+              attemptHandlerEntered = true;
+              return pinnedHandler(executionArgs, executionContext);
+            });
           } catch (error) {
             handlerRejected = true;
             handlerFailure = error;
@@ -1442,7 +1108,7 @@ export class ToolRegistry {
           }
 
           try {
-            await executionContext.onAdapterSettlement?.({
+            if (attemptHandlerEntered) await executionContext.onAdapterSettlement?.({
               name,
               attempt,
               status: handlerRejected ? 'rejected' : 'fulfilled',
@@ -1464,6 +1130,7 @@ export class ToolRegistry {
           const canRetry = attempt < retryPolicy.maxAttempts
             && !isToolLifecyclePersistenceFailure(error)
             && adapterFailureIsTransient(error)
+            && upstreamSignal?.aborted !== true
             && context?.isCancelled?.() !== true;
           if (!canRetry) throw error;
           recordToolRetry(name);
@@ -1476,192 +1143,10 @@ export class ToolRegistry {
       throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Tool execution failed.'));
     })();
 
-    const finalizeExecution = async (): Promise<string> => {
-      try {
-        const result = await execution;
-        if (externalCommit) {
-          if (externalResultIsVerified(result)) {
-            const replayResult = persistedExternalCommitReplay(result, idempotencyKey);
-            const settled = await settleExternalCommitAttempt({
-              idempotencyKey,
-              claimToken,
-              state: 'verified',
-              replayResult,
-              updatedAt: new Date().toISOString(),
-            }).catch(() => false);
-            if (!settled) {
-              externalCommitAttempts.set(idempotencyKey, {
-                state: 'unknown',
-                expiresAt: Date.now() + 24 * 60 * 60_000,
-              });
-              // The adapter handler returned a verified receipt. A later local
-              // journal failure must keep the external outcome unknown and
-              // block replay, but it is not evidence that the adapter itself
-              // is unhealthy.
-              recordAdapterExecutionSuccess(adapterPermit);
-              finishMetric('unknown_outcome');
-              throw externalCommitUnknownError(
-                name,
-                'The handler settled successfully, but its verified terminal state could not be persisted.',
-              );
-            }
-            externalCommitAttempts.set(idempotencyKey, {
-              state: 'verified',
-              result,
-              expiresAt: Date.now() + 24 * 60 * 60_000,
-            });
-            recordAdapterExecutionSuccess(adapterPermit);
-          } else {
-            await settleExternalCommitAttempt({
-              idempotencyKey,
-              claimToken,
-              state: 'unknown',
-              replayResult: '',
-              updatedAt: new Date().toISOString(),
-            }).catch(() => false);
-            externalCommitAttempts.set(idempotencyKey, {
-              state: 'unknown',
-              expiresAt: Date.now() + 24 * 60 * 60_000,
-            });
-            // The handler fulfilled, so the adapter transport is healthy even
-            // though the business outcome is not sufficiently verified. Keep
-            // the durable attempt unknown (and therefore non-replayable), but
-            // do not turn missing provider evidence into an adapter outage.
-            recordAdapterExecutionSuccess(adapterPermit);
-            finishMetric('unknown_outcome');
-            return result;
-          }
-        }
-        if (sideEffectFenceKey) {
-          if (pinnedLocalIdempotencyReplay === 'durable_handler') {
-            sideEffectAttempts.delete(sideEffectFenceKey);
-          } else {
-            sideEffectAttempts.set(sideEffectFenceKey, {
-              state: 'verified',
-              inputDigest: sideEffectInputDigest,
-              result,
-              expiresAt: Date.now() + 24 * 60 * 60_000,
-            });
-          }
-        }
-        if (!externalCommit) recordAdapterExecutionSuccess(adapterPermit);
-        finishMetric('verified_success');
-        return result;
-      } catch (error: any) {
-        if (error?.externalCommitUnknown === true) throw error;
-        if (externalCommit) {
-          if (!handlerEntered || (['generate_image', 'ai_edit_image'].includes(name) && isDefiniteOfficialImageRejection(error))) {
-            await settleExternalCommitAttempt({
-              idempotencyKey,
-              claimToken,
-              state: 'not_started',
-              replayResult: '',
-              updatedAt: new Date().toISOString(),
-            }).catch(() => false);
-            externalCommitAttempts.delete(idempotencyKey);
-            cancelAdapterExecutionPermit(adapterPermit);
-            finishMetric('failed');
-            throw error;
-          }
-          let reconciled: string | null = null;
-          if (pinnedReconcileExternalCommit && !isToolLifecyclePersistenceFailure(error)) {
-            let reconciliationTimeout: ReturnType<typeof setTimeout> | undefined;
-            try {
-              reconciled = await Promise.race([
-                pinnedReconcileExternalCommit(executionArgs, context, idempotencyKey),
-                new Promise<null>(resolve => {
-                  reconciliationTimeout = setTimeout(() => resolve(null), 8_000);
-                }),
-              ]);
-            } catch {
-              // A failed read-only reconciliation leaves the outcome unknown.
-              reconciled = null;
-            } finally {
-              if (reconciliationTimeout) clearTimeout(reconciliationTimeout);
-            }
-          }
-          if (reconciled && externalResultIsVerified(reconciled)) {
-            const replayResult = persistedExternalCommitReplay(reconciled, idempotencyKey);
-            const settled = await settleExternalCommitAttempt({
-              idempotencyKey,
-              claimToken,
-              state: 'verified',
-              replayResult,
-              updatedAt: new Date().toISOString(),
-            }).catch(() => false);
-            if (settled) {
-              externalCommitAttempts.set(idempotencyKey, {
-                state: 'verified',
-                result: reconciled,
-                expiresAt: Date.now() + 24 * 60 * 60_000,
-              });
-              recordAdapterExecutionSuccess(adapterPermit);
-              finishMetric('verified_success');
-              return reconciled;
-            }
-          }
-          await settleExternalCommitAttempt({
-            idempotencyKey,
-            claimToken,
-            state: 'unknown',
-            replayResult: '',
-            updatedAt: new Date().toISOString(),
-          }).catch(() => false);
-          externalCommitAttempts.set(idempotencyKey, {
-            state: 'unknown',
-            expiresAt: Date.now() + 24 * 60 * 60_000,
-          });
-          // Only transient adapter/transport failures contribute to the
-          // resilience circuit. Business rejection and local lifecycle errors
-          // still leave the external commit unknown, but must not poison the
-          // shared adapter family for later read-only work.
-          recordAdapterExecutionFailure(adapterPermit, error);
-          finishMetric('unknown_outcome');
-          if (isToolLifecyclePersistenceFailure(error)) throw error;
-          throw externalCommitUnknownError(
-            name,
-            `${timedOut ? 'The call timed out.' : 'The handler failed after the durable claim.'} ${String(error?.message || error || '')}`,
-          );
-        } else {
-          if (sideEffectFenceKey) {
-            if (handlerEntered) {
-              sideEffectAttempts.set(sideEffectFenceKey, {
-                state: 'unknown',
-                inputDigest: sideEffectInputDigest,
-                expiresAt: Date.now() + 24 * 60 * 60_000,
-              });
-            } else {
-              sideEffectAttempts.delete(sideEffectFenceKey);
-            }
-          }
-          recordAdapterExecutionFailure(adapterPermit, error);
-          finishMetric(timedOut ? 'timeout' : 'failed');
-        }
-        throw error;
-      } finally {
-        releasePreparation?.();
-      }
-    };
-
-    const finalizedExecution = finalizeExecution();
-    if (externalCommit) {
-      externalCommitAttempts.set(idempotencyKey, {
-        state: 'running',
-        promise: finalizedExecution,
-        expiresAt: Date.now() + 24 * 60 * 60_000,
-      });
-      releasePreparation?.();
-      releasePreparation = null;
-    }
-    if (sideEffectFenceKey) {
-      sideEffectAttempts.set(sideEffectFenceKey, {
-        state: 'running',
-        inputDigest: sideEffectInputDigest,
-        promise: finalizedExecution,
-        expiresAt: Date.now() + 24 * 60 * 60_000,
-      });
-    }
-    return await finalizedExecution;
+    return await fence.finalize(execution, {
+      get handlerEntered() { return handlerEntered; },
+      get timedOut() { return timedOut; },
+    });
   }
 }
 

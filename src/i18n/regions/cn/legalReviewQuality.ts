@@ -1,5 +1,7 @@
 export const legalReviewQualityCopy = {
   zh: {
+    historyTitle: '保存的运行结果（只读）',
+    historyHint: '保留当时的结果与状态，不代表本次执行完成、已入案或已经律师核准。',
     coverage: '全文分段审查，报告会标明未完成段落；请一并上传附件。',
     password: 'PDF 打开密码（仅本次使用）',
     retry: '重试读取原文件',
@@ -10,6 +12,8 @@ export const legalReviewQualityCopy = {
     partial: '部分文件上传失败，请重新选择失败文件；本次未完成全文导入。',
   },
   en: {
+    historyTitle: 'Stored run result (read only)',
+    historyHint: 'Original result and status; this does not mark a new execution, case archive, or lawyer approval.',
     coverage: 'Full text is reviewed in sections; unfinished sections are reported. Include attachments.',
     password: 'PDF open password (this request only)',
     retry: 'Retry reading original files',

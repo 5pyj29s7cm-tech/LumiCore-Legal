@@ -1,26 +1,15 @@
-﻿import { readDB } from '../../db_layer';
-
-const watchers = new Map<string, Set<AbortController>>();
-const keyFor = (userId: string, avatarId: string) => JSON.stringify([userId, avatarId]);
-
-/** Called synchronously when a private source is removed or its avatar archived. */
-export function invalidateMemoryAvatarAuthorization(userId: string, avatarId: string): void {
-  const key = keyFor(userId, avatarId);
-  const active = watchers.get(key);
-  watchers.delete(key);
-  for (const controller of active || []) {
-    controller.abort(new DOMException('Memory avatar or its sources changed.', 'AbortError'));
-  }
-}
+import { readMemoryAvatarAuthorization } from './store';
+import { watchers, keyFor } from './authorization_watchers';
+export { invalidateMemoryAvatarAuthorization } from './authorization_watchers';
 
 export function captureMemoryAvatarAuthorization(userId: string, avatarId: string) {
-  const row = () => (readDB().memoryAvatars || []).find((item: any) => item.id === avatarId && item.userId === userId);
+  const row = () => readMemoryAvatarAuthorization(userId, avatarId);
   const initial = row();
-  const generation = Number(initial?.payload?.sourceGeneration) || 0;
+  const generation = initial?.sourceGeneration || 0;
   let revoked = !initial || initial.status !== 'active';
   const isCurrent = () => {
     const current = row();
-    if (!current || current.status !== 'active' || (Number(current.payload?.sourceGeneration) || 0) !== generation) revoked = true;
+    if (!current || current.status !== 'active' || current.sourceGeneration !== generation) revoked = true;
     return !revoked;
   };
   return {

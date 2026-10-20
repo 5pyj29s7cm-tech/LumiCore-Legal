@@ -1,0 +1,586 @@
+[
+  {
+    "id": "call_3f6f5f2c1fab4b3dbbc3d85f",
+    "resolutionId": "resolution:plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+    "taskId": "task_bad34a4f-2ce1-45d7-b349-5074476e8b1f",
+    "requestId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+    "turnRowId": "action_turn_71b7210a7ac10b1c43f4f805602699f6",
+    "turnId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+    "executionOrigin": "model_selected",
+    "modelRoutingReceiptId": "127291b4-06d5-4e08-824d-1d3d916747c5",
+    "name": "legal_generate_litigation_packet",
+    "arguments": {
+      "caseId": "own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d",
+      "caseName": "虚构原告默认推理验收1019_0fce89ed"
+    },
+    "result": "# 虚构原告默认推理验收1019_0fce89ed 诉讼文书包\n\n- 案件名称: 虚构原告默认推理验收1019_0fce89ed\n- 我方身份: plaintiff\n- 案由/类型: 买卖合同纠纷\n- 实体法律适用时间基准（仅案件级，不代表各事件日期）: 待确认\n- 程序法律适用时间基准（仅案件级，不代表具体程序已发生）: 待确认\n- 当事人: 虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n- 我方委托人: 虚构霁川设备有限公司\n- 诉请/抗辩目标: 请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n- 案件材料（未指定当事人角色）: 请对已保存的虚构案件“虚构原告默认推理验收1019_0fce89ed”（caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d）生成半自动诉讼文书工作包，使用现有 legal_generate_litigation_packet。使用该案件已保存的身份、当事人与明确诉请及四份原始材料，不编辑案件档案，不转述或另填已有档案字段；写出本案Markdown和DOCX工作稿并归档，只需完成这一个文书包，不提交、不签署、不盖章或对外发送。\n\n本次原始要求：\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构原告原始要求与未知限定]\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构采购合同复印件文字摘录]\n本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n摘录记载：采购合同总价80万元，付款后30日交货。\n原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n[材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构付款回单复印件文字摘录]\n本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n文字记载金额20万元；甲方称该笔是本案付款。\n真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n[材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构聊天记录文字摘录]\n本文件仅为虚构聊天文字摘录，没有提供截图、聊天导出文件或原始载体。\n摘录称乙方说“下周安排发货”。\n发送人身份及权限、发送时间、完整上下文、设备对应关系与真实发货情况待核实；不能写成已完成交货、承认违约或放弃抗辩。\n\n## 逐份生成结果\n- 民事起诉状：正文已生成，待律师复核\n- 原告证据目录：正文未完成，保留结构模板\n\n# 民事起诉状（系统草稿）\n\n## 当事人\n虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n\n## 案由\n买卖合同纠纷\n\n## 诉讼请求\n请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n\n## 事实与理由\n### 虚构原告原始要求与未知限定\n\n材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 consultation；来源 manual\n\n- F1；提供材料正文第1行\n\n> 仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n\n- F2；提供材料正文第2行\n\n> 本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n\n- F3；提供材料正文第3行\n\n> 甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n\n- F4；提供材料正文第4行\n\n> 未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n\n- F5；提供材料正文第5行\n\n> 统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n### 虚构采购合同复印件文字摘录\n\n材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 contract；来源 import\n\n- F6；提供材料正文第1行\n\n> 本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n\n- F7；提供材料正文第2行\n\n> 摘录记载：采购合同总价80万元，付款后30日交货。\n\n- F8；提供材料正文第3行\n\n> 原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n### 虚构付款回单复印件文字摘录\n\n材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n\n- F9；提供材料正文第1行\n\n> 本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n\n- F10；提供材料正文第2行\n\n> 文字记载金额20万元；甲方称该笔是本案付款。\n\n- F11；提供材料正文第3行\n\n> 真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n\n- F12；提供材料正文第4行\n\n> 80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n### 虚构聊天记录文字摘录\n\n材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n[stored result truncated: 18014 chars]\nket\n- Markdown 文件：12 份\n- DOCX 文件：12 份\n- DOCX 生成：全部成功\n\n- 正文生成：尚未全部完成，部分或全部文书为结构模板\n\n## 法律成果预检\n- 现行有效法律预检：未通过：关键事实发生日期待确认（识别法条 8 项，阻断 8 项）。\n- 法条阻断项：《中华人民共和国民法典》；《中华人民共和国合同法》；《最高人民法院关于适用〈中华人民共和国民法典〉时间效力的若干规定》；《中华人民共和国民事诉讼法》；《中华人民共和国民法典》；《中华人民共和国合同法》；另 2 项。\n- 类案待复核项：无。\n- 正式交付规则：如存在已废止、失效或未确认的法条引用，不得标记为正式成果；需先替换或核验后再完成正式交付核验。\n\n## 案件归档与交付边界\n- 案件空间：未归档（persistCase=false）\n- 正式交付：完成现行有效法律、证据、类案和来源复核后，生成交付包。",
+    "evidence": {
+      "capability": "legal.litigation.packet.generate",
+      "operation": "create",
+      "assurance": "verified",
+      "scope": [
+        "虚构原告默认推理验收1019_0fce89ed"
+      ]
+    },
+    "capability": {
+      "capabilityId": "legal.litigation.packet.generate",
+      "lane": "industry",
+      "operation": "create",
+      "risk": "medium",
+      "sideEffects": [
+        {
+          "type": "local_state_change",
+          "scope": "optional legal case litigation packet archive",
+          "reversible": true
+        },
+        {
+          "type": "local_write",
+          "scope": "litigation packet Markdown and optional DOCX files",
+          "reversible": true
+        },
+        {
+          "type": "network_read",
+          "scope": "configured legal drafting model",
+          "reversible": true
+        }
+      ],
+      "verification": {
+        "strategy": "terminal_receipt",
+        "required": true,
+        "requiredFields": [
+          "ok",
+          "status",
+          "persisted",
+          "changedCaseIds",
+          "articleIds",
+          "artifacts",
+          "content"
+        ],
+        "requiredValues": {
+          "ok": true
+        },
+        "successStatuses": [
+          "generated"
+        ],
+        "failureStatuses": [
+          "blocked",
+          "failed",
+          "unverified"
+        ],
+        "successSignals": [
+          "structured legal receipt reports case, knowledge-base, and file effects separately"
+        ],
+        "limitations": [
+          "Generated legal work remains subject to lawyer review and is not automatically filed, signed, sent, or published."
+        ]
+      }
+    },
+    "idempotencyKey": "c0f548e4d00d0112f1cdbeefd9f4ce97c9630ace2f2935e7da4bf1e3b640c543",
+    "adapterStarted": true,
+    "adapterSettlements": [
+      {
+        "name": "legal_generate_litigation_packet",
+        "attempt": 1,
+        "status": "fulfilled",
+        "timedOut": false,
+        "settledAt": "2026-10-19T04:05:18.975Z"
+      }
+    ],
+    "receipt": {
+      "ok": false,
+      "status": "partial",
+      "persisted": false,
+      "changedCaseIds": [],
+      "articleIds": [],
+      "artifacts": [
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.docx"
+      ],
+      "draftMode": "mixed",
+      "draftFailures": [
+        {
+          "baseName": "16_evidence-catalog",
+          "reason": "起草栏目或来源校验未通过：工作稿章节数量不完整（要求4项，返回3项）。"
+        }
+      ],
+      "content": "# 虚构原告默认推理验收1019_0fce89ed 诉讼文书包\n\n- 案件名称: 虚构原告默认推理验收1019_0fce89ed\n- 我方身份: plaintiff\n- 案由/类型: 买卖合同纠纷\n- 实体法律适用时间基准（仅案件级，不代表各事件日期）: 待确认\n- 程序法律适用时间基准（仅案件级，不代表具体程序已发生）: 待确认\n- 当事人: 虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n- 我方委托人: 虚构霁川设备有限公司\n- 诉请/抗辩目标: 请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n- 案件材料（未指定当事人角色）: 请对已保存的虚构案件“虚构原告默认推理验收1019_0fce89ed”（caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d）生成半自动诉讼文书工作包，使用现有 legal_generate_litigation_packet。使用该案件已保存的身份、当事人与明确诉请及四份原始材料，不编辑案件档案，不转述或另填已有档案字段；写出本案Markdown和DOCX工作稿并归档，只需完成这一个文书包，不提交、不签署、不盖章或对外发送。\n\n本次原始要求：\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构原告原始要求与未知限定]\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构采购合同复印件文字摘录]\n本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n摘录记载：采购合同总价80万元，付款后30日交货。\n原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n[材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构付款回单复印件文字摘录]\n本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n文字记载金额20万元；甲方称该笔是本案付款。\n真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n[材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构聊天记录文字摘录]\n本文件仅为虚构聊天文字摘录，没有提供截图、聊天导出文件或原始载体。\n摘录称乙方说“下周安排发货”。\n发送人身份及权限、发送时间、完整上下文、设备对应关系与真实发货情况待核实；不能写成已完成交货、承认违约或放弃抗辩。\n\n## 逐份生成结果\n- 民事起诉状：正文已生成，待律师复核\n- 原告证据目录：正文未完成，保留结构模板\n\n# 民事起诉状（系统草稿）\n\n## 当事人\n虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n\n## 案由\n买卖合同纠纷\n\n## 诉讼请求\n请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n\n## 事实与理由\n### 虚构原告原始要求与未知限定\n\n材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 consultation；来源 manual\n\n- F1；提供材料正文第1行\n\n> 仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n\n- F2；提供材料正文第2行\n\n> 本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n\n- F3；提供材料正文第3行\n\n> 甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n\n- F4；提供材料正文第4行\n\n> 未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n\n- F5；提供材料正文第5行\n\n> 统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n### 虚构采购合同复印件文字摘录\n\n材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 contract；来源 import\n\n- F6；提供材料正文第1行\n\n> 本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n\n- F7；提供材料正文第2行\n\n> 摘录记载：采购合同总价80万元，付款后30日交货。\n\n- F8；提供材料正文第3行\n\n> 原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n### 虚构付款回单复印件文字摘录\n\n材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n\n- F9；提供材料正文第1行\n\n> 本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n\n- F10；提供材料正文第2行\n\n> 文字记载金额20万元；甲方称该笔是本案付款。\n\n- F11；提供材料正文第3行\n\n> 真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n\n- F12；提供材料正文第4行\n\n> 80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n### 虚构聊天记录文字摘录\n\n材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n[stored result truncated: 18014 chars]\nket\n- Markdown 文件：12 份\n- DOCX 文件：12 份\n- DOCX 生成：全部成功\n\n- 正文生成：尚未全部完成，部分或全部文书为结构模板\n\n## 法律成果预检\n- 现行有效法律预检：未通过：关键事实发生日期待确认（识别法条 8 项，阻断 8 项）。\n- 法条阻断项：《中华人民共和国民法典》；《中华人民共和国合同法》；《最高人民法院关于适用〈中华人民共和国民法典〉时间效力的若干规定》；《中华人民共和国民事诉讼法》；《中华人民共和国民法典》；《中华人民共和国合同法》；另 2 项。\n- 类案待复核项：无。\n- 正式交付规则：如存在已废止、失效或未确认的法条引用，不得标记为正式成果；需先替换或核验后再完成正式交付核验。\n\n## 案件归档与交付边界\n- 案件空间：未归档（persistCase=false）\n- 正式交付：完成现行有效法律、证据、类案和来源复核后，生成交付包。"
+    },
+    "terminalVerification": {
+      "status": "failed",
+      "strategy": "terminal_receipt",
+      "reason": "The terminal receipt reported partial."
+    },
+    "envelope": {
+      "version": 1,
+      "status": "failed",
+      "toolName": "legal_generate_litigation_packet",
+      "resolutionId": "resolution:plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+      "taskId": "task_bad34a4f-2ce1-45d7-b349-5074476e8b1f",
+      "requestId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+      "turnRowId": "action_turn_71b7210a7ac10b1c43f4f805602699f6",
+      "turnId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+      "idempotencyKey": "c0f548e4d00d0112f1cdbeefd9f4ce97c9630ace2f2935e7da4bf1e3b640c543",
+      "targetIdentity": "",
+      "startedAt": "2026-10-19T04:03:30.310Z",
+      "completedAt": "2026-10-19T04:05:18.975Z",
+      "durationMs": 108665,
+      "result": {
+        "ok": false,
+        "status": "partial",
+        "persisted": false,
+        "changedCaseIds": [],
+        "articleIds": [],
+        "artifacts": [
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-05-18-753Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.docx"
+        ],
+        "draftMode": "mixed",
+        "draftFailures": [
+          {
+            "baseName": "16_evidence-catalog",
+            "reason": "起草栏目或来源校验未通过：工作稿章节数量不完整（要求4项，返回3项）。"
+          }
+        ],
+        "content": "# 虚构原告默认推理验收1019_0fce89ed 诉讼文书包\n\n- 案件名称: 虚构原告默认推理验收1019_0fce89ed\n- 我方身份: plaintiff\n- 案由/类型: 买卖合同纠纷\n- 实体法律适用时间基准（仅案件级，不代表各事件日期）: 待确认\n- 程序法律适用时间基准（仅案件级，不代表具体程序已发生）: 待确认\n- 当事人: 虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n- 我方委托人: 虚构霁川设备有限公司\n- 诉请/抗辩目标: 请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n- 案件材料（未指定当事人角色）: 请对已保存的虚构案件“虚构原告默认推理验收1019_0fce89ed”（caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d）生成半自动诉讼文书工作包，使用现有 legal_generate_litigation_packet。使用该案件已保存的身份、当事人与明确诉请及四份原始材料，不编辑案件档案，不转述或另填已有档案字段；写出本案Markdown和DOCX工作稿并归档，只需完成这一个文书包，不提交、不签署、不盖章或对外发送。\n\n本次原始要求：\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构原告原始要求与未知限定]\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构采购合同复印件文字摘录]\n本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n摘录记载：采购合同总价80万元，付款后30日交货。\n原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n[材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构付款回单复印件文字摘录]\n本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n文字记载金额20万元；甲方称该笔是本案付款。\n真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n[材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构聊天记录文字摘录]\n本文件仅为虚构聊天文字摘录，没有提供截图、聊天导出文件或原始载体。\n摘录称乙方说“下周安排发货”。\n发送人身份及权限、发送时间、完整上下文、设备对应关系与真实发货情况待核实；不能写成已完成交货、承认违约或放弃抗辩。\n\n## 逐份生成结果\n- 民事起诉状：正文已生成，待律师复核\n- 原告证据目录：正文未完成，保留结构模板\n\n# 民事起诉状（系统草稿）\n\n## 当事人\n虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n\n## 案由\n买卖合同纠纷\n\n## 诉讼请求\n请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n\n## 事实与理由\n### 虚构原告原始要求与未知限定\n\n材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 consultation；来源 manual\n\n- F1；提供材料正文第1行\n\n> 仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n\n- F2；提供材料正文第2行\n\n> 本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n\n- F3；提供材料正文第3行\n\n> 甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n\n- F4；提供材料正文第4行\n\n> 未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n\n- F5；提供材料正文第5行\n\n> 统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n### 虚构采购合同复印件文字摘录\n\n材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 contract；来源 import\n\n- F6；提供材料正文第1行\n\n> 本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n\n- F7；提供材料正文第2行\n\n> 摘录记载：采购合同总价80万元，付款后30日交货。\n\n- F8；提供材料正文第3行\n\n> 原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n### 虚构付款回单复印件文字摘录\n\n材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n\n- F9；提供材料正文第1行\n\n> 本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n\n- F10；提供材料正文第2行\n\n> 文字记载金额20万元；甲方称该笔是本案付款。\n\n- F11；提供材料正文第3行\n\n> 真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n\n- F12；提供材料正文第4行\n\n> 80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n### 虚构聊天记录文字摘录\n\n材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n[stored result truncated: 18014 chars]\nket\n- Markdown 文件：12 份\n- DOCX 文件：12 份\n- DOCX 生成：全部成功\n\n- 正文生成：尚未全部完成，部分或全部文书为结构模板\n\n## 法律成果预检\n- 现行有效法律预检：未通过：关键事实发生日期待确认（识别法条 8 项，阻断 8 项）。\n- 法条阻断项：《中华人民共和国民法典》；《中华人民共和国合同法》；《最高人民法院关于适用〈中华人民共和国民法典〉时间效力的若干规定》；《中华人民共和国民事诉讼法》；《中华人民共和国民法典》；《中华人民共和国合同法》；另 2 项。\n- 类案待复核项：无。\n- 正式交付规则：如存在已废止、失效或未确认的法条引用，不得标记为正式成果；需先替换或核验后再完成正式交付核验。\n\n## 案件归档与交付边界\n- 案件空间：未归档（persistCase=false）\n- 正式交付：完成现行有效法律、证据、类案和来源复核后，生成交付包。"
+      },
+      "verification": {
+        "status": "failed",
+        "basis": "terminal_verification",
+        "reason": "The terminal receipt reported partial."
+      }
+    }
+  },
+  {
+    "id": "call_b6d01990b0ea4f328578e7f5",
+    "resolutionId": "resolution:plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+    "taskId": "task_bad34a4f-2ce1-45d7-b349-5074476e8b1f",
+    "requestId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+    "turnRowId": "action_turn_71b7210a7ac10b1c43f4f805602699f6",
+    "turnId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+    "executionOrigin": "model_selected",
+    "modelRoutingReceiptId": "d2678741-2557-483c-9937-2833311fa013",
+    "name": "legal_generate_litigation_packet",
+    "arguments": {
+      "caseId": "own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d",
+      "caseName": "虚构原告默认推理验收1019_0fce89ed",
+      "writeFiles": true,
+      "includeDocx": true,
+      "persistCase": true,
+      "forceRegenerate": false
+    },
+    "result": "# 虚构原告默认推理验收1019_0fce89ed 诉讼文书包\n\n- 案件名称: 虚构原告默认推理验收1019_0fce89ed\n- 我方身份: plaintiff\n- 案由/类型: 买卖合同纠纷\n- 实体法律适用时间基准（仅案件级，不代表各事件日期）: 待确认\n- 程序法律适用时间基准（仅案件级，不代表具体程序已发生）: 待确认\n- 当事人: 虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n- 我方委托人: 虚构霁川设备有限公司\n- 诉请/抗辩目标: 请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n- 案件材料（未指定当事人角色）: 请对已保存的虚构案件“虚构原告默认推理验收1019_0fce89ed”（caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d）生成半自动诉讼文书工作包，使用现有 legal_generate_litigation_packet。使用该案件已保存的身份、当事人与明确诉请及四份原始材料，不编辑案件档案，不转述或另填已有档案字段；写出本案Markdown和DOCX工作稿并归档，只需完成这一个文书包，不提交、不签署、不盖章或对外发送。\n\n本次原始要求：\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构原告原始要求与未知限定]\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构采购合同复印件文字摘录]\n本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n摘录记载：采购合同总价80万元，付款后30日交货。\n原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n[材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构付款回单复印件文字摘录]\n本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n文字记载金额20万元；甲方称该笔是本案付款。\n真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n[材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构聊天记录文字摘录]\n本文件仅为虚构聊天文字摘录，没有提供截图、聊天导出文件或原始载体。\n摘录称乙方说“下周安排发货”。\n发送人身份及权限、发送时间、完整上下文、设备对应关系与真实发货情况待核实；不能写成已完成交货、承认违约或放弃抗辩。\n\n## 逐份生成结果\n- 民事起诉状：正文已生成，待律师复核\n- 原告证据目录：正文未完成，保留结构模板\n- 接续上次进度：复用 1 份已复核正文，继续核对 0 份待复核稿。\n\n\n# 民事起诉状（系统草稿）\n\n## 当事人\n虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n\n## 案由\n买卖合同纠纷\n\n## 诉讼请求\n请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n\n## 事实与理由\n### 虚构原告原始要求与未知限定\n\n材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 consultation；来源 manual\n\n- F1；提供材料正文第1行\n\n> 仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n\n- F2；提供材料正文第2行\n\n> 本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n\n- F3；提供材料正文第3行\n\n> 甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n\n- F4；提供材料正文第4行\n\n> 未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n\n- F5；提供材料正文第5行\n\n> 统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n### 虚构采购合同复印件文字摘录\n\n材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 contract；来源 import\n\n- F6；提供材料正文第1行\n\n> 本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n\n- F7；提供材料正文第2行\n\n> 摘录记载：采购合同总价80万元，付款后30日交货。\n\n- F8；提供材料正文第3行\n\n> 原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n### 虚构付款回单复印件文字摘录\n\n材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n\n- F9；提供材料正文第1行\n\n> 本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n\n- F10；提供材料正文第2行\n\n> 文字记载金额20万元；甲方称该笔是本案付款。\n\n- F11；提供材料正文第3行\n\n> 真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n\n- F12；提供材料正文第4行\n\n> 80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n### 虚构聊天记录文字摘录\n\n材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-\n[stored result truncated: 18050 chars]\nket\n- Markdown 文件：12 份\n- DOCX 文件：12 份\n- DOCX 生成：全部成功\n\n- 正文生成：尚未全部完成，部分或全部文书为结构模板\n\n## 法律成果预检\n- 现行有效法律预检：未通过：关键事实发生日期待确认（识别法条 8 项，阻断 8 项）。\n- 法条阻断项：《中华人民共和国民法典》；《中华人民共和国合同法》；《最高人民法院关于适用〈中华人民共和国民法典〉时间效力的若干规定》；《中华人民共和国民事诉讼法》；《中华人民共和国民法典》；《中华人民共和国合同法》；另 2 项。\n- 类案待复核项：无。\n- 正式交付规则：如存在已废止、失效或未确认的法条引用，不得标记为正式成果；需先替换或核验后再完成正式交付核验。\n\n## 案件归档与交付边界\n- 案件空间：未归档（persistCase=false）\n- 正式交付：完成现行有效法律、证据、类案和来源复核后，生成交付包。",
+    "evidence": {
+      "capability": "legal.litigation.packet.generate",
+      "operation": "create",
+      "assurance": "verified",
+      "scope": [
+        "虚构原告默认推理验收1019_0fce89ed"
+      ]
+    },
+    "capability": {
+      "capabilityId": "legal.litigation.packet.generate",
+      "lane": "industry",
+      "operation": "create",
+      "risk": "medium",
+      "sideEffects": [
+        {
+          "type": "local_state_change",
+          "scope": "optional legal case litigation packet archive",
+          "reversible": true
+        },
+        {
+          "type": "local_write",
+          "scope": "litigation packet Markdown and optional DOCX files",
+          "reversible": true
+        },
+        {
+          "type": "network_read",
+          "scope": "configured legal drafting model",
+          "reversible": true
+        }
+      ],
+      "verification": {
+        "strategy": "terminal_receipt",
+        "required": true,
+        "requiredFields": [
+          "ok",
+          "status",
+          "persisted",
+          "changedCaseIds",
+          "articleIds",
+          "artifacts",
+          "content"
+        ],
+        "requiredValues": {
+          "ok": true
+        },
+        "successStatuses": [
+          "generated"
+        ],
+        "failureStatuses": [
+          "blocked",
+          "failed",
+          "unverified"
+        ],
+        "successSignals": [
+          "structured legal receipt reports case, knowledge-base, and file effects separately"
+        ],
+        "limitations": [
+          "Generated legal work remains subject to lawyer review and is not automatically filed, signed, sent, or published."
+        ]
+      }
+    },
+    "idempotencyKey": "9855741ca3119e7b1e3995f398b21aa5dd1c735d2e75fcfb0928e5de2000cec8",
+    "adapterStarted": true,
+    "adapterSettlements": [
+      {
+        "name": "legal_generate_litigation_packet",
+        "attempt": 1,
+        "status": "fulfilled",
+        "timedOut": false,
+        "settledAt": "2026-10-19T04:06:44.476Z"
+      }
+    ],
+    "receipt": {
+      "ok": false,
+      "status": "partial",
+      "persisted": false,
+      "changedCaseIds": [],
+      "articleIds": [],
+      "artifacts": [
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.docx"
+      ],
+      "draftMode": "mixed",
+      "draftFailures": [
+        {
+          "baseName": "16_evidence-catalog",
+          "reason": "起草栏目或来源校验未通过：工作稿章节数量不完整（要求4项，返回3项）。"
+        }
+      ],
+      "content": "# 虚构原告默认推理验收1019_0fce89ed 诉讼文书包\n\n- 案件名称: 虚构原告默认推理验收1019_0fce89ed\n- 我方身份: plaintiff\n- 案由/类型: 买卖合同纠纷\n- 实体法律适用时间基准（仅案件级，不代表各事件日期）: 待确认\n- 程序法律适用时间基准（仅案件级，不代表具体程序已发生）: 待确认\n- 当事人: 虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n- 我方委托人: 虚构霁川设备有限公司\n- 诉请/抗辩目标: 请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n- 案件材料（未指定当事人角色）: 请对已保存的虚构案件“虚构原告默认推理验收1019_0fce89ed”（caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d）生成半自动诉讼文书工作包，使用现有 legal_generate_litigation_packet。使用该案件已保存的身份、当事人与明确诉请及四份原始材料，不编辑案件档案，不转述或另填已有档案字段；写出本案Markdown和DOCX工作稿并归档，只需完成这一个文书包，不提交、不签署、不盖章或对外发送。\n\n本次原始要求：\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构原告原始要求与未知限定]\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构采购合同复印件文字摘录]\n本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n摘录记载：采购合同总价80万元，付款后30日交货。\n原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n[材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构付款回单复印件文字摘录]\n本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n文字记载金额20万元；甲方称该笔是本案付款。\n真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n[材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构聊天记录文字摘录]\n本文件仅为虚构聊天文字摘录，没有提供截图、聊天导出文件或原始载体。\n摘录称乙方说“下周安排发货”。\n发送人身份及权限、发送时间、完整上下文、设备对应关系与真实发货情况待核实；不能写成已完成交货、承认违约或放弃抗辩。\n\n## 逐份生成结果\n- 民事起诉状：正文已生成，待律师复核\n- 原告证据目录：正文未完成，保留结构模板\n- 接续上次进度：复用 1 份已复核正文，继续核对 0 份待复核稿。\n\n\n# 民事起诉状（系统草稿）\n\n## 当事人\n虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n\n## 案由\n买卖合同纠纷\n\n## 诉讼请求\n请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n\n## 事实与理由\n### 虚构原告原始要求与未知限定\n\n材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 consultation；来源 manual\n\n- F1；提供材料正文第1行\n\n> 仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n\n- F2；提供材料正文第2行\n\n> 本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n\n- F3；提供材料正文第3行\n\n> 甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n\n- F4；提供材料正文第4行\n\n> 未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n\n- F5；提供材料正文第5行\n\n> 统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n### 虚构采购合同复印件文字摘录\n\n材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 contract；来源 import\n\n- F6；提供材料正文第1行\n\n> 本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n\n- F7；提供材料正文第2行\n\n> 摘录记载：采购合同总价80万元，付款后30日交货。\n\n- F8；提供材料正文第3行\n\n> 原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n### 虚构付款回单复印件文字摘录\n\n材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n\n- F9；提供材料正文第1行\n\n> 本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n\n- F10；提供材料正文第2行\n\n> 文字记载金额20万元；甲方称该笔是本案付款。\n\n- F11；提供材料正文第3行\n\n> 真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n\n- F12；提供材料正文第4行\n\n> 80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n### 虚构聊天记录文字摘录\n\n材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-\n[stored result truncated: 18050 chars]\nket\n- Markdown 文件：12 份\n- DOCX 文件：12 份\n- DOCX 生成：全部成功\n\n- 正文生成：尚未全部完成，部分或全部文书为结构模板\n\n## 法律成果预检\n- 现行有效法律预检：未通过：关键事实发生日期待确认（识别法条 8 项，阻断 8 项）。\n- 法条阻断项：《中华人民共和国民法典》；《中华人民共和国合同法》；《最高人民法院关于适用〈中华人民共和国民法典〉时间效力的若干规定》；《中华人民共和国民事诉讼法》；《中华人民共和国民法典》；《中华人民共和国合同法》；另 2 项。\n- 类案待复核项：无。\n- 正式交付规则：如存在已废止、失效或未确认的法条引用，不得标记为正式成果；需先替换或核验后再完成正式交付核验。\n\n## 案件归档与交付边界\n- 案件空间：未归档（persistCase=false）\n- 正式交付：完成现行有效法律、证据、类案和来源复核后，生成交付包。"
+    },
+    "terminalVerification": {
+      "status": "failed",
+      "strategy": "terminal_receipt",
+      "reason": "The terminal receipt reported partial."
+    },
+    "envelope": {
+      "version": 1,
+      "status": "failed",
+      "toolName": "legal_generate_litigation_packet",
+      "resolutionId": "resolution:plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+      "taskId": "task_bad34a4f-2ce1-45d7-b349-5074476e8b1f",
+      "requestId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+      "turnRowId": "action_turn_71b7210a7ac10b1c43f4f805602699f6",
+      "turnId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+      "idempotencyKey": "9855741ca3119e7b1e3995f398b21aa5dd1c735d2e75fcfb0928e5de2000cec8",
+      "targetIdentity": "",
+      "startedAt": "2026-10-19T04:05:26.623Z",
+      "completedAt": "2026-10-19T04:06:44.476Z",
+      "durationMs": 77853,
+      "result": {
+        "ok": false,
+        "status": "partial",
+        "persisted": false,
+        "changedCaseIds": [],
+        "articleIds": [],
+        "artifacts": [
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-06-44-289Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.docx"
+        ],
+        "draftMode": "mixed",
+        "draftFailures": [
+          {
+            "baseName": "16_evidence-catalog",
+            "reason": "起草栏目或来源校验未通过：工作稿章节数量不完整（要求4项，返回3项）。"
+          }
+        ],
+        "content": "# 虚构原告默认推理验收1019_0fce89ed 诉讼文书包\n\n- 案件名称: 虚构原告默认推理验收1019_0fce89ed\n- 我方身份: plaintiff\n- 案由/类型: 买卖合同纠纷\n- 实体法律适用时间基准（仅案件级，不代表各事件日期）: 待确认\n- 程序法律适用时间基准（仅案件级，不代表具体程序已发生）: 待确认\n- 当事人: 虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n- 我方委托人: 虚构霁川设备有限公司\n- 诉请/抗辩目标: 请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n- 案件材料（未指定当事人角色）: 请对已保存的虚构案件“虚构原告默认推理验收1019_0fce89ed”（caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d）生成半自动诉讼文书工作包，使用现有 legal_generate_litigation_packet。使用该案件已保存的身份、当事人与明确诉请及四份原始材料，不编辑案件档案，不转述或另填已有档案字段；写出本案Markdown和DOCX工作稿并归档，只需完成这一个文书包，不提交、不签署、不盖章或对外发送。\n\n本次原始要求：\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构原告原始要求与未知限定]\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构采购合同复印件文字摘录]\n本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n摘录记载：采购合同总价80万元，付款后30日交货。\n原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n[材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构付款回单复印件文字摘录]\n本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n文字记载金额20万元；甲方称该笔是本案付款。\n真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n[材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构聊天记录文字摘录]\n本文件仅为虚构聊天文字摘录，没有提供截图、聊天导出文件或原始载体。\n摘录称乙方说“下周安排发货”。\n发送人身份及权限、发送时间、完整上下文、设备对应关系与真实发货情况待核实；不能写成已完成交货、承认违约或放弃抗辩。\n\n## 逐份生成结果\n- 民事起诉状：正文已生成，待律师复核\n- 原告证据目录：正文未完成，保留结构模板\n- 接续上次进度：复用 1 份已复核正文，继续核对 0 份待复核稿。\n\n\n# 民事起诉状（系统草稿）\n\n## 当事人\n虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n\n## 案由\n买卖合同纠纷\n\n## 诉讼请求\n请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n\n## 事实与理由\n### 虚构原告原始要求与未知限定\n\n材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 consultation；来源 manual\n\n- F1；提供材料正文第1行\n\n> 仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n\n- F2；提供材料正文第2行\n\n> 本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n\n- F3；提供材料正文第3行\n\n> 甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n\n- F4；提供材料正文第4行\n\n> 未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n\n- F5；提供材料正文第5行\n\n> 统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n### 虚构采购合同复印件文字摘录\n\n材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 contract；来源 import\n\n- F6；提供材料正文第1行\n\n> 本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n\n- F7；提供材料正文第2行\n\n> 摘录记载：采购合同总价80万元，付款后30日交货。\n\n- F8；提供材料正文第3行\n\n> 原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n### 虚构付款回单复印件文字摘录\n\n材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n\n- F9；提供材料正文第1行\n\n> 本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n\n- F10；提供材料正文第2行\n\n> 文字记载金额20万元；甲方称该笔是本案付款。\n\n- F11；提供材料正文第3行\n\n> 真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n\n- F12；提供材料正文第4行\n\n> 80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n### 虚构聊天记录文字摘录\n\n材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-\n[stored result truncated: 18050 chars]\nket\n- Markdown 文件：12 份\n- DOCX 文件：12 份\n- DOCX 生成：全部成功\n\n- 正文生成：尚未全部完成，部分或全部文书为结构模板\n\n## 法律成果预检\n- 现行有效法律预检：未通过：关键事实发生日期待确认（识别法条 8 项，阻断 8 项）。\n- 法条阻断项：《中华人民共和国民法典》；《中华人民共和国合同法》；《最高人民法院关于适用〈中华人民共和国民法典〉时间效力的若干规定》；《中华人民共和国民事诉讼法》；《中华人民共和国民法典》；《中华人民共和国合同法》；另 2 项。\n- 类案待复核项：无。\n- 正式交付规则：如存在已废止、失效或未确认的法条引用，不得标记为正式成果；需先替换或核验后再完成正式交付核验。\n\n## 案件归档与交付边界\n- 案件空间：未归档（persistCase=false）\n- 正式交付：完成现行有效法律、证据、类案和来源复核后，生成交付包。"
+      },
+      "verification": {
+        "status": "failed",
+        "basis": "terminal_verification",
+        "reason": "The terminal receipt reported partial."
+      }
+    }
+  },
+  {
+    "id": "call_3bbd27b704b24d88922320ac",
+    "resolutionId": "resolution:plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+    "taskId": "task_bad34a4f-2ce1-45d7-b349-5074476e8b1f",
+    "requestId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+    "turnRowId": "action_turn_71b7210a7ac10b1c43f4f805602699f6",
+    "turnId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+    "executionOrigin": "model_selected",
+    "modelRoutingReceiptId": "c7a144ea-07c6-4b7f-ac7b-b129a4d255ba",
+    "name": "legal_generate_litigation_packet",
+    "arguments": {
+      "caseId": "own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d",
+      "caseName": "虚构原告默认推理验收1019_0fce89ed",
+      "role": "原告"
+    },
+    "result": "# 虚构原告默认推理验收1019_0fce89ed 诉讼文书包\n\n- 案件名称: 虚构原告默认推理验收1019_0fce89ed\n- 我方身份: plaintiff\n- 案由/类型: 买卖合同纠纷\n- 实体法律适用时间基准（仅案件级，不代表各事件日期）: 待确认\n- 程序法律适用时间基准（仅案件级，不代表具体程序已发生）: 待确认\n- 当事人: 虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n- 我方委托人: 虚构霁川设备有限公司\n- 诉请/抗辩目标: 请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n- 案件材料（未指定当事人角色）: 请对已保存的虚构案件“虚构原告默认推理验收1019_0fce89ed”（caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d）生成半自动诉讼文书工作包，使用现有 legal_generate_litigation_packet。使用该案件已保存的身份、当事人与明确诉请及四份原始材料，不编辑案件档案，不转述或另填已有档案字段；写出本案Markdown和DOCX工作稿并归档，只需完成这一个文书包，不提交、不签署、不盖章或对外发送。\n\n本次原始要求：\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构原告原始要求与未知限定]\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构采购合同复印件文字摘录]\n本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n摘录记载：采购合同总价80万元，付款后30日交货。\n原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n[材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构付款回单复印件文字摘录]\n本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n文字记载金额20万元；甲方称该笔是本案付款。\n真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n[材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构聊天记录文字摘录]\n本文件仅为虚构聊天文字摘录，没有提供截图、聊天导出文件或原始载体。\n摘录称乙方说“下周安排发货”。\n发送人身份及权限、发送时间、完整上下文、设备对应关系与真实发货情况待核实；不能写成已完成交货、承认违约或放弃抗辩。\n\n## 逐份生成结果\n- 民事起诉状：正文已生成，待律师复核\n- 原告证据目录：正文已生成，待律师复核\n- 接续上次进度：复用 1 份已复核正文，继续核对 0 份待复核稿。\n\n\n# 民事起诉状（系统草稿）\n\n## 当事人\n虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n\n## 案由\n买卖合同纠纷\n\n## 诉讼请求\n请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n\n## 事实与理由\n### 虚构原告原始要求与未知限定\n\n材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 consultation；来源 manual\n\n- F1；提供材料正文第1行\n\n> 仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n\n- F2；提供材料正文第2行\n\n> 本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n\n- F3；提供材料正文第3行\n\n> 甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n\n- F4；提供材料正文第4行\n\n> 未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n\n- F5；提供材料正文第5行\n\n> 统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n### 虚构采购合同复印件文字摘录\n\n材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 contract；来源 import\n\n- F6；提供材料正文第1行\n\n> 本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n\n- F7；提供材料正文第2行\n\n> 摘录记载：采购合同总价80万元，付款后30日交货。\n\n- F8；提供材料正文第3行\n\n> 原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n### 虚构付款回单复印件文字摘录\n\n材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n\n- F9；提供材料正文第1行\n\n> 本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n\n- F10；提供材料正文第2行\n\n> 文字记载金额20万元；甲方称该笔是本案付款。\n\n- F11；提供材料正文第3行\n\n> 真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n\n- F12；提供材料正文第4行\n\n> 80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n### 虚构聊天记录文字摘录\n\n材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c\n[stored result truncated: 20592 chars]\n：未通过：关键事实发生日期待确认（识别法条 8 项，阻断 8 项）。\n- 法条阻断项：《中华人民共和国民法典》；《中华人民共和国合同法》；《最高人民法院关于适用〈中华人民共和国民法典〉时间效力的若干规定》；《中华人民共和国民事诉讼法》；《中华人民共和国民法典》；《中华人民共和国合同法》；另 2 项。\n- 类案待复核项：无。\n- 正式交付规则：如存在已废止、失效或未确认的法条引用，不得标记为正式成果；需先替换或核验后再完成正式交付核验。\n\n## 案件归档与交付边界\n- 案件空间：已归档 caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d materialId=fe462298-d99b-41e0-9d58-eab2b3a7c435\n- 正式交付：完成现行有效法律、证据、类案和来源复核后，生成交付包。",
+    "evidence": {
+      "capability": "legal.litigation.packet.generate",
+      "operation": "create",
+      "assurance": "verified",
+      "scope": [
+        "虚构原告默认推理验收1019_0fce89ed"
+      ]
+    },
+    "capability": {
+      "capabilityId": "legal.litigation.packet.generate",
+      "lane": "industry",
+      "operation": "create",
+      "risk": "medium",
+      "sideEffects": [
+        {
+          "type": "local_state_change",
+          "scope": "optional legal case litigation packet archive",
+          "reversible": true
+        },
+        {
+          "type": "local_write",
+          "scope": "litigation packet Markdown and optional DOCX files",
+          "reversible": true
+        },
+        {
+          "type": "network_read",
+          "scope": "configured legal drafting model",
+          "reversible": true
+        }
+      ],
+      "verification": {
+        "strategy": "terminal_receipt",
+        "required": true,
+        "requiredFields": [
+          "ok",
+          "status",
+          "persisted",
+          "changedCaseIds",
+          "articleIds",
+          "artifacts",
+          "content"
+        ],
+        "requiredValues": {
+          "ok": true
+        },
+        "successStatuses": [
+          "generated"
+        ],
+        "failureStatuses": [
+          "blocked",
+          "failed",
+          "unverified"
+        ],
+        "successSignals": [
+          "structured legal receipt reports case, knowledge-base, and file effects separately"
+        ],
+        "limitations": [
+          "Generated legal work remains subject to lawyer review and is not automatically filed, signed, sent, or published."
+        ]
+      }
+    },
+    "idempotencyKey": "22f60acc12a40076d21baaffdbd381b666172d133ac08c16016979928be306b1",
+    "adapterStarted": true,
+    "adapterSettlements": [
+      {
+        "name": "legal_generate_litigation_packet",
+        "attempt": 1,
+        "status": "fulfilled",
+        "timedOut": false,
+        "settledAt": "2026-10-19T04:08:40.656Z"
+      }
+    ],
+    "receipt": {
+      "ok": true,
+      "status": "generated",
+      "persisted": true,
+      "changedCaseIds": [
+        "own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d"
+      ],
+      "articleIds": [],
+      "artifacts": [
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.md",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.docx",
+        "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.docx"
+      ],
+      "draftMode": "model",
+      "draftFailures": [],
+      "content": "# 虚构原告默认推理验收1019_0fce89ed 诉讼文书包\n\n- 案件名称: 虚构原告默认推理验收1019_0fce89ed\n- 我方身份: plaintiff\n- 案由/类型: 买卖合同纠纷\n- 实体法律适用时间基准（仅案件级，不代表各事件日期）: 待确认\n- 程序法律适用时间基准（仅案件级，不代表具体程序已发生）: 待确认\n- 当事人: 虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n- 我方委托人: 虚构霁川设备有限公司\n- 诉请/抗辩目标: 请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n- 案件材料（未指定当事人角色）: 请对已保存的虚构案件“虚构原告默认推理验收1019_0fce89ed”（caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d）生成半自动诉讼文书工作包，使用现有 legal_generate_litigation_packet。使用该案件已保存的身份、当事人与明确诉请及四份原始材料，不编辑案件档案，不转述或另填已有档案字段；写出本案Markdown和DOCX工作稿并归档，只需完成这一个文书包，不提交、不签署、不盖章或对外发送。\n\n本次原始要求：\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构原告原始要求与未知限定]\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构采购合同复印件文字摘录]\n本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n摘录记载：采购合同总价80万元，付款后30日交货。\n原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n[材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构付款回单复印件文字摘录]\n本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n文字记载金额20万元；甲方称该笔是本案付款。\n真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n[材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构聊天记录文字摘录]\n本文件仅为虚构聊天文字摘录，没有提供截图、聊天导出文件或原始载体。\n摘录称乙方说“下周安排发货”。\n发送人身份及权限、发送时间、完整上下文、设备对应关系与真实发货情况待核实；不能写成已完成交货、承认违约或放弃抗辩。\n\n## 逐份生成结果\n- 民事起诉状：正文已生成，待律师复核\n- 原告证据目录：正文已生成，待律师复核\n- 接续上次进度：复用 1 份已复核正文，继续核对 0 份待复核稿。\n\n\n# 民事起诉状（系统草稿）\n\n## 当事人\n虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n\n## 案由\n买卖合同纠纷\n\n## 诉讼请求\n请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n\n## 事实与理由\n### 虚构原告原始要求与未知限定\n\n材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 consultation；来源 manual\n\n- F1；提供材料正文第1行\n\n> 仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n\n- F2；提供材料正文第2行\n\n> 本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n\n- F3；提供材料正文第3行\n\n> 甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n\n- F4；提供材料正文第4行\n\n> 未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n\n- F5；提供材料正文第5行\n\n> 统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n### 虚构采购合同复印件文字摘录\n\n材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 contract；来源 import\n\n- F6；提供材料正文第1行\n\n> 本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n\n- F7；提供材料正文第2行\n\n> 摘录记载：采购合同总价80万元，付款后30日交货。\n\n- F8；提供材料正文第3行\n\n> 原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n### 虚构付款回单复印件文字摘录\n\n材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n\n- F9；提供材料正文第1行\n\n> 本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n\n- F10；提供材料正文第2行\n\n> 文字记载金额20万元；甲方称该笔是本案付款。\n\n- F11；提供材料正文第3行\n\n> 真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n\n- F12；提供材料正文第4行\n\n> 80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n### 虚构聊天记录文字摘录\n\n材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c\n[stored result truncated: 20592 chars]\n：未通过：关键事实发生日期待确认（识别法条 8 项，阻断 8 项）。\n- 法条阻断项：《中华人民共和国民法典》；《中华人民共和国合同法》；《最高人民法院关于适用〈中华人民共和国民法典〉时间效力的若干规定》；《中华人民共和国民事诉讼法》；《中华人民共和国民法典》；《中华人民共和国合同法》；另 2 项。\n- 类案待复核项：无。\n- 正式交付规则：如存在已废止、失效或未确认的法条引用，不得标记为正式成果；需先替换或核验后再完成正式交付核验。\n\n## 案件归档与交付边界\n- 案件空间：已归档 caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d materialId=fe462298-d99b-41e0-9d58-eab2b3a7c435\n- 正式交付：完成现行有效法律、证据、类案和来源复核后，生成交付包。"
+    },
+    "terminalVerification": {
+      "status": "verified",
+      "strategy": "terminal_receipt",
+      "reason": "Generated legal work remains subject to lawyer review and is not automatically filed, signed, sent, or published."
+    },
+    "envelope": {
+      "version": 1,
+      "status": "verified_success",
+      "toolName": "legal_generate_litigation_packet",
+      "resolutionId": "resolution:plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+      "taskId": "task_bad34a4f-2ce1-45d7-b349-5074476e8b1f",
+      "requestId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+      "turnRowId": "action_turn_71b7210a7ac10b1c43f4f805602699f6",
+      "turnId": "plaintiff-provider-default-5a1924a6-1d49-4e36-9e31-df33ec72049d",
+      "idempotencyKey": "22f60acc12a40076d21baaffdbd381b666172d133ac08c16016979928be306b1",
+      "targetIdentity": "",
+      "startedAt": "2026-10-19T04:06:58.863Z",
+      "completedAt": "2026-10-19T04:08:40.727Z",
+      "durationMs": 101864,
+      "result": {
+        "ok": true,
+        "status": "generated",
+        "persisted": true,
+        "changedCaseIds": [
+          "own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d"
+        ],
+        "articleIds": [],
+        "artifacts": [
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.md",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\00_litigation-packet.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\01_filing-material-checklist.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\02_authorization-checklist.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\03_evidence-review-matrix.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\10_civil-complaint.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\11_element-complaint.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_engagement-agreement.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_power-of-attorney.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\12_law-firm-letter.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\15_service-address-confirmation.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\16_evidence-catalog.docx",
+          "C:\\Users\\Administrator\\LumiCore-Legal\\data\\legal_delivery\\personal_admin-uid\\2026-10-19T04-08-40-383Z_虚构原告默认推理验收1019_0fce89ed_litigation_packet\\99_manifest.docx"
+        ],
+        "draftMode": "model",
+        "draftFailures": [],
+        "content": "# 虚构原告默认推理验收1019_0fce89ed 诉讼文书包\n\n- 案件名称: 虚构原告默认推理验收1019_0fce89ed\n- 我方身份: plaintiff\n- 案由/类型: 买卖合同纠纷\n- 实体法律适用时间基准（仅案件级，不代表各事件日期）: 待确认\n- 程序法律适用时间基准（仅案件级，不代表具体程序已发生）: 待确认\n- 当事人: 虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n- 我方委托人: 虚构霁川设备有限公司\n- 诉请/抗辩目标: 请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n- 案件材料（未指定当事人角色）: 请对已保存的虚构案件“虚构原告默认推理验收1019_0fce89ed”（caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d）生成半自动诉讼文书工作包，使用现有 legal_generate_litigation_packet。使用该案件已保存的身份、当事人与明确诉请及四份原始材料，不编辑案件档案，不转述或另填已有档案字段；写出本案Markdown和DOCX工作稿并归档，只需完成这一个文书包，不提交、不签署、不盖章或对外发送。\n\n本次原始要求：\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构原告原始要求与未知限定]\n仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n[材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构采购合同复印件文字摘录]\n本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n摘录记载：采购合同总价80万元，付款后30日交货。\n原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n[材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构付款回单复印件文字摘录]\n本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n文字记载金额20万元；甲方称该笔是本案付款。\n真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n[材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c0ef555ad6ac：虚构聊天记录文字摘录]\n本文件仅为虚构聊天文字摘录，没有提供截图、聊天导出文件或原始载体。\n摘录称乙方说“下周安排发货”。\n发送人身份及权限、发送时间、完整上下文、设备对应关系与真实发货情况待核实；不能写成已完成交货、承认违约或放弃抗辩。\n\n## 逐份生成结果\n- 民事起诉状：正文已生成，待律师复核\n- 原告证据目录：正文已生成，待律师复核\n- 接续上次进度：复用 1 份已复核正文，继续核对 0 份待复核稿。\n\n\n# 民事起诉状（系统草稿）\n\n## 当事人\n虚构霁川设备有限公司（拟原告）/虚构墨汀制造有限公司（拟被告）\n\n## 案由\n买卖合同纠纷\n\n## 诉讼请求\n请求虚构墨汀制造有限公司交付合同项下设备，设备名称/型号/数量、期限及方式待补；仅生成律师工作稿，不提交、不签署。\n\n## 事实与理由\n### 虚构原告原始要求与未知限定\n\n材料 src-plaintiff-native-phase7-0-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 consultation；来源 manual\n\n- F1；提供材料正文第1行\n\n> 仅用于程序验收的虚构案件，无真实委托，不提交、不签名、不盖章、不对外发送。\n\n- F2；提供材料正文第2行\n\n> 本次我方为虚构霁川设备有限公司，拟作为原告；对方为虚构墨汀制造有限公司，拟作为被告。请求虚构墨汀制造有限公司交付合同项下设备，仅生成律师工作稿，不主张退款、欠款余额或另加违约金。\n\n- F3；提供材料正文第3行\n\n> 甲方称合同总价80万元，自己已支付20万元，合同记载付款后30日交货；付款是否足以触发交货期限、付款和交货的实际日期、设备名称/型号/数量、交付方式、收款主体及对方履行情况均待核实。\n\n- F4；提供材料正文第4行\n\n> 未提供验收条款不代表合同没有约定，未提供催告记录不代表催告没有发生。\n\n- F5；提供材料正文第5行\n\n> 统一社会信用代码、住所、法定代表人、法院、律所、律师、代理阶段、费用、授权期限、特别授权选择、送达地址、手机和电子送达意愿均未提供；不得补造。未给案件事实/程序法律基准日期，不能以本次创建或导出日期替代。\n\n### 虚构采购合同复印件文字摘录\n\n材料 src-plaintiff-native-phase7-1-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 contract；来源 import\n\n- F6；提供材料正文第1行\n\n> 本文件仅为虚构复印件的文字摘录，未提供真实扫描图或纸质原件。\n\n- F7；提供材料正文第2行\n\n> 摘录记载：采购合同总价80万元，付款后30日交货。\n\n- F8；提供材料正文第3行\n\n> 原件、签章、完整条款、付款触发条件、验收约定、合同签署日期、设备名称/型号/数量和交付地点方式待核实；不能从未提供的条款推断没有约定。\n\n### 虚构付款回单复印件文字摘录\n\n材料 src-plaintiff-native-phase7-2-02c8cf67-563a-4541-a41e-c0ef555ad6ac；登记类型 evidence；来源 import\n\n- F9；提供材料正文第1行\n\n> 本文件仅为虚构回单文字摘录，未提供银行回单原件、截图像素或完整流水。\n\n- F10；提供材料正文第2行\n\n> 文字记载金额20万元；甲方称该笔是本案付款。\n\n- F11；提供材料正文第3行\n\n> 真实性、交易是否成功、付款人、收款主体、实际入账日期及与本合同的对应关系均待核验，不得写成双方确认或法院认定。\n\n- F12；提供材料正文第4行\n\n> 80万元减20万元算术差额60万元不是本次诉请、确定欠款或任何一方自认金额。\n\n### 虚构聊天记录文字摘录\n\n材料 src-plaintiff-native-phase7-3-02c8cf67-563a-4541-a41e-c\n[stored result truncated: 20592 chars]\n：未通过：关键事实发生日期待确认（识别法条 8 项，阻断 8 项）。\n- 法条阻断项：《中华人民共和国民法典》；《中华人民共和国合同法》；《最高人民法院关于适用〈中华人民共和国民法典〉时间效力的若干规定》；《中华人民共和国民事诉讼法》；《中华人民共和国民法典》；《中华人民共和国合同法》；另 2 项。\n- 类案待复核项：无。\n- 正式交付规则：如存在已废止、失效或未确认的法条引用，不得标记为正式成果；需先替换或核验后再完成正式交付核验。\n\n## 案件归档与交付边界\n- 案件空间：已归档 caseId=own-plaintiff-default-effort-4a4ba0f6-52c7-40a7-afbb-b2b7d58b363d materialId=fe462298-d99b-41e0-9d58-eab2b3a7c435\n- 正式交付：完成现行有效法律、证据、类案和来源复核后，生成交付包。"
+      },
+      "verification": {
+        "status": "verified",
+        "basis": "terminal_verification",
+        "reason": "Generated legal work remains subject to lawyer review and is not automatically filed, signed, sent, or published."
+      }
+    }
+  }
+]

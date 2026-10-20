@@ -1,4 +1,5 @@
-import { readDB, writeDB } from '../../db_layer';
+import { readDatabaseTables, commitDatabaseTables } from '../../db_layer';
+import { cloneDatabaseValue } from '../db/snapshot_changes';
 
 export interface VoiceProfileScope {
   userId: string;
@@ -16,20 +17,20 @@ export function voiceProfileScope(userId: string, domain?: string, orgId?: strin
 }
 
 export function voiceProfileStorageKey(scope: VoiceProfileScope): string {
+  if (!scope.userId || !['personal', 'work'].includes(scope.domain)
+    || (scope.domain === 'work' ? !scope.orgId : Boolean(scope.orgId))) throw new Error('Invalid voice profile scope');
   return scope.domain === 'work' ? `org:${scope.orgId}` : scope.userId;
 }
 
 export function listScopedVoiceProfiles(scope: VoiceProfileScope): any[] {
-  const db = readDB();
-  return [...(db.voiceProfiles?.[voiceProfileStorageKey(scope)] || [])];
+  const db = readDatabaseTables(["voiceProfiles"]);
+  return cloneDatabaseValue(db.voiceProfiles?.[voiceProfileStorageKey(scope)] || []);
 }
 
 export function addScopedVoiceProfile(scope: VoiceProfileScope, profile: Record<string, any>): any {
-  const db = readDB();
-  if (!db.voiceProfiles) db.voiceProfiles = {};
+  const db = readDatabaseTables(["voiceProfiles"]);
   const key = voiceProfileStorageKey(scope);
-  if (!db.voiceProfiles[key]) db.voiceProfiles[key] = [];
-  const stored = {
+  const stored = cloneDatabaseValue({
     ...profile,
     // The store owns this required persistence field, including direct callers
     // that do not come through the voice clone/design HTTP routes.
@@ -37,10 +38,9 @@ export function addScopedVoiceProfile(scope: VoiceProfileScope, profile: Record<
     domain: scope.domain,
     orgId: scope.orgId,
     createdBy: scope.userId,
-  };
-  db.voiceProfiles[key].push(stored);
-  writeDB(db);
-  return stored;
+  });
+  commitDatabaseTables({ ...db, voiceProfiles: { ...db.voiceProfiles, [key]: [...(db.voiceProfiles?.[key] || []), stored] } });
+  return cloneDatabaseValue(stored);
 }
 
 export function updateScopedVoiceProfile(
@@ -48,37 +48,46 @@ export function updateScopedVoiceProfile(
   voiceId: string,
   patch: Record<string, any>,
 ): any | null {
-  const db = readDB();
+  const db = readDatabaseTables(["voiceProfiles"]);
   const key = voiceProfileStorageKey(scope);
   const profiles = db.voiceProfiles?.[key] || [];
   const index = profiles.findIndex((profile: any) => profile.voiceId === voiceId);
   if (index < 0) return null;
-  profiles[index] = { ...profiles[index], ...patch, voiceId: profiles[index].voiceId };
-  db.voiceProfiles[key] = profiles;
-  writeDB(db);
-  return profiles[index];
+  const current = profiles[index];
+  const next = cloneDatabaseValue({ ...current, ...patch, voiceId: current.voiceId,
+    domain: current.domain, orgId: current.orgId, createdBy: current.createdBy });
+  commitDatabaseTables({ ...db, voiceProfiles: { ...db.voiceProfiles, [key]: profiles.map((row: any, i: number) => i === index ? next : row) } });
+  return cloneDatabaseValue(next);
 }
 
 export function removeScopedVoiceProfile(scope: VoiceProfileScope, voiceId: string): any | null {
-  const db = readDB();
+  const db = readDatabaseTables(["voiceProfiles"]);
   const key = voiceProfileStorageKey(scope);
   const profiles = db.voiceProfiles?.[key] || [];
   const index = profiles.findIndex((profile: any) => profile.voiceId === voiceId);
   if (index < 0) return null;
-  const [removed] = profiles.splice(index, 1);
-  db.voiceProfiles[key] = profiles;
-  writeDB(db);
-  return removed;
+  const removed = profiles[index];
+  commitDatabaseTables({ ...db, voiceProfiles: { ...db.voiceProfiles, [key]: profiles.filter((_: any, i: number) => i !== index) } });
+  return cloneDatabaseValue(removed);
 }
 
 export function isVoiceProfileAccessible(scope: VoiceProfileScope, voiceId: string): boolean {
   const target = String(voiceId || '').trim();
   if (!target || target === 'default') return true;
-  const db = readDB();
+  const db = readDatabaseTables(["voiceProfiles"]);
   const entries = Object.entries(db.voiceProfiles || {}) as Array<[string, any[]]>;
   const owners = entries.filter(([, profiles]) => (
     Array.isArray(profiles) && profiles.some(profile => profile?.voiceId === target)
   ));
   if (owners.length === 0) return true;
   return owners.some(([key]) => key === voiceProfileStorageKey(scope));
+}
+
+/** Provider metadata only; never disclose another owner's profile payload. */
+export function findVoiceProfileModel(voiceId: string): string | undefined {
+  for (const profiles of Object.values(readDatabaseTables(["voiceProfiles"]).voiceProfiles || {}) as any[][]) {
+    const model = profiles.find(profile => profile?.voiceId === voiceId && profile?.model)?.model;
+    if (model) return String(model);
+  }
+  return undefined;
 }

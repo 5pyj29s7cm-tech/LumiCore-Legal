@@ -1,4 +1,4 @@
-import { readDB, writeDB } from '../../db_layer';
+import { readSetting, writeSetting } from '../persistence/settings_repository';
 import { PRODUCT_VARIANT } from '../../shared/product_variant';
 import { mcpManager } from '../mcp';
 import type { MCPServerConfig } from '../mcp/client';
@@ -32,8 +32,7 @@ export function selectNonDefaultVariantSkillsToDisable(
  * but never touches third-party connectors and never overrides later opt-ins.
  */
 export function enforceProductVariantSkillBaseline(): string[] {
-  const db = readDB();
-  if ((db.settings || []).some((row: any) => row.key === MIGRATION_KEY && row.value === '1')) return [];
+  if (readSetting(MIGRATION_KEY) === '1') return [];
 
   const configured = mcpManager.getConfig();
   const disabled = selectNonDefaultVariantSkillsToDisable(
@@ -43,8 +42,6 @@ export function enforceProductVariantSkillBaseline(): string[] {
   for (const name of disabled) configured[name].enabled = false;
   if (disabled.length > 0) mcpManager.saveConfig(configured);
 
-  if (!Array.isArray(db.settings)) db.settings = [];
-  db.settings.push({ key: MIGRATION_KEY, value: '1' });
-  writeDB(db);
+  writeSetting(MIGRATION_KEY, '1');
   return disabled;
 }

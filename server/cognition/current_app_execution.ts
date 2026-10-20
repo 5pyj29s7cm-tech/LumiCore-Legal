@@ -1,16 +1,14 @@
+import type { DesktopExecutionPreference } from '../../shared/operation_modes';
 import type { ToolExecutionRecord } from '../tools/types';
 import {
   extractRequestedCurrentAppText,
   extractCurrentAppTarget,
   requiresCurrentAppUiMutation,
 } from './action_contract';
-import {
-  getRecoveredApplicationContinuationTarget,
-  isRecoveredCurrentAppEditingContinuation,
-} from './action_continuation';
 import { WPS_CREATE_DOCUMENT_TOOL } from '../external_control/wps_automation';
 import {
   guardTaskTargetToolCall,
+  parseTaskTargetJson,
   type AcceptedTaskTarget,
   type TaskTargetToolCallGuardResult,
 } from '../conversation/task_target_anchor';
@@ -47,36 +45,16 @@ function isWpsTarget(value: string): boolean {
     .test(String(value || '').trim());
 }
 
-export function isRecoveredWpsCreateTask(text: string): boolean {
+export function isWpsCreateTask(text: string, appTarget = ''): boolean {
   const primary = primaryTurnText(text);
-  const target = isRecoveredCurrentAppEditingContinuation(text)
-    ? getRecoveredApplicationContinuationTarget(text)
-    : requiresCurrentAppUiMutation(text)
-      ? extractCurrentAppTarget(text)
-      : '';
+  const target = requiresCurrentAppUiMutation(text, appTarget) ? appTarget || extractCurrentAppTarget(text) : '';
   return isWpsTarget(target)
     && CREATE_INTENT_RE.test(primary);
 }
 
-export function isRecoveredWpsCreateAndTypeTask(text: string): boolean {
-  return isRecoveredWpsCreateTask(text) && WRITE_INTENT_RE.test(primaryTurnText(text));
-}
-
-function parseNestedJson(value: unknown): unknown {
-  let parsed = value;
-  for (let depth = 0; depth < 3 && typeof parsed === 'string'; depth += 1) {
-    try {
-      parsed = JSON.parse(parsed);
-    } catch {
-      break;
-    }
-  }
-  return parsed;
-}
-
 function recordFailed(record: ToolExecutionRecord): boolean {
   if (record.error || !String(record.result || '').trim()) return true;
-  const payload = parseNestedJson(record.result) as any;
+  const payload = parseTaskTargetJson(record.result) as any;
   const status = String(payload?.status || payload?.verification?.status || '').trim().toLowerCase();
   return payload?.ok === false
     || payload?.success === false
@@ -116,7 +94,7 @@ function nodeLooksLikeEditor(node: unknown): boolean {
 
 function snapshotShowsEditor(record: ToolExecutionRecord): boolean {
   if (record.name !== 'desktop_ui_snapshot' || recordFailed(record)) return false;
-  const parsed = parseNestedJson(record.result);
+  const parsed = parseTaskTargetJson(record.result);
   if (nodeLooksLikeEditor(parsed)) return true;
   const text = String(record.result || '');
   return /"(?:controlType|role|type)"\s*:\s*"Document"/i.test(text)
@@ -126,7 +104,7 @@ function snapshotShowsEditor(record: ToolExecutionRecord): boolean {
 function isCreateAction(record: ToolExecutionRecord): boolean {
   if (recordFailed(record)) return false;
   if (record.name === WPS_CREATE_DOCUMENT_TOOL) {
-    const payload = parseNestedJson(record.result) as any;
+    const payload = parseTaskTargetJson(record.result) as any;
     return payload?.status === 'verified'
       && payload?.documentCreated === true
       && payload?.exactTextMatch === true;
@@ -141,7 +119,7 @@ function isCreateAction(record: ToolExecutionRecord): boolean {
 function hasVerifiedWpsAutomation(records: ToolExecutionRecord[]): boolean {
   return records.some(record => {
     if (record.name !== WPS_CREATE_DOCUMENT_TOOL || recordFailed(record)) return false;
-    const payload = parseNestedJson(record.result) as any;
+    const payload = parseTaskTargetJson(record.result) as any;
     return payload?.ok === true
       && payload?.status === 'verified'
       && payload?.automation === 'KWPS.Application'
@@ -168,15 +146,12 @@ function latestIndex(records: ToolExecutionRecord[], predicate: (record: ToolExe
   return -1;
 }
 
-export function isCurrentAppExecutionTask(text: string): boolean {
-  return isRecoveredCurrentAppEditingContinuation(text) || requiresCurrentAppUiMutation(text);
-}
-
 export function getConfirmedCurrentAppEditorSnapshotIndex(
   records: ToolExecutionRecord[],
   taskText: string,
+  appTarget = '',
 ): number {
-  if (!isCurrentAppExecutionTask(taskText)) return -1;
+  if (!requiresCurrentAppUiMutation(taskText, appTarget)) return -1;
   const wantsCreate = CREATE_INTENT_RE.test(primaryTurnText(taskText));
   const createIndex = latestIndex(records, isCreateAction);
   if (wantsCreate && createIndex < 0) return -1;
@@ -231,7 +206,9 @@ export function guardCurrentAppToolCall(input: {
   arguments?: Record<string, unknown>;
   toolRecords?: ToolExecutionRecord[];
   acceptedTaskTarget?: AcceptedTaskTarget;
+  currentAppTarget?: string;
   isolatedCalculation?: boolean;
+  desktopExecutionPreference?: DesktopExecutionPreference;
 }): CurrentAppToolCallGuardResult {
   const targetGuard = guardTaskTargetToolCall({
     taskText: input.taskText,
@@ -242,7 +219,8 @@ export function guardCurrentAppToolCall(input: {
     isolatedCalculation: input.isolatedCalculation,
   });
   if (!targetGuard.allowed) return targetGuard;
-  if (!isCurrentAppExecutionTask(input.taskText)) return targetGuard;
+  const appTarget = input.currentAppTarget || input.acceptedTaskTarget?.target.application || '';
+  if (!requiresCurrentAppUiMutation(input.taskText, appTarget)) return targetGuard;
 
   const toolName = String(input.toolName || '');
   const args = input.arguments || {};
@@ -250,14 +228,16 @@ export function guardCurrentAppToolCall(input: {
   const verifiedWpsAutomation = hasVerifiedWpsAutomation(records);
 
   if (toolName === WPS_CREATE_DOCUMENT_TOOL) {
-    if (!isRecoveredWpsCreateTask(input.taskText)) {
+    if (!isWpsCreateTask(input.taskText, appTarget)) {
       return {
         allowed: false,
         reason: `${WPS_CREATE_DOCUMENT_TOOL} requires an explicit WPS request or a recovered WPS continuation that creates a document.`,
       };
     }
     const requestedText = extractRequestedCurrentAppText(primaryTurnText(input.taskText));
-    if (WRITE_INTENT_RE.test(primaryTurnText(input.taskText)) && !requestedText) {
+    const generativeDraft = /(?:\u8d77\u8349|\u64b0\u5199|\u751f\u6210|\u5236\u4f5c|\u6839\u636e.{0,30}(?:\u8d44\u6599|\u6750\u6599))|\b(?:draft|compose|generate)\b/iu.test(primaryTurnText(input.taskText));
+    const documentText = requestedText || (generativeDraft && typeof args.text === 'string' ? args.text.trim() : '');
+    if (WRITE_INTENT_RE.test(primaryTurnText(input.taskText)) && !documentText) {
       return {
         allowed: false,
         reason: `${WPS_CREATE_DOCUMENT_TOOL} requires an exact text payload recoverable from the user's write/type instruction.`,
@@ -275,18 +255,18 @@ export function guardCurrentAppToolCall(input: {
       // The dedicated WPS tool must receive the trusted payload from the user
       // turn, not a model reconstruction that may omit punctuation or alter
       // wording. It has no other supported arguments.
-      normalizedArguments: { text: requestedText },
+      normalizedArguments: { text: documentText },
     };
   }
 
-  if ((CURRENT_APP_FORBIDDEN_TOOLS as readonly string[]).includes(toolName)) {
+  if (input.desktopExecutionPreference !== 'external' && (CURRENT_APP_FORBIDDEN_TOOLS as readonly string[]).includes(toolName)) {
     return {
       allowed: false,
       reason: `${toolName} is disabled for current-app editing. Use active-window and UI Automation controls so focus and state changes remain auditable.`,
     };
   }
 
-  const editorSnapshotIndex = getConfirmedCurrentAppEditorSnapshotIndex(records, input.taskText);
+  const editorSnapshotIndex = getConfirmedCurrentAppEditorSnapshotIndex(records, input.taskText, appTarget);
   const editorReady = editorSnapshotIndex >= 0;
   const key = String(args.key || '').trim().toLowerCase();
   const isTyping = toolName === 'desktop_ui_type';

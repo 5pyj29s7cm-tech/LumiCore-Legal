@@ -12,7 +12,7 @@ export function installCivilCodeFixture() {
     title: entry.sourceTitle, status: 'verified', checkedAt: '2026-09-18T00:00:00.000Z',
     expectedVersionDate: entry.verification.versionDate, expectedEffectiveDate: entry.verification.effectiveDate,
     expectedArticleMax: entry.verification.articleMax!, expectedRecordId: entry.recordId,
-    lastVerifiedAt: '2026-09-18T00:00:00.000Z', reviewAfter: '2026-10-10', reasons: [], consecutiveFailures: 0,
+    lastVerifiedAt: '2026-09-18T00:00:00.000Z', reviewAfter: new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10), reasons: [], consecutiveFailures: 0,
     observed: {
       recordId: entry.recordId!, title: entry.sourceTitle, versionDate: entry.verification.versionDate,
       effectiveDate: entry.verification.effectiveDate, effectivenessCode: 3, category: '法律',

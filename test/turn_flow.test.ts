@@ -155,7 +155,6 @@ describe('Lumi turn flow', () => {
     expect(dispatch.flow.allowToolUseForTurn).toBe(false);
     expect(dispatch.flow.clientActionOnlyTurn).toBe(false);
     expect(dispatch.flow.selfRepairTurn).toBe(false);
-    expect(dispatch.flow.specialWorkflow).toBeNull();
     expect(dispatch.flow.routeText).not.toContain('active task');
     if (channel === 'chat') {
       expect(dispatch.promptOverlay).toContain('only text entry');
@@ -808,4 +807,13 @@ describe('Lumi turn flow', () => {
     expect(cadContinuation.clientActionOnlyTurn).toBe(false);
     expect(cadContinuation.routeText).toContain('AutoCAD');
   });
+});
+
+it.each(['按上面的“非拼写错误版”来', '按上面的非拼写错误版来'])('keeps a creative version choice out of runtime self-repair: %s', async text => {
+  const { isDiagnosticOrRepairRequest } = await import('../server/cognition/tool_intent');
+  const { buildLumiTurnFlow } = await import('../server/cognition/turn_flow');
+  expect(isDiagnosticOrRepairRequest(text)).toBe(false);
+  const flow = buildLumiTurnFlow({userId:'creative-version-selection',text,channel:'chat',targetIsLumi:true});
+  expect(flow.selfRepairTurn).toBe(false);
+  expect(isDiagnosticOrRepairRequest('客户端启动错误，请检查')).toBe(true);
 });

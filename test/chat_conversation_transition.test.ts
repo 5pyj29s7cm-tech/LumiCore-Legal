@@ -1,15 +1,9 @@
-import fs from 'node:fs';
+import { pagePath, pageAst, sendButtonDisabled, deferred, noop, pageHarness } from './chat_page_fixture';
+import { extractSourceExpression as extract } from './source_expression';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
-import { ChatAttachmentUploads } from '../src/lib/chatAttachmentUploads';
-import { chatAttachmentCopy } from '../src/i18n/locales/chatAttachments';
-import { ChatViewWorkRegistry } from '../src/lib/chatViewWork';
-import { ChatRequestLedger } from '../src/lib/chatEventReceipts';
-import { createChatAttachmentReference, mergeChatAttachmentReferences, MAX_CHAT_ATTACHMENTS } from '../src/lib/chatAttachmentReferences';
-const pagePath = 'src/components/AgentChatPage.tsx';
-const pageSource = fs.readFileSync(pagePath, 'utf8');
-const pageAst = ts.createSourceFile(pagePath, pageSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
 function initialHistoryEffect(dependencies: Record<string, any>) {
   let expression = '';
   const visit = (node: ts.Node) => {
@@ -20,107 +14,6 @@ function initialHistoryEffect(dependencies: Record<string, any>) {
   visit(pageAst);
   if (!expression) throw new Error('Missing mounted initial history effect');
   return vm.runInNewContext(ts.transpileModule(`(${expression})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, dependencies)();
-}
-function extract(file: string, name: string, dependencies: Record<string, any>) {
-  const source = fs.readFileSync(file, 'utf8');
-  const ast = file === pagePath ? pageAst : ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let expression = '';
-  const visit = (node: ts.Node) => {
-    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name && node.initializer) {
-      const init = node.initializer;
-      expression = ts.isCallExpression(init) && init.expression.getText(ast) === 'useCallback'
-        ? init.arguments[0].getText(ast) : init.getText(ast);
-    }
-    if (ts.isFunctionDeclaration(node) && node.name?.text === name) expression = node.getText(ast).replace(/^export\s+/, '');
-    ts.forEachChild(node, visit);
-  };
-  visit(ast);
-  if (!expression) throw new Error(`Production function missing: ${file}:${name}`);
-  return vm.runInNewContext(ts.transpileModule(`(${expression})`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText, dependencies);
-}
-function sendButtonDisabled(dependencies: Record<string, unknown>) {
-  let expression = '';
-  const visit = (node: ts.Node) => {
-    if (ts.isJsxAttribute(node) && node.name.getText(pageAst) === 'disabled'
-      && node.initializer && ts.isJsxExpression(node.initializer)
-      && node.initializer.expression?.getText(pageAst).includes('pendingAttachments.length === 0')) {
-      expression = node.initializer.expression.getText(pageAst);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(pageAst);
-  if (!expression) throw new Error('Mounted send button disabled predicate missing');
-  return vm.runInNewContext(expression, dependencies);
-}
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>(r => { resolve = r; });
-  return { promise, resolve };
-}
-const noop = () => {};
-const oldAttachment = () => createChatAttachmentReference({
-  fileId: 'earlier-budget.txt', fileName: 'earlier-budget.txt',
-  path: 'C:/synthetic-knowledge/earlier-budget.txt', kind: 'file', content: 'OLD_DOCUMENT_ONLY: budget 100.',
-});
-const newFileReply = () => ({ ok: true, json: async () => ({ files: [{
-  id: 'current-budget.txt', name: 'current-budget.txt',
-  path: 'C:/synthetic-knowledge/current-budget.txt', mimeType: 'text/plain',
-  content: 'NEW_DOCUMENT_ONLY: budget 250.', extractionStatus: 'indexed', rawSize: 35,
-}] }) });
-
-function pageHarness(withOldAttachment = false, transport?: (url: string, init: any) => Promise<any>) {
-  const response = deferred<any>();
-  const registry = new ChatViewWorkRegistry();
-  const emitted: any[] = [];
-  const deps: Record<string, any> = {
-    conversationTransitionRef: { current: null }, conversationTransitionPending: false, setConversationTransitionPending: (value: boolean) => { deps.conversationTransitionPending = value; },
-    isOptimizing: false, attachmentUploadFailures: [], chatUploadsRef: { current: new ChatAttachmentUploads() },
-    attachmentUploadText: chatAttachmentCopy(false), conversationAttachmentsRef: { current: withOldAttachment ? [oldAttachment()] : [] },
-    pendingAttachmentsRef: { current: [] }, pendingAttachments: [], draftTextRef: { current: 'Summarize the document I just selected.' },
-    messagesRef: { current: [] }, messages: [], user: { uid: 'synthetic-owner', username: 'synthetic-owner' },
-    activeDomain: 'personal', activeOrgId: '', agentId: 'lumi', agentCategory: 'assistant',
-    chatExecutionSource: 'command-center-chat', operationMode: 'standard', isZh: false,
-    mergeChatAttachmentReferences, createChatAttachmentReference, MAX_CHAT_ATTACHMENTS,
-    chatViewWorkRef: { current: registry }, scopedFileUrl: (url: string) => url,
-    FormData: transport ? FormData : class { append() {} },
-    fetch: transport || (() => response.promise),
-    toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() }, t: {},
-    uiMessage: (key: string) => key, formatUiMessage: (key: string) => key,
-    setOptimizationProgress: noop, window: { setTimeout: noop }, notifyKnowledgeUpdated: noop,
-    chatRequestLedgerRef: { current: new ChatRequestLedger() }, chatTurnUiMetaRef: { current: new Map() },
-    currentRequestHadToolRef: { current: false }, currentRequestNeedsEvidenceRef: { current: false },
-    currentResponseFinalizationRef: { current: null }, chatTurnTimerGuardRef: { current: { begin: noop } },
-    taskRelationLedgerRef: { current: { controlTarget: () => ({}) } },
-    activeChatRequestIdRef: { current: null }, textChatActiveRef: { current: false },
-    attachmentConversationIdRef: { current: 'synthetic-conversation' }, activeChatViewDetachersRef: { current: new Set() },
-    activeMediaGenerationRef: { current: null }, mediaGenerationText: {},
-    setIsTyping: noop, needsVisibleToolEvidence: () => false, clearChatProgress: noop, pushChatProgress: noop,
-    setWorkflowStatus: noop, setWorkflowSteps: noop, persistActiveExecution: noop,
-    setTimeout: () => 1, clearTimeout: noop, buildChatHistoryPayload: (rows: any[]) => rows,
-    makeChatMessageId: (prefix: string) => `${prefix}-${Math.random()}`,
-    socket: { connected: true, on: noop, off: noop, emit: (event: string, payload: any) => { emitted.push({ event, payload }); } },
-  };
-  deps.setAttachmentUploadFailures = (value: any[]) => { deps.attachmentUploadFailures = value; };
-  deps.setIsOptimizing = (value: boolean) => { deps.isOptimizing = value; };
-  deps.setDraftText = (value: string) => { deps.draftTextRef.current = value; };
-  deps.setPendingAttachments = (update: any) => {
-    deps.pendingAttachments = typeof update === 'function' ? update(deps.pendingAttachments) : update;
-    deps.pendingAttachmentsRef.current = deps.pendingAttachments;
-  };
-  deps.setMessages = (update: any) => {
-    deps.messages = typeof update === 'function' ? update(deps.messages) : update;
-    deps.messagesRef.current = deps.messages;
-  };
-  deps.setConversationAttachments = (value: any) => { deps.conversationAttachmentsRef.current = value; };
-  deps.attachmentContextStorageKey = '';
-  for (const name of ['isImageFileName', 'isAudioFileName', 'extractAudioTranscript', 'serializeChatAttachment',
-    'appendPendingAttachments', 'mapImportedFilesToAttachments', 'acceptImportedChatFiles', 'rememberAttachmentContext',
-    'sendText', 'handleSendMessage', 'runChatAttachmentUpload', 'uploadChatAttachments', 'importChatAttachmentPaths']) {
-    deps[name] = extract(pagePath, name, deps);
-  }
-  return { deps, response, registry, emitted, upload: deps.uploadChatAttachments, send: () => deps.handleSendMessage({ preventDefault: noop }) };
 }
 
 function switchingHarness() {
@@ -144,6 +37,8 @@ function switchingHarness() {
     seenWorkflowToolEvents: { current: new Set() }, setConversationHistory: noop,
     setConversationHistorySelectorExpanded: noop, requestAnimationFrame: noop,
   });
+  h.deps.detachPreviousExecution = extract(pagePath, 'detachPreviousExecution', h.deps);
+  h.deps.activateTranscript = extract(pagePath, 'activateTranscript', h.deps);
   h.deps.restoreTextConversation = extract(pagePath, 'restoreTextConversation', h.deps);
   h.deps.setIsCreatingConversation = (value: boolean) => { h.deps.isCreatingConversation = value; };
   h.deps.startNewTextConversation = extract(pagePath, 'startNewTextConversation', h.deps);
@@ -152,6 +47,37 @@ function switchingHarness() {
 }
 
 describe('conversation transition send barrier', () => {
+  it('keeps server-owned finalization metadata for the foreground request', async () => {
+    const h = switchingHarness();
+    h.send();
+    const requestId = h.emitted[0].payload.requestId;
+    const metadata = h.deps.chatTurnUiMetaRef.current.get(requestId);
+    expect(metadata).toEqual({ hadTool: false, finalization: null });
+    expect(h.deps.currentTurnUiMetaRef.current).toBe(metadata);
+    metadata.hadTool = true;
+    expect(h.deps.currentTurnUiMetaRef.current.hadTool).toBe(true);
+    const pending = h.restore(); h.finish(); await pending;
+    expect(h.deps.currentTurnUiMetaRef.current).toEqual({ hadTool: false, finalization: null });
+    expect(h.deps.chatTurnUiMetaRef.current.size).toBe(0);
+  });
+
+  it('keeps queued metadata separate and resumes the next request by reference', () => {
+    const h = switchingHarness();
+    h.send();
+    const first = h.deps.currentTurnUiMetaRef.current;
+    first.hadTool = true;
+    h.deps.setDraftText('A queued request'); h.send();
+    const nextId = h.emitted[1].payload.requestId;
+    const next = h.deps.chatTurnUiMetaRef.current.get(nextId);
+    expect(next).not.toBe(first);
+    expect(h.deps.currentTurnUiMetaRef.current).toBe(first);
+    expect(next.hadTool).toBe(false);
+    extract(pagePath, 'resumeForegroundRequest', h.deps)(nextId);
+    expect(h.deps.currentTurnUiMetaRef.current).toBe(next);
+    next.finalization = { finalized: true, blocked: true, reason: 'synthetic' };
+    expect(h.deps.currentTurnUiMetaRef.current.finalization).toBe(next.finalization);
+  });
+
   it('control: after switching finishes, send goes to the selected conversation and remains visible', async () => {
     const h = switchingHarness();
     const pending = h.restore(); h.finish(); await pending;
@@ -247,5 +173,35 @@ describe('conversation transition send barrier', () => {
     expect(h.emitted[0].payload.conversationId).toBe('initial-active');
     expect(h.deps.chatRequestLedgerRef.current.size).toBe(1);
     unmount();
+  });
+});
+
+describe('scope detachment ownership', () => {
+  function scopeHarness(founder: boolean) {
+    const h = switchingHarness(); h.send();
+    Object.assign(h.deps, {
+      isFounder: founder, lastConversationScopeRef: { current: h.deps.user.username + ':scope' },
+      initialLoadDoneRef: { current: true }, buildChatConversationScopeKey: (id: string) => id === 'founder' ? 'founder-scope' : 'scope',
+      attachmentContextStoragePrefix: '', terminalReceiptsRef: { current: new Set() },
+      localStorage: { removeItem: noop }, setIsTyping: vi.fn(),
+      fetch: vi.fn(async () => ({ json: async () => ({}) })),
+    });
+    return h;
+  }
+  it('a changed uid detaches the old view even when the username stays the same', () => {
+    const h = scopeHarness(false); h.deps.user = { ...h.deps.user, uid: 'second-owner' };
+    initialHistoryEffect(h.deps);
+    expect(h.deps.chatRequestLedgerRef.current.size).toBe(0);
+    expect(h.deps.chatExecutionWatchesRef.current.size).toBe(0);
+    expect(h.deps.currentTurnUiMetaRef.current).toEqual({ hadTool: false, finalization: null });
+    expect(h.deps.setIsTyping).toHaveBeenCalledWith(false);
+    expect(h.deps.clearPersistedExecution).not.toHaveBeenCalled();
+  });
+  it('a founder surface switch detaches text watches before skipping history loading', () => {
+    const h = scopeHarness(true); h.deps.agentId = 'founder';
+    initialHistoryEffect(h.deps);
+    expect(h.deps.chatRequestLedgerRef.current.size).toBe(0);
+    expect(h.deps.chatExecutionWatchesRef.current.size).toBe(0);
+    expect(h.deps.fetch).not.toHaveBeenCalled();
   });
 });

@@ -1,0 +1,46 @@
+import './helpers';
+import OpenAI from 'openai';
+import {beforeAll,beforeEach,afterEach,describe,expect,it,vi} from 'vitest';
+import {initDatabase} from '../db_layer';
+import {makeLLMCallStreaming,type LLMCallConfig} from '../server/llm/providers';
+import {prepareLocalModelRequest,estimateLocalRequestInputTokens} from '../server/llm/local_context_budget';
+import {promptBlockMessage} from '../server/llm/prompt_blocks';
+import {ensureLocalModelReady} from '../server/llm/local_models';
+import {loadedLocalContextTokens} from '../server/llm/local_model_capacity';
+import {upsertUserPreferredLLM} from '../server/llm/user_preferences';
+import {runLegalLLM,LegalStructuredResponseError} from '../server/regions/packs/cn/legal_tools/context';
+import {resetCircuit} from '../server/cloud/circuit_breaker';
+vi.mock('../server/llm/local_models',async original=>({...await original<typeof import('../server/llm/local_models')>(),ensureLocalModelReady:vi.fn(async()=>({})),runLocalModelInference:vi.fn(async(_provider,operation)=>operation())}));
+vi.mock('../server/llm/local_model_capacity',async original=>({...await original<typeof import('../server/llm/local_model_capacity')>(),loadedLocalContextTokens:vi.fn()}));
+beforeAll(initDatabase);
+beforeEach(()=>{vi.stubEnv('LUMI_PRIVACY','standard');vi.mocked(loadedLocalContextTokens).mockResolvedValue(8192);vi.mocked(ensureLocalModelReady).mockClear();vi.spyOn(globalThis,'fetch').mockRejectedValue(new Error('Actual network forbidden in this offline SDK regression'));resetCircuit();});
+afterEach(()=>{expect(fetch).not.toHaveBeenCalled();vi.restoreAllMocks();vi.unstubAllEnvs();resetCircuit();});
+const source='程序验收虚构刑事材料：虚构甲陈述2026年10月1日借出一辆自行车，虚构乙否认收到；尚无原件和签收记录。不得把陈述升级为已证明事实。仅列已提供信息、矛盾与待补材料，不作有罪判断。';
+const required=(text=source)=>promptBlockMessage({id:'criminal-original',kind:'task_state',authority:'server',required:true,content:text},'user');
+const schema=[{type:'function' as const,function:{name:'read_fixture',description:'Read one exact offline source.',parameters:{type:'object',properties:{path:{type:'string'}},required:['path']}}}];
+function fixture(options:{ceiling?:number;provider?:string;context?:number;finish?:string;content?:string;pending?:boolean}={}){
+ const provider=options.provider||'lmstudio',userId='local-ceiling-'+Math.random(),wire:any[]=[],controller=new AbortController();let began!:()=>void;const started=new Promise<void>(resolve=>{began=resolve;});
+ vi.mocked(loadedLocalContextTokens).mockResolvedValue(options.context||8192);
+ upsertUserPreferredLLM(userId,{provider,model:provider==='relay'?'aliyun/deepseek-v4-flash':'qwen2.5-7b-instruct',selectionMode:'pinned',allowCloudFallback:false});
+ const sdkFetch=vi.fn(async(_url:any,init:any)=>{const body=JSON.parse(String(init.body));wire.push(body);began();if(options.pending)return new Promise<Response>((_resolve,reject)=>{if(init.signal.aborted)reject(init.signal.reason);else init.signal.addEventListener('abort',()=>reject(init.signal.reason),{once:true});});
+ const chunk={id:'synthetic-local',object:'chat.completion.chunk',created:1,model:body.model,choices:[{index:0,delta:{content:options.content??'{"analysis":"虚构陈述及争议均待核实。"}'},finish_reason:options.finish||'stop'}],usage:{prompt_tokens:200,completion_tokens:20,total_tokens:220}};
+ return new Response('data: '+JSON.stringify(chunk)+'\n\ndata: [DONE]\n\n',{status:200,headers:{'Content-Type':'text/event-stream'}});});
+ const sdk=new OpenAI({apiKey:'synthetic-not-a-key',baseURL:'http://synthetic.invalid/v1',fetch:sdkFetch,maxRetries:0});const get=()=>sdk;
+ const getters=[get,get,get,get,get,get,get,get,get,get,get,get] as const;
+ const config:LLMCallConfig={provider,model:provider==='relay'?'aliyun/deepseek-v4-flash':'qwen2.5-7b-instruct',userId,selectionMode:'pinned',noImplicitFailover:true,maxTokens:options.ceiling??16384,responseFormat:'json_object',signal:controller.signal};
+ return{wire,sdkFetch,controller,started,config,getters,context:{userId,executionSignal:controller.signal,llmGetters:{getDeepSeek:()=>null,getGemini:()=>null,getLmStudio:get}},run:(messages:any[]=[required()],tools:any[]=[])=>makeLLMCallStreaming(messages,tools,config,()=>{},...getters)};
+}
+describe('local output ceiling is resolved after complete input, using real OpenAI SDK SSE without network',()=>{
+ it('fits exact short criminal originals under loaded8192 and caller16384 with one legal SDK request',async()=>{const f=fixture();const response=await f.run();expect(response.text).toContain('待核实');expect(f.sdkFetch).toHaveBeenCalledOnce();const request=f.wire[0];expect(request.messages.find((m:any)=>m.role==='user').content).toBe(source);expect(JSON.stringify(request)).not.toMatch(/compacted|omitted/);expect(request.max_tokens).toBeGreaterThanOrEqual(768);expect(request.max_tokens).toBeLessThan(16384);const prepared=prepareLocalModelRequest({messages:[required()],toolDeclarations:[],contextTokens:8192,maxTokens:16384,compactToolDeclarations:true});expect(request.max_tokens).toBe(prepared.maxTokens);expect(prepared.maxTokens+prepared.estimatedInputTokens+819).toBeLessThanOrEqual(8192);expect(prepared.currentInputCompacted).toBe(false);expect(request.response_format.type).toBe('json_schema');});
+ it.each([128,2048])('keeps a fitting explicit output cap %s without changing any original',async ceiling=>{const f=fixture({ceiling});await f.run();expect(f.wire).toHaveLength(1);expect(f.wire[0].max_tokens).toBe(ceiling);expect(f.wire[0].messages.find((m:any)=>m.role==='user').content).toBe(source);});
+ it('keeps the original16384 cap when the already loaded32768 context fits it',async()=>{const f=fixture({context:32768});await f.run();expect(f.wire).toHaveLength(1);expect(f.wire[0].max_tokens).toBe(16384);expect(f.wire[0].messages.find((m:any)=>m.role==='user').content).toBe(source);});
+ it('does not truncate an oversized required original or contact readiness/SDK',async()=>{const f=fixture();await expect(f.run([required(source.repeat(100))])).rejects.toThrow(/required|original|context|budget/i);expect(f.sdkFetch).not.toHaveBeenCalled();expect(ensureLocalModelReady).not.toHaveBeenCalled();});
+ it('does not silently compact oversized current user text without required metadata',async()=>{const f=fixture({ceiling:256});await expect(f.run([{role:'user',content:source.repeat(100),sourceMessageId:'full-current-source'}])).rejects.toThrow(/original user input|context|budget/i);expect(f.sdkFetch).not.toHaveBeenCalled();});
+ it('keeps complete source and assistant/tool protocol through a fitting adapted request',async()=>{const f=fixture();const receipt='EXACT-RECEIPT '+source;await f.run([required(),{role:'assistant',content:null,toolCalls:[{id:'read-original',name:'read_fixture',arguments:{path:'synthetic-only.txt'}}]},{role:'tool',name:'read_fixture',toolCallId:'read-original',content:receipt}],schema);expect(f.wire).toHaveLength(1);expect(f.wire[0].messages.find((m:any)=>m.role==='user').content).toBe(source);expect(f.wire[0].messages.find((m:any)=>m.role==='tool').content).toBe(receipt);expect(f.wire[0].messages.find((m:any)=>m.role==='assistant').tool_calls[0].id).toBe('read-original');expect(f.wire[0].tools[0].function.name).toBe('read_fixture');});
+ it('still rejects an oversized atomic receipt with no SDK call',async()=>{const f=fixture();await expect(f.run([required(),{role:'assistant',content:null,toolCalls:[{id:'big-receipt',name:'read_fixture',arguments:{path:'synthetic-only.txt'}}]},{role:'tool',name:'read_fixture',toolCallId:'big-receipt',content:source.repeat(100)}],schema)).rejects.toThrow(/complete assistant|context|budget/i);expect(f.sdkFetch).not.toHaveBeenCalled();});
+ it('still rejects orphan receipts before SDK execution',async()=>{const f=fixture({ceiling:128});await expect(f.run([required(),{role:'tool',name:'read_fixture',toolCallId:'orphan',content:'orphan fixture'}],schema)).rejects.toThrow(/orphan/i);expect(f.sdkFetch).not.toHaveBeenCalled();});
+ it.each(['{"analysis":"未完', ''])('preserves length as the existing legal output_limit rather than success: %s',async content=>{const f=fixture({finish:'length',content});const failure=await runLegalLLM(source,f.context,16384,true).catch(error=>error);expect(failure).toBeInstanceOf(LegalStructuredResponseError);expect(failure.reason).toBe('output_limit');expect(f.sdkFetch).toHaveBeenCalledOnce();});
+ it('does not retry or outlive a caller cancellation after the one SDK request starts',async()=>{const f=fixture({pending:true});const pending=expect(f.run()).rejects.toThrow();await Promise.race([f.started,pending.then(()=>{throw new Error('SDK request never started before preflight rejection');})]);f.controller.abort(new Error('Synthetic local cancellation'));await pending;expect(f.sdkFetch).toHaveBeenCalledOnce();});
+ it('does not alter a cloud16384 ceiling or use local capacity logic',async()=>{const f=fixture({provider:'relay'});await f.run();expect(f.wire).toHaveLength(1);expect(f.wire[0].max_tokens).toBe(16384);expect(ensureLocalModelReady).not.toHaveBeenCalled();});
+ it('keeps local_only cloud prohibition at zero SDK calls',async()=>{const f=fixture({provider:'relay'});f.config.dataRoutingPolicy='local_only';await expect(f.run()).rejects.toThrow();expect(f.sdkFetch).not.toHaveBeenCalled();});
+});

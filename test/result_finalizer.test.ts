@@ -1,3 +1,6 @@
+import { isVerifiedCurrentTurnRecord } from '../server/cognition/result_finalizer_support';
+import { readImplementationSource } from './implementation_source';
+import { readVoiceImplementationSource } from './voice_implementation_source';
 import './helpers';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -13,8 +16,53 @@ const verifiedDesktopReceipt = {
 };
 
 describe('Lumi result finalizer', () => {
+  it('accepts a current client-state read without requiring an unrequested UI mutation', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const { buildActionContract, hasCoreActionEvidence } = await import('../server/cognition/action_contract');
+    const taskText = '查看 Lumi 客户端当前界面状态，介绍当前页面和各个分区。只读取客户端状态，不做桌面控制，也不切换页面。';
+    const responseText = '当前在个人域的指挥中心。聊天、任务和创作入口都在客户端内。';
+    const record = { name: 'client_get_state', arguments: { detail: 'full' }, requestId: 'client-read', taskId: 'client-task',
+      result: JSON.stringify({ state: { activeTab: 'home', workDomain: 'personal' }, stateDigest: { clientStateAvailable: true, stateFresh: true } }),
+      terminalVerification: { status: 'verified' as const, strategy: 'terminal_receipt' as const, reason: 'current scoped client state' } };
+    const input = { taskText, responseText, source: 'chat', requestId: 'client-read', taskId: 'client-task', toolRecords: [record], flow: { clientActionOnlyTurn: true, completionEvidenceNeeded: true } as any };
+    const result = finalizeLumiResponse(input);
+    expect(result.blocked).toBe(false);
+    expect(result.text).toContain('指挥中心');
+    const contract = buildActionContract(taskText);
+    expect(contract.label).toBe('Verified Lumi client state');
+    expect(hasCoreActionEvidence(contract, [record], taskText)).toBe(true);
+    expect(hasCoreActionEvidence(contract, [], taskText)).toBe(false);
+  });
+
+  it.each([true, false])('grounds model identity in current evidence (active receipt: %s)', async active => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const input = { taskText: '你现在是什么模型', responseText: '', source: 'chat', requestId: 'identity-current', taskId: 'identity-task',
+      toolRecords: [{ name: 'model_configuration_get', arguments: {}, requestId: 'identity-current', taskId: 'identity-task',
+        result: JSON.stringify({ roles: { reasoning: { provider: 'relay', model: 'aliyun/deepseek-v4-pro' } },
+          activeCall: { requestId: active ? 'identity-current' : 'stale-request', provider: 'relay', model: 'aliyun/deepseek-v4-flash' } }),
+        terminalVerification: { status: 'verified' as const, strategy: 'terminal_receipt' as const, reason: 'configuration read' } }] };
+    const result = finalizeLumiResponse(input);
+    expect(result.blocked).toBe(false);
+    expect(result.text).toContain(active ? 'aliyun/deepseek-v4-flash' : 'aliyun/deepseek-v4-pro');
+    expect(result.text).toContain('Lumi 官方 API');
+    expect(finalizeLumiResponse(input)?.text).toBe(result.text);
+    expect(isVerifiedCurrentTurnRecord({ ...input, requestId:'different-request' }, input.toolRecords[0])).toBe(false);
+    expect(finalizeLumiResponse({ ...input, requestId:'different-request' }).text).not.toContain('aliyun/deepseek-v4-');
+  });
+  it('preserves a generated video but does not claim mismatched output settings completed the request', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const input = { taskText: '生成6秒视频：公寓走廊。', responseText: '视频已生成。', source: 'chat', requestId: 'media-measured', taskId: 'media-task',
+      toolRecords: [{ name: 'generate_video', arguments: { size: '720x1280', duration: 6 }, requestId: 'media-measured', taskId: 'media-task',
+        result: JSON.stringify({ ok: true, success: true, status: 'generated', verified: true, verificationStatus: 'verified',
+          actualSettings: { size: '1080x1920', duration: 5 }, settingsMatch: false, outputPath: 'D:/generated/video.mp4' }),
+        terminalVerification: { status: 'verified' as const, strategy: 'artifact' as const, reason: 'saved container' } }] };
+    const result = finalizeLumiResponse(input);
+    expect(result).toMatchObject({ blocked: true, reason: 'media_settings_mismatch' });
+    expect(result.text).toContain('5.00'); expect(result.text).toContain('1080x1920');
+    expect(finalizeLumiResponse(input)?.reason).toBe('media_settings_mismatch');
+  });
   it('delivers a readable saved-workflow draft receipt without claiming it can run', async () => {
-    const { finalizeLumiResponse, tryFinalizeVerifiedBoundedAction } = await import('../server/cognition/result_finalizer');
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
     const { sanitizeExecutionResponseForDelivery } = await import('../server/cognition/execution_guard_recovery');
     const input = { taskText: '把刚才的文件处理流程保存为可复用工作流。', responseText: '{"steps":[{"arguments":{"path":"C:/private/input.csv"}}]}', source: 'chat', requestId: 'save-draft-request', taskId: 'save-draft-task',
       toolRecords: [{name: 'save_workflow', arguments: {}, requestId: 'save-draft-request', taskId: 'save-draft-task', result: JSON.stringify({ok: true, status: 'draft', workflowId: 'workflow-1', name: '更新销售单据', hash: 'a'.repeat(64), stepCount: 2}),
@@ -22,7 +70,7 @@ describe('Lumi result finalizer', () => {
     const result = finalizeLumiResponse(input);
     expect(result.text).toContain('工作流草稿已保存：更新销售单据');
     expect(result.text).toContain('暂不能运行');
-    expect(tryFinalizeVerifiedBoundedAction(input)?.text).toBe(result.text);
+    expect(finalizeLumiResponse(input)?.text).toBe(result.text);
     const delivered = sanitizeExecutionResponseForDelivery(result, {task: input.taskText, toolRecords: input.toolRecords});
     expect(delivered.text).toBe(result.text);
     expect(delivered.blocked).toBe(false);
@@ -240,13 +288,8 @@ describe('Lumi result finalizer', () => {
   });
 
   it('allows a truthful explanation that a routed subset is not the tool inventory', async () => {
-    const { buildCapabilityMetaResponse } = await import('../server/cognition/capability_meta');
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-    const responseText = buildCapabilityMetaResponse({
-      text: '\u90a3\u8981\u600e\u4e48\u624d\u80fd\u8ba9\u4f60\u4f7f\u7528\u5176\u5b83\u5de5\u5177',
-      operationMode: 'assistant',
-      source: 'command-center-chat',
-    })!;
+    const responseText = 'Lumi selects only the tools relevant to this turn. That subset is not the installed capability inventory and does not mean other tools are disabled.';
     const result = finalizeLumiResponse({
       taskText: '\u90a3\u8981\u600e\u4e48\u624d\u80fd\u8ba9\u4f60\u4f7f\u7528\u5176\u5b83\u5de5\u5177',
       responseText,
@@ -482,12 +525,12 @@ describe('Lumi result finalizer', () => {
     expect(result.text).toContain('client_get_state');
   });
 
-  it('replaces a diagnostic narrative with a summary grounded in real records', async () => {
+  it('grounds an explicitly requested diagnostic narrative in real records', async () => {
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
     const responseText = '\u6211\u5df2\u7ecf\u8fd0\u884c\u4e86 `client_health_check` \u548c `client_get_state`\u3002';
 
     const result = finalizeLumiResponse({
-      taskText: '\u786e\u8ba4',
+      taskText: '请做一次客户端自检',
       responseText,
       toolRecords: [
         { name: 'client_health_check', arguments: {}, result: '{"level":"ready"}' },
@@ -840,13 +883,14 @@ describe('Lumi result finalizer', () => {
         source: 'chat',
       });
       expect(missing.blocked).toBe(true);
-      expect(missing.text).toContain('缺少精确文本“负责人：刘工”');
+      expect(missing.text).toContain('缺少要求的内容：负责人：刘工');
 
       writeFileSync(artifactPath, '## 已知风险\n负责人：刘工\n', 'utf8');
       const satisfied = finalizeLumiResponse({
         taskText,
         responseText: '已经修改并验证完成。',
-        toolRecords: [record],
+        toolRecords: [record, { name: 'read_file', arguments: { path: artifactPath },
+          result: '## 已知风险\n负责人：刘工\n', terminalVerification: { status: 'verified' } } as any],
         source: 'chat',
       });
       expect(satisfied.blocked).toBe(false);
@@ -952,6 +996,26 @@ describe('Lumi result finalizer', () => {
     }
   });
 
+  it('delivers a requested computed amount instead of only acknowledging the saved file', async () => {
+    const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+    const root = mkdtempSync(path.join(os.tmpdir(), 'lumi-computed-readback-'));
+    const artifactPath = path.join(root, 'report.csv');
+    const content = 'category,amount\nA,360\nB,510\nC,300\ntotal,1170\n';
+    try {
+      writeFileSync(artifactPath, content, 'utf8');
+      const writer = { name: 'write_file', arguments: { path: artifactPath, content }, result: JSON.stringify({ path: artifactPath }), ...verifiedDesktopReceipt };
+      const result = finalizeLumiResponse({
+        taskText: `生成报表并另存到 ${artifactPath}，告诉我新总金额。`, responseText: '已保存文件。', source: 'chat',
+        toolRecords: [writer, { name: 'read_file', arguments: { path: artifactPath }, result: content, ...verifiedDesktopReceipt }],
+      });
+      expect(result.blocked).toBe(false);
+      expect(result.text).toContain('1170');
+      const missingReadback = finalizeLumiResponse({ taskText: `生成报表并另存到 ${artifactPath}，告诉我新总金额。`, responseText: '已保存文件，总额999。', source: 'chat', toolRecords: [writer] });
+      expect(missingReadback.blocked).toBe(true);
+      expect(missingReadback.text).not.toContain('999');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('grounds native semantic text writes from the same shared artifact receipts', async () => {
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
     const root = mkdtempSync(path.join(os.tmpdir(), 'lumi-native-artifact-finalizer-'));
@@ -1045,7 +1109,7 @@ describe('Lumi result finalizer', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toBe('Missing core evidence for desktop_operation.');
+    expect(result.reason).toBe('成功执行了查询或检查工具，但这些结果不是完成当前请求所需的执行证据');
     expect(result.text).not.toBe('\u5df2\u6253\u5f00 AutoCAD\u3002');
   });
 
@@ -1541,7 +1605,7 @@ describe('Lumi result finalizer', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.text).toContain('never reached a successful execution');
+    expect(result.text).toContain('could not complete the requested action');
   });
 
   it('blocks a runtime-repair plan when no tool actually started', async () => {
@@ -1589,7 +1653,7 @@ describe('Lumi result finalizer', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.text).toContain('available result does not confirm it');
+    expect(result.text).toContain('could not complete the requested action');
     expect(result.reason).toContain('content-read/open/review');
   });
 
@@ -1611,7 +1675,7 @@ describe('Lumi result finalizer', () => {
     expect(result.blocked).toBe(true);
     expect(result.text).toContain('\u8fd9\u6b21\u8fd8\u6ca1\u5b8c\u6210');
     expect(result.text).toContain('\u6253\u5f00\u6216\u805a\u7126\u76ee\u6807\u7a97\u53e3');
-    expect(result.text).toContain('\u7a97\u53e3\u56de\u6267\u65f6\u8d85\u65f6');
+    expect(result.text).toContain('\u7b49\u5f85\u7ed3\u679c\u8d85\u65f6');
     expect(result.text).not.toContain('timed out');
     expect(result.text).not.toContain('\u56de\u590d\u58f0\u79f0');
     expect(result.text).not.toContain('\u76ee\u524d\u80fd\u786e\u8ba4\u7684\u6210\u529f\u6b65\u9aa4');
@@ -2080,36 +2144,29 @@ describe('Lumi result finalizer', () => {
     expect(result.blocked).toBe(true);
     expect(result.reason).toBe('Missing current-law verification gate for legal document.');
     expect(result.text).toContain('\u8fd8\u4e0d\u80fd\u6807\u8bb0\u4e3a\u5b8c\u6210\u6216\u6b63\u5f0f\u53ef\u7528');
-    expect(result.text).toContain('legal_generate_citation_verification_report');
+    expect(result.text).toContain('文书核验');
+    expect(result.text).not.toContain('legal_generate_');
   });
 
-  it('allows legal document completion after current-law verification passes', async () => {
+  it('allows legal document completion only after the current verified full-delivery receipt', async () => {
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
-
-    const responseText = '\u8d77\u8bc9\u72b6\u548c\u8981\u7d20\u5f0f\u8bc9\u72b6\u5df2\u7ecf\u751f\u6210\u5b8c\u6210\uff0c\u73b0\u884c\u6709\u6548\u6cd5\u5f8b\u6838\u9a8c\u5df2\u901a\u8fc7\u3002';
+    const responseText = '起诉状和要素式诉状已经生成完成，文书核验已通过。';
     const result = finalizeLumiResponse({
-      taskText: '\u6839\u636e\u6750\u6599\u751f\u6210\u8d77\u8bc9\u72b6\u548c\u8981\u7d20\u5f0f\u8bc9\u72b6',
-      responseText,
-      toolRecords: [
-        {
-          name: 'legal_generate_litigation_packet',
-          arguments: { caseName: '\u4e70\u5356\u5408\u540c\u7ea0\u7eb7' },
-          result: '# \u8d77\u8bc9\u72b6\n## \u6cd5\u5f8b\u4f9d\u636e\n\u4ee5\u73b0\u884c\u6709\u6548\u6cd5\u5f8b\u4e3a\u51c6\u3002\n## \u4e8b\u5b9e\u4e0e\u8bc1\u636e\n\u8bc1\u636e\u76ee\u5f55\u3001\u8bc1\u660e\u76ee\u7684\u5df2\u7ed1\u5b9a\u3002\n## \u4e8b\u5b9e\u9002\u7528\u5206\u6790\n\u56f4\u7ed5\u4e89\u8bae\u7126\u70b9\u5f62\u6210\u7ed3\u8bba\u8bf7\u6c42\u3002\n# \u8981\u7d20\u5f0f\u8bc9\u72b6\noutput: D:\\\\tmp\\\\complaint.docx',
-        },
-        {
-          name: 'legal_generate_citation_verification_report',
-          arguments: { caseName: '\u4e70\u5356\u5408\u540c\u7ea0\u7eb7' },
-          result: '\u73b0\u884c\u6709\u6548\u6cd5\u5f8b\u786c\u95e8\u69db\uff1a\u901a\u8fc7\n\u5df2\u5e9f\u6b62/\u5931\u6548\u98ce\u9669\uff1a0',
-        },
-      ],
-      source: 'chat',
+      taskText: '根据材料生成起诉状和要素式诉状', responseText,
+      requestId: 'legal-delivery-current', taskId: 'legal-delivery-task',
+      toolRecords: [{
+        name: 'legal_finalize_delivery_package', arguments: { caseId: 'synthetic-current-case' },
+        requestId: 'legal-delivery-current', taskId: 'legal-delivery-task',
+        result: '完整交付核验已取得，文件仍供承办律师复核。',
+        receipt: { ok: true, status: 'generated', persisted: true, changedCaseIds: ['synthetic-current-case'], articleIds: [], artifacts: ['D:/synthetic/formal-document.docx'] },
+        terminalVerification: { status: 'verified', strategy: 'terminal_receipt', reason: 'Server full-delivery handler completed law, source and reasoning gates.' },
+      }], source: 'chat',
     });
-
     expect(result.blocked).toBe(false);
     expect(result.text).toBe(responseText);
   });
 
-  it('blocks legal document completion claims without triad reasoning chain evidence', async () => {
+  it('blocks document and citation text without a full-delivery receipt', async () => {
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
 
     const result = finalizeLumiResponse({
@@ -2131,9 +2188,10 @@ describe('Lumi result finalizer', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toBe('Missing legal reasoning chain evidence.');
-    expect(result.text).toContain('\u4e09\u6bb5\u8bba\u63a8\u7406\u94fe');
-    expect(result.text).toContain('legal_case_reasoning_matrix');
+    expect(result.reason).toBe('Missing current-law verification gate for legal document.');
+    expect(result.text).toContain('文书核验');
+    expect(result.text).not.toContain('已经生成完成');
+    expect(result.text).not.toContain('legal_case_reasoning_matrix');
   });
 
   it('blocks legal delivery claims when the current-law gate failed', async () => {
@@ -2294,7 +2352,7 @@ describe('Lumi result finalizer', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toBe('Missing legal document production evidence.');
+    expect(result.reason).toBe('Missing current-law verification gate for legal document.');
     expect(result.text).toContain('\u6cd5\u5f8b\u6587\u4e66\u8fd8\u4e0d\u80fd\u6807\u8bb0\u4e3a\u5b8c\u6210');
   });
 
@@ -3178,13 +3236,10 @@ describe('Lumi result finalizer', () => {
     expect(result.text).toBe(responseText);
   });
 
-  it.each([
-    '分析一下 sample.pdf 附件。',
-    '继续读取 sample.pdf 文件。\n## Recent action continuation context\nRecovered structured action state:\n- originalGoal: 分析一下 sample.pdf 附件。\n- unfinished: yes',
-  ])('keeps a PDF analysis incomplete when only the read step has a verified receipt: %s', async (taskText) => {
+  it('keeps a PDF analysis incomplete when only the read step has a verified receipt', async () => {
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
     const result = finalizeLumiResponse({
-      taskText,
+      taskText: '分析一下 sample.pdf 附件。',
       responseText: '状态：受阻。这次还没完成。',
       toolRecords: [{
         name: 'read_pdf',
@@ -3206,13 +3261,10 @@ describe('Lumi result finalizer', () => {
     expect(result.reason).toContain('no usable analysis');
   });
 
-  it.each([
-    '读取 sample.pdf 文件。',
-    '继续读取 sample.pdf 文件。\n## Recent action continuation context\nRecovered structured action state:\n- originalGoal: 读取 sample.pdf 文件。\n- nextAction: analyze\nRules:\n- Do not mistake a tool total for completion.',
-  ])('completes a plain document read from its verified receipt even when narration is empty: %s', async (taskText) => {
+  it('completes a plain document read from its verified receipt even when narration is empty', async () => {
     const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
     const result = finalizeLumiResponse({
-      taskText,
+      taskText: '读取 sample.pdf 文件。',
       responseText: '',
       toolRecords: [{
         name: 'read_pdf',
@@ -3233,10 +3285,9 @@ describe('Lumi result finalizer', () => {
 
   it('keeps socket entrypoints on the shared finalizer path', () => {
     const root = process.cwd();
-    const chatSource = readFileSync(path.join(root, 'server/socket/chat.ts'), 'utf8');
-    const voiceSource = readFileSync(path.join(root, 'server/socket/voice.ts'), 'utf8');
-    const taskSource = readFileSync(path.join(root, 'server/socket/task.ts'), 'utf8');
-    const socketSources = [chatSource, voiceSource, taskSource];
+    const chatSource = readImplementationSource(path.join(root, 'server/socket/chat.ts'), 'utf8');
+    const voiceSource = readVoiceImplementationSource();
+    const socketSources = [chatSource, voiceSource];
 
     for (const source of socketSources) {
       expect(source).toContain('finalizeLumiResponse');
@@ -3245,7 +3296,98 @@ describe('Lumi result finalizer', () => {
     expect(chatSource).toContain('responseText = finalResponse.text;');
     expect(chatSource).not.toContain('responseText: completionCandidate');
     expect(chatSource).not.toContain('const completionText = finalizedBackground.text;');
-    expect(voiceSource).toContain('responseText = finalResponse.text;');
-    expect(taskSource).toContain('finalTaskText = finalTaskResponse.text;');
+    const voiceDelivery = readFileSync(path.join(root, 'server/socket/voice/turn/finalize_voice_model_turn.ts'), 'utf8');
+    expect(voiceDelivery).toContain('context.responseText = completed.finalized.text;');
+    expect(voiceDelivery).toContain('const finalResponse = completed.finalized;');
+    const driver = readFileSync(path.join(root, 'server/cognition/turn_execution.ts'), 'utf8');
+    expect(driver).toContain('const completed = await runPreparedLumiTurn({');
+    expect(driver).toContain('return await input.deliver(executed);');
   });
+});
+
+it('never allows incidental successful client checks to replace the video deliverable', async () => {
+  const { formatClientDiagnosticResult } = await import('../server/cognition/client_diagnostic_result');
+  const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+  const diagnostics = [
+    {name:'client_get_state',arguments:{},result:'{"state":{"activeTab":"command-center"}}'},
+    {name:'client_health_check',arguments:{},result:'{"report":{"level":"attention"},"skillRuntimeFindings":[{"name":"internal-plugin","connected":false}]}'},
+  ];
+  expect(formatClientDiagnosticResult(diagnostics, '按上面的“非拼写错误版”来', '已检查 client_get_state')).toBeNull();
+  expect(formatClientDiagnosticResult(diagnostics, '可以', '已检查 client_get_state')).toBeNull();
+  const result = finalizeLumiResponse({taskText:'生成三十秒的推广视频',responseText:'视频已生成。',source:'chat',toolRecords:[...diagnostics,{
+    name:'generate_video',arguments:{duration:30,size:'1080x1920'},
+    result:JSON.stringify({ok:true,success:true,status:'generated',verified:true,verificationStatus:'verified',settingsMatch:true,actualSettings:{duration:30,size:'1080x1920'},outputPath:'D:/generated/video.mp4'}),
+    terminalVerification:{status:'verified',strategy:'artifact',reason:'Verified generated file'},
+  }]});
+  expect(result).toMatchObject({blocked:false,text:'视频已保存，音轨尚未核实。'});
+  expect(result.text).not.toMatch(/自检|client_get_state|internal-plugin|attention/);
+});
+it.each([false, true])('does not accept five seconds against thirty merely because tool arguments matched (structured=%s)', async structured => {
+  const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+  const result = finalizeLumiResponse({taskText:'帮我生成三十秒的纯英文推广视频',responseText:'视频已生成。',source:'chat',
+    ...(structured ? {flow:{routeText:'Generate a video',structuredMediaRequest:{operation:'text_to_video',prompt:'Open the product box, then show the English product advertisement',size:'1080x1920',duration:30}} as any}:{}),
+    toolRecords:[{name:'generate_video',arguments:{duration:5,size:'1080x1920'},result:JSON.stringify({ok:true,success:true,status:'generated',verified:true,verificationStatus:'verified',settingsMatch:true,actualSettings:{duration:5,size:'1080x1920'},outputPath:'D:/generated/short.mp4'}),terminalVerification:{status:'verified',strategy:'artifact',reason:'File exists'}}]});
+  expect(result).toMatchObject({blocked:true,reason:'media_settings_mismatch'});
+  expect(result.text).toContain('5.00');
+});
+
+it.each([false, true, undefined])('reports only measured audio evidence on a generated video (%s)', async hasAudio => {
+  const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+  const result = finalizeLumiResponse({ taskText: '生成一个带英文配音的视频', responseText: '视频和英文配音都已经生成。', source: 'chat',
+    toolRecords: [{ name: 'generate_video', arguments: { duration: 5, size: '832x480', hasAudio: true },
+      result: JSON.stringify({ ok: true, success: true, status: 'generated', verified: true, verificationStatus: 'verified', settingsMatch: true,
+        actualSettings: { duration: 5, size: '832x480', hasAudio }, outputPath: 'D:/generated/video.mp4' }),
+      terminalVerification: { status: 'verified', strategy: 'artifact', reason: 'Saved video' } }] });
+  expect(result.blocked).toBe(hasAudio !== true);
+  if (hasAudio === true) expect(result.text).toBe('视频已生成，已检测到音轨。');
+  else {
+    expect(result.reason).toBe('media_audio_requirement_unmet');
+    expect(result.text).toContain(hasAudio === false ? '不含音轨' : '尚未核实');
+    expect(result.text).toContain('不会自动重复生成');
+    const { decideExecutionGuardRecovery } = await import('../server/cognition/execution_guard_recovery');
+    expect(decideExecutionGuardRecovery({ ...result, allowToolUse: true, task: '生成一个带英文配音的视频' }).recoverable).toBe(false);
+  }
+  expect(result.text).not.toContain('英文配音都已经生成');
+});
+
+it('keeps an intentionally silent video complete and rejects missing audio in a structured studio prompt', async () => {
+  const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+  const record = { name: 'generate_video', arguments: { duration: 5, size: '832x480' },
+    result: JSON.stringify({ ok: true, status: 'generated', verified: true, verificationStatus: 'verified', settingsMatch: true, actualSettings: { duration: 5, size: '832x480', hasAudio: false }, outputPath: 'D:/generated/video.mp4' }),
+    terminalVerification: { status: 'verified' as const, strategy: 'artifact' as const, reason: 'Saved file' } };
+  expect(finalizeLumiResponse({ taskText: '生成一个视频，不要声音', responseText: '已经生成', source: 'chat', toolRecords: [record] })).toMatchObject({ blocked: false, text: '视频画面已生成，但文件不含音轨。' });
+  expect(finalizeLumiResponse({ taskText: '开始生成', responseText: '已经生成', source: 'chat', toolRecords: [record],
+    flow: { structuredMediaRequest: { operation: 'text_to_video', prompt: 'Make a product video with English voiceover', size: '832x480', duration: 5 } } as any })).toMatchObject({ blocked: true, reason: 'media_audio_requirement_unmet' });
+});
+
+it.each([false, true])('rejects DOCX output as a video completion (structured=%s)', async structured => {
+  const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+  const { sanitizeExecutionResponseForDelivery } = await import('../server/cognition/execution_guard_recovery');
+  const { sanitizeUserFacingExecutionOutput } = await import('../server/cognition/user_output_protection');
+  const toolRecords = ['TikTok_30s_English_Script_Storyboard.docx', 'TikTok_30s_English_Voiceover_Narration.docx'].map(file => ({
+    name: 'create_docx', arguments: {}, taskId: 'video-doc-task', requestId: 'video-doc-request',
+    result: JSON.stringify({ ok: true, status: 'created', path: 'C:\\private\\' + file }),
+    terminalVerification: { status: 'verified' as const, strategy: 'artifact' as const, reason: 'file saved' },
+  }));
+  const input = { taskText: structured ? '继续' : '帮我生成30秒的TikTok视频，要16:9', responseText: '任务已经完成。', source: 'chat',
+    taskId: 'video-doc-task', requestId: 'video-doc-request', toolRecords,
+    ...(structured ? { flow: { structuredMediaRequest: { operation: 'text_to_video' as const, prompt: '生成30秒视频，16:9', duration: 30, size: '1920x1080' } } as import('../server/cognition/turn_flow').LumiTurnFlow } : {}),
+  };
+  const result = finalizeLumiResponse(input);
+  expect(result).toMatchObject({ blocked: true, reason: 'media_output_type_mismatch' });
+  const { decideExecutionGuardRecovery } = await import('../server/cognition/execution_guard_recovery');
+  expect(decideExecutionGuardRecovery({ ...result, task: input.taskText, allowToolUse: true }).recoverable).toBe(false);
+  expect(result.text).toContain('没有交付你要求的视频');
+  expect(result.text).toContain('TikTok_30s_English_Script_Storyboard.docx');
+  expect(result.text).toContain('TikTok_30s_English_Voiceover_Narration.docx');
+  expect(result.text).not.toContain('C:/private');
+  expect(finalizeLumiResponse(input)).toMatchObject({ blocked: true, reason: 'media_output_type_mismatch' });
+  expect(sanitizeExecutionResponseForDelivery(result, { task: input.taskText, toolRecords }).text).toBe(result.text);
+  const summary = sanitizeUserFacingExecutionOutput(toolRecords[0].result, { task: '生成文件', toolRecords });
+  expect(summary).toContain('TikTok_30s_English_Script_Storyboard.docx');
+  expect(summary).toContain('TikTok_30s_English_Voiceover_Narration.docx');
+  expect(summary).not.toMatch(/private|原始系统数据|我会只汇报/);
+  expect(sanitizeUserFacingExecutionOutput(toolRecords[0].result, { task: '生成文件', toolRecords: toolRecords.map(record => ({ ...record, terminalVerification: undefined })) })).not.toContain('已保存文件');
+  expect(finalizeLumiResponse({ ...input, requestId: 'another-request' }).reason).not.toBe('media_output_type_mismatch');
+  expect(finalizeLumiResponse({ ...input, taskText: '只生成视频脚本Word文档', flow: undefined }).reason).not.toBe('media_output_type_mismatch');
 });

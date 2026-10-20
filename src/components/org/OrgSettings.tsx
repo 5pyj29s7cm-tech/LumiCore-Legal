@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import { FeedbackBanner } from './FeedbackBanner';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import {
-  AlertCircle,
   Building2,
   CheckCircle,
   Copy,
@@ -14,130 +14,78 @@ import {
 } from 'lucide-react';
 import { useT } from '../../lib/useT';
 import { useApp } from '../../contexts/AppContext';
-import { appConfirm } from '../../lib/appConfirm';
-import { formatUiMessage, uiMessage } from '../../i18n/uiMessages';
+import { useAppConfirm } from '../../lib/appConfirm';
+import { apiJson } from '../../services/apiClient';
+import { useAsyncOperation } from '../../hooks/useAsyncOperation';
+import { uiMessage } from '../../i18n/uiMessages';
 
-type Feedback = { type: 'success' | 'error'; text: string };
+function readOrg(value: any, id: string) {
+  if (value?.id !== id || typeof value.name !== 'string' || typeof value.slug !== 'string') throw new Error('Organization receipt was not confirmed');
+  return value;
+}
 
 export function OrgSettings() {
-  const t = useT();
-  const { orgConnection, switchDomain } = useApp();
-  const [org, setOrg] = useState<any>(null);
-  const [name, setName] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [invitationCode, setInvitationCode] = useState('');
-  const [invitationRole, setInvitationRole] = useState('member');
-  const [generating, setGenerating] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const { user, workDomain, orgConnection } = useApp();
+  return user ? <OrganizationForm key={JSON.stringify([user.uid, user.role, workDomain, orgConnection?.orgId, orgConnection?.orgRole])} initialOrgId={orgConnection?.orgId || ''} /> : null;
+}
 
-  const loadOrg = useCallback(async () => {
-    setLoading(true);
-    setFeedback(null);
-    try {
-      let orgId = orgConnection?.orgId || '';
-      if (!orgId) {
-        const orgsRes = await fetch('/api/org/org', { credentials: 'include' });
-        const orgs = await orgsRes.json().catch(() => []);
-        if (!orgsRes.ok) throw new Error((orgs as any).error || formatUiMessage('org-settings.failed-to-load-organizations-value0.0c01e9694d', { value0: orgsRes.status }));
-        if (!Array.isArray(orgs) || orgs.length === 0) throw new Error(uiMessage('org-settings.no-organization-found.90a2ad4211'));
-        orgId = orgs[0].id || orgs[0].orgId;
-      }
-
-      const orgDetailRes = await fetch(`/api/org/org/${orgId}`, { credentials: 'include' });
-      const orgData = await orgDetailRes.json().catch(() => ({}));
-      if (!orgDetailRes.ok) throw new Error(orgData.error || formatUiMessage('org-settings.failed-to-load-organization-value0.29c105c15a', { value0: orgDetailRes.status }));
-      setOrg(orgData);
-      setName(orgData.name || '');
-    } catch (err: any) {
-      setOrg(null);
-      setFeedback({ type: 'error', text: err.message || String(err) });
-    } finally {
-      setLoading(false);
+function OrganizationForm({ initialOrgId }: { initialOrgId: string }) {
+  const t = useT(), { switchDomain } = useApp(), appConfirm = useAppConfirm();
+  const [org, setOrg] = useState<any>();
+  const [name, setName] = useState(''), [invitationCode, setInvitationCode] = useState('');
+  const [invitationRole, setInvitationRole] = useState('member'), [copied, setCopied] = useState(false);
+  const [message, setMessage] = useState('');
+  const resolvedOrgId = useRef(initialOrgId);
+  const { busy, error, run } = useAsyncOperation();
+  const loading = busy === 'load' || (org === undefined && !error), saving = busy === 'save', generating = busy === 'invite';
+  const feedback = error ? { type: 'error' as const, text: error } : message ? { type: 'success' as const, text: message } : null;
+  const loadOrg = useCallback(() => run('load', async signal => {
+    let orgId = resolvedOrgId.current;
+    if (!orgId) {
+      const organizations = await apiJson('/api/org/org', { signal });
+      if (!Array.isArray(organizations) || typeof organizations[0]?.id !== 'string' || !organizations[0].id) throw new Error(uiMessage('org-settings.no-organization-found.90a2ad4211'));
+      orgId = organizations[0].id;
     }
-  }, [orgConnection?.orgId]);
-
-  useEffect(() => {
-    void loadOrg();
-  }, [loadOrg]);
-
-  const handleSave = async () => {
+    const data = readOrg(await apiJson('/api/org/org/' + encodeURIComponent(orgId), { signal }), orgId);
+    return () => { resolvedOrgId.current = orgId; setOrg(data); setName(data.name); setMessage(''); };
+  }), [run]);
+  useEffect(() => { void loadOrg(); }, [loadOrg]);
+  const handleSave = () => {
     if (!org || !name.trim()) return;
-    setSaving(true);
-    setFeedback(null);
-    try {
-      const res = await fetch(`/api/org/org/${org.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim() }),
-        credentials: 'include',
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || formatUiMessage('org-settings.save-failed-value0.5559bb34d3', { value0: res.status }));
-      setOrg(data);
-      setName(data.name || name.trim());
-      setFeedback({ type: 'success', text: t.orgSettingsSaved || uiMessage('org-settings.organization-settings-saved.ba1832e337') });
-    } catch (err: any) {
-      setFeedback({ type: 'error', text: err.message || String(err) });
-    } finally {
-      setSaving(false);
-    }
+    setMessage('');
+    return run('save', async signal => {
+      const data = readOrg(await apiJson('/api/org/org/' + encodeURIComponent(org.id), { method: 'PUT', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) }), org.id);
+      return () => { setOrg(data); setName(data.name); setMessage(t.orgSettingsSaved || uiMessage('org-settings.organization-settings-saved.ba1832e337')); };
+    });
   };
-
-  const handleCreateInvitation = async () => {
+  const handleCreateInvitation = () => {
     if (!org) return;
-    setGenerating(true);
-    setFeedback(null);
-    try {
-      const res = await fetch(`/api/org/org/${org.id}/invitations`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: invitationRole, maxUses: 0 }),
-        credentials: 'include',
-      });
-      const inv = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(inv.error || formatUiMessage('org-settings.invitation-creation-failed-value0.dd3265d5f7', { value0: res.status }));
-      setInvitationCode(inv.code || '');
-      setFeedback({ type: 'success', text: t.invitationCreated || uiMessage('org-settings.invitation-code-created.b835c22578') });
-    } catch (err: any) {
-      setFeedback({ type: 'error', text: err.message || String(err) });
-    } finally {
-      setGenerating(false);
-    }
+    setMessage('');
+    return run('invite', async signal => {
+      const data = await apiJson('/api/org/org/' + encodeURIComponent(org.id) + '/invitations', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: invitationRole, maxUses: 0 }) });
+      if (data?.orgId !== org.id || data.role !== invitationRole || typeof data.code !== 'string' || !data.code) throw new Error('Invitation receipt was not confirmed');
+      return () => { setInvitationCode(data.code); setCopied(false); setMessage(t.invitationCreated || uiMessage('org-settings.invitation-code-created.b835c22578')); };
+    });
   };
-
-  const copyCode = async () => {
-    if (!invitationCode) return;
-    await navigator.clipboard.writeText(invitationCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
-  };
-
+  const copyCode = () => invitationCode && run('copy', async () => {
+    await navigator.clipboard.writeText(invitationCode); return () => setCopied(true);
+  });
   const handleDelete = async () => {
-    if (!org) return;
-    const ok = await appConfirm({
+    if (!org || busy || !await appConfirm({
       title: uiMessage('org-settings.delete-organization.4de5283414'),
       message: uiMessage('org-settings.this-cannot-be-undone-organization.1d1562fe80'),
-      confirmText: uiMessage('org-settings.delete.5b875326d1'),
-      cancelText: uiMessage('org-settings.cancel.998b9c48fb'),
-      tone: 'danger',
+      confirmText: uiMessage('org-settings.delete.5b875326d1'), cancelText: uiMessage('org-settings.cancel.998b9c48fb'), tone: 'danger',
+    })) return;
+    setMessage('');
+    return run('delete', async signal => {
+      const data = await apiJson('/api/org/org/' + encodeURIComponent(org.id), { method: 'DELETE', signal });
+      signal.throwIfAborted();
+      if (data?.success !== true) throw new Error('Organization deletion was not confirmed');
+      setOrg(null); setMessage(t.organizationDeleted || uiMessage('org-settings.organization-deleted.7ecab76b97'));
+      const result = await switchDomain('personal', { signal });
+      if (!result.success) throw new Error(result.message || 'Personal workspace could not be opened');
+      return () => window.dispatchEvent(new CustomEvent('lumi:navigate', { detail: { tab: 'home' } }));
     });
-    if (!ok) return;
-
-    setFeedback(null);
-    try {
-      const res = await fetch(`/api/org/org/${org.id}`, { method: 'DELETE', credentials: 'include' });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || formatUiMessage('org-settings.delete-failed-value0.98201beb15', { value0: res.status }));
-      setFeedback({ type: 'success', text: t.organizationDeleted || uiMessage('org-settings.organization-deleted.7ecab76b97') });
-      setOrg(null);
-      void switchDomain('personal').finally(() => {
-        window.dispatchEvent(new CustomEvent('lumi:navigate', { detail: { tab: 'home' } }));
-      });
-    } catch (err: any) {
-      setFeedback({ type: 'error', text: err.message || String(err) });
-    }
   };
 
   if (loading) {
@@ -163,7 +111,7 @@ export function OrgSettings() {
 
   return (
     <div className="h-full overflow-y-auto p-6 text-white">
-      <div className="mx-auto flex max-w-4xl flex-col gap-4">
+      <fieldset disabled={Boolean(busy)} className="mx-auto flex max-w-4xl flex-col gap-4">
         <section className="rounded-lg border border-white/10 bg-white/[0.04] p-5">
           <div className="flex items-start gap-3">
             <span className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-white/65">
@@ -251,7 +199,7 @@ export function OrgSettings() {
                 <p className="mt-1 font-mono text-2xl font-semibold tracking-[0.18em] text-emerald-200">{invitationCode}</p>
               </div>
               <button
-                onClick={copyCode}
+                onClick={() => void copyCode()}
                 className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70 transition hover:bg-white/10"
               >
                 {copied ? <CheckCircle size={15} className="text-emerald-300" /> : <Copy size={15} />}
@@ -276,20 +224,7 @@ export function OrgSettings() {
             {uiMessage('org-settings.delete-organization.4de5283414')}
           </button>
         </section>
-      </div>
-    </div>
-  );
-}
-
-function FeedbackBanner({ feedback }: { feedback: Feedback }) {
-  return (
-    <div className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-sm ${
-      feedback.type === 'success'
-        ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'
-        : 'border-red-500/20 bg-red-500/10 text-red-200'
-    }`}>
-      {feedback.type === 'success' ? <CheckCircle size={16} className="mt-0.5 shrink-0" /> : <AlertCircle size={16} className="mt-0.5 shrink-0" />}
-      <span>{feedback.text}</span>
+      </fieldset>
     </div>
   );
 }

@@ -1,7 +1,9 @@
 import './helpers';
-import { beforeEach, describe, expect, it } from 'vitest';
-import { ToolRegistry } from '../server/tools/registry';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ToolRegistry, externalCommitInputDigest } from '../server/tools/registry';
 import { registerDesktopAiTools } from '../server/tools/definitions/desktop_ai_tools';
+import { createTurnConfirmation } from '../server/tools/turn_confirmation';
+import { confirmationArgumentsMatch } from '../server/tools/pending_confirmation';
 
 function createRegistry() {
   const registry = new ToolRegistry();
@@ -378,4 +380,12 @@ describe('single-target desktop AI tools', () => {
     expect(detectDesktopAiAnswerBlocker('Captcha or one-time code is required')).toBe('verification_required');
     expect(detectDesktopAiAnswerBlocker('No substantive assistant answer is visible yet')).toBeNull();
   });
+function confirmationFixture() { const registry = new ToolRegistry(); registerDesktopAiTools(registry); const handler = vi.fn(async (_args: Record<string, any>) => { throw new Error('ISOLATED_HANDLER_ADMITTED'); }); registry.get('desktop_ai_ask')!.handler = handler; const userId = 'binder-audit-' + crypto.randomUUID(), requestId = crypto.randomUUID(), scope = { domain: 'personal', channelId: 'conversation:' + crypto.randomUUID(), taskId: crypto.randomUUID(), originRequestId: requestId }; const proposals: any[] = []; const context: any = { userId, requestId, taskId: scope.taskId, domain: 'personal', authenticated: true, authRole: 'user', localExecution: true, executionBoundary: 'trusted_local', actionIntent: '解释这份虚构资料内容。' }; const confirm = (pending?: any) => createTurnConfirmation({ userId, source: 'offline-binder-audit', requestId, actionIntent: context.actionIntent, pending, consumeScope: () => scope, proposalScope: () => scope, onPending: p => proposals.push(p) }); return { registry, handler, context, confirm, proposals }; }
+describe('desktop_ai existing send default is bound before real confirmation', () => {
+    it('binds omitted send to true before admission and creates an exact proposal without entering handler', async () => { const f = confirmationFixture(), input = { question: 'synthetic' }, explicit = { question: 'synthetic', send: true }; const prepared = f.registry.prepareExecution('desktop_ai_ask', input, f.context); expect(input).not.toHaveProperty('send'); expect(prepared.arguments).toEqual(explicit); expect(externalCommitInputDigest('desktop_ai_ask', prepared.arguments)).toBe(externalCommitInputDigest('desktop_ai_ask', f.registry.prepareExecution('desktop_ai_ask', explicit, f.context).arguments)); const result = await f.registry.execute('desktop_ai_ask', prepared.arguments, { ...f.context, requestConfirmation: f.confirm() }); expect(result).toContain('requires user confirmation'); expect(f.handler).not.toHaveBeenCalled(); expect(f.proposals).toHaveLength(1); expect(f.proposals[0].exactArgs).toEqual(explicit); expect(confirmationArgumentsMatch(f.proposals[0].exactArgs, prepared.arguments)).toBe(true); });
+    it('keeps explicit false preparation without asking or changing it to a submit', async () => { const f = confirmationFixture(), args = { question: 'synthetic', send: false }; const prepared = f.registry.prepareExecution('desktop_ai_ask', args, f.context); expect(prepared.arguments).toEqual(args); await expect(f.registry.execute('desktop_ai_ask', prepared.arguments, { ...f.context, requestConfirmation: f.confirm() })).rejects.toThrow('ISOLATED_HANDLER_ADMITTED'); expect(f.handler).toHaveBeenCalledTimes(1); expect(f.handler.mock.calls[0][0]).toEqual(args); expect(f.proposals).toHaveLength(0); });
+    it('keeps explicit true behind the exact single-use grant and rejects modified question or send state', async () => { const f = confirmationFixture(), args = { question: 'synthetic', send: true }; const prepared = f.registry.prepareExecution('desktop_ai_ask', args, f.context); expect(await f.registry.execute('desktop_ai_ask', prepared.arguments, { ...f.context, requestConfirmation: f.confirm() })).toContain('requires user confirmation'); expect(f.handler).not.toHaveBeenCalled(); const pending = f.proposals[0]; expect(pending.exactArgs).toEqual(prepared.arguments); expect(confirmationArgumentsMatch(pending.exactArgs, { ...args, question: 'changed' })).toBe(false); expect(confirmationArgumentsMatch(pending.exactArgs, { ...args, send: false })).toBe(false); const approved = f.confirm(pending); await expect(f.registry.execute('desktop_ai_ask', prepared.arguments, { ...f.context, requestId: crypto.randomUUID(), requestConfirmation: approved })).rejects.toThrow('ISOLATED_HANDLER_ADMITTED'); expect(f.handler).toHaveBeenCalledTimes(1); expect(f.handler.mock.calls[0][0]).toEqual(prepared.arguments); expect(await approved('desktop_ai_ask', prepared.arguments, f.registry.getCapabilityManifestEntry('desktop_ai_ask'))).toBe(false); expect(f.handler).toHaveBeenCalledTimes(1); });
+});
+
+
 });

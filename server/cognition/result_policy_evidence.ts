@@ -1,4 +1,5 @@
 import type { ToolExecutionRecord } from '../tools/types';
+import { parseReceiptObject, toolRecordSucceeded } from '../tools/receipt_payload';
 
 export function hasContinuousStockWatchIntent(text: string): boolean {
   return /(?:\u6301\u7eed|\u4e00\u76f4|\u5b9e\u65f6|\u76d8\u4e2d|\u5f00\u59cb|\u6b63\u5728)?.{0,12}(?:\u76ef\u76d8|\u76d1\u63a7|\u9884\u8b66|\u63d0\u9192)|(?:watch|monitor|track|alert|watchlist|price\s*alert|market\s*alert)/iu
@@ -16,99 +17,31 @@ export function hasContinuousStockWatchEvidence(records: ToolExecutionRecord[]):
 }
 
 export function requiresLegalCurrentLawGate(text: string): boolean {
-  const normalized = String(text || '');
-  const strictInternalBidDraft =
-    /(?:\u5185\u90e8|\u5de5\u4f5c\u5e95\u7a3f|\u8349\u7a3f|\u5f85\u590d\u6838)/u.test(normalized)
-    && /(?:\u6807\u4e66|\u6295\u6807\u54cd\u5e94|\bbid\b|\btender\b)/iu.test(normalized)
-    && /(?:\u4e0d\u5f97|\u4e0d\u8981|\u4e0d)\u5f15\u7528[^\u3002\uff1b;\n]{0,48}(?:\u5177\u4f53\u6cd5\u6761|\u6cd5\u6761|\u6848\u4f8b)/u.test(normalized)
-    && /(?:\u4e0d\u8981|\u4e0d\u5f97|\u672a)[^\u3002\n]{0,100}(?:\u4e0a\u4f20|\u53d1\u9001|\u63d0\u4ea4|\u7b7e\u7f72|\u6295\u6807)/u.test(normalized);
-  // An explicitly internal bid working draft that forbids unverified legal
-  // citations and every external submission action is not a formal legal
-  // deliverable. Preserve its verified draft and blocker list; the current-law
-  // gate remains mandatory once the user asks for a formal/submittable package.
-  if (strictInternalBidDraft) return false;
-  const sourceOnlyContractReview =
-    // i18n-allow: Reviewed multilingual source-only legal review input recognition; not user-visible copy.
-    /(?:审查|审核|检查|复核|review).{0,16}(?:合同|协议)|(?:合同|协议).{0,16}(?:审查|审核|检查|复核|review)/iu.test(normalized)
-    // i18n-allow: Reviewed multilingual source-only legal review input recognition; not user-visible copy.
-    && /(?:只|仅)(?:能|可)?(?:依据|基于|按照).{0,16}(?:原文|条款)|source[- ]only|only\s+(?:the\s+)?(?:source|contract\s+text)/iu.test(normalized)
-    // i18n-allow: Reviewed multilingual source-only legal review input recognition; not user-visible copy.
-    && /(?:不要|不得|无需|不需要).{0,20}(?:补造|编造|具体法条|法条)|(?:do\s+not|without).{0,28}(?:invent|fabricat|specific\s+(?:law|citation))/iu.test(normalized)
-    // i18n-allow: Reviewed multilingual source-only legal review input recognition; not user-visible copy.
-    && /(?:不要|不得|未)[^。\n]{0,100}(?:发送|提交|签署)|(?:do\s+not|without)[^.!?\n]{0,100}(?:send|submit|sign)/iu.test(normalized);
-  // A source-only clause review is an internal risk analysis, not a formal
-  // legal opinion. Its verified review receipt is sufficient when the user
-  // explicitly forbids invented authorities and every external action.
-  if (sourceOnlyContractReview) return false;
   if (
-    /(?:\u68c0\u7d22\u8ba1\u5212|\u68c0\u7d22\u884c\u52a8\u5355|\u5916\u90e8\u68c0\u7d22|\u6765\u6e90\u767b\u8bb0|\u6388\u6743\u534f\u4f5c|\u88c1\u5224\u6587\u4e66\u7f51|\u4eba\u6c11\u6cd5\u9662\u6848\u4f8b\u5e93|\u6cd5\u8749|\bAlpha\b|\u4f01\u67e5\u67e5|research plan|source register|authorized collaboration)/iu.test(normalized) &&
-    !/(?:\u8d77\u8bc9\u72b6|\u8981\u7d20\u5f0f\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u8d28\u8bc1\u610f\u89c1|\u4ee3\u7406\u8bcd|\u6cd5\u5f8b\u610f\u89c1\u4e66|\u59d4\u6258\u624b\u7eed|\u7acb\u6848\u6750\u6599|\u8bc1\u636e\u76ee\u5f55|\u5408\u540c|\u534f\u8bae|\u6807\u4e66|\u6295\u6807\u4e66|\u6b63\u5f0f\u6587\u4e66|\u4ea4\u4ed8\u5305|pleading|complaint|defense|legal\s+opinion|contract|agreement|bid|tender|filing\s+packet|evidence\s+catalog)/iu.test(normalized)
+    /(?:\u68c0\u7d22\u8ba1\u5212|\u68c0\u7d22\u884c\u52a8\u5355|\u5916\u90e8\u68c0\u7d22|\u6765\u6e90\u767b\u8bb0|\u6388\u6743\u534f\u4f5c|\u88c1\u5224\u6587\u4e66\u7f51|\u4eba\u6c11\u6cd5\u9662\u6848\u4f8b\u5e93|\u6cd5\u8749|\bAlpha\b|\u4f01\u67e5\u67e5|research plan|source register|authorized collaboration)/iu.test(text || '') &&
+    !/(?:\u8d77\u8bc9\u72b6|\u8981\u7d20\u5f0f\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u8d28\u8bc1\u610f\u89c1|\u4ee3\u7406\u8bcd|\u6cd5\u5f8b\u610f\u89c1\u4e66|\u59d4\u6258\u624b\u7eed|\u7acb\u6848\u6750\u6599|\u8bc1\u636e\u76ee\u5f55|\u5408\u540c|\u534f\u8bae|\u6807\u4e66|\u6295\u6807\u4e66|\u6b63\u5f0f\u6587\u4e66|\u4ea4\u4ed8\u5305|pleading|complaint|defense|legal\s+opinion|contract|agreement|bid|tender|filing\s+packet|evidence\s+catalog)/iu.test(text || '')
   ) {
     return false;
   }
   return /(?:\u8d77\u8bc9\u72b6|\u8981\u7d20\u5f0f\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u8d28\u8bc1\u610f\u89c1|\u4ee3\u7406\u8bcd|\u6cd5\u5f8b\u610f\u89c1\u4e66|\u59d4\u6258\u624b\u7eed|\u7acb\u6848\u6750\u6599|\u8bc1\u636e\u76ee\u5f55|\u5408\u540c|\u534f\u8bae|\u6807\u4e66|\u6295\u6807\u4e66|\u6587\u4e66|\u8bc9\u72b6|pleading|complaint|defense|legal\s+opinion|contract|agreement|bid|tender|filing\s+packet|evidence\s+catalog)/iu
-    .test(normalized);
+    .test(text || '');
 }
 
 export function claimsLegalDocumentCompletion(text: string): boolean {
-  const normalized = String(text || '');
-  if (/(?:不可|不能|尚未|还不能|未能|不具备).{0,20}(?:正式交付|正式使用|标记为完成|直接使用|直接提交)|(?:正式交付|正式使用).{0,12}(?:阻断|未通过|待确认)/u.test(normalized)) {
-    return false;
-  }
-  return /(?:\u5df2\u7ecf|\u5df2|\u5b8c\u6210|\u751f\u6210|\u51fa\u5177|\u4ea4\u4ed8|\u6b63\u5f0f|\u53ef\u76f4\u63a5\u4f7f\u7528|\u53ef\u4ee5\u76f4\u63a5\u4f7f\u7528|\u53ef\u63d0\u4ea4|\u53ef\u7acb\u6848|\u53ef\u7528|completed|created|generated|ready|formal|deliverable)/iu
-    .test(normalized);
-}
-
-export function hasLegalDocumentProductionEvidence(records: ToolExecutionRecord[]): boolean {
-  return records.some(record => {
-    if (record.error) return false;
-    const name = String(record.name || '');
-    const result = String(record.result || '');
-    return /^(legal_generate_(?!citation_verification_report)|legal_analyze_folder_and_draft_argument|legal_review_contract|legal_draft_contract|legal_finalize_delivery_package|legal_prepare_filing_handoff|create_docx|write_file)$/i.test(name)
-      || /\.(?:docx|pdf|md|txt)\b|formal-document|litigation-packet|pleading|argument|opinion|\u8d77\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u4ee3\u7406\u8bcd|\u6cd5\u5f8b\u610f\u89c1|\u8bc1\u636e\u76ee\u5f55|\u6807\u4e66/iu.test(result);
+  return String(text || '').split(/[。！？!?\n]/u).some(clause => {
+    if (/(?:\u5c1a\u672a|\u6ca1\u6709|\u4e0d\u80fd|\u4e0d\u5f97|\u4e0d\u7b49\u540c|\u4e0d\u6784\u6210|\u4e0d\u4f5c\u4e3a|\u5f85\u6838\u9a8c|not\s+(?:a|complete|ready|formal)|cannot)/iu.test(clause)) return false;
+    return /(?:\u8d77\u8bc9\u72b6|\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u8d28\u8bc1\u610f\u89c1|\u4ee3\u7406\u8bcd|\u6cd5\u5f8b\u610f\u89c1\u4e66|\u59d4\u6258\u624b\u7eed|\u7acb\u6848\u6750\u6599|\u8bc1\u636e\u76ee\u5f55|\u5408\u540c|\u534f\u8bae|\u6807\u4e66|\u6295\u6807\u4e66|\u6587\u4e66|pleading|complaint|defense|legal\s+opinion|contract|agreement|bid|tender).{0,24}(?:\u5df2(?:\u7ecf)?(?:\u751f\u6210|\u5b8c\u6210|\u8d77\u8349|\u5199\u597d|\u51fa\u5177|\u4ea4\u4ed8)|\u751f\u6210\u5b8c\u6210|\u6b63\u5f0f\u53ef\u7528|\u53ef(?:\u4ee5)?\u76f4\u63a5\u4f7f\u7528|completed|created|generated|ready)|(?:\u5df2(?:\u7ecf)?(?:\u751f\u6210|\u5b8c\u6210|\u8d77\u8349|\u5199\u597d|\u51fa\u5177|\u4ea4\u4ed8)|completed|created|generated).{0,24}(?:\u8d77\u8bc9\u72b6|\u8bc9\u72b6|\u7b54\u8fa9\u72b6|\u8d28\u8bc1\u610f\u89c1|\u4ee3\u7406\u8bcd|\u6cd5\u5f8b\u610f\u89c1\u4e66|\u59d4\u6258\u624b\u7eed|\u7acb\u6848\u6750\u6599|\u8bc1\u636e\u76ee\u5f55|\u5408\u540c|\u534f\u8bae|\u6807\u4e66|\u6295\u6807\u4e66|\u6587\u4e66|pleading|complaint|defense|legal\s+opinion|contract|agreement|bid|tender)/iu.test(clause);
   });
 }
 
+// The full-delivery handler owns law, source and reasoning checks. Body text
+// and successful drafting/searching cannot upgrade a document into that result.
 export function hasLegalCurrentLawGateEvidence(records: ToolExecutionRecord[]): boolean {
-  const successful = records.filter(record => !record.error && String(record.result || '').trim());
-  if (successful.length === 0) return false;
-
-  const combined = successful.map(record => `${record.name}\n${record.result || ''}`).join('\n');
-  if (/(?:\u73b0\u884c\u6709\u6548\u6cd5\u5f8b[^\n]{0,24}\u672a\u901a\u8fc7|\u786c\u95e8\u69db[^\n]{0,24}\u672a\u901a\u8fc7|current-law gate blocked|current law gate blocked|\u300a[^\n\u300b]{1,40}\u300b[^\n]{0,20}\u5df2\u5e9f\u6b62|\u5931\u6548\u98ce\u9669[^\d\n]{0,8}[1-9]|\u672a\u786e\u8ba4\u7684\u6cd5\u6761|\u4e0d\u5f97\u6807\u8bb0\u4e3a\u6b63\u5f0f\u6210\u679c)/iu.test(combined)) {
-    return false;
-  }
-
-  return successful.some(record => {
-    const name = String(record.name || '');
-    const result = String(record.result || '');
-    const isGateTool = /^(legal_generate_citation_verification_report|legal_finalize_delivery_package|legal_search_statute|legal_case_reasoning_matrix|legal_generate_litigation_packet|legal_generate_argument_or_opinion|legal_review_contract|legal_draft_contract|legal_generate_bid)$/i.test(name);
-    if (!isGateTool) return false;
-    return /(?:\u73b0\u884c\u6709\u6548\u6cd5\u5f8b(?:\u9884\u68c0|\u786c\u95e8\u69db)?[\uff1a:]\s*\u901a\u8fc7|\u5df2\u5e9f\u6b62\/\u5931\u6548\u98ce\u9669[\uff1a:]\s*0|current-?law\s+gate[^.\n]{0,40}pass|"currentLawGate"\s*:\s*"passed"|"passed"\s*:\s*true)/iu.test(result);
+  return records.some(record => {
+    const receipt = parseReceiptObject(record.receipt);
+    return record.name === 'legal_finalize_delivery_package' && toolRecordSucceeded(record)
+      && receipt?.ok === true && receipt.status === 'generated';
   });
-}
-
-export function hasLegalReasoningChainEvidence(records: ToolExecutionRecord[]): boolean {
-  const successful = records.filter(record => !record.error && String(record.result || '').trim());
-  if (successful.length === 0) return false;
-
-  const combined = successful.map(record => `${record.name}\n${record.result || ''}`).join('\n');
-  if (/(?:\u6cd5\u5f8b\u5206\u6790\u4e09\u6bb5\u8bba\u5e95\u7a3f|\u4e09\u6bb5\u8bba|\u5927\u524d\u63d0|\u5c0f\u524d\u63d0|\u6db5\u6444|major\s+premise|minor\s+premise|subsumption|reasoning\s+matrix)/iu.test(combined)) {
-    return true;
-  }
-
-  const hasReasoningCapableProduct = successful.some(record => {
-    const name = String(record.name || '');
-    const result = String(record.result || '');
-    const isReasoningCapableTool = /^(legal_case_reasoning_matrix|legal_generate_litigation_packet|legal_generate_argument_or_opinion|legal_analyze_folder_and_draft_argument|legal_review_contract|legal_draft_contract|legal_finalize_delivery_package|legal_generate_bid)$/i.test(name);
-    if (!isReasoningCapableTool) return false;
-    return /(?:\u4e89\u8bae\u7126\u70b9|\u4e8b\u5b9e\u9002\u7528\u5206\u6790|\u6cd5\u5f8b\u9002\u7528|\u8bc1\u636e\u8bc4\u4ef7|\u8bc1\u636e\u76ee\u5f55|\u8bc1\u660e\u76ee\u7684|\u5f85\u8bc1\u4e8b\u5b9e|\u8d28\u8bc1|\u7ed3\u8bba|dispute\s+issue|application|conclusion|evidence\s+catalog|proof\s+purpose)/iu.test(result);
-  });
-  if (!hasReasoningCapableProduct) return false;
-
-  const hasLaw = /(?:\u6cd5\u5f8b\u4f9d\u636e|\u73b0\u884c\u6709\u6548\u6cd5\u5f8b|\u6cd5\u6761|\u6cd5\u5f8b\u9002\u7528|\u88c1\u5224\u89c4\u5219|\u7c7b\u6848|current-?law|statute|legal\s+(?:basis|authority)|citation)/iu.test(combined);
-  const hasFactEvidence = /(?:\u4e8b\u5b9e\u4e0e\u8bc1\u636e|\u4e8b\u5b9e|\u8bc1\u636e|\u8bc1\u636e\u8bc4\u4ef7|\u8bc1\u636e\u76ee\u5f55|\u8bc1\u660e\u76ee\u7684|\u5f85\u8bc1\u4e8b\u5b9e|\u4e3e\u8bc1|\u8d28\u8bc1|facts?|evidence|proof\s+purpose|burden\s+of\s+proof)/iu.test(combined);
-  const hasApplication = /(?:\u4e8b\u5b9e\u9002\u7528\u5206\u6790|\u6cd5\u5f8b\u9002\u7528|\u4e89\u8bae\u7126\u70b9|\u7ed3\u8bba|\u8bf7\u6c42\u6743\u57fa\u7840|\u6297\u8fa9\u7406\u7531|application|analysis|conclusion|subsumption)/iu.test(combined);
-  return hasLaw && hasFactEvidence && hasApplication;
 }
 
 export function hasLegalExternalPlatformSignal(text: string): boolean {
@@ -147,7 +80,7 @@ export function hasLegalExternalPlatformResultEvidence(records: ToolExecutionRec
     if (/manual_required|captcha|2FA|QR|\u9a8c\u8bc1\u7801|\u626b\u7801|\u4ed8\u8d39|\u9700\u8981\u767b\u5f55|\u672a\u914d\u7f6e|not configured|login required/i.test(result)) {
       return false;
     }
-    const resultTool = /^(legal_search_external_authorities|legal_search_tender_projects|legal_company_database_lookup|legal_trace_assets|legal_equity_penetration|url_fetch_logged_in|mcp_playwright_browser_snapshot|mcp_playwright_browser_evaluate|browser_open_task)$/i.test(name);
+    const resultTool = /^(legal_search_external_authorities|legal_company_database_lookup|legal_trace_assets|legal_equity_penetration|url_fetch_logged_in|mcp_playwright_browser_snapshot|mcp_playwright_browser_evaluate|browser_open_task)$/i.test(name);
     const hasResultMarkers = /(?:\u6765\u6e90\u767b\u8bb0|\u590d\u6838\u72b6\u6001|\u6848\u53f7|\u6cd5\u9662|\u88c1\u5224|\u80a1\u4e1c|\u88ab\u6267\u884c|\u516c\u53f8|\u641c\u7d22\u7ed3\u679c|Page URL|source-register|result|title|case|company)/iu.test(result);
     return resultTool && hasResultMarkers;
   });

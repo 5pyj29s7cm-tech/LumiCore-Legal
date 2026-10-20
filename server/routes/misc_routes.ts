@@ -1,6 +1,7 @@
 // Misc routes that didn't fit into other modules: founder vision, feedback, admin config
 import { Router } from "express";
-import { flushDBOrThrow, readDB, writeDB } from "../../db_layer";
+import { randomUUID } from "node:crypto";
+import { flushDBOrThrow, readDatabaseTables, commitDatabaseTables } from "../../db_layer";
 import { requireAdmin, requireAuth, requireLocalRequest } from "../middleware/auth";
 
 export function mountMiscRoutes(router: Router, _jwtSecret: string, _llm: {
@@ -9,7 +10,7 @@ export function mountMiscRoutes(router: Router, _jwtSecret: string, _llm: {
   // ── Founder Vision ──
   router.get("/founder/vision", requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
     try {
-      const db = readDB();
+      const db = readDatabaseTables(["founderVision","founderVisionUpdatedAt","settings"]);
       res.json({ vision: db.founderVision || '' });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -22,10 +23,10 @@ export function mountMiscRoutes(router: Router, _jwtSecret: string, _llm: {
       if (typeof vision !== 'string') return res.status(400).json({ error: 'vision is required' });
       if (vision.length > 20_000) return res.status(400).json({ error: 'vision must be 20000 characters or fewer' });
       const updatedAt = new Date().toISOString();
-      const db = readDB();
+      const db = readDatabaseTables(["founderVision","founderVisionUpdatedAt","settings"]);
       db.founderVision = vision;
       db.founderVisionUpdatedAt = updatedAt;
-      writeDB(db);
+      commitDatabaseTables(db);
       await flushDBOrThrow();
       res.json({ success: true });
     } catch (err: any) {
@@ -50,17 +51,20 @@ export function mountMiscRoutes(router: Router, _jwtSecret: string, _llm: {
       if (normalized.type.length > 64) return res.status(400).json({ error: 'type must be 64 characters or fewer' });
       if (normalized.contact.length > 500) return res.status(400).json({ error: 'contact must be 500 characters or fewer' });
       if (normalized.position.length > 500) return res.status(400).json({ error: 'position must be 500 characters or fewer' });
-      const db = readDB();
-      if (!db.feedback) db.feedback = [];
-      db.feedback.push({
-        id: Math.random().toString(36).substring(2, 15),
+      const db = readDatabaseTables(["founderVision","founderVisionUpdatedAt","settings"]);
+      const feedback = {
+        id: randomUUID(),
         ...normalized,
         userId: req.user!.uid,
         createdAt: new Date().toISOString(),
-      });
-      writeDB(db);
+      };
+      // Only declared database tables are persisted. An ad-hoc db.feedback
+      // array previously vanished on restart despite a successful flush.
+      db.settings ||= [];
+      db.settings.push({ key: `user_feedback_v1:${feedback.id}`, value: JSON.stringify(feedback) });
+      commitDatabaseTables(db);
       await flushDBOrThrow();
-      res.json({ success: true });
+      res.json({ success: true, id: feedback.id });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -69,7 +73,7 @@ export function mountMiscRoutes(router: Router, _jwtSecret: string, _llm: {
   // ── Admin Config ──
   router.get("/admin/config", requireAuth, requireAdmin, requireLocalRequest, (_req, res) => {
     try {
-      const db = readDB();
+      const db = readDatabaseTables(["founderVision","founderVisionUpdatedAt","settings"]);
       const setting = (db.settings || []).find((s: any) => s.key === 'admin_config');
       const config = setting ? JSON.parse(setting.value) : {};
       res.json({ adminEmail: config.adminEmail || '' });
@@ -84,7 +88,7 @@ export function mountMiscRoutes(router: Router, _jwtSecret: string, _llm: {
       if (typeof adminEmail !== 'string' || adminEmail.length > 320) {
         return res.status(400).json({ error: 'adminEmail must be a string of 320 characters or fewer' });
       }
-      const db = readDB();
+      const db = readDatabaseTables(["founderVision","founderVisionUpdatedAt","settings"]);
       if (!db.settings) db.settings = [];
       const key = 'admin_config';
       const value = JSON.stringify({ adminEmail: adminEmail || '' });
@@ -94,7 +98,7 @@ export function mountMiscRoutes(router: Router, _jwtSecret: string, _llm: {
       } else {
         db.settings.push({ key, value });
       }
-      writeDB(db);
+      commitDatabaseTables(db);
       await flushDBOrThrow();
       res.json({ success: true });
     } catch (err: any) {

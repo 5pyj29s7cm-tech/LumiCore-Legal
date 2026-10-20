@@ -2,14 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { PRODUCT_VARIANT } from '../shared/product_variant';
 
 const originalDataDir = process.env.LUMI_DATA_DIR;
 const originalTestTmpDir = process.env.LUMI_TEST_TMPDIR;
 const originalNodeEnv = process.env.NODE_ENV;
 const tempRoots: string[] = [];
-const currentProductDataDirectory = PRODUCT_VARIANT.runtime.dataDirectoryName;
-const legacyProductDataDirectory = PRODUCT_VARIANT.runtime.legacyDataDirectoryName;
 
 afterEach(() => {
   if (originalDataDir === undefined) delete process.env.LUMI_DATA_DIR;
@@ -57,7 +54,7 @@ describe('runtime data isolation', () => {
   it('moves the legacy LumiOS data root in place and keeps its contents', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lumi-core-migration-'));
     tempRoots.push(home);
-    const legacyRoot = path.join(home, legacyProductDataDirectory);
+    const legacyRoot = path.join(home, 'LumiOS-Legal');
     fs.mkdirSync(path.join(legacyRoot, 'data'), { recursive: true });
     fs.writeFileSync(path.join(legacyRoot, 'data', 'lumi.db'), 'existing-conversations');
 
@@ -68,7 +65,7 @@ describe('runtime data isolation', () => {
     const { claimDataRootForMigration } = await import('../server/runtime/data_root_lease');
     const currentRoot = migrateLegacyProductDataRoot(claimDataRootForMigration, home);
 
-    expect(currentRoot).toBe(path.join(home, currentProductDataDirectory));
+    expect(currentRoot).toBe(path.join(home, 'LumiCore-Legal'));
     expect(fs.existsSync(legacyRoot)).toBe(false);
     expect(fs.readFileSync(path.join(currentRoot, 'data', 'lumi.db'), 'utf8')).toBe('existing-conversations');
     expect(fs.existsSync(path.join(currentRoot, 'runtime', 'backend-instance.lock'))).toBe(false);
@@ -104,7 +101,7 @@ describe('runtime data isolation', () => {
   it('fails closed when both LumiCore and legacy LumiOS roots contain data', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lumi-core-conflict-'));
     tempRoots.push(home);
-    for (const directory of [currentProductDataDirectory, legacyProductDataDirectory]) {
+    for (const directory of ['LumiCore-Legal', 'LumiOS-Legal']) {
       fs.mkdirSync(path.join(home, directory), { recursive: true });
       fs.writeFileSync(path.join(home, directory, 'identity.txt'), directory);
     }
@@ -113,25 +110,25 @@ describe('runtime data isolation', () => {
     expect(() => migrateLegacyProductDataRoot(() => {
       throw new Error('claim must not be attempted for a conflict');
     }, home)).toThrow(/both directories contain data/i);
-    expect(fs.readFileSync(path.join(home, legacyProductDataDirectory, 'identity.txt'), 'utf8')).toBe(legacyProductDataDirectory);
-    expect(fs.readFileSync(path.join(home, currentProductDataDirectory, 'identity.txt'), 'utf8')).toBe(currentProductDataDirectory);
+    expect(fs.readFileSync(path.join(home, 'LumiOS-Legal', 'identity.txt'), 'utf8')).toBe('LumiOS-Legal');
+    expect(fs.readFileSync(path.join(home, 'LumiCore-Legal', 'identity.txt'), 'utf8')).toBe('LumiCore-Legal');
   });
 
   it('refuses to migrate while the legacy backend lease is live', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lumi-core-live-lease-'));
     tempRoots.push(home);
-    const legacyRoot = path.join(home, legacyProductDataDirectory);
+    const legacyRoot = path.join(home, 'LumiOS-Legal');
     fs.mkdirSync(path.join(legacyRoot, 'data'), { recursive: true });
     fs.writeFileSync(path.join(legacyRoot, 'data', 'lumi.db'), 'active');
 
     const { migrateLegacyProductDataRoot } = await import('../server/config/data_path');
     const { claimDataRootForMigration } = await import('../server/runtime/data_root_lease');
-    const activeClaim = claimDataRootForMigration(legacyRoot, path.join(home, currentProductDataDirectory));
+    const activeClaim = claimDataRootForMigration(legacyRoot, path.join(home, 'LumiCore-Legal'));
     try {
       expect(() => migrateLegacyProductDataRoot(claimDataRootForMigration, home))
         .toThrow(/already owned by live backend PID/i);
       expect(fs.existsSync(legacyRoot)).toBe(true);
-      expect(fs.existsSync(path.join(home, currentProductDataDirectory))).toBe(false);
+      expect(fs.existsSync(path.join(home, 'LumiCore-Legal'))).toBe(false);
     } finally {
       expect(activeClaim.releaseAt(legacyRoot)).toBe(true);
     }
@@ -144,7 +141,7 @@ describe('runtime data isolation', () => {
     vi.resetModules();
     const blankModule = await import('../server/config/data_path');
     expect(blankModule.hasExplicitDataRoot()).toBe(false);
-    expect(blankModule.resolveDefaultDataRoot(home)).toBe(path.join(home, currentProductDataDirectory));
+    expect(blankModule.resolveDefaultDataRoot(home)).toBe(path.join(home, 'LumiCore-Legal'));
 
     process.env.LUMI_DATA_DIR = 'relative/data-root';
     expect(() => blankModule.getDataRoot()).toThrow(/absolute path/i);
@@ -156,19 +153,19 @@ describe('runtime data isolation', () => {
     const backingLegacy = path.join(home, 'legacy-backing');
     fs.mkdirSync(path.join(backingLegacy, 'data'), { recursive: true });
     fs.writeFileSync(path.join(backingLegacy, 'data', 'lumi.db'), 'do-not-follow');
-    fs.symlinkSync(backingLegacy, path.join(home, legacyProductDataDirectory), process.platform === 'win32' ? 'junction' : 'dir');
+    fs.symlinkSync(backingLegacy, path.join(home, 'LumiOS-Legal'), process.platform === 'win32' ? 'junction' : 'dir');
 
     const { migrateLegacyProductDataRoot } = await import('../server/config/data_path');
     expect(() => migrateLegacyProductDataRoot(() => {
       throw new Error('unsafe root must be rejected before a lease is claimed');
     }, home)).toThrow(/not a safe directory/i);
 
-    fs.rmSync(path.join(home, legacyProductDataDirectory));
-    fs.mkdirSync(path.join(home, legacyProductDataDirectory, 'data'), { recursive: true });
-    fs.writeFileSync(path.join(home, legacyProductDataDirectory, 'data', 'lumi.db'), 'legacy');
+    fs.rmSync(path.join(home, 'LumiOS-Legal'));
+    fs.mkdirSync(path.join(home, 'LumiOS-Legal', 'data'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'LumiOS-Legal', 'data', 'lumi.db'), 'legacy');
     const backingCurrent = path.join(home, 'current-backing');
     fs.mkdirSync(backingCurrent);
-    fs.symlinkSync(backingCurrent, path.join(home, currentProductDataDirectory), process.platform === 'win32' ? 'junction' : 'dir');
+    fs.symlinkSync(backingCurrent, path.join(home, 'LumiCore-Legal'), process.platform === 'win32' ? 'junction' : 'dir');
     expect(() => migrateLegacyProductDataRoot(() => {
       throw new Error('unsafe target must be rejected before a lease is claimed');
     }, home)).toThrow(/not a safe directory/i);
@@ -189,7 +186,7 @@ describe('runtime data isolation', () => {
   it('fails closed on a forged existing migration verification receipt', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lumi-core-forged-verification-'));
     tempRoots.push(home);
-    const legacyRoot = path.join(home, legacyProductDataDirectory);
+    const legacyRoot = path.join(home, 'LumiOS-Legal');
     fs.mkdirSync(path.join(legacyRoot, 'data'), { recursive: true });
     fs.writeFileSync(path.join(legacyRoot, 'data', 'lumi.db'), 'existing-conversations');
 
@@ -216,7 +213,7 @@ describe('runtime data isolation', () => {
   });
 
   it('keeps explicit data roots isolated from the legacy cwd data importer', () => {
-    const source = fs.readFileSync(path.join(process.cwd(), 'db_layer.ts'), 'utf8');
+    const source = fs.readFileSync(path.join(process.cwd(), 'server', 'db', 'startup.ts'), 'utf8');
     const preflight = fs.readFileSync(
       path.join(process.cwd(), 'server', 'runtime', 'data_root_preflight.ts'),
       'utf8',
@@ -240,7 +237,11 @@ describe('runtime data isolation', () => {
       'server/stt/artifact_paths.ts',
     ];
     for (const consumer of consumers) {
-      const source = fs.readFileSync(consumer, 'utf8');
+      const legalDirectory = 'server/regions/packs/cn/legal_tools';
+      const source = consumer === 'server/regions/packs/cn/legal_tools.ts'
+        ? [consumer, ...fs.readdirSync(legalDirectory).filter(file => file.endsWith('.ts')).sort()
+            .map(file => path.join(legalDirectory, file))].map(file => fs.readFileSync(file, 'utf8')).join('\n')
+        : fs.readFileSync(consumer, 'utf8');
       expect(source).not.toMatch(/process\.cwd\(\).{0,80}lumi_output/);
       expect(source).not.toMatch(/path\.join\(process\.cwd\(\),\s*['"]data['"]/);
       expect(source).toMatch(/get(?:GeneratedOutputDir|DataDirectory|DataPath)/);

@@ -1,3 +1,4 @@
+import { type ProviderGetters as SharedProviderGetters } from "../llm/provider_getters";
 // Messaging integrations (Feishu, WeCom, etc.)
 import { Router } from "express";
 import type { Server as SocketIOServer } from "socket.io";
@@ -15,11 +16,7 @@ import { getActiveWeChatAdapter } from '../messaging/wechat_runtime';
 
 export function setupMessaging(
   apiRouter: Router,
-  llm: {
-    getDeepSeek: any; getGemini: any; getOpenAI: any; getAnthropic: any; getQwen: any;
-    getArk?: any; getOllama?: any; getLmStudio?: any; getXiaomi?: any; getKimi?: any;
-    getGlm?: any; getRelay?: any;
-  },
+  llm: SharedProviderGetters & Required<Pick<SharedProviderGetters, 'getOpenAI' | 'getAnthropic' | 'getQwen'>>,
   io?: SocketIOServer,
 ) {
   const cfg = getMessagingConfig();
@@ -49,23 +46,25 @@ export function setupMessaging(
     getConnectionStatus: platform => messagingConnectionManager.status(platform),
     sendProactive: (platform, chatId, text) => messagingConnectionManager.sendProactive(platform, chatId, text),
     createScopedDesktopRelay: io
-      ? (userId, source, domain, orgId) => createDesktopRelay({
+      ? (userId, source, domain, orgId, lifecycle) => createDesktopRelay({
           io,
           userId,
           domain,
           orgId,
           source,
           timeoutMs: 90_000,
+          ...lifecycle,
         })
       : undefined,
     createPersonalDesktopRelay: io
-      ? (userId, source) => createDesktopRelay({
+      ? (userId, source, lifecycle) => createDesktopRelay({
           io,
           userId,
           domain: 'personal',
           orgId: '',
           source,
           timeoutMs: 90_000,
+          ...lifecycle,
         })
       : undefined,
     onConversationUpdated: update => {

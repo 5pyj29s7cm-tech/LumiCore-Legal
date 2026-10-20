@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
-  classifyActiveTaskMessage,
   formatActiveTaskRelationContext,
   resolveActiveTaskMessageRelation,
   bindPreparedTaskMessageRelation,
 } from '../server/cognition/task_concurrency';
+import { normalizeActionIntent } from '../server/cognition/normalized_action_intent';
+import { isConfirmationCancellation, isExplicitConfirmationReply } from '../server/tools/pending_confirmation';
+import { classifyVoiceWorkInterruption } from '../server/socket/voice_turn_state';
 import type { ConversationActionContinuationState } from '../server/cognition/action_continuation';
 
 const activeState: ConversationActionContinuationState = {
@@ -26,6 +28,33 @@ const activeState: ConversationActionContinuationState = {
 };
 
 describe('active task message relation', () => {
+  it.each(['停止执行', '拒绝', '不同意', '不要执行', '取消', '停止', '不用做了', 'cancel the task'])('cancels the exact active task across control entrances: %s', text => {
+    expect(isConfirmationCancellation(text)).toBe(true);
+    expect(classifyVoiceWorkInterruption(text)).toBe('cancel_work');
+    expect(resolveActiveTaskMessageRelation(text, activeState)).toMatchObject({
+      taskRelation: 'cancel', taskId: activeState.taskId, revision: activeState.revision,
+    });
+    expect(resolveActiveTaskMessageRelation(text, activeState, { controlTargetRevision: 1 })).toMatchObject({ binding: 'stale', operation: 'reject_stale' });
+  });
+  it.each(['ok', 'okay', '行', '没问题', '开始吧', '确认', '好的'])('uses one confirmation vocabulary without inventing a grant: %s', text => {
+    expect(isExplicitConfirmationReply(text)).toBe(true);
+    expect(resolveActiveTaskMessageRelation(text, { ...activeState, status: 'waiting_confirmation' })).toMatchObject({
+      taskRelation: 'confirm', taskId: activeState.taskId,
+    });
+    expect(resolveActiveTaskMessageRelation(text, null).binding).not.toBe('active_task');
+    expect(resolveActiveTaskMessageRelation(text, { ...activeState, status: 'completed', unfinished: false }).binding).not.toBe('active_task');
+  });
+  it.each(['不要停止执行', '我拒绝的原因是什么', '取消订单', '好的，另外给小王发消息', 'stop speaking'])('does not turn domain commands or discussion into a task-control grant: %s', text => {
+    expect(isExplicitConfirmationReply(text)).toBe(false);
+    expect(isConfirmationCancellation(text)).toBe(false);
+  });
+  it('retries the identical unfinished goal without allocating an independent task', () => {
+    const goal = '生成 D:/work/result.xlsx 采购报表，金额使用公式并回读。';
+    const state = { ...activeState, goal, latestInstruction: goal, activeRequestId: undefined, status: 'blocked' as const };
+    expect(resolveActiveTaskMessageRelation(goal, state)).toMatchObject({ taskRelation: 'continue', taskId: state.taskId, preservesRootGoal: true });
+    expect(resolveActiveTaskMessageRelation(goal.replace('result.xlsx', 'different.xlsx'), state).taskRelation).toBe('new');
+    expect(resolveActiveTaskMessageRelation(goal, { ...state, status: 'completed', unfinished: false }).taskRelation).toBe('new');
+  });
   it('reconciles stale new-task display metadata with the prepared durable continuation', () => {
     const early = resolveActiveTaskMessageRelation('Continue the unfinished task.', null);
     expect(early.taskRelation).toBe('new');
@@ -57,9 +86,9 @@ describe('active task message relation', () => {
     expect(resolveActiveTaskMessageRelation(text, activeState)).toMatchObject({ taskRelation: 'new' });
   });
   it('keeps status and confirmation on the existing task', () => {
-    expect(classifyActiveTaskMessage('怎么样了', activeState)).toBe('status');
-    expect(classifyActiveTaskMessage('确认', activeState)).toBe('continue');
-    expect(classifyActiveTaskMessage('继续执行', activeState)).toBe('continue');
+    expect(resolveActiveTaskMessageRelation('怎么样了', activeState).relation).toBe('status');
+    expect(resolveActiveTaskMessageRelation('确认', activeState).relation).toBe('continue');
+    expect(resolveActiveTaskMessageRelation('继续执行', activeState).relation).toBe('continue');
   });
 
   it('keeps a global runtime-work query independent from the adjacent action', () => {
@@ -142,16 +171,16 @@ describe('active task message relation', () => {
   });
 
   it('cancels only an explicit cancellation or replacement', () => {
-    expect(classifyActiveTaskMessage('取消当前任务', activeState)).toBe('cancel');
-    expect(classifyActiveTaskMessage('Cancel this task. Do not write any file.', activeState)).toBe('cancel');
-    expect(classifyActiveTaskMessage("Cancel this task. Don't write any file.", activeState)).toBe('cancel');
-    expect(classifyActiveTaskMessage('Cancel this task. Don’t write any file.', activeState)).toBe('cancel');
-    expect(classifyActiveTaskMessage('停止这个，改成打开 WPS', activeState)).toBe('replace');
+    expect(resolveActiveTaskMessageRelation('取消当前任务', activeState).relation).toBe('cancel');
+    expect(resolveActiveTaskMessageRelation('Cancel this task. Do not write any file.', activeState).relation).toBe('cancel');
+    expect(resolveActiveTaskMessageRelation("Cancel this task. Don't write any file.", activeState).relation).toBe('cancel');
+    expect(resolveActiveTaskMessageRelation('Cancel this task. Don’t write any file.', activeState).relation).toBe('cancel');
+    expect(resolveActiveTaskMessageRelation('停止这个，改成打开 WPS', activeState).relation).toBe('replace');
   });
 
   it('queues independent work without destroying the active ledger', () => {
-    expect(classifyActiveTaskMessage('顺便帮我整理一下会议纪要', activeState)).toBe('queue');
-    expect(classifyActiveTaskMessage('今天天气怎么样', activeState)).toBe('queue');
+    expect(resolveActiveTaskMessageRelation('顺便帮我整理一下会议纪要', activeState).relation).toBe('queue');
+    expect(resolveActiveTaskMessageRelation('今天天气怎么样', activeState).relation).toBe('queue');
   });
 
   it('distinguishes adjacent feedback and binds it to task identity and revision', () => {
@@ -493,6 +522,52 @@ describe('active task message relation', () => {
     }
   });
 
+  it('keeps a bare acknowledgement conversational when no action is pending', () => {
+    const completed = {
+      ...activeState,
+      status: 'completed' as const,
+      unfinished: false,
+      activeRequestId: undefined,
+      revision: 8,
+    };
+    expect(resolveActiveTaskMessageRelation('\u597d\u7684', completed, {
+      controlTargetRequestId: 'request-7',
+    })).toMatchObject({
+      relation: 'queue',
+      taskRelation: 'new',
+      feedback: 'new_task',
+      binding: 'new_task',
+      operation: 'enqueue',
+      reason: 'independent_instruction',
+    });
+
+    expect(resolveActiveTaskMessageRelation('\u597d\u7684', {
+      ...activeState,
+      status: 'blocked' as const,
+      activeRequestId: undefined,
+    }, {
+      controlTargetRequestId: 'request-7',
+    })).toMatchObject({
+      feedback: 'new_task',
+      binding: 'new_task',
+    });
+  });
+
+  it('still binds a bare acknowledgement to an action waiting for confirmation', () => {
+    expect(resolveActiveTaskMessageRelation('\u597d\u7684', {
+      ...activeState,
+      status: 'waiting_confirmation' as const,
+      activeRequestId: undefined,
+    })).toMatchObject({
+      relation: 'continue',
+      taskRelation: 'confirm',
+      feedback: 'accept',
+      binding: 'active_task',
+      operation: 'verify',
+      taskId: 'task-1',
+    });
+  });
+
   it('gives the planner root-level continuity and verification invariants', () => {
     const relation = resolveActiveTaskMessageRelation('不对，图纸单位应该是毫米', activeState, {
       activeRequestId: 'request-7',
@@ -509,4 +584,3 @@ describe('active task message relation', () => {
     expect(context).toContain('LumiCore may report terminal completion only after checking the whole goal');
   });
 });
-import { normalizeActionIntent } from '../server/cognition/normalized_action_intent';

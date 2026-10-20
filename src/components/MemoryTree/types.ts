@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { KnowledgeEntry } from '../../../routes/files';
 
 // ── Data types (mirrors backend & existing interfaces) ──
 
@@ -18,42 +19,10 @@ export interface MemoryNode {
   parentId: string | null;
 }
 
-export interface FileEntry {
-  archiveId?: string;
-  archiveKind?: string;
-  sourceConversationId?: string;
-  id: string;
-  name: string;
-  displayName?: string;
-  path?: string;
-  domain?: 'personal' | 'work';
-  orgId?: string;
-  size?: string;
-  rawSize?: number;
-  source?: 'upload' | 'generated' | 'ingested' | 'obsidian';
-  agentIds?: string[];
-  status?: 'ready' | 'indexing' | 'indexed' | 'partial' | 'unsupported' | 'failed';
-  extractionStatus?: 'indexed' | 'partial' | 'unsupported' | 'failed';
-  extractionMethod?: string;
-  extractionWarning?: string;
-  extractionError?: string;
-  extractionProvider?: string;
-  extractionModel?: string;
-  contentChars?: number;
-  sourceTitle?: string;
-  sourceAliases?: string[];
-  sourceTags?: string[];
-  sourceLinks?: string[];
-  sourceBacklinks?: string[];
-  sourceProperties?: Record<string, unknown>;
-  obsidianVaultId?: string;
-  obsidianVaultName?: string;
-  obsidianVaultPath?: string;
-  obsidianRelativePath?: string;
-  obsidianSourcePath?: string;
-  updatedAt?: string;
-  createdAt?: string;
-}
+// UI callers may supply partial metadata; the file API owns the field contract.
+export type FileEntry = Pick<KnowledgeEntry, 'id' | 'name'>
+  & Partial<Omit<KnowledgeEntry, 'id' | 'name' | 'extractionMethod'>>
+  & { extractionMethod?: string };
 
 export interface ConversationEntry {
   id: string;
@@ -116,19 +85,4 @@ export interface RingDef {
   speed: number;
   /** Number of orbiting particles */
   particleCount: number;
-}
-
-// ── Timeline ──
-
-export interface TimelineState {
-  /** ISO 8601 cutoff — show only memories created on or before this */
-  before: string | null;
-  /** Is the timeline auto-playing (growing) */
-  playing: boolean;
-  /** Playback speed multiplier */
-  speed: number;
-  /** Earliest memory date found */
-  earliest: string | null;
-  /** Latest memory date found */
-  latest: string | null;
 }

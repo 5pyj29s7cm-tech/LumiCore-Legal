@@ -1,5 +1,7 @@
+import { stableValue } from '../../shared/stable_json';
+import { CN_EXECUTION_EVIDENCE_MESSAGES } from '../regions/messages/execution_evidence_messages';
 import crypto from 'node:crypto';
-import { isDelegatedActionEvidenceArchive } from './task_execution_ledger';
+import { groupTaskReceipts, isDelegatedActionEvidenceArchive } from './task_execution_ledger';
 import { projectAutonomousTaskFinalization } from '../autonomy/task_finalization';
 import { getJwtSecret } from '../config/local_identity';
 import type { CapabilityManifestEntry, ToolExecutionRecord } from '../tools/types';
@@ -10,12 +12,7 @@ import {
 import {
   parseReceiptObject,
   toolRecordHasTerminalPayload,
-  toolRecordTerminalPayload,
 } from '../tools/receipt_payload';
-import { buildActionEvidenceContract, hasCoreActionEvidence } from './action_contract';
-import { isExternalCliRequest } from './external_cli_intent';
-import { normalizeActionIntent } from './normalized_action_intent';
-import { buildMediaArtifactReceipt } from '../socket/media_artifact_receipt';
 
 export type AcceptanceStage = 'registered' | 'available' | 'exercised' | 'verified';
 export type RuntimeSampleStatus = 'not_exercised' | 'unknown' | 'degraded' | 'verified';
@@ -154,15 +151,6 @@ function compact(value: unknown, limit = 700): string {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, limit);
-}
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.keys(value as Record<string, unknown>).sort().map(key => [
-    key,
-    stableValue((value as Record<string, unknown>)[key]),
-  ]));
 }
 
 function digest(value: unknown): string {
@@ -351,8 +339,16 @@ export function validateCompletionTerminalReceipt(
   return { accepted: true, diagnosticCode: 'accepted', reason: receipt.reason };
 }
 
-function nextStepForReceipt(receipt: TaskTerminalReceipt | null | undefined): string {
+function nextStepForReceipt(receipt: TaskTerminalReceipt | null | undefined, taskLabel = ''): string {
   const code = String(receipt?.reasonCode || '');
+  if (/[\u3400-\u9fff]/u.test(taskLabel) && receipt?.outcome !== 'completed') {
+    // i18n-allow: localized public task feedback.
+    if (/confirmation/i.test(code)) return '确认待执行的具体操作后继续。';
+    // i18n-allow: localized public task feedback.
+    if (/runtime|provider|dependency|unavailable/i.test(code)) return '恢复不可用的服务后，从未完成的步骤继续。';
+    // i18n-allow: localized public task feedback.
+    if (receipt?.outcome === 'failed' || receipt?.outcome === 'blocked') return '核对当前停在哪一步，再继续未完成的部分；已经做好的内容保留。';
+  }
   if (/confirmation/i.test(code)) return 'Obtain the required user confirmation, then resume from the preserved receipt ledger.';
   if (/policy|forbidden/i.test(code)) return 'Resolve the policy boundary or select an allowed capability before retrying.';
   if (/runtime|provider|dependency|unavailable/i.test(code)) return 'Restore the unavailable runtime dependency, then resume without replaying verified side effects.';
@@ -396,7 +392,7 @@ export function buildTaskCompletionFeedback(
       : []),
     ...(!receipt && fallback?.accepted ? ['A verified terminal action receipt was recorded.'] : []),
   ];
-  const nextStep = nextStepForReceipt(trustedReceipt);
+  const nextStep = nextStepForReceipt(trustedReceipt, taskLabel);
   return {
     status,
     completed: status === 'completed' ? [`${label} completed with verified terminal evidence.`] : [],
@@ -409,10 +405,12 @@ export function buildTaskCompletionFeedback(
 
 /**
  * Build a structured foreground result without turning ordinary conversation
- * into a fake task. Only an actual tool receipt, a blocked execution, or an
- * explicit task lifecycle status produces feedback.
+ * into a fake task. Only a finalized verdict or an explicit task lifecycle
+ * produces feedback; receipts alone never decide whether the goal is complete.
  */
 export function buildForegroundTaskCompletionFeedback(input: {
+  /** The finalizer already adjudicated this turn. Feedback only projects that verdict. */
+  finalization?: Pick<import('./result_finalizer_types').LumiResultFinalizerResult, 'blocked' | 'reason' | 'progress'>;
   taskId: string;
   taskLabel: string;
   toolRecords?: ToolExecutionRecord[];
@@ -440,29 +438,13 @@ export function buildForegroundTaskCompletionFeedback(input: {
       nextSteps: ['Approve or reject the pending action to continue.'],
     };
   }
-  if (records.length === 0 && !input.blocked && !input.status) return undefined;
-  const contract = buildActionEvidenceContract(input.taskLabel);
-  // Runtime task control has a single exact ledger contract. Do not allow a
-  // successful file/process observation to promote a failed cancellation or
-  // status probe into completed foreground feedback. Broader action kinds are
-  // adjudicated by the result finalizer, whose target rules are richer than
-  // this compact cross-runtime summary layer.
-  const mediaIntent = normalizeActionIntent(input.taskLabel);
-  const missingMediaEvidence = mediaIntent.kind === 'media_generation' && !records.some(record => (
-    record.name === mediaIntent.target
-    && record.terminalVerification?.status === 'verified'
-    && buildMediaArtifactReceipt(record.name, record.arguments, toolRecordTerminalPayload(record), record.error)
-  ));
-  const missingRequestedActionEvidence = missingMediaEvidence || ((contract.kind === 'task_control' || isExternalCliRequest(input.taskLabel))
-    && !hasCoreActionEvidence(contract, records, input.taskLabel, undefined, { taskId: input.taskId }));
+  if (!input.finalization && !input.blocked && !input.status) return undefined;
   const outcome: TaskTerminalOutcome = input.status === 'cancelled'
     ? 'cancelled'
-    : input.blocked || input.status === 'persistence_unknown' || missingRequestedActionEvidence
+    : input.finalization?.blocked || input.blocked || input.status === 'persistence_unknown'
       ? 'blocked'
       : 'completed';
-  const terminalReason = input.reason || (missingRequestedActionEvidence
-    ? `The tool receipts do not verify the requested ${contract.label.toLowerCase()}.`
-    : undefined);
+  const terminalReason = input.finalization?.reason || input.reason;
   const receipt = buildTaskTerminalReceipt({
     taskId: input.taskId,
     runtime: 'conversation',
@@ -472,16 +454,25 @@ export function buildForegroundTaskCompletionFeedback(input: {
       ? 'terminal_persistence_unknown'
       : input.status === 'cancelled'
         ? 'task_cancelled'
-        : input.blocked
+        : input.finalization?.blocked || input.blocked
           ? 'foreground_execution_blocked'
           : undefined,
     reason: terminalReason,
   });
-  return buildTaskCompletionFeedback(receipt, label, {
+  const feedback = buildTaskCompletionFeedback(receipt, label, {
     status: outcome,
     reason: terminalReason,
     accepted: outcome === 'completed' && receipt.verification === 'verified',
   });
+  if (!input.status && input.finalization?.reason === 'media_generation_unknown') return {
+    ...feedback, status: 'unknown', completed: [], blockers: [],
+    nextSteps: [/[\u3400-\u9fff]/u.test(label) ? CN_EXECUTION_EVIDENCE_MESSAGES.mediaGenerationPending
+      : 'The original generation task is retained. Query its status; do not generate again.'],
+  };
+  const progress = input.finalization?.progress;
+  return progress ? { ...feedback, ...progress,
+    incomplete: outcome === 'completed' ? [] : progress.incomplete.length ? progress.incomplete : feedback.incomplete,
+  } : feedback;
 }
 
 function receiptVerification(
@@ -582,21 +573,6 @@ export function buildCapabilityAcceptanceProjections(input: {
   }).sort((left, right) => left.toolName.localeCompare(right.toolName));
 }
 
-function latestDurableReason(task: any): string {
-  const diagnosis = Array.isArray(task?.recovery?.diagnoses) ? task.recovery.diagnoses.at(-1) : null;
-  const terminalReceipt = hasValidTerminalReceiptSignature(task?.terminalReceipt)
-    ? task.terminalReceipt as TaskTerminalReceipt
-    : undefined;
-  return compact(
-    terminalReceipt?.reason
-      || diagnosis?.reason
-      || task?.recovery?.blockedReason
-      || task?.verificationReason
-      || task?.error,
-    700,
-  );
-}
-
 function projectDurableTask(task: any): TaskAcceptanceProjection {
   const runtime = 'autonomous' as const;
   const status = compact(task?.status || 'unknown', 60);
@@ -606,7 +582,9 @@ function projectDurableTask(task: any): TaskAcceptanceProjection {
   const validation = status === 'completed'
     ? validateCompletionTerminalReceipt(terminalReceipt, { taskId: String(task?.id || ''), runtime })
     : null;
-  const reason = latestDurableReason(task);
+  const diagnosis = Array.isArray(task?.recovery?.diagnoses) ? task.recovery.diagnoses.at(-1) : null;
+  const reason = compact(trustedTerminalReceipt?.reason || diagnosis?.reason || task?.recovery?.blockedReason
+    || task?.verificationReason || task?.error, 700);
   const terminalVerification = terminalReceiptIntegrityValid
     ? terminalReceipt.verification
     : terminalReceipt
@@ -651,8 +629,7 @@ function projectDurableTask(task: any): TaskAcceptanceProjection {
   };
 }
 
-function projectConversationTask(task: any, receipts: any[]): TaskAcceptanceProjection {
-  const taskReceipts = receipts.filter(row => row?.taskId === task?.id);
+function projectConversationTask(task: any, taskReceipts: any[], context: Record<string, any>): TaskAcceptanceProjection {
   const verified = taskReceipts.some(row => (
     row?.outcome === 'verified_success' && receiptVerification(row) === 'verified'
   ));
@@ -670,7 +647,6 @@ function projectConversationTask(task: any, receipts: any[]): TaskAcceptanceProj
       : status === 'blocked'
         ? 'conversation_task_blocked'
         : 'not_terminal';
-  const context = parseObject(task?.context);
   const diagnosticReason = compact(task?.blocker || (latest ? `Latest terminal outcome: ${latest.outcome || 'unknown'}.` : ''), 700);
   return {
     taskId: compact(task?.id, 180),
@@ -765,8 +741,7 @@ function isVerifiedCurrentSchedulerCheckpoint(
   );
 }
 
-function projectCompactSchedulerTask(task: any, receipts: any[], context: Record<string, any>): TaskAcceptanceProjection {
-  const taskReceipts = receipts.filter(row => row?.taskId === task?.id);
+function projectCompactSchedulerTask(task: any, taskReceipts: any[], context: Record<string, any>): TaskAcceptanceProjection {
   const audit = parseObject(context.schedulerAudit);
   const currentExecution = parseObject(audit.currentExecution);
   const currentExecutionId = compact(currentExecution.executionId, 180);
@@ -853,13 +828,14 @@ export function buildTaskAcceptanceProjections(db: any, input: {
   orgId?: string;
 } = {}): TaskAcceptanceProjection[] {
   const actionReceipts = Array.isArray(db?.conversationActionReceipts) ? db.conversationActionReceipts : [];
-  const conversation = (Array.isArray(db?.conversationActionTasks) ? db.conversationActionTasks : [])
-    .filter((task: any) => !isDelegatedActionEvidenceArchive(task) && scopeMatches(task, input))
-    .map((task: any) => {
+  const actionTasks = (Array.isArray(db?.conversationActionTasks) ? db.conversationActionTasks : [])
+    .filter((task: any) => !isDelegatedActionEvidenceArchive(task) && scopeMatches(task, input));
+  const receiptsByTask = groupTaskReceipts(actionTasks, actionReceipts);
+  const conversation = actionTasks.map((task: any) => {
       const context = parseObject(task?.context);
       return context.source === 'scheduler' && context.compactAudit === true
-        ? projectCompactSchedulerTask(task, actionReceipts, context)
-        : projectConversationTask(task, actionReceipts);
+        ? projectCompactSchedulerTask(task, receiptsByTask.get(task.id)!, context)
+        : projectConversationTask(task, receiptsByTask.get(task.id)!, context);
     });
   const autonomous = (Array.isArray(db?.autonomousTasks) ? db.autonomousTasks : [])
     .filter((task: any) => scopeMatches(task, input))

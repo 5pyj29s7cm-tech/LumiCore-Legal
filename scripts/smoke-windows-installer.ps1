@@ -11,8 +11,7 @@ $DesktopSessionHeader = "X-Lumi-Desktop-Session"
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 if ([string]::IsNullOrWhiteSpace($Installer)) {
   $PackageJson = Get-Content (Join-Path $ProjectRoot "package.json") -Raw | ConvertFrom-Json
-  $TauriConfig = Get-Content (Join-Path $ProjectRoot "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
-  $Installer = Join-Path $ProjectRoot "src-tauri\target\release\bundle\nsis\$($TauriConfig.productName)_$($PackageJson.version)_x64-setup.exe"
+  $Installer = Join-Path $ProjectRoot "src-tauri\target\release\bundle\nsis\LumiCore_$($PackageJson.version)_x64-setup.exe"
 }
 $Installer = [System.IO.Path]::GetFullPath($Installer)
 if (!(Test-Path $Installer)) {
@@ -503,12 +502,25 @@ try {
     throw "Installed $DirName did not connect as an MCP server"
   }
 
-  $SkillDir = Join-Path $HomeDir "lumi_skills\$DirName"
+  # Skills are executable profile data, scoped to LUMI_DATA_DIR rather than
+  # the legacy shared ~/lumi_skills directory (server/mcp/skill_paths.ts).
+  $SkillDir = Join-Path $DataRoot "data\skills\$DirName"
   $RuntimeConfig = Join-Path $DataRoot "data\mcp_config.json"
   $DatabasePath = Join-Path $DataRoot "data\lumi.db"
   $GeneratedOutputDir = Join-Path $DataRoot "data\generated"
-  if (!(Test-Path $SkillDir) -or !(Test-Path $RuntimeConfig) -or !(Test-Path $DatabasePath) -or !(Test-Path $GeneratedOutputDir) -or !(Test-Path $RuntimeLog)) {
-    throw "Installed skill, MCP config, database, generated-output directory, or runtime log was not persisted in the isolated profile"
+  $PersistencePaths = [ordered]@{
+    skill = $SkillDir
+    mcpConfig = $RuntimeConfig
+    database = $DatabasePath
+    generatedOutput = $GeneratedOutputDir
+    runtimeLog = $RuntimeLog
+  }
+  $MissingPersistencePaths = @($PersistencePaths.GetEnumerator() | Where-Object { !(Test-Path -LiteralPath $_.Value) } | ForEach-Object { $_.Key })
+  if ($MissingPersistencePaths.Count -gt 0) {
+    throw "Installed profile data was not persisted: $($MissingPersistencePaths -join ', ')"
+  }
+  if (Test-Path -LiteralPath (Join-Path $HomeDir "lumi_skills\$DirName")) {
+    throw "Installed skill leaked into the legacy shared home directory"
   }
 
   $SmokeStage = "restart-installed-client"

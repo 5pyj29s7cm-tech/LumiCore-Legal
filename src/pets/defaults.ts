@@ -1,3 +1,4 @@
+import { roundRect } from './canvas';
 import { PetConfig, DEFAULT_ATLAS, PetPalette, CustomPetTags, PetSpecies, BUILTIN_PALETTES } from './types';
 
 const CW = 192;
@@ -33,23 +34,6 @@ function drawRow(ctx: CanvasRenderingContext2D, row: number, frameCount: number,
 function canvasToDataURL(canvas: HTMLCanvasElement): string {
   // PNG for max compatibility across WebView2 / all browsers
   return canvas.toDataURL('image/png');
-}
-
-// ── Drawing helpers ──
-
-function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
-  ctx.fill();
 }
 
 function drawEyes(ctx: CanvasRenderingContext2D, cx: number, cy: number, eyeShape: string, eyeColor: string, eyeWhite: string, blink: number, scale: number) {
@@ -273,7 +257,7 @@ type CreatureDrawer = (
 // ── Cat ──
 
 function drawCat(ctx: CanvasRenderingContext2D, a: { bounceY: number; extra: number; blink: number; frame: number }, p: PetPalette, _tags: CustomPetTags, s: number) {
-  const cx = 96, cy = 100 + a.bounceY;
+  const cx = 96;
 
   // Tail
   ctx.strokeStyle = p.body;
@@ -501,7 +485,6 @@ function drawBird(ctx: CanvasRenderingContext2D, a: { bounceY: number; extra: nu
 function drawDragon(ctx: CanvasRenderingContext2D, a: { bounceY: number; extra: number; blink: number; frame: number }, p: PetPalette, tags: CustomPetTags, s: number) {
   // Dragon = cat body shape + spikes + wings + horns + slit eyes + open mouth
   const bounceY = a.bounceY;
-  const cy = 100 + bounceY;
 
   // Back spikes (drawn BEFORE body so they sit behind)
   ctx.fillStyle = p.bodyDark;
@@ -1235,14 +1218,6 @@ export function recolorPet(pet: PetConfig, palette: PetPalette): PetConfig {
 // Simple color math
 function darken(hex: string): string { return shiftColor(hex, -25); }
 function lighten(hex: string): string { return shiftColor(hex, 25); }
-function hexToRgba(hex: string, alpha: number): string {
-  const num = parseInt(hex.replace('#', ''), 16);
-  const r = (num >> 16) & 0xFF;
-  const g = (num >> 8) & 0xFF;
-  const b = num & 0xFF;
-  return `rgba(${r},${g},${b},${alpha})`;
-}
-
 function shiftColor(hex: string, amount: number): string {
   const num = parseInt(hex.replace('#', ''), 16);
   const r = Math.min(255, Math.max(0, ((num >> 16) & 0xFF) + amount));

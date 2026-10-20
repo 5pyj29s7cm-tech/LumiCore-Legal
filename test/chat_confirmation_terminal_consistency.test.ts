@@ -31,7 +31,7 @@ vi.mock('../server/agents/rag', async importOriginal => {
 });
 
 import { initDatabase, readDB, querySQL } from '../db_layer';
-import { getConversationActionStateByTaskId } from '../server/conversation/action_ledger';
+import { getConversationActionStateByTaskId } from "../server/conversation/ledger/queries";
 import { getConversationActionTurn } from '../server/conversation/action_turn_ledger';
 import { getOrCreateActiveConversation, startIsolatedConversation } from '../server/conversation/manager';
 import { registerChatHandler } from '../server/socket/chat';
@@ -375,8 +375,8 @@ describe('chat pending-confirmation terminal consistency', () => {
       },
     });
 
-    const status = await send(statusRequestId, '当前任务状态怎么样');
-    expect(status).toMatchObject({
+    const status = await send(statusRequestId, '刚才的任务状态怎么样');
+    expect(status, JSON.stringify(status)).toMatchObject({
       reason: 'task_status',
       finalized: true,
       blocked: false,

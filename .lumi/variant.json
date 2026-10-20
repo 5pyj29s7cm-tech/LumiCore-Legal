@@ -35,7 +35,7 @@
   "createdAt": "2026-08-03",
   "lastSyncedAt": "2026-09-14T15:05:33.427439+00:00",
   "delivery": {
-    "localBranch": "variant/legal-client",
+    "localBranch": "contrib/installer-inputs-20260915-legal",
     "remoteBranch": "main",
     "defaultBranch": "main"
   },

@@ -1,0 +1,354 @@
+import React, { useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { Plus, ArrowLeft, Check, Film, Image as ImageIcon, Loader2, Save, X } from 'lucide-react';
+import { chatSongCopy } from '@/i18n/locales/chatSong';
+import { apiFetch, apiJson } from '@/services/apiClient';
+import { saveFileResource } from '@/services/fileResource';
+import { openExternalHttpUrl } from '@/lib/externalNavigation';
+import { useFileResource } from '@/hooks/useFileResource';
+import { FileResourceImage, FileResourceVideo } from './FileResourceMedia';
+import { ChatSongPreview } from './ChatSongPreview';
+import { FileLocationActions } from './FileLocationActions';
+import { CHAT_SONG_TEMPLATE } from '../../shared/chat_song_layout';
+import type { FileEntry } from './MemoryTree/types';
+import type { MediaGenerationRequest } from './MediaGenerationStudio';
+import { CHAT_SONG_AUDIO_EXTENSIONS, chatSongLyrics, chatSongSongCurrent, visibleChatSongLines, type ChatSongProject, type ChatSongLine, type ChatSongAssetKind, type ChatSongTiming, type ChatSongRender, type ChatSongAnimation, type ChatSongVideoVersions, type ChatSongReactionSearch } from '../../shared/chat_song';
+
+const base = '/api/creative/chat-songs';
+const fileUrl = (id: string, hash = "") => `/api/files/download/${encodeURIComponent(id)}?domain=personal&inline=1&v=${encodeURIComponent(hash)}`;
+const json = (method: string, body: unknown): RequestInit => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const field = 'min-w-0 w-full rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm text-white outline-none focus:border-amber-300/60';
+const button = 'inline-flex shrink-0 whitespace-nowrap min-h-10 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-semibold text-white/85 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-35';
+const primary = `${button} !border-amber-200/30 !bg-amber-200 !text-slate-950 hover:!bg-amber-100`;
+type Handoff = { lyrics: string; singing: string; prompts: { kind: ChatSongAssetKind; lineId: string; prompt: string }[] };
+type Bundle = { fileId: string; url: string; timed: boolean; warnings: string[]; handoffs: { music: string; edit: string } };
+type ReactionSearchResult = { revision: number; reactions: ChatSongReactionSearch[] };
+type SongDraft = ReactionSearchResult & { lines: ChatSongLine[]; choices: Record<string, string> };
+export type ChatSongWorkbenchProps = {
+  embedded?: boolean;
+  locale: 'zh' | 'en'; files: FileEntry[]; libraryFailed?: boolean; busy: boolean;
+  onRefreshLibrary: () => void; onClose: () => void;
+  onGenerate: (request: MediaGenerationRequest) => void;
+  onTask: (prompt: string) => Promise<string | undefined>;
+};
+
+export type ChatSongWorkbenchHandle = { prepareToLeave: () => Promise<boolean> };
+
+const ChatSongWorkbench = React.forwardRef<ChatSongWorkbenchHandle, ChatSongWorkbenchProps>(function ChatSongWorkbench({ embedded = false, locale, files, libraryFailed, busy, onRefreshLibrary, onClose, onGenerate, onTask }, ref) {
+  const c = chatSongCopy[locale];
+  const [projects, setProjects] = useState<ChatSongProject[]>([]);
+  const [project, setProject] = useState<ChatSongProject | null>(null);
+  const [saved, setSaved] = useState('');
+  const [tab, setTab] = useState(0);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [draft, setDraft] = useState<SongDraft | null>(null);
+  const [reactionSearch, setReactionSearch] = useState<(ReactionSearchResult & { projectId: string }) | null>(null);
+  const [handoff, setHandoff] = useState<Handoff | null>(null);
+  const [bundle, setBundle] = useState<Bundle | null>(null);
+  const [checks, setChecks] = useState([false, false, false, false]);
+  const [timings, setTimings] = useState<ChatSongTiming[]>([]);
+  const [seconds, setSeconds] = useState(0);
+  const [songChoice, setSongChoice] = useState('');
+  const [videoLineChoice, setVideoLineChoice] = useState('');
+  const [renderResult, setRenderResult] = useState<ChatSongRender | null>(null);
+  const [rendering, setRendering] = useState(false);
+  const [animationChoice, setAnimationChoice] = useState('');
+  const [animationResult, setAnimationResult] = useState<ChatSongAnimation | null>(null);
+  const [animationError, setAnimationError] = useState('');
+  useEffect(() => { setAnimationChoice(''); }, [project?.id]);
+  const audio = useRef<HTMLAudioElement>(null);
+  const contentPane = useRef<HTMLDivElement>(null);
+  const inFlight = useRef(false);
+  const outputRequest = useRef(0);
+  const live = useRef(true);
+  const controller = useRef<AbortController | null>(null);
+  const savedProject = useMemo<ChatSongProject | null>(() => saved ? JSON.parse(saved) : null, [saved]);
+  const contentDirty = Boolean(project && JSON.stringify(project) !== saved);
+  const timingDirty = Boolean(savedProject && JSON.stringify(timings) !== JSON.stringify(savedProject.timings));
+  const dirty = contentDirty || timingDirty;
+  const songResource = useFileResource(project?.song ? fileUrl(project.song.fileId, project.song.sha256) : undefined);
+  const disabled = working || busy;
+  useEffect(() => { if (contentPane.current) contentPane.current.scrollTop = 0; }, [tab, project?.id]);
+  useEffect(() => {
+    live.current = true;
+    const abort = new AbortController();
+    apiJson<{ projects: ChatSongProject[] }>(base, { signal: abort.signal }).then(result => {
+      if (abort.signal.aborted) return;
+      setProjects(result.projects);
+      if (result.projects[0]) { setProject(result.projects[0]); setSaved(JSON.stringify(result.projects[0])); }
+    }).catch(e => { if (!abort.signal.aborted) setError(String(e.message)); });
+    return () => { live.current = false; abort.abort(); controller.current?.abort(); };
+  }, []);
+  useEffect(() => {
+    if (!savedProject) return;
+    const abort = new AbortController();
+    setHandoff(null); setBundle(null); setChecks([false, false, false, false]);
+    setTimings(savedProject.timings); setSeconds(0);
+    apiJson<Handoff>(`${base}/${savedProject.id}/handoff`, { signal: abort.signal }).then(result => { if (!abort.signal.aborted) setHandoff(result); })
+      .catch(e => { if (!abort.signal.aborted) setError(String(e.message)); });
+    const request = ++outputRequest.current;
+    setRenderResult(null); setAnimationResult(null); setAnimationError('');
+    apiJson<ChatSongVideoVersions>(`${base}/${savedProject.id}/render`, { signal: abort.signal }).then(result => { if (!abort.signal.aborted && request === outputRequest.current) { setRenderResult(result.render || null); setAnimationResult(result.animation || null); setAnimationError(result.animationError || ''); } })
+      .catch(e => { if (!abort.signal.aborted && request === outputRequest.current) setError(String(e.message)); });
+    return () => abort.abort();
+    // Refresh derived material only after a server revision, not on each keystroke.
+  }, [savedProject]);
+  async function run(fn: () => Promise<void>) {
+    if (inFlight.current) return;
+    inFlight.current = true; setWorking(true); setError(''); setNotice('');
+    try { await fn(); } catch (e) { if (live.current) setError(e instanceof Error ? e.message : String(e)); }
+    finally { inFlight.current = false; if (live.current) setWorking(false); }
+  }
+  function accept(value: ChatSongProject) {
+    if (!live.current) return;
+    setProject(value); setSaved(JSON.stringify(value));
+    setProjects(all => [value, ...all.filter(item => item.id !== value.id)]);
+  }
+  async function persist(): Promise<ChatSongProject> {
+    if (!project) throw new Error(c.empty);
+    if (!contentDirty) return project;
+    const result = await apiJson<ChatSongProject>(`${base}/${project.id}`, json('PATCH', { revision: project.revision, project: {
+      title: project.title, brief: project.brief, lines: project.lines.map(({ id: _id, ...line }) => line),
+    } }));
+    accept(result); return result;
+  }
+  async function saveAll() {
+    let current = await persist();
+    if (timingDirty && chatSongSongCurrent(current) && current.scriptRevision === savedProject?.scriptRevision && current.song?.sha256 === savedProject?.song?.sha256) {
+      current = await apiJson<ChatSongProject>(`${base}/${current.id}/action`, json('POST', { revision: current.revision, action: 'set-timings', value: timings }));
+      accept(current);
+    }
+    return current;
+  }
+  useImperativeHandle(ref, () => ({
+    async prepareToLeave() {
+      let ready = false;
+      await run(async () => { if (dirty) await saveAll(); ready = true; });
+      return ready;
+    },
+  }));
+  async function act(action: string, value?: unknown) {
+    const current = action === 'set-timings' ? await persist() : await saveAll();
+    accept(await apiJson<ChatSongProject>(`${base}/${current.id}/action`, json('POST', { revision: current.revision, action, value })));
+  }
+  async function create(reuse = false) {
+    if (dirty) await saveAll();
+    const next = await apiJson<ChatSongProject>(base, json('POST', { id: crypto.randomUUID(), title: `${c.defaultTitle} ${projects.length + 1}`, ...(reuse && project ? { templateId: project.id } : {}) }));
+    accept(next); setDraft(null); setTab(0);
+  }
+  async function makeBundle(): Promise<Bundle> {
+    const current = await saveAll();
+    const result = await apiJson<Bundle>(`${base}/${current.id}/export`, json('POST', { revision: current.revision }));
+    setBundle(result); onRefreshLibrary(); return result;
+  }
+  async function task(step: 'music' | 'edit') {
+    const result = await makeBundle();
+    if (!result.handoffs[step]) throw new Error(c.needTiming);
+    const requestId = await onTask(result.handoffs[step]);
+    if (!requestId) throw new Error(c.taskFailed);
+    onClose();
+  }
+  async function generateAsset(kind: ChatSongAssetKind, lineId = '') {
+    const current = await saveAll();
+    if (kind === 'clip' && current.brief.outputStyle !== 'animation') throw new Error(c.animationOnly);
+    const mode = kind === 'clip' ? 'video' : 'image';
+    if (mode === 'video' && !chatSongSongCurrent(current)) throw new Error(c.videoNeedsSong);
+    const fresh = await apiJson<Handoff>(`${base}/${current.id}/handoff`);
+    const prompt = fresh.prompts.find(item => item.kind === kind && item.lineId === lineId)?.prompt;
+    if (!prompt) throw new Error(c.noLine);
+    await apiJson(`${base}/${current.id}/media-preflight`, json('POST', { mode, revision: current.revision }));
+    onGenerate({ mode, operation: mode === 'video' ? 'text_to_video' : 'text_to_image', prompt,
+      size: mode === 'video' ? '720x1280' : kind === 'background' ? '1024x1792' : '1024x1024',
+      ...(mode === 'video' ? { duration: 6 } : { count: 1 }), officialOnly: true });
+  }
+  async function createDraft() {
+    const current = await saveAll();
+    controller.current = new AbortController();
+    const result = await apiJson<Omit<SongDraft, 'choices'>>(`${base}/${current.id}/draft`, { ...json('POST', { revision: current.revision }), signal: controller.current.signal });
+    const reactions = result.reactions || [];
+    setDraft({ ...result, reactions, choices: Object.fromEntries(reactions.map(row => [row.lineId, row.status === 'matched' ? row.candidates[0]?.id || '' : ''])) });
+  }
+  async function adoptDraft() {
+    if (!project || !draft) return;
+    accept(await apiJson<ChatSongProject>(`${base}/${project.id}/action`, json('POST', { revision: draft.revision, action: 'save', value: {
+      title: project.title, brief: project.brief, lines: draft.lines.map(({ id: _id, ...line }) => line),
+      reactions: draft.lines.flatMap(line => draft.choices[line.id] ? [{ lineId: line.id, candidateId: draft.choices[line.id] }] : []),
+    } })));
+    setDraft(null); onRefreshLibrary();
+  }
+  async function searchReactions() {
+    const current = await saveAll();
+    const result = await apiJson<ReactionSearchResult>(`${base}/${current.id}/reactions/search`, json('POST', { revision: current.revision }));
+    setReactionSearch({ ...result, projectId: current.id });
+  }
+  async function renderVideo() {
+    const current = await saveAll();
+    if (current.brief.outputStyle === 'animation') throw new Error(c.animationOnly);
+    controller.current = new AbortController(); setRendering(true);
+    try {
+      const result = await apiJson<{ render: ChatSongRender }>(`${base}/${current.id}/render`, { ...json('POST', { revision: current.revision }), signal: controller.current.signal });
+      outputRequest.current++; setRenderResult(result.render); onRefreshLibrary(); setNotice(c.rendered);
+    } finally { setRendering(false); }
+  }
+  async function bindAnimation() {
+    const current = await saveAll();
+    const updated = await apiJson<ChatSongProject>(`${base}/${current.id}/action`, json('POST', { revision: current.revision, action: 'attach-asset', value: { kind: 'animation', fileId: animationChoice } }));
+    accept(updated);
+    const request = ++outputRequest.current;
+    const result = await apiJson<ChatSongVideoVersions>(`${base}/${current.id}/render`);
+    if (live.current && request === outputRequest.current) { setRenderResult(result.render); setAnimationResult(result.animation || null); setAnimationError(result.animationError || ''); }
+  }
+  function changeLine(index: number, patch: Partial<ChatSongLine>) {
+    if (project) setProject({ ...project, lines: project.lines.map((line, i) => i === index ? { ...line, ...patch } : line) });
+  }
+  async function upload(file: File, target?: { kind: ChatSongAssetKind; lineId: string }) {
+    const form = new FormData(); form.append('files', file); form.append('domain', 'personal');
+    if (target && target.kind !== 'clip') form.append('purpose', 'media_source');
+    const response = await apiFetch('/api/files/upload', { method: 'POST', body: form });
+    const result = await response.json();
+    if (!response.ok || result.success === false || !result.files?.length) throw new Error(result.error || 'Upload failed.');
+    if (target) await act('attach-asset', { ...target, fileId: result.files[0].id });
+    onRefreshLibrary(); setNotice(c.saved);
+  }
+  const imageSlots: { kind: ChatSongAssetKind; lineId: string }[] = [
+    ...(['background', 'avatarA', 'avatarB'] as const).map(kind => ({ kind, lineId: '' })),
+    ...(project?.lines.filter(line => line.reaction.trim()).map(line => ({ kind: 'reaction' as const, lineId: line.id })) || []),
+  ];
+  const imageFiles = files.filter(item => /\.(png|jpe?g|webp)$/i.test(item.id));
+  const videoFiles = files.filter(item => /\.(mp4|webm|mov)$/i.test(item.id));
+  const audioFiles = files.filter(item => CHAT_SONG_AUDIO_EXTENSIONS.some(extension => item.id.toLowerCase().endsWith(extension)));
+  const currentSong = project ? chatSongSongCurrent(project) : false;
+  const songReviewed = currentSong && !contentDirty && project?.song?.confirmed === true;
+  const videoLine = project?.lines.find(line => line.id === videoLineChoice) || project?.lines[0];
+  const videoAsset = project?.assets.find(asset => asset.kind === 'clip' && asset.lineId === videoLine?.id);
+  const timed = Boolean(currentSong && project && project.timings.length === project.lines.length);
+  const outputStyle = project?.brief.outputStyle || 'chat';
+  const selectedVideo = outputStyle === 'animation' ? animationResult : renderResult;
+  const previewLines = project ? (timed ? visibleChatSongLines(project, seconds) : project.brief.messageLayout === 'conversation' ? project.lines.filter(line => line.group === 1) : project.lines.slice(0, 1)) : [];
+  const outputChoice = project && <fieldset className="space-y-3 rounded-2xl border border-amber-200/20 bg-amber-200/5 p-4"><legend className="px-2 text-sm font-semibold text-amber-100">{c.outputStyle}</legend><div className="grid gap-3 sm:grid-cols-2">{(['chat', 'animation'] as const).map(style => <label key={style} className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 ${outputStyle === style ? 'border-amber-200/40 bg-amber-200/10' : 'border-white/10'}`}><input type="radio" name="chat-song-output" value={style} checked={outputStyle === style} disabled={disabled} onChange={() => setProject({ ...project, brief: { ...project.brief, outputStyle: style } })} /><span className="text-sm">{style === 'chat' ? c.chatVersion : c.animationVersion}<span className="mt-1 block text-xs leading-5 text-white/50">{style === 'chat' ? c.chatStyleHint : c.animationStyleHint}</span></span></label>)}</div><p className="text-xs leading-5 text-white/50">{c.singleOutputHint}</p></fieldset>;
+
+  return <section aria-label={c.title} className={`${embedded ? 'relative min-h-0 flex-1' : 'absolute inset-0 z-[216]'} flex flex-col overflow-hidden bg-[#0b1017] text-white`}>
+    <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
+      <div><h2 className="flex items-center gap-2 text-lg font-bold"><Film size={20} className="text-amber-200" />{c.title}<span className="rounded-md bg-amber-200/10 px-2 py-1 text-[10px] text-amber-200">{c.trial}</span></h2><p className="mt-1 max-w-2xl text-xs leading-5 text-white/50">{c.subtitle}</p></div>
+      <div className="flex items-center gap-2">{project && <><span className="text-xs text-white/45">{dirty ? c.dirty : c.saved}</span><button className={primary} disabled={disabled || !dirty} onClick={() => void run(async () => { await saveAll(); })}><Save size={14} />{c.save}</button></>}
+        {!embedded && <button className={button} disabled={working} onClick={() => void run(async () => { if (dirty) await saveAll(); onClose(); })}><ArrowLeft size={14} />{c.close}</button>}</div>
+    </header>
+    {(error || notice || working) && <div className={`flex shrink-0 items-center gap-2 border-b border-white/10 px-5 py-2 text-xs ${error ? 'bg-red-400/10 text-red-200' : 'text-amber-100'}`} role={error ? 'alert' : 'status'}>{working && <Loader2 size={14} className="animate-spin" />}{error || notice || (rendering ? c.rendering : c.loading)}{rendering && <button className={button} onClick={() => controller.current?.abort()}>{c.cancelRender}</button>}{error && project && <button className={button} disabled={working} onClick={() => void run(async () => { accept(await apiJson<ChatSongProject>(`${base}/${project.id}`)); setDraft(null); })}>{c.reload}</button>}</div>}
+    <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+      <aside className="flex shrink-0 gap-2 overflow-auto border-b border-white/10 p-3 md:w-52 md:flex-col md:border-b-0 md:border-r">
+        <button className={primary} disabled={disabled} onClick={() => void run(() => create())}><Plus size={14} />{c.newProject}</button>
+        <p className="hidden py-2 text-[10px] uppercase tracking-widest text-white/40 md:block">{c.projects}</p>
+        {projects.map(item => <button key={item.id} disabled={working} onClick={() => void run(async () => { if (dirty) await saveAll(); accept(await apiJson<ChatSongProject>(`${base}/${item.id}`)); setDraft(null); })} className={`min-w-32 rounded-xl border px-3 py-3 text-left text-xs ${project?.id === item.id ? 'border-amber-200/25 bg-amber-200/10 text-amber-100' : 'border-transparent text-white/55 hover:bg-white/5'}`}><span className="line-clamp-2 break-words font-semibold">{item.title}</span><span className="mt-1 block text-[10px] opacity-60">{item.updatedAt.slice(0, 10)}</span></button>)}
+      </aside>
+      {!project ? <div className="m-auto max-w-md p-8 text-center"><Film size={42} className="mx-auto mb-5 text-amber-200/70" /><h3 className="text-2xl font-bold">{c.empty}</h3><p className="mt-3 text-sm leading-6 text-white/50">{c.emptyHint}</p><button className={`${primary} mt-6`} disabled={disabled} onClick={() => void run(() => create())}>{c.newProject}</button></div> :
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <nav role="tablist" className="flex shrink-0 gap-1 overflow-x-auto border-b border-white/10 p-2">{c.tabs.map((name, i) => <button key={name} role="tab" aria-selected={tab === i} onClick={() => setTab(i)} className={`whitespace-nowrap rounded-lg px-4 py-2 text-xs ${tab === i ? 'bg-white/10 text-amber-100' : 'text-white/45'}`}>{name}</button>)}</nav>
+        <div ref={contentPane} className="min-h-0 flex-1 overflow-auto p-4 md:p-6">
+          {tab === 0 && <div className="mx-auto max-w-4xl space-y-5">
+            {outputChoice}
+            <label className="block text-xs text-white/60">{c.projectName}<input className={`${field} mt-2`} value={project.title} disabled={disabled} onChange={e => setProject({ ...project, title: e.target.value })} maxLength={100} /></label>
+            <div className="grid gap-4 sm:grid-cols-2">{(['theme', 'relationship', 'twist', 'visualStyle', 'targetSeconds', 'roleA', 'roleB'] as const).map(key => <label key={key} className="text-xs text-white/60">{c[key]}<input className={`${field} mt-2`} disabled={disabled} type={key === 'targetSeconds' ? 'number' : 'text'} min={10} max={300} value={project.brief[key]} onChange={e => setProject({ ...project, brief: { ...project.brief, [key]: key === 'targetSeconds' ? Number(e.target.value) : e.target.value } })} /></label>)}</div>
+            <p className="text-xs leading-5 text-white/45">{c.official}</p>
+            <button className={button} disabled={disabled} onClick={() => void run(createDraft)}>{c.aiDraft}</button>
+            {draft && <div className="space-y-3 rounded-xl border border-amber-200/20 bg-amber-200/5 p-4"><p className="text-xs text-amber-100">{c.draftNote}</p>{draft.lines.map(line => <div key={line.id} className="space-y-3 rounded-xl border border-white/10 p-3"><p className="text-sm">{line.role === 'A' ? project.brief.roleA : project.brief.roleB}：{line.text}</p><ReactionOptions locale={locale} search={draft.reactions.find(row => row.lineId === line.id) || { lineId: line.id, query: line.reaction, status: line.reaction ? 'unavailable' : 'empty', candidates: [] }} choice={draft.choices[line.id] || ''} disabled={disabled} onChange={candidateId => setDraft({ ...draft, choices: { ...draft.choices, [line.id]: candidateId } })} /></div>)}<div className="flex gap-2"><button className={primary} disabled={disabled} onClick={() => void run(adoptDraft)}>{c.adopt}</button><button className={button} disabled={disabled} onClick={() => setDraft(null)}>{c.discard}</button></div></div>}
+            <h3 className="font-semibold">{c.dialogue}</h3>
+            {project.lines.map((line, index) => <div key={index} className="space-y-2 rounded-xl border border-white/10 bg-white/[0.025] p-3">
+              <div className="flex items-center gap-2"><span className="w-6 text-xs text-white/30">{index + 1}</span><select aria-label={`${c.dialogue} ${index + 1}`} className={`${field} max-w-40`} disabled={disabled} value={line.role} onChange={e => changeLine(index, { role: e.target.value as 'A' | 'B' })}><option value="A">{project.brief.roleA}</option><option value="B">{project.brief.roleB}</option></select><label className="ml-auto flex items-center gap-2 text-xs text-white/45">{c.group}<input className={`${field} !w-16`} disabled={disabled} type="number" min={1} max={40} value={line.group} onChange={e => changeLine(index, { group: Number(e.target.value) })} /></label><button className={button} disabled={disabled} aria-label={`${c.remove} ${index + 1}`} onClick={() => setProject({ ...project, lines: project.lines.filter((_, i) => i !== index) })}><X size={14} /></button></div>
+              <textarea aria-label={`${c.dialogue} ${index + 1} text`} className={field} rows={2} maxLength={100} disabled={disabled} value={line.text} onChange={e => changeLine(index, { text: e.target.value })} />
+              <input aria-label={`${c.reaction} ${index + 1}`} placeholder={c.reaction} className={field} maxLength={180} disabled={disabled} value={line.reaction} onChange={e => changeLine(index, { reaction: e.target.value })} />
+            </div>)}
+            <div className="flex flex-wrap gap-2"><button className={button} disabled={disabled || project.lines.length >= 40} onClick={() => setProject({ ...project, lines: [...project.lines, { id: '', role: project.lines.at(-1)?.role === 'A' ? 'B' : 'A', text: '', group: project.lines.at(-1)?.group || 1, reaction: '' }] })}><Plus size={14} />{c.addLine}</button><button className={primary} disabled={disabled || (!dirty && project.scriptLocked)} onClick={() => void run(() => act('lock-script'))}>{project.scriptLocked && !dirty ? <Check size={14} /> : null}{project.scriptLocked && !dirty ? c.locked : c.lock}</button><button className={button} disabled={disabled} onClick={() => void run(() => create(true))}>{c.reuse}</button></div><p className="text-xs leading-5 text-white/40">{c.invalidation}</p>
+          </div>}
+          {tab === 2 && <div className="mx-auto max-w-4xl space-y-5">
+            <div role="group" aria-label={c.outputStyle} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 p-4"><p className="text-sm text-white/60">{c.outputStyle} · <strong className="font-semibold text-amber-100">{outputStyle === 'chat' ? c.chatVersion : c.animationVersion}</strong></p><button className={button} onClick={() => setTab(0)}><ArrowLeft size={14} />{c.tabs[0]}</button></div>
+            {!currentSong ? <div className="flex flex-wrap items-center gap-3"><p className="text-xs text-amber-100">{c.videoNeedsSong}</p><button className={button} onClick={() => setTab(1)}>{c.goToSong}</button></div> : <p className="text-xs text-emerald-200">{c.selected} · {project.song?.name} · {project.song?.duration.toFixed(1)}s</p>}
+            <div className="flex items-center justify-between gap-3"><p className="text-xs text-white/40">{c.fileLimit}</p><button className={button} disabled={disabled} onClick={onRefreshLibrary}>{c.refresh}</button></div>
+            {libraryFailed && <p role="alert">{c.libraryFailed}</p>}
+            {outputStyle === 'chat' ? <>
+              <h3 className="font-semibold">{c.chatAppearance}</h3><p className="text-xs leading-5 text-white/50">{c.assetsHint}</p>
+              <div className="grid gap-4 sm:grid-cols-2">{(['A', 'B'] as const).map(role => <label key={role} className="text-xs text-white/60">{role === 'A' ? c.nicknameA : c.nicknameB}<input className={field + ' mt-2'} value={project.brief[role === 'A' ? 'displayNameA' : 'displayNameB'] || ''} placeholder={project.brief[role === 'A' ? 'roleA' : 'roleB']} maxLength={30} disabled={disabled} onChange={e => setProject({ ...project, brief: { ...project.brief, [role === 'A' ? 'displayNameA' : 'displayNameB']: e.target.value } })} /></label>)}</div>
+              <label className="block text-xs text-white/60">{c.messageLayout}<select className={field + ' mt-2'} disabled={disabled} value={project.brief.messageLayout || 'single'} onChange={e => setProject({ ...project, brief: { ...project.brief, messageLayout: e.target.value as 'single' | 'conversation' } })}><option value="single">{c.singleMessage}</option><option value="conversation">{c.conversationMessages}</option></select></label>
+              <div className="grid gap-4 lg:grid-cols-2">{imageSlots.map(item => {
+                const asset = project.assets.find(asset => asset.kind === item.kind && asset.lineId === item.lineId);
+                const name = c[item.kind === 'reaction' ? 'reactionAsset' : item.kind];
+                return <AssetSlot key={project.id + ':' + item.kind + ':' + item.lineId} kind={item.kind} name={name + (item.lineId ? ' · ' + item.lineId : '')} locale={locale} files={imageFiles} asset={asset} disabled={disabled} onAttach={id => void run(() => act('attach-asset', { kind: item.kind, lineId: item.lineId, fileId: id }))} onUpload={file => void run(() => upload(file, { kind: item.kind, lineId: item.lineId }))} onRemove={() => void run(() => act('remove-asset', asset?.id))} onGenerate={item.kind === 'reaction' ? undefined : () => void run(() => generateAsset(item.kind, item.lineId))} onSearch={() => void run(searchReactions)} reactionSearch={!dirty && reactionSearch?.projectId === project.id && reactionSearch.revision === project.revision ? reactionSearch.reactions.find(row => row.lineId === item.lineId) : undefined} onAdoptReaction={candidateId => void run(() => act('attach-asset', { kind: 'reaction', lineId: item.lineId, candidateId }))} />;
+              })}</div>
+            </> : <div className="space-y-4 rounded-2xl border border-amber-200/20 bg-amber-200/5 p-4">
+              <h3 className="flex items-center gap-2 font-semibold text-amber-100"><Film size={18} />{c.videoCreation}</h3><p className="text-xs leading-6 text-white/60">{c.videoHint}</p>
+              {videoLine ? <><label className="block text-xs text-white/60">{c.videoLine}<select className={field + ' mt-2'} value={videoLine.id} disabled={disabled} onChange={e => setVideoLineChoice(e.target.value)}>{project.lines.map(line => <option key={line.id} value={line.id}>{line.id} · {line.text}</option>)}</select></label><AssetSlot key={project.id + ':' + videoLine.id} kind="clip" name={c.clip} locale={locale} files={videoFiles} asset={videoAsset} disabled={disabled} generateDisabled={!currentSong || contentDirty} onAttach={id => void run(() => act('attach-asset', { kind: 'clip', lineId: videoLine.id, fileId: id }))} onUpload={file => void run(() => upload(file, { kind: 'clip', lineId: videoLine.id }))} onRemove={() => void run(() => act('remove-asset', videoAsset?.id))} onGenerate={() => void run(() => generateAsset('clip', videoLine.id))} /></> : <p className="text-xs text-amber-100">{c.needLock}</p>}
+              <p className="text-xs leading-5 text-white/60">{c.animationHint}</p><label className="block text-xs text-white/65">{c.bindAnimation}<select className={field + ' mt-2'} disabled={disabled} value={animationChoice} onChange={event => setAnimationChoice(event.target.value)}><option value="">{c.choose}</option>{videoFiles.map(file => <option key={file.id} value={file.id}>{file.displayName || file.name}</option>)}</select></label><button className={button} disabled={disabled || !animationChoice || !currentSong} onClick={() => void run(bindAnimation)}>{c.bindAnimation}</button>{animationError && <p role="alert" className="text-xs text-red-200">{animationError}</p>}{!animationResult && <p className="text-xs text-white/50">{c.noAnimation}</p>}
+            </div>}
+          </div>}
+          {tab === 1 && <div className="mx-auto max-w-4xl space-y-4"><p className="text-sm leading-6 text-white/60">{c.songHint}</p>
+              <div className="flex flex-wrap gap-2"><button className={primary} disabled={disabled || !project.scriptLocked || dirty} onClick={() => void run(() => task('music'))}>{c.musicTask}</button><button className={button} disabled={disabled} onClick={() => void run(async () => { await openExternalHttpUrl('https://music.douyin.com/studio'); })}>{c.openMusic}</button></div>
+              <div className="rounded-xl border border-white/10 p-4"><h3 className="mb-2 text-sm font-semibold">{c.lyrics}</h3><pre className="max-h-52 overflow-auto whitespace-pre-wrap text-sm leading-7 text-white/65">{chatSongLyrics(project.lines)}</pre><button className={`${button} mt-3`} disabled={disabled} onClick={() => void run(async () => { await navigator.clipboard.writeText(chatSongLyrics(project.lines)); setNotice(c.copied); })}>{c.copy}</button><p className="mt-4 text-xs leading-6 text-white/45">{handoff?.singing}</p></div>
+              <label className={`${button} cursor-pointer`}>{c.upload}<input className="sr-only" type="file" accept={CHAT_SONG_AUDIO_EXTENSIONS.join(',')} disabled={disabled} onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; if (file) void run(() => upload(file)); }} /></label>
+              <div className="flex gap-2"><select aria-label={c.song} className={field} value={songChoice} disabled={disabled} onChange={e => setSongChoice(e.target.value)}><option value="">{c.choose}</option>{audioFiles.map(file => <option key={file.id} value={file.id}>{file.displayName || file.name}</option>)}</select><button className={button} disabled={disabled || !songChoice || !project.scriptLocked || dirty} onClick={() => void run(() => act('select-song', { fileId: songChoice }))}>{c.selectSong}</button></div>
+              {!project.scriptLocked && <p className="text-xs text-amber-200">{c.needLock}</p>}
+              {project.song && <><p className="break-all text-xs text-white/60">{project.song.name} · {project.song.duration.toFixed(1)}s</p>{songResource.error && <p role="alert">{songResource.error.message}</p>}<audio ref={audio} src={songResource.url} controls className="sticky top-0 z-10 w-full" onTimeUpdate={e => setSeconds(e.currentTarget.currentTime)} />
+                <fieldset disabled={disabled || songReviewed || dirty} className="space-y-2 rounded-xl border border-white/10 p-4"><legend className="px-2 text-sm">{songReviewed ? c.songConfirmed : c.checkLyrics}</legend>{c.checks.map((label, index) => <label key={label} className="flex items-center gap-2 text-xs text-white/65"><input type="checkbox" checked={songReviewed || checks[index]} onChange={e => setChecks(values => values.map((value, i) => i === index ? e.target.checked : value))} />{label}</label>)}<button className={`${primary} mt-2`} disabled={disabled || songReviewed || !checks.every(Boolean)} onClick={() => void run(() => act('confirm-song', { noOmissions: true, noRewrites: true, noRepeats: true, correctOrder: true }))}>{songReviewed ? c.songConfirmed : c.confirmSong}</button></fieldset>
+              </>}
+              {currentSong && <button className={primary} onClick={() => setTab(2)}>{c.goToVideo}</button>}
+              <p className="text-xs leading-6 text-white/50">{c.handoffHint}</p>
+          </div>}
+          {tab === 2 && selectedVideo && <div className="mx-auto mt-6 max-w-6xl space-y-3 rounded-2xl border border-white/10 p-4">
+              {selectedVideo && <div className="space-y-3"><h3 className="font-semibold text-emerald-100">{c.finishedVideo}</h3>{(dirty || (outputStyle === 'chat' ? selectedVideo.sourceRevision !== project.revision || renderResult?.templateVersion !== CHAT_SONG_TEMPLATE.version : animationResult?.scriptRevision !== project.scriptRevision || animationResult?.songSha256 !== project.song?.sha256)) && <p className="text-xs text-amber-100">{outputStyle === 'animation' ? c.animationOutdated : c.renderOutdated}</p>}{outputStyle === 'chat' && renderResult?.warnings.map(warning => <p key={warning} className="text-xs text-amber-100">{warning}</p>)}<FileResourceVideo key={selectedVideo.fileId + selectedVideo.sha256} src={fileUrl(selectedVideo.fileId, selectedVideo.sha256)} controls preload="metadata" className="max-h-[600px] w-full max-w-md rounded-xl bg-black object-contain" /><button className={button} onClick={() => void run(() => saveFileResource(fileUrl(selectedVideo.fileId, selectedVideo.sha256), selectedVideo.fileId))}>{c.downloadVideo}</button><FileLocationActions url={fileUrl(selectedVideo.fileId, selectedVideo.sha256)} isZh={locale === 'zh'} /></div>}
+          </div>}
+          {tab === 2 && outputStyle === 'chat' && <div className="mx-auto mt-6 grid max-w-6xl gap-6 xl:grid-cols-[minmax(0,1fr)_300px]">
+            <div className="min-w-0 space-y-4">
+              {currentSong && <><p className="break-all text-xs text-white/60">{project.song?.name} · {project.song?.duration.toFixed(1)}s</p>{songResource.error && <p role="alert">{songResource.error.message}</p>}<audio ref={audio} src={songResource.url} controls className="sticky top-0 z-10 w-full" onTimeUpdate={e => setSeconds(e.currentTarget.currentTime)} /></>}
+              <details open={!timed} className="rounded-xl border border-white/10 p-4"><summary className="cursor-pointer text-sm font-semibold">{c.timings}</summary><p className="text-xs leading-5 text-white/45">{c.timingHint}</p>{currentSong ? <><div className="space-y-3">{project.lines.map((line, index) => <div key={line.id} className="rounded-xl border border-white/10 p-3"><p className="mb-2 text-sm text-white/70">{line.id} · {line.text}</p><div className="grid grid-cols-2 gap-3">{(['start', 'end'] as const).map(key => {
+                const change = (value: number) => setTimings(all => project.lines.map((l, i) => ({ lineId: l.id, start: all[i]?.start ?? 0, end: all[i]?.end ?? 0, ...(i === index ? { [key]: value } : {}) })));
+                return <label key={key} className="text-[10px] text-white/45">{c[key]}<div className="mt-1 flex gap-1"><input className={field} type="number" min={0} step={0.1} disabled={disabled || contentDirty} value={timings[index]?.[key] ?? ''} onChange={e => change(Number(e.target.value))} /><button className={button} disabled={disabled || contentDirty || !songResource.url} onClick={() => change(Math.round((audio.current?.currentTime || 0) * 100) / 100)}>{key === 'start' ? c.markStart : c.markEnd}</button></div></label>;
+              })}</div></div>)}</div><button className={primary} disabled={disabled || contentDirty} onClick={() => void run(() => act('set-timings', timings))}>{c.saveTiming}</button></> : <p className="text-xs text-amber-200">{c.needSong}</p>}</details>
+            </div>
+            <div className="order-first w-full max-w-[340px] self-start justify-self-center xl:sticky xl:top-0 xl:order-none"><h3 className="mb-3 text-sm font-semibold">{c.preview}</h3><div className="relative aspect-[3/4] overflow-hidden rounded-2xl border border-white/15 bg-[#263338]">
+              <ChatSongPreview project={project} lines={previewLines} seconds={timed ? seconds : undefined} audioRef={timed ? audio : undefined} />
+            </div><p className="mt-3 text-xs leading-5 text-white/40">{c.previewHint}</p></div>
+          </div>}
+          {tab === 2 && outputStyle === 'chat' && <div className="mx-auto mt-8 max-w-6xl space-y-5 border-t border-white/10 pt-6">
+            <p className="text-sm leading-6 text-white/60">{c.renderHint}</p>
+            <button className={primary} disabled={disabled || !timed || dirty} onClick={() => void run(renderVideo)}><Film size={16} />{c.renderVideo}</button>
+            <details className="rounded-xl border border-white/10 p-4"><summary className="cursor-pointer text-sm text-white/65">{c.optionalEditing}</summary><p className="my-4 text-sm leading-6 text-white/60">{c.bundleHint}</p><div className="flex flex-wrap gap-2"><button className={button} disabled={disabled || !project.scriptLocked || dirty} onClick={() => void run(async () => { const result = await makeBundle(); await saveFileResource(result.url, result.fileId); })}>{c.export}</button><button className={button} disabled={disabled || !timed || dirty} onClick={() => void run(() => task('edit'))}>{c.editTask}</button></div>
+            {bundle && <div className="space-y-2 rounded-xl border border-emerald-200/20 p-4"><p className="text-sm text-emerald-200">{c.exported}</p>{bundle.warnings.map(warning => <p key={warning} className="text-xs text-amber-100">{warning}</p>)}<button className={button} onClick={() => void run(() => saveFileResource(bundle.url, bundle.fileId))}>{c.download}</button><FileLocationActions url={bundle.url} isZh={locale === 'zh'} /></div>}
+            <p className="text-xs leading-6 text-white/50">{c.handoffHint}</p><p className="rounded-xl border border-amber-200/15 bg-amber-200/5 p-4 text-xs leading-6 text-amber-100/80">{c.externalLimit}</p>
+            </details>
+          </div>}
+        </div>
+      </div>}
+    </div>
+  </section>;
+});
+
+export default ChatSongWorkbench;
+
+function AssetSlot({ kind, name, locale, files, asset, disabled, generateDisabled, onAttach, onUpload, onGenerate, onRemove, onSearch, reactionSearch, onAdoptReaction }: {
+  kind: ChatSongAssetKind; name: string; locale: 'zh' | 'en'; files: FileEntry[]; asset?: ChatSongProject['assets'][number]; disabled: boolean; generateDisabled?: boolean;
+  onAttach: (id: string) => void; onUpload: (file: File) => void; onGenerate?: () => void; onRemove: () => void;
+  onSearch?: () => void; reactionSearch?: ChatSongReactionSearch; onAdoptReaction?: (candidateId: string) => void;
+}) {
+  const c = chatSongCopy[locale], [choice, setChoice] = useState('');
+  const [reactionChoice, setReactionChoice] = useState('');
+  useEffect(() => { setReactionChoice(reactionSearch?.status === 'matched' ? reactionSearch.candidates[0]?.id || '' : ''); }, [reactionSearch]);
+  return <article className="space-y-3 rounded-2xl border border-white/10 bg-white/[0.025] p-4"><h3 className="text-sm font-semibold">{name}</h3>
+    <div className="flex h-32 items-center justify-center overflow-hidden rounded-xl bg-black/20">{asset ? asset.kind === 'clip' ? <FileResourceVideo controls src={fileUrl(asset.fileId, asset.sha256)} className="h-full max-w-full" /> : <FileResourceImage src={fileUrl(asset.fileId, asset.sha256)} alt={name} className="h-full w-full object-contain" /> : kind === 'clip' ? <Film className="text-white/25" size={32} /> : <ImageIcon className="text-white/15" size={32} />}</div>
+    {asset && <div className="flex items-center justify-between gap-2"><p className="truncate text-[10px] text-white/40">{c.selected} · {asset.name}</p><button className={button} disabled={disabled} onClick={onRemove} aria-label={`${c.remove} ${name}`}><X size={12} /></button></div>}
+    {asset?.reactionSource && <a className="block text-xs text-cyan-200 underline" href={asset.reactionSource.sourceUrl} target="_blank" rel="noreferrer">{c.reactionSource} · {asset.reactionSource.title}</a>}
+    <select aria-label={name} className={field} disabled={disabled} value={choice} onChange={e => setChoice(e.target.value)}><option value="">{c.choose}</option>{files.map(file => <option key={file.id} value={file.id}>{file.displayName || file.name}</option>)}</select>
+    <label className={button + ' cursor-pointer'}>{c.uploadAndUse}<input aria-label={c.uploadAndUse + ' · ' + name} className="sr-only" type="file" accept={kind === 'clip' ? '.mp4,.webm,.mov' : '.png,.jpg,.jpeg,.webp'} disabled={disabled} onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; if (file) onUpload(file); }} /></label>
+    <div className="flex flex-wrap gap-2"><button className={button} disabled={disabled || !choice} onClick={() => onAttach(choice)}>{c.attach}</button>{kind === 'reaction' ? <button className={button} disabled={disabled} onClick={onSearch}>{c.searchReactions}</button> : <button className={kind === 'clip' ? primary : button} disabled={disabled || generateDisabled} onClick={onGenerate}>{kind === 'clip' ? c.generateVideo : c.generateImage}</button>}</div>
+    {kind === 'reaction' && reactionSearch && <><ReactionOptions locale={locale} search={reactionSearch} choice={reactionChoice} disabled={disabled} onChange={setReactionChoice} /><button className={button} disabled={disabled || !reactionChoice} onClick={() => onAdoptReaction?.(reactionChoice)}>{c.useReaction}</button></>}
+  </article>;
+}
+
+function ReactionOptions({ locale, search, choice, disabled, onChange }: {
+  locale: 'zh' | 'en'; search: ChatSongReactionSearch; choice: string; disabled: boolean; onChange: (candidateId: string) => void;
+}) {
+  const c = chatSongCopy[locale];
+  const statuses: Record<ChatSongReactionSearch['status'], string> = { matched: c.reactionMatched, no_match: c.reactionNoMatch, unavailable: c.reactionUnavailable, empty: c.reactionEmpty, skipped: c.reactionSkipped, privacy_blocked: c.reactionPrivacyBlocked };
+  return <fieldset className="space-y-3" aria-label={`${c.reactionCandidates} · ${search.lineId}`} disabled={disabled}>
+    <p className="text-xs leading-5 text-white/55">{search.status === 'matched' && !search.candidates.length ? c.reactionNoMatch : statuses[search.status]}{search.query && <span className="ml-2 text-white/40">{search.query}</span>}</p>
+    {search.status === 'matched' && search.candidates.length > 0 && <><div className="grid gap-3 sm:grid-cols-2">{search.candidates.map(candidate => <div key={candidate.id} className={`space-y-2 rounded-xl border p-3 ${choice === candidate.id ? 'border-amber-200/40 bg-amber-200/5' : 'border-white/10'}`}><label className="flex cursor-pointer items-start gap-2 text-xs"><input type="radio" name={`reaction-${search.lineId}`} checked={choice === candidate.id} onChange={() => onChange(candidate.id)} /><span>{candidate.title}</span></label><FileResourceImage src={candidate.previewUrl} alt={candidate.title} className="h-28 w-full rounded-lg object-contain" /><a className="text-xs text-cyan-200 underline" href={candidate.sourceUrl} target="_blank" rel="noreferrer">{c.reactionSource} · {candidate.title}</a></div>)}</div><label className="flex items-center gap-2 text-xs text-white/60"><input type="radio" name={`reaction-${search.lineId}`} checked={!choice} onChange={() => onChange('')} />{c.noReaction}</label></>}
+  </fieldset>;
+}

@@ -1,12 +1,16 @@
 import './helpers';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildLumiExecutionPipeline } from '../server/cognition/execution_pipeline';
+import { buildCapabilityExecutionPlan } from '../server/cognition/capability_execution_plan';
+import { executeToolCall, getCanonicalToolExecutionInputDigests, toolExecutionInputDigests } from '../server/tools/execution_engine';
 import { registerAllTools } from '../server/tools/definitions';
 import { ToolRegistry } from '../server/tools/registry';
 import { buildActionContract } from '../server/cognition/action_contract';
 import { finalizeLumiResponse } from '../server/cognition/result_finalizer';
 import { hasExplicitNoToolInstruction } from '../server/cognition/tool_intent';
 import { buildRecentActionContinuationBridge } from '../server/cognition/action_continuation';
+import { resolveActiveTaskMessageRelation } from '../server/cognition/task_concurrency';
+import { guardCurrentAppToolCall } from '../server/cognition/current_app_execution';
 
 beforeAll(async () => {
   const { initDatabase } = await import('../db_layer');
@@ -20,6 +24,131 @@ function createRegistry(): ToolRegistry {
 }
 
 describe('unified execution pipeline', () => {
+  it.each([
+    ['chat', 'chat'], ['voice', 'voice'], ['task', 'task'],
+    ['chat', 'rest_chat'], ['autonomy', 'autonomy'], ['chat', 'feishu'],
+  ] as const)('keeps one restricted policy and projection for %s/%s', (channel, source) => {
+    const pipeline = buildLumiExecutionPipeline({
+      dispatch: { userId: 'entry-boundary', channel, source, text: '搜索公开网页里的人工智能新闻，然后打开本机 WPS。', operationMode: 'assistant' },
+      registry: createRegistry(), executionBoundary: 'remote_restricted',
+      personalityToolPolicy: { allowedTools: ['*'], forbiddenTools: [], requireConfirmation: [], maxIterations: 10 },
+    });
+    expect(pipeline.execution.toolPolicy).toBe(pipeline.authorizationPolicy);
+    expect(pipeline.execution.baseToolPolicy).toBe(pipeline.authorizationPolicy);
+    for (const names of [pipeline.authorizationPolicy.allowedTools, pipeline.modelToolProjection.toolNames, pipeline.execution.toolRoute?.toolNames || []]) {
+      expect(names.every(name => name === 'web_search')).toBe(true);
+    }
+    expect(pipeline.modelToolProjection.toolNames).not.toContain('desktop_open');
+  });
+
+  it('uses the structured application reference even if prompt metadata names a different app', () => {
+    const state = { version: 2 as const, taskId: 'wps-task', revision: 1, status: 'completed' as const,
+      goal: '打开 WPS', latestInstruction: '打开 WPS', appTarget: 'WPS', sourcePaths: [], latestBlocker: '',
+      unfinished: false, evidenceTools: ['desktop_open'], assistantState: '已打开', toolSummaries: [], updatedAt: new Date().toISOString() };
+    const input = { dispatch: { userId: 'app-binding', channel: 'chat' as const, text: '在这里面新建一个空白文档并写入：测试。',
+      continuationContext: '## Recent action continuation context\nRecovered structured action state:\n- followupIntent: status\n- appTarget: Chrome',
+      operationMode: 'assistant' }, registry: createRegistry() };
+    const bound = buildLumiExecutionPipeline({ ...input, actionTaskState: state });
+    expect(bound.turnIntent.flow.currentAppEditTarget).toBe('WPS');
+    expect(bound.modelToolProjection.toolNames).toContain('wps_create_document_with_text');
+    const unbound = buildLumiExecutionPipeline(input);
+    expect(unbound.turnIntent.flow.currentAppEditTarget).toBe('');
+    expect(unbound.trustedActionContinuation).toBe(false);
+    const plain = buildLumiExecutionPipeline({ ...input, dispatch: { ...input.dispatch, continuationContext: '' } });
+    expect(unbound.modelToolProjection.toolNames).toEqual(plain.modelToolProjection.toolNames);
+    expect(guardCurrentAppToolCall({ taskText: `${input.dispatch.text}\n${input.dispatch.continuationContext}`,
+      toolName: 'wps_create_document_with_text', arguments: { text: '测试' } }).allowed).toBe(false);
+  });
+
+  it.each(['chat', 'voice'] as const)('retains browser execution schemas through the complete %s legal lookup projection', channel => {
+    const pipeline = buildLumiExecutionPipeline({ dispatch: { userId: 'court-lookup', channel, source: channel, operationMode: 'assistant',
+      text: '打开中国裁判文书网查找浙江省衢州市中级法院最新的判例', targetIsLumi: true }, registry: createRegistry(),
+      personalityToolPolicy: { allowedTools: ['*'], forbiddenTools: [], requireConfirmation: [], maxIterations: 10 } });
+    expect(pipeline.executionRequested).toBe(true);
+    for (const name of ['browser_open_task', 'computer_use', 'web_login_profile_list', 'url_fetch_logged_in']) {
+      expect(pipeline.modelToolProjection.toolNames).toContain(name);
+      expect(pipeline.modelToolProjection.requiredToolNames).toContain(name);
+    }
+    expect(pipeline.modelToolProjection.toolNames).not.toContain('legal_external_research_plan');
+  });
+  it.each(['chat', 'voice'] as const)('routes current model identity through the complete %s read-only execution path', channel => {
+    const input = { dispatch: { userId: 'model-identity', channel, source: channel, operationMode: 'assistant', text: '你现在是什么模型', targetIsLumi: true }, registry: createRegistry(),
+      personalityToolPolicy: { allowedTools: ['*'], forbiddenTools: [], requireConfirmation: [], maxIterations: 10 } };
+    const pipeline = buildLumiExecutionPipeline(input);
+    expect(pipeline.executionRequested).toBe(true);
+    expect(pipeline.modelToolProjection.toolNames).toEqual(['model_configuration_get']);
+    expect(pipeline.capabilityPlan.taskLedgerRequired).toBe(true);
+    const blocked = buildLumiExecutionPipeline({ ...input, dispatch: { ...input.dispatch, text: '不要调用工具，只说说什么是大语言模型。' } });
+    expect(blocked.executionRequested).toBe(false);
+  });
+  it('keeps a WPS report open-and-check request out of Lumi client navigation', () => {
+    const text = '用电脑上的 WPS 打开 D:/LumiCore-Audit-Reports/20260920/chat-task-repair/cloud-output/采购报表_执行进度复测更新.xlsx，核对表格的总金额和图表，告诉我实际看到的结果。';
+    const pipeline = buildLumiExecutionPipeline({ dispatch: { userId: 'wps-open-read', channel: 'chat', source: 'chat', operationMode: 'assistant', text, targetIsLumi: true }, registry: createRegistry(), personalityToolPolicy: { allowedTools: ['*'], forbiddenTools: [], requireConfirmation: [], maxIterations: 10 } });
+    expect(pipeline.turnIntent.flow.clientActionOnlyTurn).toBe(false);
+    expect(pipeline.normalizedIntent.kind).not.toBe('client_navigation');
+    expect(pipeline.modelToolProjection.toolNames).toContain('desktop_open');
+    expect(pipeline.modelToolProjection.toolNames).toContain('read_xlsx');
+    expect(pipeline.modelToolProjection.toolNames).toContain('ocr_screen');
+  });
+  it.each(['chat', 'voice'] as const)('allows fresh %s window observation while prohibiting further player input', channel => {
+    const text = '先不要再操作播放器。只查看当前网易云音乐窗口，告诉我当前歌曲和歌手、暂停还是播放状态，以及底部显示的已播放时间和总时长；看不清的项目明确说明。';
+    const pipeline = buildLumiExecutionPipeline({ dispatch: { userId: 'read-only-player', channel, source: channel,
+      operationMode: 'assistant', text, targetIsLumi: true }, registry: createRegistry(),
+      personalityToolPolicy: { allowedTools: ['*'], requireConfirmation: [], forbiddenTools: [], maxIterations: 10 } });
+    expect(pipeline.turnIntent.flow.modelToolAccess).toBe('manifest');
+    expect(pipeline.modelToolProjection.toolNames).toContain('ocr_screen');
+    expect(pipeline.modelToolProjection.toolNames).not.toContain('computer_use');
+    expect(pipeline.modelToolProjection.toolNames).not.toContain('mouse_click');
+    expect(pipeline.modelToolProjection.toolNames).not.toContain('keyboard_type');
+  });
+  it.each(['chat', 'voice'] as const)('keeps explicit report edits executable after a %s progress question', channel => {
+    for (const destination of ['D:/LumiCore-Audit-Reports/20260920/chat-task-repair/cloud-output/采购报表_执行进度复测更新.xlsx', '/tmp/lumi/chat-repair/采购报表_执行进度.xlsx', '\\\\host\\lumi\\chat-repair\\采购报表_执行进度.xlsx']) {
+    const text = `把刚才报表的 B类数量改成6，其余不变，另存到 ${destination}，检查公式和图表，并告诉我新总金额。`;
+    const pipeline = buildLumiExecutionPipeline({ dispatch: { userId: 'report-edit-after-status', channel, source: channel,
+      operationMode: 'assistant', text, targetIsLumi: true }, registry: createRegistry(),
+      personalityToolPolicy: { allowedTools: ['*'], requireConfirmation: [], forbiddenTools: [], maxIterations: 10 } });
+    expect(pipeline.executionRequested, JSON.stringify(pipeline)).toBe(true);
+    expect(pipeline.capabilityPlan.lane).toBe('artifact_work');
+    expect(pipeline.modelToolProjection.toolNames).toContain('modify_xlsx');
+    const statusText = '刚才报表实际改好了吗？新总额多少？只根据已经保存的结果回答，不要重新操作文件。';
+    const status = buildLumiExecutionPipeline({ dispatch: { userId: 'report-edit-after-status', channel, source: channel,
+      operationMode: 'assistant', text: statusText, targetIsLumi: true }, registry: createRegistry() });
+    expect(status.executionRequested).toBe(false);
+    }
+  });
+  it.each(['chat', 'voice'] as const)('retains browser session inspection after a bound %s confirmation', channel => {
+    const goal = '用 Google Chrome 打开 https://www.douyin.com/，检查我之前保存的登录是否仍有效。只查看登录状态，不发消息、不点赞。';
+    const state = { version: 2, taskId: 'browser-confirm-task', goal, latestInstruction: goal, status: 'waiting_confirmation', unfinished: true,
+      appTarget: 'Google Chrome', sourcePaths: [], latestBlocker: '', evidenceTools: [], assistantState: '', toolSummaries: [], revision: 1, updatedAt: new Date().toISOString() } as const;
+    const run = (taskId: string) => buildLumiExecutionPipeline({ dispatch: { userId: 'browser-confirm-user', channel, source: channel,
+      operationMode: 'assistant', text: '确认', targetIsLumi: true, continuationContext: `- followupIntent: confirm\n- taskId: ${taskId}` },
+      actionTaskState: state as any, taskRelation: resolveActiveTaskMessageRelation('确认', state as any, { controlTargetTaskId: taskId }),
+      registry: createRegistry(), personalityToolPolicy: { allowedTools: ['*'], requireConfirmation: ['browser_open_task'], forbiddenTools: ['send_email'], maxIterations: 10 } });
+    const result = run(state.taskId);
+    expect(result.turnIntent.flow.routeText).toContain(goal);
+    expect(result.capabilityPlan.promptOverlay).toContain('cookies/password store are separate');
+    expect(result.modelToolProjection.toolNames).toContain('desktop_ui_snapshot');
+    expect(result.modelToolProjection.toolNames).toContain('ocr_screen');
+    expect(result.authorizationPolicy.forbiddenTools).toContain('send_email');
+    expect(run('wrong-task').turnIntent.flow.routeText).not.toContain(goal);
+  });
+  it.each(['chat', 'voice'] as const)('preserves requested person authoring through scoped %s prohibitions', channel => {
+    const text = '请实际完成一轮数字人形象制作验收：在记忆领地新建一个独立人物，名称为“Lumi 动画验收”。用 Lumi 官方 API 生成正面半身人像，浅棕发、墨绿色衣装；再基于这张图生成闭眼和开口两张表情变体。实际导入三张图片，配置眨眼、呼吸、语音口型和环境微动，保存后读取确认。不要覆盖现有 Lumi，不修改代码或数据库、不接第三方数字人服务、不开始直播。';
+    const run = (text: string) => buildLumiExecutionPipeline({ dispatch: { userId: 'avatar-acceptance', channel, source: channel,
+      operationMode: 'assistant', text, targetIsLumi: true }, registry: createRegistry(),
+      personalityToolPolicy: { allowedTools: ['*'], requireConfirmation: [], forbiddenTools: ['send_email'], maxIterations: 16 } });
+    const pipeline = run(text);
+    for (const name of ['memory_avatar_read', 'memory_avatar_create', 'memory_avatar_import_image', 'memory_avatar_configure_animation', 'generate_image', 'ai_edit_image', 'get_image_generation_status']) {
+      expect(pipeline.modelToolProjection.toolNames, name).toContain(name);
+      expect(pipeline.authorizationPolicy.forbiddenTools, name).not.toContain(name);
+    }
+    expect(pipeline.modelToolProjection.toolNames).not.toContain('write_file');
+    expect(pipeline.modelToolProjection.allowDynamicDiscovery).toBe(false);
+    expect(pipeline.authorizationPolicy.forbiddenTools).toContain('send_email');
+    const blocked = run(text + '现在不要创建或修改任何内容。');
+    expect(blocked.authorizationPolicy.forbiddenTools).toContain('memory_avatar_create');
+    expect(blocked.authorizationPolicy.forbiddenTools).toContain('memory_avatar_configure_animation');
+  });
   it.each(['chat', 'voice'] as const)('keeps the unfinished execute-and-capture plan through detailed %s resumption', channel => {
     const goal = '请读取 C:/Users/Administrator/Documents/input-4.csv，按数量乘单价增加 total 列，保存为 C:/Users/Administrator/Documents/output-4.csv。然后把完整的读取、计算、写文件流程保存为可复用工作流草稿。源文件不要改动。';
     const policy = { allowedTools: ['*'], requireConfirmation: [], forbiddenTools: ['send_email'], maxIterations: 10 };
@@ -66,12 +195,13 @@ describe('unified execution pipeline', () => {
     expect(pipeline.executionRequested).toBe(true);
     expect(pipeline.turnIntent.flow.modelToolAccess).toBe('manifest');
   });
-  it.each(['chat', 'voice'] as const)('binds short plan acceptance to the latest user goal for %s', channel => {
+  it.each(['chat', 'voice', 'task'] as const)('binds short plan acceptance to the latest user goal for %s', channel => {
     const text = '按刚才的计划执行。';
     const goal = '读取 C:/Users/Administrator/Documents/orders.csv，计算每项金额和总额';
     const pipeline = buildLumiExecutionPipeline({ dispatch: { userId: 'plan-acceptance', channel, source: channel,
       operationMode: 'assistant', text, targetIsLumi: true }, registry: createRegistry(),
       personalityToolPolicy: { allowedTools: ['*'], requireConfirmation: [], forbiddenTools: [], maxIterations: 10 },
+      traceText: text,
       persistedConversationHistory: [
         { role: 'user', message: '数量改成4。' },
         { id: 'latest-plan', role: 'user', message: goal + '。先只告诉我准备怎么做，暂时不要读取文件。原文件不动。' },
@@ -85,6 +215,9 @@ describe('unified execution pipeline', () => {
     expect(pipeline.authorizationPolicy.forbiddenTools).toContain('write_file');
     expect(pipeline.trustedActionContinuation).toBe(false);
     expect(pipeline.turnIntent.promptOverlay).toContain('latest-plan');
+    expect(pipeline.intentTrace.input.text).toBe(text);
+    expect(pipeline.normalizedIntent.target).toBe('C:/Users/Administrator/Documents/orders.csv');
+    expect(pipeline.intentTrace.normalizedActionIntent).toEqual(pipeline.normalizedIntent);
   });
   it.each(['chat', 'voice'] as const)('keeps a visible-client planning request in discussion through %s finalization', channel => {
     const text = 'LC-UI-统一验收：我要处理 C:/Users/Administrator/LumiCore/task-skill-acceptance-20260908/LC-TASK-ORDERS.csv，计算每项金额和总额。先只告诉我准备怎么做，暂时不要读取文件。';
@@ -228,7 +361,7 @@ describe('unified execution pipeline', () => {
       'client_get_state',
       'client_action',
     ]));
-    expect(pipeline.execution.toolPolicy.allowedTools.length).toBeGreaterThan(2);
+    expect(pipeline.execution.toolPolicy.allowedTools).toEqual(['client_get_state', 'client_action']);
     expect(pipeline.execution.toolPolicy.forbiddenTools).not.toContain('client_action');
   });
 
@@ -295,28 +428,9 @@ describe('unified execution pipeline', () => {
     expect(pipeline.capabilityPlan.schemaVersion).toBe(1);
     expect(pipeline.capabilityPlan.taskLedgerRequired).toBe(true);
     expect(pipeline.capabilityPlan.capabilityIds.length).toBeGreaterThan(0);
-    expect(pipeline.executionPlan.decisionAuthority).toBe('semantic_planner');
-    expect(pipeline.executionPlan.scriptAuthority).toBe('adapter_only');
-    expect(pipeline.executionPlan.nodes.length).toBeGreaterThan(0);
-    const adapterNodes = pipeline.executionPlan.nodes
-      .filter(node => node.executionRole === 'adapter');
-    expect(pipeline.executionPlan.expectedEvidence.length)
-      .toBe(adapterNodes.length);
-    expect(pipeline.executionPlan.edges.length).toBeGreaterThan(0);
-    expect(pipeline.executionPlan.nodes.some(node => node.executionRole === 'planner')).toBe(true);
-    expect(pipeline.executionPlan.nodes.some(node => node.executionRole === 'verifier')).toBe(true);
-    expect(pipeline.executionPlan.nodes.some(node => node.executionRole === 'join')).toBe(true);
-    for (const adapter of adapterNodes) {
-      expect(pipeline.executionPlan.edges).toContainEqual(expect.objectContaining({
-        to: adapter.nodeId,
-        condition: 'selected',
-      }));
-      expect(pipeline.executionPlan.edges).toContainEqual(expect.objectContaining({
-        from: adapter.nodeId,
-        condition: 'success',
-      }));
-    }
-    expect(pipeline.capabilityPlan.promptOverlay).toContain('Capability Execution Plan');
+    expect(pipeline.executionPlan).toBeUndefined();
+    expect(pipeline.modelToolProjection.toolNames.length).toBeGreaterThan(0);
+    expect(pipeline.capabilityPlan.promptOverlay).not.toContain('Capability Execution Plan');
     expect(pipeline.intentTrace.toolPolicy.allowedTools)
       .toEqual(pipeline.execution.toolPolicy.allowedTools);
   });
@@ -348,8 +462,7 @@ describe('unified execution pipeline', () => {
     expect(chat.turnIntent.channel).toBe('chat');
     expect(voice.turnIntent.channel).toBe('voice');
     expect(task.turnIntent.channel).toBe('task');
-    expect(chat.executionPlan.planId).toBe(voice.executionPlan.planId);
-    expect(voice.executionPlan.planId).toBe(task.executionPlan.planId);
+    for (const entrance of [chat, voice, task]) expect(entrance.executionPlan).toBeUndefined();
   });
 
   it('does not turn product feedback into execution merely because chat can see the manifest', () => {
@@ -406,7 +519,7 @@ describe('unified execution pipeline', () => {
     expect(pipeline.modelToolProjection.toolNames).toContain('desktop_open');
   });
 
-  it('fails external commits closed and binds confirmation to immutable payload evidence', () => {
+  it('fails an actual selected external call closed and binds confirmation to its full canonical input', async () => {
     const registry = createRegistry();
     const pipeline = buildLumiExecutionPipeline({
       dispatch: {
@@ -421,20 +534,23 @@ describe('unified execution pipeline', () => {
     });
 
     expect(pipeline.normalizedIntent.sideEffectClass).toBe('external_commit');
-    expect(pipeline.executionPlan.risk.requiresConfirmation).toBe(true);
-    expect(pipeline.executionPlan.risk.failClosed).toBe(true);
-    expect(pipeline.executionPlan.risk.confirmationBinding).toMatchObject({
-      taskId: pipeline.executionPlan.taskId,
-      target: 'Alice',
-      tool: '',
-    });
-    expect(pipeline.executionPlan.risk.confirmationBinding?.payloadDigest).toHaveLength(64);
-    expect(pipeline.executionPlan.fallbackPolicy).toMatchObject({
-      maxRetries: 0,
-      reconcileUnknownOutcome: true,
-      allowLegacyRoute: false,
-      onUnknownOutcome: 'reconcile_then_stop',
-    });
+    expect(pipeline.executionPlan).toBeUndefined();
+    const args = { contact: 'Alice', message: 'deployment is complete' };
+    const confirmation = vi.fn(async () => false);
+    const handler = vi.fn(async () => 'must not execute');
+    registry.get('wechat_send_message')!.handler = handler;
+    const record = await executeToolCall({ registry, id: 'immutable-send-fixture', name: 'wechat_send_message', arguments: args,
+      context: { userId: 'pipeline-user', authenticated: true, localExecution: true, actionIntent: 'send to Alice: deployment is complete',
+        toolPolicy: pipeline.authorizationPolicy, requestConfirmation: confirmation } });
+    expect(record.envelope?.status).toBe('waiting_confirmation');
+    expect(handler).not.toHaveBeenCalled();
+    expect(confirmation).toHaveBeenCalledWith('wechat_send_message', args, expect.any(Object));
+    expect(getCanonicalToolExecutionInputDigests(record)?.argumentsDigest).toBe(toolExecutionInputDigests(args).argumentsDigest);
+    const actual = buildCapabilityExecutionPlan({ record, capability: registry.getCapabilityManifestEntry('wechat_send_message')!, taskId: 'immutable-send-task' });
+    expect(actual.risk).toMatchObject({ sideEffectClass: 'external_commit', requiresConfirmation: true, failClosed: true });
+    expect(actual.risk.confirmationBinding).toBeUndefined();
+    expect(actual.nodes[0].terminalStatus).toBe('waiting_confirmation');
+    expect(actual.fallbackPolicy).toMatchObject({ maxRetries: 0, reconcileUnknownOutcome: true, allowLegacyRoute: false, onUnknownOutcome: 'reconcile_then_stop' });
   });
 
   it('keeps confirmation-only external commits executable only up to the confirmation gate', () => {
@@ -467,13 +583,11 @@ describe('unified execution pipeline', () => {
     expect(pipeline.execution.toolRoute?.toolNames).toEqual(['wechat_send_message']);
     expect(pipeline.execution.toolPolicy.allowedTools).toEqual(['wechat_send_message']);
     expect(pipeline.execution.toolPolicy.forbiddenTools).not.toContain('wechat_send_message');
-    expect(pipeline.executionPlan.risk).toMatchObject({
-      requiresConfirmation: true,
-      failClosed: true,
-    });
+    expect(pipeline.executionPlan).toBeUndefined();
+    expect(pipeline.execution.promptOverlay).not.toContain('blank tool confirmation');
   });
 
-  it('permits bounded jittered retry only for read/status plans', () => {
+  it('retains bounded jittered read recovery on the actual observed read plan', async () => {
     const registry = createRegistry();
     const pipeline = buildLumiExecutionPipeline({
       dispatch: {
@@ -488,13 +602,13 @@ describe('unified execution pipeline', () => {
     });
 
     expect(pipeline.normalizedIntent.operation).toBe('read');
-    expect(pipeline.executionPlan.risk.sideEffectClass).toBe('none');
-    expect(pipeline.executionPlan.fallbackPolicy).toMatchObject({
-      retryClass: 'idempotent_only',
-      maxRetries: 2,
-      jitter: true,
-      allowLegacyRoute: false,
-    });
+    expect(pipeline.executionPlan).toBeUndefined();
+    registry.get('wechat_read_recent_chat')!.handler = async () => JSON.stringify({ read: true, contentSummary: 'offline read', status: 'observed' });
+    const record = await executeToolCall({ registry, id: 'read-plan-fixture', name: 'wechat_read_recent_chat', arguments: { contact: 'Alice' },
+      context: { userId: 'pipeline-user', authenticated: true, localExecution: true, actionIntent: 'read messages from Alice', toolPolicy: pipeline.authorizationPolicy } });
+    const actual = buildCapabilityExecutionPlan({ record, capability: registry.getCapabilityManifestEntry('wechat_read_recent_chat')!, taskId: 'read-task' });
+    expect(actual.risk.sideEffectClass).toBe('none');
+    expect(actual.fallbackPolicy).toMatchObject({ retryClass: 'idempotent_only', maxRetries: 2, jitter: true, allowLegacyRoute: false });
   });
 
   it('compiles a chat workflow match as a model-owned capability candidate', () => {
@@ -513,19 +627,73 @@ describe('unified execution pipeline', () => {
     });
 
     expect(pipeline.turnIntent.boundary).not.toBe('skill_workflow');
-    expect(pipeline.turnIntent.flow.specialWorkflow).toBeNull();
     expect(pipeline.turnIntent.flow.workflowHint?.id).toBe('self_intro_demo');
-    expect(pipeline.turnIntent.flow.workflowRouting).toBe('model_hint');
-    expect(pipeline.executionPlan.nodes).toContainEqual(expect.objectContaining({
-      type: 'skill',
-      executionRole: 'adapter',
-      capabilityId: 'desktop-automation/self_intro_demo',
-    }));
-    expect(pipeline.executionPlan.decisionAuthority).toBe('semantic_planner');
-    expect(pipeline.executionPlan.nodes.filter(node => node.toolName).length).toBeGreaterThan(0);
-    expect(pipeline.executionPlan.nodes).toContainEqual(expect.objectContaining({
-      toolName: 'client_action',
-      state: 'candidate',
-    }));
+    expect(pipeline.executionPlan).toBeUndefined();
+    expect(pipeline.modelToolProjection.toolNames).toContain('client_action');
   });
+});
+
+it.each(['chat', 'voice', 'task'] as const)('keeps new and stale %s plans separate from the previous task evidence', channel => {
+  const state = { version: 2 as const, taskId: 'old-file-task', revision: 3, status: 'blocked' as const,
+    goal: '读取 D:/old-orders.csv 并计算总额', latestInstruction: '读取 D:/old-orders.csv 并计算总额',
+    sourcePaths: ['D:/old-orders.csv'], unfinished: true, latestBlocker: 'waiting', evidenceTools: [],
+    toolSummaries: [], assistantState: '', appTarget: '', updatedAt: new Date().toISOString() };
+  const input = { dispatch: { userId: 'plan-identity', channel, source: channel, operationMode: 'assistant', targetIsLumi: true, text: '' },
+    registry: createRegistry(), actionTaskState: state };
+  for (const extra of [
+    { dispatch: { ...input.dispatch, text: '新建 D:/new-note.txt，写入新的独立内容。' } },
+    { dispatch: { ...input.dispatch, text: '生成一张山水图片' }, structuredMediaRequest: { operation: 'text_to_image' as const, prompt: 'mountains', size: '1024x1024' } },
+    { dispatch: { ...input.dispatch, text: '继续' }, taskRelation: { ...resolveActiveTaskMessageRelation('继续', state), revision: 2 } },
+    { dispatch: { ...input.dispatch, text: '继续' }, taskRelation: { ...resolveActiveTaskMessageRelation('继续', state), taskId: undefined } },
+    { dispatch: { ...input.dispatch, text: '按刚才的计划执行。' }, persistedConversationHistory: [
+      { role: 'user', message: '读取 D:/new-orders.csv，计算总额。先只告诉我准备怎么做，暂时不要读取文件。' },
+      { role: 'assistant', message: '等待确认后读取。' },
+    ] },
+  ]) {
+    const result = buildLumiExecutionPipeline({ ...input, ...extra });
+    expect(result.trustedActionContinuation).toBe(false);
+    expect(result.executionPlan).toBeUndefined();
+    expect(result.taskId).not.toBe(state.taskId);
+    if (result.taskRelation.binding === 'stale') expect(result.executionRequested).toBe(false);
+  }
+  for (const text of ['继续', '现在做得怎么样了', '目前进度如何', '执行到哪一步了']) {
+    const result = buildLumiExecutionPipeline({ ...input, dispatch: { ...input.dispatch, text } });
+    expect(result.taskId, JSON.stringify({ text, relation: result.taskRelation })).toBe(state.taskId);
+    expect(result.executionPlan).toBeUndefined();
+    if (text === '继续') expect(result.trustedActionContinuation).toBe(true);
+    else expect(result.executionRequested).toBe(false);
+  }
+  const owned = buildLumiExecutionPipeline({ ...input, taskId: 'new-owned-task', dispatch: { ...input.dispatch, text: '新建 D:/new-note.txt，写入新的独立内容。' } });
+  expect(owned.taskId).toBe('new-owned-task');
+  expect(owned.executionPlan).toBeUndefined();
+});
+
+it.each(['继续', 'continue'])('executes a validated media binding for %s while keeping unbound continuations read-only', text => {
+  const input = { userText: text, dispatch: { userId: 'bound-video-continuation', channel: 'chat' as const, targetIsLumi: true, text },
+    registry: createRegistry(), personalityToolPolicy: { allowedTools: ['*'], forbiddenTools: [], requireConfirmation: [], maxIterations: 3 } };
+  const unbound = buildLumiExecutionPipeline(input);
+  expect(unbound.executionRequested).toBe(false);
+  const bound = buildLumiExecutionPipeline({ ...input, structuredMediaRequest: { operation: 'text_to_video', prompt: 'A product advertisement', duration: 30, size: '1920x1080' } });
+  expect(bound.executionRequested).toBe(true);
+  expect(bound.modelToolProjection.toolNames).toContain('generate_video');
+  expect(bound.modelToolProjection.toolNames).toEqual(['generate_video']);
+  expect(bound.authorizationPolicy.allowedTools).toEqual(['generate_video']);
+  expect(bound.modelToolProjection.allowDynamicDiscovery).toBe(false);
+  expect(buildLumiExecutionPipeline({ ...input, personalityToolPolicy: { ...input.personalityToolPolicy, forbiddenTools: ['generate_video'] },
+    structuredMediaRequest: { operation: 'text_to_video', prompt: 'A product advertisement', duration: 30, size: '1920x1080' } }).executionRequested).toBe(false);
+  expect(buildLumiExecutionPipeline({ ...input, dispatch: { ...input.dispatch, text: '继续，暂时不要执行' }, userText: '继续，暂时不要执行',
+    structuredMediaRequest: { operation: 'text_to_video', prompt: 'A product advertisement', duration: 30, size: '1920x1080' } }).executionRequested).toBe(false);
+});
+
+it('exposes existing-video retrieval in the real full-registry readonly pipeline and catalog', () => {
+  const registry = createRegistry();
+  const text = "请把聊天唱歌工程 a590fef2-1d8f-4cea-a2b6-6a3ed5567e6a 当前第 22 版选中的聊天记录＋表情包视频作为本轮附件返回。这个工程已经有完整120秒的成片，请通过 chat_song_render 复用已有文件，不要重新起草、生成歌曲、图片或视频模型画面，不要制作动画版，不要发送到任何外部聊天软件，不用再次确认歌词。歌曲人工核对状态保持原值。";
+  const pipeline = buildLumiExecutionPipeline({ dispatch: { userId: 'cached-video-discovery', channel: 'chat', source: 'e2e-formal-client', operationMode: 'assistant', text, targetIsLumi: true },
+    registry, executionBoundary: 'trusted_local', personalityToolPolicy: { allowedTools: ['*'], forbiddenTools: [], requireConfirmation: [], maxIterations: 10 } });
+  expect(pipeline.executionRequested).toBe(true);
+  expect(pipeline.modelToolProjection.toolNames).toContain('chat_song_read');
+  expect(pipeline.authorizationPolicy.forbiddenTools).not.toContain('chat_song_read');
+  expect(pipeline.authorizationPolicy.forbiddenTools).toContain('chat_song_render');
+  expect(pipeline.modelToolProjection.toolNames).not.toContain('generate_video');
+  expect(registry.findRelevant('chat_song_render').map(entry => entry.name)).toContain('chat_song_read');
 });

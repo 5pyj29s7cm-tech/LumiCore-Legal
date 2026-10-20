@@ -23,6 +23,7 @@ export type MediaGenerationArtifact = {
   prompt?: string;
   model?: string;
   createdAt?: string;
+  hasAudio?: boolean;
 };
 
 export type MediaGenerationExpectation = {
@@ -186,6 +187,11 @@ export function extractMediaGenerationArtifacts(
       url: location.url,
       path: location.path,
       fileName: fileNameFor(location.path || value),
+      ...(typeof payload.model === 'string' ? { model: payload.model } : {}),
+      ...(kind === 'video' && ['text_to_video', 'image_to_video'].includes(payload.generationMode)
+        ? { operation: payload.generationMode as 'text_to_video' | 'image_to_video' } : {}),
+      ...(kind === 'video' && typeof (payload.actualSettings || payload.settings)?.hasAudio === 'boolean'
+        ? { hasAudio: (payload.actualSettings || payload.settings).hasAudio } : {}),
     });
   }
   return artifacts;
@@ -245,6 +251,7 @@ export function mediaGenerationReceiptSettingsMatch(
   if (
     (receipt as Record<string, any>).verified !== true
     || (receipt as Record<string, any>).verificationStatus !== 'verified'
+    || (receipt as Record<string, any>).settingsMatch === false
   ) return false;
   const operation = resolveMediaGenerationOperation(expectation);
   if (mediaGenerationKindForOperation(operation) !== expectation.mode) return false;
@@ -266,6 +273,6 @@ export function mediaGenerationReceiptSettingsMatch(
     return settings.hasSource == null || settings.hasSource === true;
   }
   const expectsReference = operation === 'image_to_video';
-  return Number(settings.duration) === Number(expectation.duration)
+  return Number.isFinite(Number(settings.duration)) && Math.abs(Number(settings.duration) - Number(expectation.duration)) <= 0.15
     && Boolean(settings.hasReference) === expectsReference;
 }

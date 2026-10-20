@@ -1,5 +1,7 @@
-import { beforeAll, describe, expect, it } from 'vitest';
-import { buildAutonomousCapabilityPipeline, buildAutonomousToolPolicy } from '../server/autonomy/task_executor';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { buildAutonomousToolPolicy } from '../server/autonomy/task_executor';
+import { autonomousTurnPlanningData } from '../server/autonomy/executor/tool_policy';
+import { buildLumiExecutionPipeline } from '../server/cognition/execution_pipeline';
 import { registerAllTools } from '../server/tools/definitions';
 import { ToolRegistry } from '../server/tools/registry';
 
@@ -14,38 +16,43 @@ beforeAll(async () => {
 
 describe('autonomous capability planning entrance', () => {
   it('routes scheduled work through the same durable capability protocol', () => {
-    const pipeline = buildAutonomousCapabilityPipeline({
+    const pipeline = buildLumiExecutionPipeline(autonomousTurnPlanningData({
       id: 'autotask-scheduled-1',
       userId: 'autonomous-plan-user',
       title: 'Inspect installed applications',
       description: '检查本机已经安装的桌面应用并生成只读清单。',
       source: 'scheduler',
-    }, 30, registry);
+    }, 30, registry));
 
     expect(pipeline.turnIntent.channel).toBe('scheduler');
     expect(pipeline.turnIntent.boundary).toBe('task_center');
-    expect(pipeline.executionPlan.taskId).toBe('autotask-scheduled-1');
-    expect(pipeline.executionPlan.decisionAuthority).toBe('semantic_planner');
-    expect(pipeline.executionPlan.scriptAuthority).toBe('adapter_only');
-    expect(pipeline.executionPlan.nodes.length).toBeGreaterThan(0);
+    expect(pipeline.taskId).toBe('autotask-scheduled-1');
+    expect(pipeline.executionPlan).toBeUndefined();
+    expect(pipeline.modelToolProjection.toolNames.length).toBeGreaterThan(0);
   });
 
-  it('fails autonomous external commits closed before any tool can execute', () => {
-    const pipeline = buildAutonomousCapabilityPipeline({
+  it('fails an actual selected autonomous external call closed before its adapter can execute', async () => {
+    const pipeline = buildLumiExecutionPipeline(autonomousTurnPlanningData({
       id: 'autotask-external-1',
       userId: 'autonomous-plan-user',
       title: 'Send a message',
       description: 'send to Alice: deployment is complete',
       source: 'user_request',
-    }, 30, registry);
+    }, 30, registry));
 
     expect(pipeline.turnIntent.channel).toBe('autonomy');
-    expect(pipeline.executionPlan.risk).toMatchObject({
-      sideEffectClass: 'external_commit',
-      requiresConfirmation: true,
-      failClosed: true,
-    });
-    expect(pipeline.executionPlan.risk.confirmationBinding?.taskId).toBe('autotask-external-1');
+    expect(pipeline.executionPlan).toBeUndefined();
+    const tool = registry.get('wechat_send_message')!;
+    const original = tool.handler;
+    const handler = vi.fn(async () => 'must not execute');
+    tool.handler = handler;
+    try {
+      await expect(registry.execute('wechat_send_message', { contact: 'Alice', message: 'deployment is complete' }, {
+        userId: 'autonomous-plan-user', authenticated: true, localExecution: true, autonomous: true,
+        toolPolicy: pipeline.authorizationPolicy, actionIntent: 'send to Alice: deployment is complete',
+      })).rejects.toThrow('Autonomous external commit blocked');
+      expect(handler).not.toHaveBeenCalled();
+    } finally { tool.handler = original; }
   });
 
   it('keeps a recovery attempt inside the capabilities persisted by its prior plan', () => {
@@ -53,6 +60,7 @@ describe('autonomous capability planning entrance', () => {
       title: 'Resume a read task',
       description: 'Read the same target after a provider timeout',
       executionPlan: {
+        decisionAuthority: 'semantic_planner',
         nodes: [
           { toolName: 'url_fetch' },
           { toolName: 'web_search' },

@@ -20,6 +20,24 @@ const tools = [{
 }];
 
 describe('local model context budget', () => {
+  it('reserves one consistent message budget before selecting optional schemas on continuation', () => {
+    const task = 'Create the requested report, then open that exact output in WPS and check its contents.';
+    const call: any = { role: 'assistant', content: null,
+      toolCalls: [{ id: 'saved-1', name: 'create_docx', arguments: { outputPath: 'D:/work/meeting.docx' } }] };
+    const receipt: any = { role: 'tool', name: 'create_docx', toolCallId: 'saved-1',
+      content: JSON.stringify({ ok: true, path: 'D:/work/meeting.docx', details: 'verified details '.repeat(220) }) };
+    const prepared = prepareLocalModelRequest({ contextTokens: 32768, compactToolDeclarations: true,
+      messages: [{ role: 'system', content: 'execution rules '.repeat(2000) },
+        { role: 'user', content: task }, call, receipt],
+      toolDeclarations: [...tools, ...Array.from({ length: 20 }, (_, i) => ({ ...tools[0], function: {
+        ...tools[0].function, name: `optional_${i}`, description: 'Optional capability description. '.repeat(45),
+      } }))], requiredToolNames: ['desktop_open'],
+    });
+    expect(prepared.messages).toContainEqual(receipt);
+    expect(prepared.messages).toContainEqual(call);
+    expect(prepared.messages.find(m => m.role === 'user')?.content).toBe(task);
+    expect(prepared.estimatedInputTokens).toBeLessThanOrEqual(6144);
+  });
   it('reserves room for nested workflow arguments while respecting the context and explicit limits', () => {
     const toolDeclarations = [{ type: 'function' as const, function: { name: 'save_workflow', description: 'Save draft',
       parameters: { type: 'object', properties: { steps: { type: 'array', items: { type: 'object', properties: {
@@ -43,15 +61,15 @@ describe('local model context budget', () => {
       { role: 'user', content: newest },
     ];
 
-    const prepared = prepareLocalModelRequest({
-      messages,
-      toolDeclarations: tools,
-      maxTokens: 8_000,
-      contextTokens: 4_096,
-    });
+    const input = { messages, toolDeclarations: tools, maxTokens: 8_000, contextTokens: 4_096 };
+    const adapted = prepareLocalModelRequest(input);
+    expect(adapted.maxTokens).toBeGreaterThan(0);
+    expect(adapted.maxTokens + adapted.estimatedInputTokens + 409).toBeLessThanOrEqual(4096);
+    expect([...adapted.messages].reverse().find(message => message.role === 'user')?.content).toBe(newest);
+    const prepared = prepareLocalModelRequest({ ...input, maxTokens: 768 });
 
     expect(prepared.compacted).toBe(true);
-    expect(prepared.maxTokens).toBeLessThanOrEqual(1_024);
+    expect(prepared.maxTokens).toBe(768);
     expect(prepared.estimatedInputTokens).toBeLessThanOrEqual(prepared.inputBudgetTokens);
     expect(estimateLocalRequestInputTokens(prepared.messages, tools)).toBe(prepared.estimatedInputTokens);
     expect(prepared.messages.some(message => message.role === 'user' && String(message.content).includes(newest))).toBe(true);
@@ -244,9 +262,9 @@ describe('local model context budget', () => {
     })).toThrow(/complete assistant tool_call\/tool receipt boundary/i);
   });
 
-  it('retains the annotated source and a trailing synthetic user through local-model compaction', () => {
+  it('rejects rather than clipping an oversized annotated source and trailing synthetic user', () => {
     const sourceMessageId = 'local-durable-source-1';
-    const prepared = prepareLocalModelRequest({
+    const request = () => prepareLocalModelRequest({
       messages: [
         { role: 'system', content: `Safety boundary. ${'large policy '.repeat(1_500)}` },
         ...Array.from({ length: 12 }, (_, index) => ({
@@ -269,10 +287,11 @@ describe('local model context budget', () => {
       contextTokens: 4_096,
     });
 
-    const source = prepared.messages.find(message => message.sourceMessageId === sourceMessageId);
-    expect(String(source?.content)).toContain('LOCAL_ANNOTATED_SOURCE_SENTINEL');
-    expect(String(prepared.messages.at(-1)?.content)).toContain('LOCAL_SYNTHETIC_RECOVERY_SENTINEL');
-    expect(prepared.estimatedInputTokens).toBeLessThanOrEqual(prepared.inputBudgetTokens);
+    let failure: Error | undefined;
+    try { request(); } catch (error) { failure = error as Error; }
+    expect(failure).toBeInstanceOf(LocalModelContextBudgetError);
+    expect(failure!.message).toMatch(/complete original user input/);
+    expect(failure!.message).not.toMatch(/LOCAL_ANNOTATED_SOURCE_SENTINEL|LOCAL_SYNTHETIC_RECOVERY_SENTINEL/);
   });
 
   it('fails closed on multiple annotated sources before local-model inference', () => {

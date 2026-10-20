@@ -1,0 +1,41 @@
+import './helpers';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { dispatchLLMCallStreaming, type LLMGetters } from '../server/llm/dispatch';
+import { resetCircuit } from '../server/cloud/circuit_breaker';
+import { modelRoutingErrorReason } from '../server/llm/model_routing_receipts';
+import { ModelAttemptDeadlineError } from '../server/llm/provider/deadlines';
+vi.mock('../server/llm/local_models', async original => ({ ...await original<typeof import('../server/llm/local_models')>(), ensureLocalModelReady:vi.fn(async (_provider:string, model:string)=>model) }));
+vi.mock('../server/llm/local_model_capacity', ()=>({loadedLocalContextTokens:vi.fn(async()=>8192)}));
+const messages=[{role:'user' as const,content:'Synthetic route diagnosis; no user materials.'}];
+const limits={requestMs:500,firstByteMs:500,semanticContentMs:500,idleMs:500,absoluteMs:1000};
+const getters=(relay:any,deepseek:any=null,lmstudio:any=null):LLMGetters=>({getDeepSeek:()=>deepseek,getGemini:()=>null,getOpenAI:()=>null,getAnthropic:()=>null,getQwen:()=>null,getOllama:()=>null,getRelay:()=>relay,getLmStudio:()=>lmstudio});
+const client=(create:any)=>({chat:{completions:{create}}});
+afterEach(()=>{resetCircuit();vi.unstubAllEnvs();});
+describe('first actual model failure diagnostic preserves the candidate ledger',()=>{
+ it('keeps completedEmpty as the first failure before quota and actual local capacity rejection',async()=>{
+  vi.stubEnv('LUMI_PRIVACY','standard');
+  const primary=vi.fn(async()=> (async function*(){yield{choices:[{delta:{reasoning_content:'Synthetic reasoning without a response'},finish_reason:'stop'}]};})());
+  const quota=vi.fn(async()=>{throw Object.assign(new Error('402 Payment Required: insufficient balance'),{status:402});});
+  const local=vi.fn();
+  const requiredTools=[{type:'function' as const,function:{name:'offline_capacity_fixture',description:'Synthetic required protocol field '.repeat(1000),parameters:{type:'object',properties:{}}}}];
+  const error=await dispatchLLMCallStreaming(messages,requiredTools,{provider:'relay',model:'synthetic-empty-primary',selectionMode:'ordered_fallback',fallbackCandidates:[{provider:'deepseek',model:'synthetic-quota-backup'},{provider:'lmstudio',model:'synthetic-local-backup'}],allowCloudFallback:true,maxTokens:8192,attemptTimeouts:limits},()=>{},getters(client(primary),client(quota),client(local))).catch(error=>error);
+  expect(error).toMatchObject({name:'ModelRoutingDispatchError',routing:{fallbackReason:'empty_response'}});
+  expect(error.routing.attempts).toHaveLength(3);
+  expect(error.routing.attempts.map((a:any)=>[a.provider,a.status,a.reason])).toEqual([['relay','failed','empty_response'],['deepseek','failed','quota_or_billing'],['lmstudio','failed','local_context_budget_exceeded']]);
+  expect(error.routing.attempts[0]).toMatchObject({errorCategory:'empty_response',visibleOutputCommitted:false});
+  expect(error.routing.attempts[1]).toMatchObject({errorCategory:'quota'});
+  expect(error.routing.attempts[2]).toMatchObject({errorCategory:'local_context_budget_exceeded'});
+  expect(primary).toHaveBeenCalledOnce();expect(quota).toHaveBeenCalledOnce();expect(local).not.toHaveBeenCalled();
+  expect(error.routing.attempts[0].outboundMessagesEvidence.messages.some((m:any)=>m.role==='user')).toBe(true);
+  expect(modelRoutingErrorReason(new ModelAttemptDeadlineError('semantic_content',1,{completedEmpty:true}))).toBe('empty_response');
+  expect(modelRoutingErrorReason({name:'ModelAttemptDeadlineError',completedEmpty:true,message:'lookalike object'})).not.toBe('empty_response');
+ });
+ it.each(['cancel','privacy'] as const)('terminates for %s before an empty result can select another candidate',async mode=>{
+  vi.stubEnv('LUMI_PRIVACY','standard');const parent=new AbortController(),fallback=vi.fn();
+  const primary=vi.fn(async()=> (async function*(){if(mode==='cancel')parent.abort(new Error('Synthetic caller cancelled'));yield{choices:[{delta:{},finish_reason:'stop'}]};})());
+  const error=await dispatchLLMCallStreaming(messages,[],{provider:'relay',model:'synthetic-policy-primary',selectionMode:'ordered_fallback',fallbackCandidates:[{provider:'deepseek',model:'must-not-execute'}],allowCloudFallback:true,...(mode==='privacy'?{dataRoutingPolicy:'local_only' as const}:{}),signal:parent.signal,attemptTimeouts:limits},()=>{},getters(client(primary),client(fallback))).catch(error=>error);
+  expect(error.routing).toMatchObject({fallbackReason:mode==='cancel'?'cancelled':'privacy_policy_blocked'});
+  expect(error.routing.attempts).toHaveLength(1);expect(error.routing.attempts[0].reason).not.toBe('empty_response');
+  expect(fallback).not.toHaveBeenCalled();expect(primary).toHaveBeenCalledTimes(mode==='cancel'?1:0);
+ });
+});

@@ -1,3 +1,4 @@
+import { parseStoredObject as parseObject } from '../tools/receipt_payload';
 import crypto from 'node:crypto';
 import type { CapabilityManifestEntry, ToolExecutionRecord } from '../tools/types';
 import {
@@ -35,21 +36,10 @@ type WindowFingerprint = DesktopWindowFingerprint & {
   displayId?: string;
 };
 
-const CONTROL_TOOL_RE = /^(?:client_(?:get_state|action)|desktop_(?:open|show_lumi_window|window_control|active_window|list_apps|ui_|capture_screen|mouse_|keyboard_|run_command)|mouse_(?:move|click|drag)|keyboard_(?:type|press)|computer_use|run_command|powershell|shell_exec|terminal_exec|wechat_(?:read_recent_chat|send_message)|cad_(?:prepare_autocad_operations|draw_floorplan_in_autocad)|mcp_cad-drafting_autocad_|wps_create_document_with_text|desktop_ai_(?:ask|roundtable))/i;
+const CONTROL_TOOL_RE = /^(?:desktop_(?:open|show_lumi_window|window_control|active_window|list_apps|ui_|capture_screen|mouse_|keyboard_|run_command)|mouse_(?:move|click|drag)|keyboard_(?:type|press)|computer_use|run_command|powershell|shell_exec|terminal_exec|wechat_(?:read_recent_chat|send_message)|cad_(?:prepare_autocad_operations|draw_floorplan_in_autocad)|mcp_cad-drafting_autocad_|wps_create_document_with_text|desktop_ai_ask)/i;
 
 function digest(value: unknown): string {
   return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
-}
-
-function parseObject(value: unknown): Record<string, any> {
-  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, any>;
-  if (typeof value !== 'string' || !value.trim()) return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
 }
 
 export function parseDesktopWindowFingerprint(value: unknown): WindowFingerprint | null {
@@ -100,7 +90,7 @@ function fingerprintInvalidatesVisualPlan(before: WindowFingerprint | null, afte
 type RuntimeCapabilityDescriptor = Pick<
   CapabilityManifestEntry,
   'lane' | 'operation' | 'sideEffects'
->;
+> & Partial<Pick<CapabilityManifestEntry, 'family'>>;
 
 function isSafeObservationCapability(capability?: RuntimeCapabilityDescriptor): boolean {
   return Boolean(
@@ -125,21 +115,22 @@ function isDesktopRuntimeCapability(
   toolName: string,
   capability?: RuntimeCapabilityDescriptor,
 ): boolean {
+  if (capability?.lane === 'client') return false;
   if (CONTROL_TOOL_RE.test(toolName)) return true;
   if (!capability) return false;
-  return capability.sideEffects.some(effect => effect.type === 'desktop_control')
-    || (
-      ['client', 'desktop', 'cad', 'messaging', 'office'].includes(capability.lane)
-      && !isSafeObservationCapability(capability)
-    );
+  // Office/CAD/messaging also contain background file and API capabilities.
+  // Only actual desktop input needs a foreground-window lease.
+  return capability.sideEffects.some(effect => effect.type === 'desktop_control');
 }
 
-function isFocusOrOpenCapability(toolName: string): boolean {
+function isFocusOrOpenCapability(toolName: string, capability?: RuntimeCapabilityDescriptor): boolean {
   const segments = toolName.toLocaleLowerCase().split('_').filter(Boolean);
   return segments.includes('open')
     || segments.includes('focus')
     || segments.join('_') === 'desktop_show_lumi_window'
-    || segments.join('_') === 'desktop_window_control';
+    || segments.join('_') === 'desktop_window_control'
+    || (capability?.family === 'web_login' && capability.lane === 'web'
+      && capability.operation === 'mutate' && !isExternalCommitCapability(capability));
 }
 
 /**
@@ -153,14 +144,14 @@ function stepForTool(
   toolName: string,
   capability?: RuntimeCapabilityDescriptor,
 ): DesktopActionStep | undefined {
+  if (!isDesktopRuntimeCapability(toolName, capability)) return undefined;
   const planned = plan.steps.find(step => step.allowedTools.includes(toolName));
   if (planned) return planned;
-  if (!isDesktopRuntimeCapability(toolName, capability)) return undefined;
   if (isSafeObservationCapability(capability)) {
     return plan.steps.find(step => step.operation === 'observe')
       || plan.steps.find(step => step.operation === 'verify');
   }
-  if (isFocusOrOpenCapability(toolName)) {
+  if (isFocusOrOpenCapability(toolName, capability)) {
     return plan.steps.find(step => step.operation === 'focus_or_open');
   }
   if (isExternalCommitCapability(capability)) {
@@ -194,6 +185,17 @@ export class DesktopExecutionTracker {
   private block(reason: string): DesktopRuntimeAuthorization {
     recordDesktopAuthorizationBlock(reason);
     return { allowed: false, reason };
+  }
+
+  bindSnapshotArguments(args: Record<string, any>): Record<string, any> {
+    // Reading a previously identified window does not require it to remain
+    // foreground. Keep both native selectors; never use this as an input lease.
+    const fingerprint = this.lastFingerprint;
+    if (!this.applicationMatched || !fingerprint?.processId || !fingerprint.nativeWindowHandle
+      || (args.root && args.root !== 'active') || args.allMatches
+      || ['name', 'nameContains', 'automationId', 'controlType', 'className', 'processId', 'nativeWindowHandle']
+        .some(key => args[key] !== undefined && args[key] !== '')) return args;
+    return { ...args, root: 'desktop', processId: fingerprint.processId, nativeWindowHandle: fingerprint.nativeWindowHandle };
   }
 
   authorize(
@@ -255,13 +257,13 @@ export class DesktopExecutionTracker {
     if (postOpenFingerprint) this.pendingAction = { step, recordVerified: true };
     if (isObservationStep(step) || postOpenFingerprint) {
       const fingerprint = postOpenFingerprint || parseDesktopWindowFingerprint(record.result);
+      // Screenshots and accessibility trees are content evidence, not a fresh
+      // foreground identity measurement. Missing identity is not a mismatch,
+      // and it must neither consume nor renew the last input lease.
+      if (!fingerprint) return;
       const fingerprintInvalidated = fingerprintInvalidatesVisualPlan(this.lastFingerprint, fingerprint);
-      const identityAssessment = this.plan.application.family === 'lumi'
-        ? null
-        : assessDesktopApplicationIdentity(fingerprint, this.plan.application);
-      const matched = this.plan.application.family === 'lumi'
-        ? record.name === 'client_get_state' && verified
-        : this.plan.application.family === 'unknown'
+      const identityAssessment = assessDesktopApplicationIdentity(fingerprint, this.plan.application);
+      const matched = this.plan.application.family === 'unknown'
           ? desktopFingerprintMatchesRequestedTarget(
               fingerprint,
               this.plan.expectedWindow.requestedTarget,

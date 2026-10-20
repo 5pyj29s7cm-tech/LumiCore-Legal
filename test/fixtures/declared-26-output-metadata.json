@@ -1,0 +1,91 @@
+{
+  "fileNames": [
+    "00_litigation-packet.md",
+    "01_filing-material-checklist.md",
+    "02_authorization-checklist.md",
+    "03_evidence-review-matrix.md",
+    "20_statement-of-defense.md",
+    "21_cross-examination-opinion.md",
+    "22_procedural-defense-checklist.md",
+    "23_argument-outline.md",
+    "24_engagement-agreement.md",
+    "24_power-of-attorney.md",
+    "24_law-firm-letter.md",
+    "27_evidence-catalog.md",
+    "99_manifest.md",
+    "00_litigation-packet.docx",
+    "01_filing-material-checklist.docx",
+    "02_authorization-checklist.docx",
+    "03_evidence-review-matrix.docx",
+    "20_statement-of-defense.docx",
+    "21_cross-examination-opinion.docx",
+    "22_procedural-defense-checklist.docx",
+    "23_argument-outline.docx",
+    "24_engagement-agreement.docx",
+    "24_power-of-attorney.docx",
+    "24_law-firm-letter.docx",
+    "27_evidence-catalog.docx",
+    "99_manifest.docx"
+  ],
+  "name": "legal_generate_litigation_packet",
+  "capability": {
+    "capabilityId": "legal.litigation.packet.generate",
+    "lane": "industry",
+    "operation": "create",
+    "risk": "medium",
+    "sideEffects": [
+      {
+        "type": "local_state_change",
+        "scope": "optional legal case litigation packet archive",
+        "reversible": true
+      },
+      {
+        "type": "local_write",
+        "scope": "litigation packet Markdown and optional DOCX files",
+        "reversible": true
+      },
+      {
+        "type": "network_read",
+        "scope": "configured legal drafting model",
+        "reversible": true
+      }
+    ],
+    "verification": {
+      "strategy": "terminal_receipt",
+      "required": true,
+      "requiredFields": [
+        "ok",
+        "status",
+        "persisted",
+        "changedCaseIds",
+        "articleIds",
+        "artifacts",
+        "content"
+      ],
+      "requiredValues": {
+        "ok": true
+      },
+      "successStatuses": [
+        "generated"
+      ],
+      "failureStatuses": [
+        "blocked",
+        "failed",
+        "unverified"
+      ],
+      "successSignals": [
+        "structured legal receipt reports case, knowledge-base, and file effects separately"
+      ],
+      "limitations": [
+        "Generated legal work remains subject to lawyer review and is not automatically filed, signed, sent, or published."
+      ]
+    }
+  },
+  "terminalVerification": {
+    "status": "verified",
+    "strategy": "terminal_receipt",
+    "reason": "Generated legal work remains subject to lawyer review and is not automatically filed, signed, sent, or published."
+  },
+  "status": "generated",
+  "note": "Portable uses only synthetic fixture filenames and declaration metadata. No actual prompt/body/preferences/keys copied."
+}

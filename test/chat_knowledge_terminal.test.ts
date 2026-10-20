@@ -98,7 +98,7 @@ describe('knowledge observation completion contract', () => {
     expect(response.completionGuard?.blocked).toBe(true);
     const final = finalizeLumiResponse({ taskText: '读取合同内容并审查', responseText: response.text, toolRecords: response.toolCalls, completionGuard: response.completionGuard, source: 'chat' });
     expect(final.blocked).toBe(true);
-    expect(buildForegroundTaskCompletionFeedback({ taskId: 'test-task', taskLabel: '读取合同内容并审查', toolRecords: response.toolCalls, blocked: final.blocked, reason: final.reason })?.status).toBe('blocked');
+    expect(buildForegroundTaskCompletionFeedback({ taskId: 'test-task', taskLabel: '读取合同内容并审查', toolRecords: response.toolCalls, finalization: final })?.status).toBe('blocked');
     const recovered = await recoverBlockedExecutionOnce({
       task: '读取合同内容并审查', responseText: final.text, finalization: final, allowToolUse: true,
       toolRecords: response.toolCalls,
@@ -242,7 +242,8 @@ describe('real Socket + adapter + knowledge handler + durable task', () => {
     expect(receipts.map((row: any) => row.toolName)).toEqual(['knowledge_file_stats']);
     const assistant = (readDB().interactions || []).find((row: any) => row.requestId === requestId && row.role === 'assistant');
     expect(assistant?.message).toContain('共有 6 个文件');
-    const route = events.find(item => item.event === 'agent:tool_route' && item.payload?.toolNames?.includes('knowledge_file_stats'));
+    const route = events.find(item => item.event === 'agent:tool_route' && item.payload?.requestId === requestId);
+    expect(route?.payload).toMatchObject({ requestId, conversationId });
     expect(route?.payload.toolNames).toEqual(expect.arrayContaining(['knowledge_file_stats']));
     expect(route?.payload.toolNames).not.toContain('client_action');
     expect(modelCalls.at(-1)).toEqual(expect.arrayContaining(['knowledge_file_stats']));

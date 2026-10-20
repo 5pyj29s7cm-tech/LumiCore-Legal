@@ -1,3 +1,4 @@
+import { CN_TASK_EXECUTION_MESSAGES } from "../server/regions/messages/task_execution_messages";
 import './helpers';
 import { beforeAll, afterAll, afterEach, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
@@ -26,10 +27,13 @@ vi.mock('../server/tools/pending_confirmation', async original => {
     await probe.consume?.(); return result;
   } };
 });
-vi.mock('../server/cognition', async original => ({
-  ...await original<typeof import('../server/cognition')>(),
-  processInput: (...args: any[]) => probe.process(...args),
-}));
+vi.mock('../server/llm/adapter', async original => {
+  const actual = await original<typeof import('../server/llm/adapter')>();
+  return { ...actual, runWithTools: async (...args: Parameters<typeof actual.runWithTools>) => {
+    await probe.process();
+    return actual.runWithTools(...args);
+  } };
+});
 vi.mock('../server/llm/providers', async original => ({
   ...await original<typeof import('../server/llm/providers')>(),
   makeLLMCall: (...args: any[]) => probe.model(...args),
@@ -104,7 +108,7 @@ async function setup(options: { confirmation?: boolean; response?: boolean; befo
   clients.push(client);
   await new Promise<void>((resolve, reject) => { client.once('connect', resolve); client.once('connect_error', reject); });
   expect(io.sockets.sockets.get(client.id!)?.data.authenticatedOrgId).toBe(orgId);
-  const conversationId = getOrCreateActiveConversation(uid, '', 'work', orgId).id;
+  const conversationId = getOrCreateActiveConversation(uid, 'lumi', 'work', orgId).id;
   const requestId = `audit9-task-${randomUUID()}`;
   let entered!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; });
@@ -112,7 +116,7 @@ async function setup(options: { confirmation?: boolean; response?: boolean; befo
   if (options.confirmation) {
     const originRequestId = `audit9-proposal-${randomUUID()}`;
     const userText = '请搜索公开测试资料。';
-    const userMessageId = addMessage({ userId: uid, agentId: '', conversationId, role: 'user', content: userText,
+    const userMessageId = addMessage({ userId: uid, agentId: 'lumi', conversationId, role: 'user', content: userText,
       domain: 'work', orgId, source: 'task', channel: 'task', requestId: originRequestId, deferActionPreparation: true });
     bindConversationActionExecutionTurn({ conversationId, userId: uid, userText, requestId: originRequestId, userMessageId });
     const prepared = prepareConversationActionExecution({ conversationId, userId: uid, userText,
@@ -120,7 +124,7 @@ async function setup(options: { confirmation?: boolean; response?: boolean; befo
       toolPolicy: { allowedTools: ['web_search'], requireConfirmation: [], forbiddenTools: [], maxIterations: 2 } });
     expect(prepared.state?.taskId).toBeTruthy();
     setConversationActionExecutionStatus(conversationId, uid, 'blocked', { blocker: 'Waiting for exact user confirmation.', requestId: originRequestId });
-    addMessage({ userId: uid, agentId: '', conversationId, role: 'assistant', content: '请确认执行公开资料搜索。',
+    addMessage({ userId: uid, agentId: 'lumi', conversationId, role: 'assistant', content: '请确认执行公开资料搜索。',
       domain: 'work', orgId, source: 'task', channel: 'task', requestId: originRequestId,
       completionFeedback: { status: 'blocked', incomplete: ['Waiting for exact user confirmation.'], nextSteps: [] } });
     await flushDBOrThrow();
@@ -129,15 +133,15 @@ async function setup(options: { confirmation?: boolean; response?: boolean; befo
     await recordPendingConfirmationDurably(uid, 'web_search', { query: 'Synthetic fixture' }, 'task', { ...scope, actionIntent: userText });
     probe.consume = async () => { entered(); await held; };
   } else if (options.response) {
-    probe.process.mockResolvedValue({ responseText: '', intent: { category: 'conversation', confidence: 1, entities: {}, needsLLM: true }, llmWasCalled: false, directToolExecuted: false, isFallback: false });
+    probe.process.mockResolvedValue(undefined);
     probe.model.mockResolvedValue({ text: 'A synthetic explanation with no external actions.', toolCalls: [] });
     entered();
-  } else probe.process.mockImplementationOnce(async () => { entered(); await held; throw new Error('Synthetic cognition stopped at test boundary'); });
+  } else probe.process.mockImplementationOnce(async () => { entered(); await held; throw new Error('Synthetic task stopped before model invocation'); });
   const responses: any[] = [];
   client.on('agent:response', payload => { if (payload.requestId === requestId) responses.push(payload); });
   options.beforeSend?.({ uid, requestId, conversationId });
-  const ack = await client.timeout(5_000).emitWithAck('agent:task', {
-    text: options.confirmation ? '确认执行' : options.response ? '解释一下什么是计划。不要调用任何工具。' : '请分析季度报告的重点和执行建议。', requestId, conversationId, domain: 'work', orgId,
+  const ack = await client.timeout(5_000).emitWithAck('agent:chat', { source: 'task',
+    text: options.confirmation ? '确认执行' : options.response ? '解释一下什么是计划。不要调用任何工具。' : '请搜索公开季度报告，再分析重点和执行建议。', requestId, conversationId, domain: 'work', orgId,
   });
   expect(ack).toMatchObject({ ok: true, requestId });
   await started;
@@ -159,27 +163,33 @@ async function setup(options: { confirmation?: boolean; response?: boolean; befo
   return { uid, orgId, requestId, client, responses, remove, conversationId, finish };
 }
 
+function expectRevocationNotice(responses: any[], requestId: string) {
+  expect(responses).toHaveLength(1);
+  expect(responses[0]).toEqual({ text: CN_TASK_EXECUTION_MESSAGES.cancelled, agentName: 'Lumi',
+    source: 'task', requestId, conversationId: expect.any(String), finalized: true, blocked: false, reason: 'cancelled' });
+}
+
 it.each([false, true])('actual task cancellation keeps the original scope after membership removal=%s', async removed => {
   const test = await setup();
   if (removed) await test.remove();
-  const cancellation = await test.client.timeout(5_000).emitWithAck('agent:task_cancel', {
+  const cancellation = await test.client.timeout(5_000).emitWithAck('agent:abort_chat', { source: 'task',
     requestId: test.requestId, domain: 'work', orgId: test.orgId,
   });
   expect(cancellation).toMatchObject({ ok: true, requestId: test.requestId, status: 'cancelling' });
   release!();
   const terminal = await test.finish();
   expect(terminal.status).toBe('cancelled');
-  if (removed) expect(test.responses).toEqual([]);
+  if (removed) expectRevocationNotice(test.responses, test.requestId);
   else expect(test.responses[0]?.reason).toBe('request_cancelled');
   const rows = await querySQL<any>('SELECT * FROM interactions WHERE userId = ?', [test.uid]);
   const assistant = rows.find((row: any) => row.role === 'assistant');
   expect(assistant).toMatchObject({ domain: 'work', orgId: test.orgId });
   if (removed) {
-    const denied = await test.client.timeout(5_000).emitWithAck('agent:task', { text: 'A new personal task', requestId: randomUUID(), domain: 'personal' });
+    const denied = await test.client.timeout(5_000).emitWithAck('agent:chat', { source: 'task', text: 'A new personal task', requestId: randomUUID(), domain: 'personal' });
     expect(denied.ok).toBe(false);
-    const replay = await test.client.timeout(5_000).emitWithAck('agent:task_cancel', { requestId: test.requestId });
+    const replay = await test.client.timeout(5_000).emitWithAck('agent:abort_chat', { source: 'task', requestId: test.requestId });
     expect(replay).toMatchObject({ ok: true, status: 'cancelled' });
-    expect(test.responses).toEqual([]);
+    expectRevocationNotice(test.responses, test.requestId);
     expect(readDB().conversations.some((row: any) => row.userId === test.uid && row.domain === 'personal')).toBe(false);
   }
   expect(probe.model).not.toHaveBeenCalled();
@@ -191,7 +201,7 @@ it('automatically cancels a planning task on removal without a user cancellation
   await vi.waitFor(() => expect(getChatExecution({ userId: test.uid, domain: 'work', orgId: test.orgId, source: 'task' }, test.requestId)?.status).toBe('cancelling'));
   release!();
   expect((await test.finish()).status).toBe('cancelled');
-  expect(test.responses).toEqual([]); expect(probe.model).not.toHaveBeenCalled();
+  expectRevocationNotice(test.responses, test.requestId); expect(probe.model).not.toHaveBeenCalled();
 });
 
 it('cancels queued work on removal before it can acquire the executor', async () => {
@@ -199,7 +209,7 @@ it('cancels queued work on removal before it can acquire the executor', async ()
   const queuedId = `audit9-queued-${randomUUID()}`;
   const responses: any[] = [];
   test.client.on('agent:response', payload => { if (payload.requestId === queuedId) responses.push(payload); });
-  expect(await test.client.timeout(5_000).emitWithAck('agent:task', {
+  expect(await test.client.timeout(5_000).emitWithAck('agent:chat', { source: 'task',
     text: '另外，请分析下一季度的工作重点。', requestId: queuedId, conversationId: test.conversationId,
   })).toMatchObject({ ok: true, requestId: queuedId });
   const scope = { userId: test.uid, domain: 'work' as const, orgId: test.orgId, source: 'task' };
@@ -224,8 +234,8 @@ it('does not allow another organization member to cancel a known request id', as
   } });
   clients.push(other);
   await new Promise<void>((resolve, reject) => { other.once('connect', resolve); other.once('connect_error', reject); });
-  expect(await other.timeout(5_000).emitWithAck('agent:task_cancel', { requestId: test.requestId, userId: test.uid }))
-    .toMatchObject({ ok: false, error: 'Active task not found' });
+  expect(await other.timeout(5_000).emitWithAck('agent:abort_chat', { source: 'task', requestId: test.requestId, userId: test.uid }))
+    .toMatchObject({ ok: false, error: 'Active execution not found' });
   expect(getChatExecution({ userId: test.uid, domain: 'work', orgId: test.orgId, source: 'task' }, test.requestId)?.terminal).toBe(false);
   await test.remove(); release!(); await test.finish();
 });
@@ -236,7 +246,7 @@ it.each([false, true])('checks membership again after the durable confirmation w
   release!();
   const terminal = await test.finish();
   if (removed) {
-    expect(publicTool).not.toHaveBeenCalled(); expect(terminal.status).toBe('cancelled'); expect(test.responses).toEqual([]);
+    expect(publicTool).not.toHaveBeenCalled(); expect(terminal.status).toBe('cancelled'); expectRevocationNotice(test.responses, test.requestId);
   } else {
     const assistant = readDB().interactions.find((row: any) => row.userId === test.uid && row.requestId === test.requestId && row.role === 'assistant');
     expect(assistant?.toolCalls?.[0]?.error || '').toBe('');
@@ -267,7 +277,7 @@ it.each(['flush', 'receipt'])('replaces an unpublished terminal with durable can
     proceed();
     const terminal = await test.finish();
     expect(terminal.status).toBe('cancelled');
-    expect(test.responses).toEqual([]);
+    expectRevocationNotice(test.responses, test.requestId);
     const assistant = readDB().interactions.find((row: any) => row.userId === test.uid && row.role === 'assistant');
     expect(assistant?.completionFeedback?.status).toBe('cancelled');
     expect(assistant?.message).not.toContain('A synthetic explanation');

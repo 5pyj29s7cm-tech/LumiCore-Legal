@@ -7,6 +7,8 @@ export interface LegalWorkflowRun {
   basis: string;
   materialIds: string[];
   artifacts: string[];
+  /** Actual returned text for read-only business-page history; never source evidence. */
+  displayText?: string;
   currentLawGate?: 'passed' | 'blocked';
   reasoningLinked?: boolean;
   draftMode?: 'template' | 'mixed' | 'model';
@@ -22,13 +24,15 @@ export function isLegalSourceMaterial(material: { source?: string; title?: strin
 /** Change detection only; authorization and formal delivery are checked server-side. */
 export function legalCaseSourceFingerprint(input: {
   title?: string; party?: string; cause?: string; court?: string; caseNumber?: string;
-  notes?: string; clientRole?: string; objective?: string;
+  notes?: string; clientPartyName?: string; clientRole?: string; objective?: string; factDate?: string;
   materials?: Array<{ id?: string; type?: string; source?: string; title?: string; content?: string; localPath?: string }>;
 }): string {
   const source = JSON.stringify([
     input.title || '', input.party || '', input.cause || '', input.court || '', input.caseNumber || '',
     input.clientRole || '', input.objective || '', (input.notes || '').replace(/^【材料归档】.*$/gm, '').trim(),
     (input.materials || []).filter(isLegalSourceMaterial).map(m => [m.id, m.type, m.title, m.content, m.localPath]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    ...(input.clientPartyName ? [['clientPartyName', input.clientPartyName]] : []),
+    ...(input.factDate ? [['factDate', input.factDate]] : []),
   ]);
   let a = 2166136261; let b = 5381;
   for (let i = 0; i < source.length; i++) {

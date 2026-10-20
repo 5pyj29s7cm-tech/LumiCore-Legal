@@ -7,10 +7,8 @@ import {
 
 describe('visible client surface commit', () => {
   it('only accepts an exact rendered surface marker', () => {
-    const selectors: string[] = [];
     const root = {
       querySelector(selector: string) {
-        selectors.push(selector);
         return selector === '[data-lumi-rendered-surface="command-center"]' ? {} as Element : null;
       },
     };
@@ -18,23 +16,13 @@ describe('visible client surface commit', () => {
     expect(getRenderedClientSurfaceSelector('command-center')).toBe('[data-lumi-rendered-surface="command-center"]');
     expect(isClientSurfaceRendered('command-center', root)).toBe(true);
     expect(isClientSurfaceRendered('chat', root)).toBe(false);
-    expect(selectors).toEqual([
-      '[data-lumi-rendered-surface="command-center"]',
-      '[data-lumi-rendered-surface="chat"]',
-    ]);
   });
 
-  it('waits for the React surface commit instead of acknowledging desired state', async () => {
+  it('waits for a real surface commit and times out when none appears', async () => {
     let ticks = 0;
     let rendered = false;
-    const root = {
-      querySelector() {
-        return rendered ? {} as Element : null;
-      },
-    };
-
-    const result = await waitForClientSurfaceRendered('command-center', {
-      root,
+    const committed = await waitForClientSurfaceRendered('command-center', {
+      root: { querySelector: () => rendered ? {} as Element : null },
       timeoutMs: 500,
       now: () => ticks * 16,
       schedule: callback => {
@@ -43,14 +31,10 @@ describe('visible client surface commit', () => {
         callback();
       },
     });
+    expect(committed).toBe(true);
 
-    expect(result).toBe(true);
-    expect(ticks).toBe(2);
-  });
-
-  it('returns false when no visible surface commits before the timeout', async () => {
     let now = 0;
-    const result = await waitForClientSurfaceRendered('command-center', {
+    const missing = await waitForClientSurfaceRendered('command-center', {
       root: { querySelector: () => null },
       timeoutMs: 50,
       now: () => now,
@@ -59,7 +43,6 @@ describe('visible client surface commit', () => {
         callback();
       },
     });
-
-    expect(result).toBe(false);
+    expect(missing).toBe(false);
   });
 });

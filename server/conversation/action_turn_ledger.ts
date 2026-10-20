@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readDB, writeDB } from '../../db_layer';
+import { readDatabaseTables, commitDatabaseTables } from '../../db_layer';
 
 export const DEFAULT_CONVERSATION_ACTION_TURN_LEASE_TTL_MS = 90_000;
 export const MAX_CONVERSATION_ACTION_TURN_LEASE_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -321,23 +321,13 @@ function terminalStateIsIdempotent(
   return !messageId || !turn.terminalMessageId || turn.terminalMessageId === messageId;
 }
 
-export function getConversationActionTurnProcessEpoch(): string {
-  return PROCESS_EPOCH;
-}
-
-export function isConversationActionTurnTerminalStatus(
-  status: ConversationActionTurnStatus,
-): status is ConversationActionTurnTerminalStatus {
-  return isTerminalStatus(status);
-}
-
 export function acceptConversationActionTurn(
   input: AcceptConversationActionTurnInput,
 ): AcceptConversationActionTurnResult {
   const identity = identityFrom(input);
   const userMessageId = required(input.userMessageId, 'userMessageId');
   const { iso } = resolveNow(input.now);
-  const db = readDB();
+  const db = readDatabaseTables(["conversationActionTurns"]);
   const rows = turnRows(db);
   const existingIndex = findTurnIndex(rows, identity);
   if (existingIndex >= 0) {
@@ -378,7 +368,7 @@ export function acceptConversationActionTurn(
     terminalAt: '',
   };
   rows.push(turn);
-  writeDB(db);
+  commitDatabaseTables(db);
   return { accepted: true, created: true, turn: cloneTurn(turn) };
 }
 
@@ -386,7 +376,7 @@ export function getConversationActionTurn(
   input: ConversationActionTurnIdentity,
 ): ConversationActionTurn | null {
   const identity = identityFrom(input);
-  const rows = turnRows(readDB());
+  const rows = turnRows(readDatabaseTables(["conversationActionTurns"]));
   const index = findTurnIndex(rows, identity);
   return index >= 0 ? cloneTurn(rows[index]) : null;
 }
@@ -395,7 +385,7 @@ export function listConversationActionTurns(
   input: ListConversationActionTurnsInput = {},
 ): ConversationActionTurn[] {
   const statuses = input.statuses ? new Set(input.statuses) : null;
-  return turnRows(readDB())
+  return turnRows(readDatabaseTables(["conversationActionTurns"]))
     .filter(turn => !input.conversationId || turn.conversationId === input.conversationId)
     .filter(turn => !input.userId || turn.userId === input.userId)
     .filter(turn => !input.taskId || turn.taskId === input.taskId)
@@ -411,7 +401,7 @@ export function acquireConversationActionTurnLease(
   const processEpoch = optional(input.processEpoch) || PROCESS_EPOCH;
   const ttlMs = resolveTtlMs(input.ttlMs);
   const now = resolveNow(input.now);
-  const db = readDB();
+  const db = readDatabaseTables(["conversationActionTurns"]);
   const rows = turnRows(db);
   const index = findTurnIndex(rows, identity);
   if (index < 0) {
@@ -454,7 +444,7 @@ export function acquireConversationActionTurnLease(
     turn.leaseExpiresAt = new Date(now.ms + ttlMs).toISOString();
     turn.updatedAt = now.iso;
     turn.revision += 1;
-    writeDB(db);
+    commitDatabaseTables(db);
     return { acquired: true, recovered, renewed: true, turn: cloneTurn(turn) };
   }
 
@@ -466,17 +456,18 @@ export function acquireConversationActionTurnLease(
   turn.leaseExpiresAt = new Date(now.ms + ttlMs).toISOString();
   turn.updatedAt = now.iso;
   turn.revision += 1;
-  writeDB(db);
+  commitDatabaseTables(db);
   return { acquired: true, recovered, renewed: false, turn: cloneTurn(turn) };
 }
 
 export function bindConversationActionTurnTask(
   input: BindConversationActionTurnTaskInput,
+  database?: Parameters<typeof commitDatabaseTables>[0],
 ): BindConversationActionTurnTaskResult {
   const identity = identityFrom(input);
   const taskId = required(input.taskId, 'taskId');
   const { iso } = resolveNow(input.now);
-  const db = readDB();
+  const db = database || readDatabaseTables(["conversationActionTurns"]);
   const rows = turnRows(db);
   const index = findTurnIndex(rows, identity);
   if (index < 0) return { bound: false, changed: false, reason: 'not_found', turn: null };
@@ -499,7 +490,7 @@ export function bindConversationActionTurnTask(
   turn.taskId = taskId;
   turn.updatedAt = iso;
   turn.revision += 1;
-  writeDB(db);
+  if (!database) commitDatabaseTables(db);
   return { bound: true, changed: true, turn: cloneTurn(turn) };
 }
 
@@ -516,7 +507,7 @@ export function releaseConversationActionTurnLease(
   const processEpoch = optional(input.processEpoch) || PROCESS_EPOCH;
   const releaseReason = required(input.reason, 'reason');
   const { iso } = resolveNow(input.now);
-  const db = readDB();
+  const db = readDatabaseTables(["conversationActionTurns"]);
   const rows = turnRows(db);
   const index = findTurnIndex(rows, identity);
   if (index < 0) return { released: false, changed: false, reason: 'not_found', turn: null };
@@ -549,7 +540,7 @@ export function releaseConversationActionTurnLease(
   turn.recoveredAt = iso;
   turn.updatedAt = iso;
   turn.revision += 1;
-  writeDB(db);
+  commitDatabaseTables(db);
   return { released: true, changed: true, turn: cloneTurn(turn) };
 }
 
@@ -558,7 +549,7 @@ export function finalizeConversationActionTurn(
 ): FinalizeConversationActionTurnResult {
   const identity = identityFrom(input);
   const now = resolveNow(input.now);
-  const db = readDB();
+  const db = readDatabaseTables(["conversationActionTurns"]);
   const rows = turnRows(db);
   const index = findTurnIndex(rows, identity);
   if (index < 0) return { finalized: false, changed: false, reason: 'not_found', turn: null };
@@ -622,7 +613,7 @@ export function finalizeConversationActionTurn(
   }
 
   applyTerminalState(turn, input, now.iso);
-  writeDB(db);
+  commitDatabaseTables(db);
   return { finalized: true, changed: true, turn: cloneTurn(turn) };
 }
 
@@ -673,7 +664,7 @@ export function reconcileConversationActionTurnLease(
   const identity = identityFrom(input);
   const processEpoch = optional(input.processEpoch) || PROCESS_EPOCH;
   const now = resolveNow(input.now);
-  const db = readDB();
+  const db = readDatabaseTables(["conversationActionTurns"]);
   const rows = turnRows(db);
   const index = findTurnIndex(rows, identity);
   if (index < 0) {
@@ -719,7 +710,7 @@ export function reconcileConversationActionTurnLease(
   if (!recoveryReason) {
     return { reconciled: false, action: 'none', reason: 'lease_current', turn: cloneTurn(turn) };
   }
-  writeDB(db);
+  commitDatabaseTables(db);
   return {
     reconciled: true,
     action: 'released',
@@ -733,12 +724,12 @@ export function reconcileConversationActionTurnLeases(
 ): ReconcileConversationActionTurnLeasesResult {
   const processEpoch = optional(input.processEpoch) || PROCESS_EPOCH;
   const now = resolveNow(input.now);
-  const db = readDB();
+  const db = readDatabaseTables(["conversationActionTurns"]);
   const rows = turnRows(db);
   const released: ConversationActionTurn[] = [];
   for (const turn of rows) {
     if (releaseStaleLease(turn, processEpoch, now.ms, now.iso)) released.push(cloneTurn(turn));
   }
-  if (released.length > 0) writeDB(db);
+  if (released.length > 0) commitDatabaseTables(db);
   return { inspected: rows.length, released: released.length, turns: released };
 }

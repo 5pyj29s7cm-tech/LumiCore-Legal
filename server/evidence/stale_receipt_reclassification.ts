@@ -1,5 +1,7 @@
+import { stableValue } from '../../shared/stable_json';
+import { cloneDatabaseValue } from '../db/snapshot_changes';
 import crypto from 'node:crypto';
-import { readDB } from '../../db_layer';
+import { readDatabaseTables } from '../../db_layer';
 import {
   conversationTaskStatusOwnsExecutionLease,
   isTerminalConversationTaskStatus,
@@ -115,15 +117,6 @@ function staleEvidenceError(code: string): Error {
   return error;
 }
 
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.keys(value as Record<string, unknown>).sort().map(key => [
-    key,
-    stableValue((value as Record<string, unknown>)[key]),
-  ]));
-}
-
 function stableJson(value: unknown): string {
   return JSON.stringify(stableValue(value));
 }
@@ -149,7 +142,7 @@ function taskSemanticProjection(value: Record<string, any>): Record<string, any>
 }
 
 function clone<T>(value: T): T {
-  if (typeof structuredClone === 'function') return structuredClone(value);
+  if (typeof structuredClone === 'function') return cloneDatabaseValue(value);
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
@@ -322,7 +315,7 @@ export async function reclassifyManifestBoundStaleReceipt(
     || input.displayRequestId === input.continueRequestId
   ) throw staleEvidenceError('task_regression_stale_binding_invalid');
 
-  const readDb = dependencies.readDb || readDB;
+  const readDb = dependencies.readDb || (() => readDatabaseTables(["conversationActionReceipts","conversationActionTasks","conversationActionTurns","conversations","interactions"]));
   const persistLateAssistant = dependencies.persistLateAssistant || defaultPersistLateAssistant;
   const beforeDb = clone(readDb());
   const conversation = exactRow<Record<string, any>>(

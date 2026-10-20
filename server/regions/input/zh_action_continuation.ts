@@ -1,0 +1,51 @@
+const SHORT_ACTION_CONTINUATION_RE =
+  /^(?:继续(?:做|执行|处理|推进|画|绘制)?|接着(?:做|执行|处理|画|绘制)?|下一步|开始(?:吧|执行)?|执行(?:一下|吧|它|这个|那个|绘图)?|去(?:执行|做|处理|画|绘制)(?:一下|吧)?|去呀|去啊|去呀?快点|(?:你在搞什么(?:东西)?|别磨蹭)(?:啊)?(?:快点)?去(?:执行|做|处理)(?:这个|那个)?(?:任务|事情)?|快点(?:(?:去)?(?:执行|做|处理|画|绘制))?|赶紧(?:(?:去)?(?:执行|做|处理|画|绘制))?|运行(?:一下|吧|它|这个|那个)?|重试|再试(?:一次|一下)?|画出来|绘制出来|执行绘图|保存(?:一下|吧)?|导出(?:一下|吧)?|发出去|提交(?:一下|吧)?|做吧|就这样做)[啊呀吧嘛呢，,。！？?!]*$/iu;
+
+const REFERENTIAL_ACTION_RE =
+  /(?:按照|根据)(?:里面|其中|上面|前面|刚才|刚刚|之前|这个|那个)|(?:把|将)?(?:这个|那个|它|刚才的|刚刚的|上一个|上一条|前面的|上面的).{0,32}(?:执行|运行|打开|处理|画|绘制|保存|导出|发送|提交|继续)|(?:在|到|往)?(?:这里面|这个软件里|这个应用里|刚打开的里面|刚才打开的里面|刚打开的软件里|刚才打开的软件里).{0,64}(?:新建|创建|写|写入|输入|填写|编辑|粘贴|保存|继续|操作)|(?:里面|其中).{0,24}(?:要求|内容|文件|图片|图纸|材料)|^(?:切换|切到|换到|进入|点开|打开)(?:到)?(?:联系人|通讯录|聊天|会话|设置|首页)(?:页面|界面|标签|选项卡)?[。！？?!]*$/iu;
+
+const BACKGROUND_CONTINUATION_RE =
+  /^(?:放到|交给)?后台(?:继续|接着|执行|处理|运行|做)(?:这个|那个|它)?(?:任务|绘图)?[。！？?!]*$/iu;
+
+const EXECUTION_PRESSURE_RE =
+  /^(?:\u6162\u4e2a\u5c41|\u522b\u5149\u8bf4[\uff0c,\s]*\u5feb(?:\u70b9)?\u505a)[\u554a\u5440\u5427\u561b\u5462\uff0c,\u3002\uff01\uff1f?!]*$/iu;
+
+export function matchesCnActionContinuation(text: string): boolean {
+  return SHORT_ACTION_CONTINUATION_RE.test(text)
+    || REFERENTIAL_ACTION_RE.test(text)
+    || BACKGROUND_CONTINUATION_RE.test(text)
+    || EXECUTION_PRESSURE_RE.test(text);
+}
+
+/** Retrospective questions read receipts; negated retries are not new work. */
+export function matchesCnTaskReceiptQuestion(text: string): boolean {
+  const clauses = text.split(/[，,。！？!?；;\n]/u).map(value => value.trim()).filter(Boolean);
+  const affirmative = clauses.filter(value => !/^(?:请)?(?:先|暂时)?(?:不要|别|不用|无需|禁止)/u.test(value));
+  if (affirmative.some(value => /^(?:请|然后|接着|现在|再)?(?:继续(?:做|执行|处理)?|重新执行|重试|新建|创建|修改|打开|把|将)/u.test(value)
+    && !/(?:了吗|了没|了没有|吗|是否)/u.test(value))) return false;
+  return affirmative.some(value => /(?:做到|执行到|进行到|进展到)哪(?:一)?步|(?:告诉我|列出|说说).{0,12}(?:已经|已).{0,12}(?:完成|执行|做).{0,12}(?:哪些|哪几|多少)|(?:刚才|之前|上次|到底).{0,20}(?:播放|保存|执行|运行|生成|导出|发送|打开)(?:成功|完成|好)?了?(?:吗|没|没有)/u.test(value));
+}
+
+/** Recognize an edit to a field already grounded in this file task. */
+export function matchesCnBoundArtifactEdit(text: string, taskText: string): boolean {
+  if (/[？?]|(?:怎么|如何|为什么|是否|了吗|改了没|不要|别再|禁止)/u.test(text)) return false;
+  if (/(?:另一个|另外|新建|新任务|重新开始|别的)(?:文件|任务|报表|表格)?/u.test(text)) return false;
+  const edit = /(?:改成|改为|修改为?|调整为?|换成)\s*[^，,。；;\n]+/u.test(text);
+  if (!edit) return false;
+  if (/(?:刚才|刚刚|上一(?:步|份)|这份|该).{0,16}(?:报表|表格|文件|文档|那张表)|(?:不是换文件|还是刚才那张表)/u.test(text)) return true;
+  const field = text.match(/(数量|单价|价格|金额|日期|标题|名称|姓名|地址|电话|税率|折扣|比例|长度|宽度|高度|颜色|字体|字号|[A-Z]+\d+)\s*(?:改成|改为|修改为?|调整为?|换成)/iu)?.[1];
+  return Boolean(field && taskText.toLocaleLowerCase().includes(field.toLocaleLowerCase()));
+}
+
+/** Latency hint only: literal numeric edits, never an execution permission. */
+export function isCnLiteralTableFieldEdit(text: string): boolean {
+  if (!/(?:\.xlsx\b|\.csv\b|Excel|工作簿|表格|报表)/iu.test(text)) return false;
+  if (/(?:分析|推理|评估|审查|策略|建议|预测|比较|原因|方案)/u.test(text)) return false;
+  return /(?:数量|单价|价格|金额|税率|折扣|比例|[A-Z]+\d+)\s*(?:改成|改为|修改为?|调整为?|换成)\s*[+-]?\d+(?:\.\d+)?%?(?=[，,。；;\s]|$)/iu.test(text);
+}
+
+export function matchesCnExplicitPlaybackRetry(text: string): boolean {
+  return /(?:还没|没有|并未)(?:成功)?播放/u.test(text)
+    && /(?:^|[，,。；;\s])(?:请)?(?:继续|接着|重试)(?:播放|执行)?[。！!\s]*$/u.test(text)
+    && !/(?:不要|别|禁止).{0,8}(?:继续|播放|重试)/u.test(text);
+}

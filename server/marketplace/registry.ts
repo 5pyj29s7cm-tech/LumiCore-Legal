@@ -9,11 +9,12 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { readDB, writeDB } from '../../db_layer';
+import { readDatabaseTables, commitDatabaseTables } from '../../db_layer';
 import { getTranslation, translateCategory } from '../skills/translations';
 import { mcpManager } from '../mcp/client';
 import {
   projectOfficialBundledIdentity,
+  readRuntimeIdentitySnapshot,
   type OfficialSkillIdentityStatus,
 } from './official_identity';
 import { getJwtSecret } from '../config/local_identity';
@@ -138,12 +139,9 @@ function discoverBundledSkills(_scope?: MarketplaceAgentScope): MarketplaceSkill
   return skills;
 }
 
-/** Community skill registry stored in DB */
-const COMMUNITY_REGISTRY: MarketplaceSkill[] = [];
-
 /** Get community registry from DB */
 function getCommunityRegistry(_scope?: MarketplaceAgentScope): MarketplaceSkill[] {
-  const db = readDB();
+  const db = readDatabaseTables(["communitySkills","skillDownloads","skillRatings"]);
   if (!db.communitySkills) return [];
   return db.communitySkills.map((s: any) => {
     return {
@@ -174,9 +172,9 @@ function applyTranslations(skills: MarketplaceSkill[], lang?: string): Marketpla
 
 /** Get all marketplace skills: bundled + community, with download counts & ratings from DB */
 export function getMarketplaceSkills(lang?: string, scope?: MarketplaceAgentScope): MarketplaceSkill[] {
-  const bundled = discoverBundledSkills(scope);
+  const bundled = readRuntimeIdentitySnapshot(() => discoverBundledSkills(scope));
   const community = getCommunityRegistry(scope);
-  const db = readDB();
+  const db = readDatabaseTables(["communitySkills","skillDownloads","skillRatings"]);
 
   const all = [...bundled, ...community];
 
@@ -226,10 +224,10 @@ export function getCategories(lang?: string, scope?: MarketplaceAgentScope): str
 
 /** Record a skill installation */
 export function recordInstall(skillId: string): void {
-  const db = readDB();
+  const db = readDatabaseTables(["communitySkills","skillDownloads","skillRatings"]);
   if (!db.skillDownloads) db.skillDownloads = {};
   db.skillDownloads[skillId] = (db.skillDownloads[skillId] || 0) + 1;
-  writeDB(db);
+  commitDatabaseTables(db);
 }
 
 /** Publish a community skill */
@@ -245,7 +243,7 @@ export function publishSkill(skill: {
   toolCount?: number;
 }): MarketplaceSkill {
   const skillId = skill.id || `skill-${skill.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
-  const db = readDB();
+  const db = readDatabaseTables(["communitySkills","skillDownloads","skillRatings"]);
   if (!db.communitySkills) db.communitySkills = [];
 
   const entry: MarketplaceSkill = {
@@ -270,7 +268,7 @@ export function publishSkill(skill: {
   } else {
     db.communitySkills.push(entry);
   }
-  writeDB(db);
+  commitDatabaseTables(db);
   return entry;
 }
 
@@ -278,7 +276,7 @@ export function publishSkill(skill: {
 export function rateSkill(skillId: string, userId: string, rating: number, review?: string): SkillRating {
   if (rating < 1 || rating > 5) throw new Error('Rating must be between 1 and 5');
 
-  const db = readDB();
+  const db = readDatabaseTables(["communitySkills","skillDownloads","skillRatings"]);
   if (!db.skillRatings) db.skillRatings = [];
 
   // Update existing rating or add new
@@ -295,13 +293,13 @@ export function rateSkill(skillId: string, userId: string, rating: number, revie
   } else {
     (db.skillRatings as SkillRating[]).push(entry);
   }
-  writeDB(db);
+  commitDatabaseTables(db);
   return entry;
 }
 
 /** Get ratings for a skill */
 export function getSkillRatings(skillId: string): SkillRating[] {
-  const db = readDB();
+  const db = readDatabaseTables(["communitySkills","skillDownloads","skillRatings"]);
   if (!db.skillRatings) return [];
   return (db.skillRatings as SkillRating[]).filter(r => r.skillId === skillId);
 }
@@ -311,4 +309,12 @@ function toDisplayName(dirName: string): string {
     .split('-')
     .map(w => w.charAt(0).toUpperCase() + w.slice(1))
     .join(' ');
+}
+
+export function recordMarketplaceInstallBestEffort(skillId: string): void {
+  try {
+    recordInstall(skillId);
+  } catch (error: any) {
+    console.warn(`[SkillHall] Runtime activation succeeded, but install analytics could not be recorded for ${skillId}:`, error?.message || error);
+  }
 }

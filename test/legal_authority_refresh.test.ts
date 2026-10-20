@@ -10,6 +10,7 @@ import {
 } from '../server/legal/kb';
 import {
   extractOfficialArticleMax,
+  formatStatuteAuthorityRefreshReport,
   refreshAuthoritativeStatuteSources,
 } from '../server/legal/statute_authority_refresh';
 import {
@@ -199,6 +200,8 @@ describe('Authoritative statute source refresh', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(result.checks[0].originalText).toBeUndefined();
     expect(result.checks[0].originalTextError).toBeTruthy();
+    expect(formatStatuteAuthorityRefreshReport(result)).toContain('本次不可用：1');
+    expect(formatStatuteAuthorityRefreshReport(result)).toContain('权威版本一致：1');
     expect(verifyCitation('《公司法》第50条')).toMatchObject({ provisionVerified: false, verificationStatus: 'metadata_only' });
   });
 });

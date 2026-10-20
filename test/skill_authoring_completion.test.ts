@@ -1,7 +1,7 @@
 import './helpers';
 import { describe, expect, it } from 'vitest';
 import { buildActionContract, hasCoreActionEvidence } from '../server/cognition/action_contract';
-import { finalizeLumiResponse, tryFinalizeVerifiedBoundedAction } from '../server/cognition/result_finalizer';
+import { finalizeLumiResponse } from '../server/cognition/result_finalizer';
 import { verifiedSkillAuthoringReceipt } from '../server/skills/authoring_receipt';
 import { isArtifactProducerRecord } from '../server/tools/artifact_evidence';
 import type { ToolExecutionRecord } from '../server/tools/types';
@@ -28,7 +28,7 @@ describe('skill lifecycle completion uses the same intent as routing', () => {
     expect(contract.components).toHaveLength(2);
     for (const records of [[read, failed], [save], [read, save]]) {
       expect(hasCoreActionEvidence(contract, records, task, undefined, identity)).toBe(false);
-      expect(tryFinalizeVerifiedBoundedAction({ ...identity, source: 'chat', taskText: task, responseText: '', toolRecords: records })).toBeNull();
+      expect(finalizeLumiResponse({ ...identity, source: 'chat', taskText: task, responseText: '', toolRecords: records })).toMatchObject({ blocked: true });
       const responseText = sanitizeUserFacingExecutionOutput('terminalVerification: failed', { task, toolRecords: records });
       expect(finalizeLumiResponse({ ...identity, source: 'chat', taskText: task, responseText, toolRecords: records }).blocked).toBe(true);
     }
@@ -48,7 +48,7 @@ describe('skill lifecycle completion uses the same intent as routing', () => {
     expect(buildActionContract(taskText).kind).toBe('skill_authoring');
     for (const source of ['chat', 'voice', 'task', 'workflow']) {
       const input = { ...identity, taskText, source, toolRecords: [record()], responseText: '' };
-      const bounded = tryFinalizeVerifiedBoundedAction(input);
+      const bounded = finalizeLumiResponse(input);
       expect(bounded?.blocked).toBe(false);
       expect(bounded?.text).toContain('尚未安装或执行');
       expect(bounded?.text).toContain(draft.review.contentHash);

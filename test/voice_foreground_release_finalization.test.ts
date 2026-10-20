@@ -1,4 +1,7 @@
+import { countImplementationCalls } from './implementation_source';
+import { readVoiceImplementationSource } from './voice_implementation_source';
 import './helpers';
+import { prepareForegroundRequest, taskFor } from './foreground_request_fixture';
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initDatabase, readDB, writeDB } from '../db_layer';
@@ -30,49 +33,7 @@ const TOOL_POLICY = {
   maxIterations: 4,
 };
 
-function prepareVoiceRequest(label: string): VoiceForegroundRequestIdentity {
-  const nonce = `${Date.now()}-${Math.random()}`;
-  const userId = `voice-release-${label}-${nonce}`;
-  const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
-  const requestId = `request-${label}-${nonce}`;
-  const userText = `Run the ${label} voice task.`;
-  const userMessageId = addMessageIdempotent({
-    userId,
-    agentId: 'lumi',
-    conversationId: conversation.id,
-    role: 'user',
-    content: userText,
-    requestId,
-    deferActionPreparation: true,
-    domain: 'personal',
-    source: 'test',
-    channel: 'voice',
-  });
-  const prepared = prepareConversationActionExecution({
-    conversationId: conversation.id,
-    userId,
-    userText,
-    requestId,
-    userMessageId,
-    toolPolicy: TOOL_POLICY,
-    forceTask: true,
-  });
-  expect(prepared.state?.taskId).toBeTruthy();
-  return Object.freeze({
-    conversationId: conversation.id,
-    userId,
-    requestId,
-    expectedTaskId: prepared.state!.taskId!,
-  });
-}
-
-function taskFor(identity: VoiceForegroundRequestIdentity): any {
-  return readDB().conversationActionTasks.find((row: any) => (
-    row.id === identity.expectedTaskId
-    && row.conversationId === identity.conversationId
-    && row.userId === identity.userId
-  ));
-}
+const prepareVoiceRequest = (label: string) => prepareForegroundRequest('voice', label, TOOL_POLICY);
 
 function buildPriorityHandoffSession(identity: VoiceForegroundRequestIdentity): any {
   return {
@@ -646,8 +607,8 @@ describe('voice foreground release convergence', () => {
     expect(await getPendingConfirmationDurably(identity.userId, confirmationScope)).toBeNull();
   });
 
-  it('keeps immutable identity and converges before fast-path, exception, cancel, and finally release', () => {
-    const source = readFileSync('server/socket/voice.ts', 'utf8');
+  it('keeps immutable identity and converges before retained control, exception, cancel, and model finally release', () => {
+    const source = readVoiceImplementationSource();
 
     const identityAt = source.indexOf('const foregroundRequestIdentity: VoiceForegroundRequestIdentity = Object.freeze({');
     const bindingFailureAt = source.indexOf("if ('bindingFailure' in actionTaskExecution)");
@@ -655,16 +616,22 @@ describe('voice foreground release convergence', () => {
     expect(identityAt).toBeGreaterThan(bindingFailureAt);
     expect(freezeAt).toBeGreaterThan(identityAt);
     expect(source.slice(identityAt, identityAt + 420)).toContain("? { expectedTaskId: actionTaskExecution.state.taskId }");
-    const prepareTaskAt = source.indexOf('prepareConversationActionExecution({');
-    expect(source.slice(prepareTaskAt, prepareTaskAt + 520))
-      .toContain('|| interruptedMerge.usedInterruptedTurn');
+    const prepareTaskAt = source.indexOf('preparePlannedConversationExecution({');
+    expect(prepareTaskAt).toBeGreaterThanOrEqual(0);
+    expect(source.slice(prepareTaskAt, prepareTaskAt + 700))
+      .toContain('acceptedInterruptedTurn: interruptedMerge.usedInterruptedTurn');
+    const bindingOwner = readFileSync('server/conversation/planned_execution.ts', 'utf8');
+    expect(bindingOwner).toContain('input.acceptedInterruptedTurn || execution.trustedActionContinuation');
 
     const publicHelperStart = source.indexOf('export async function convergeVoiceForegroundRequestBeforeRelease');
     const settleBeforeFinalizeAt = source.indexOf('settleConversationActionExecutionRequest(', publicHelperStart);
-    const fallbackFinalizeAt = source.indexOf('const finalization = await finalizeForegroundRequestDurably({', publicHelperStart);
+    const manager = readFileSync('server/conversation/foreground_finalization.ts', 'utf8');
+    const settleCallbackAt = manager.indexOf('input.settlePendingTask();');
+    const fallbackFinalizeAt = manager.indexOf('const finalization = await finalizeForegroundRequestDurably({', settleCallbackAt);
     expect(settleBeforeFinalizeAt).toBeGreaterThan(publicHelperStart);
-    expect(fallbackFinalizeAt).toBeGreaterThan(settleBeforeFinalizeAt);
-    expect(source.slice(fallbackFinalizeAt, fallbackFinalizeAt + 360))
+    expect(settleCallbackAt).toBeGreaterThan(-1);
+    expect(fallbackFinalizeAt).toBeGreaterThan(settleCallbackAt);
+    expect(manager.slice(fallbackFinalizeAt, fallbackFinalizeAt + 360))
       .toContain('assistantMessageId: convergence.assistantMessageId || undefined');
 
     const releaseStart = source.indexOf('const voiceReleaseGate = createDurableForegroundReleaseGate({');
@@ -686,7 +653,20 @@ describe('voice foreground release convergence', () => {
     expect(workLaneReleaseAt).toBeGreaterThan(desktopReleaseAt);
     expect(workHeartbeatReleaseAt).toBeGreaterThan(workLaneReleaseAt);
 
-    expect(source).toContain("releaseVoiceTurnResources('Voice quick-command fast path completed.')");
+    expect(source).not.toContain('preMatchedQuickResult');
+    const turnSource = readFileSync('server/socket/voice_conversation_turn.ts', 'utf8');
+    expect(countImplementationCalls(turnSource, 'releaseVoiceTurnResources')).toBe(1);
+    const ownerStart = turnSource.indexOf('async function processAdmittedVoiceTurn(');
+    const ownerTry = turnSource.indexOf('await runLumiEntryTurn<void>({', ownerStart);
+    const clarificationPhase = turnSource.indexOf('await executeVoiceConfirmedAndDeterministicTurn(', ownerTry);
+    const modelPhase = turnSource.indexOf('return prepareVoiceModelTurn(', ownerTry);
+    const clarificationSource = readFileSync('server/socket/voice/turn/execute_voice_confirmed_and_deterministic_turn.ts', 'utf8');
+    const phaseStart = clarificationSource.indexOf('async function executeVoiceConfirmedAndDeterministicTurn(');
+    expect(ownerTry).toBeGreaterThan(ownerStart);
+    expect(clarificationPhase).toBeGreaterThan(ownerTry);
+    expect(modelPhase).toBeGreaterThan(clarificationPhase);
+    expect(clarificationSource.indexOf("if (context.transcriptExecutionGuard.action === 'clarify')", phaseStart))
+      .toBeLessThan(clarificationSource.indexOf('await persistTurnMemory(', phaseStart));
     expect(source).toContain("releaseVoiceTurnResources('Voice model/tool pipeline reached its finally boundary.')");
 
     const outerFailureStart = source.indexOf("logger.error('[Voice Error]:', err);");
@@ -700,11 +680,12 @@ describe('voice foreground release convergence', () => {
     const mainFailureStart = source.indexOf('logger.error("[Audio Error]:", err);');
     const mainFailureEnd = source.indexOf('} finally {', mainFailureStart);
     const mainFailure = source.slice(mainFailureStart, mainFailureEnd);
-    expect(mainFailure).toContain('await commitVoiceTerminal({');
+    expect(mainFailure).toContain('await finishVoiceTerminal({');
+    expect(source).toContain('commit: commitVoiceTerminal');
     expect(mainFailure).toContain('CN_VOICE_WORK_MESSAGES.processingFailed');
     expect(mainFailure).not.toContain("emitAgent('agent:error'");
     const voiceTerminalStart = source.indexOf('const commitVoiceTerminal = async');
-    const voiceTerminalEnd = source.indexOf('const maxIterations =', voiceTerminalStart);
+    const voiceTerminalEnd = source.indexOf('const releaseVoiceTransportResources =', voiceTerminalStart);
     expect(source.slice(voiceTerminalStart, voiceTerminalEnd))
       .toContain('persistVoiceAssistantMessage(');
 

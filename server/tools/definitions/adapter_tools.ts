@@ -1,7 +1,6 @@
 import { getAdapterRegistry, summarizeAdapters, AdapterCapability, AdapterCategory, AdapterStatus } from '../../adapters/registry';
 import { getClientStateForScope } from '../../client/self_model';
 import { ToolRegistry } from '../registry';
-import { registerAdapterAutoRecoveryTools } from './adapter_auto_recovery_tools';
 
 const STATUSES: AdapterStatus[] = [
   'ready',
@@ -31,7 +30,6 @@ const CATEGORIES: AdapterCategory[] = [
 ];
 
 export function registerAdapterTools(registry: ToolRegistry): void {
-  registerAdapterAutoRecoveryTools(registry);
   registry.register({
     name: 'adapter_registry_list',
     description: 'List Lumi client capability adapters: windows, modes, tools, skills, music, meeting, organization, runtime logs, knowledge, settings, permissions, desktop control, CAD/BIM, external apps, and collaboration.',

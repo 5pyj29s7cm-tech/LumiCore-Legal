@@ -1,0 +1,7 @@
+import {beforeAll,expect,it,vi} from 'vitest';
+const fx=vi.hoisted(()=>({handlers:new Map<string,(args:any)=>Promise<any>>()}));
+vi.mock('@modelcontextprotocol/sdk/server/mcp.js',()=>({McpServer:class {registerTool(name:string,_schema:any,handler:any){fx.handlers.set(name,handler);}async connect(){}}}));
+vi.mock('@modelcontextprotocol/sdk/server/stdio.js',()=>({StdioServerTransport:class {}}));
+beforeAll(async()=>{await import('../server/skills/bundled/content-ops/index');});
+it.each([15,20,25,30,45,120,180])('keeps all four script beats ordered, contiguous and within %s seconds',async duration=>{const result=await fx.handlers.get('short_video_script')!({topic:'Virtual legal video',durationSeconds:duration});const script=JSON.parse(result.content[0].text);const intervals=script.structure.map((b:any)=>b.second.split('-').map(Number));expect(intervals).toHaveLength(4);expect(intervals[0][0]).toBe(0);expect(intervals.at(-1)[1]).toBe(duration);intervals.forEach(([start,end]:number[],i:number)=>{expect(start).toBeLessThan(end);expect(end).toBeLessThanOrEqual(duration);if(i)expect(start).toBe(intervals[i-1][1]);});});
+it('retains the established 45-second timing and does not publish or generate media',async()=>{const result=await fx.handlers.get('short_video_script')!({topic:'Virtual legal video',durationSeconds:45});const script=JSON.parse(result.content[0].text);expect(script.structure.map((b:any)=>b.second)).toEqual(['0-3','3-15','15-35','35-45']);expect(script).not.toHaveProperty('providerTaskId');});

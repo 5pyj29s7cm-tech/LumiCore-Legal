@@ -1,10 +1,9 @@
-import React, { useMemo, useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { RingDef } from './types';
 
 interface OrbitalRingsProps {
-  hue: number;
   syncRate: number;
 }
 
@@ -17,9 +16,8 @@ const DEFAULT_RINGS: RingDef[] = [
   { y: 1.3, radius: 0.45, tube: 0.008, tiltX: -0.65, tiltZ: 0.4, hue: 150, speed: -0.25, particleCount: 40 },
 ];
 
-export function OrbitalRings({ hue, syncRate }: OrbitalRingsProps) {
+export function OrbitalRings({ syncRate }: OrbitalRingsProps) {
   const groupRef = useRef<THREE.Group>(null);
-  const particleGroupsRef = useRef<THREE.Group[]>([]);
 
   const rings = useMemo(() => DEFAULT_RINGS, []);
 
@@ -115,7 +113,7 @@ export function OrbitalRings({ hue, syncRate }: OrbitalRingsProps) {
       ))}
 
       {/* Orbiting particles on each ring */}
-      {rings.map((r, ri) => (
+      {rings.map((_, ri) => (
         <group key={`particles-${ri}`}>
           {particleData[ri].map((_, pi) => (
             <mesh

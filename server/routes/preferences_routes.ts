@@ -1,9 +1,10 @@
+import { readSettingRecord, writeSetting } from "../persistence/settings_repository";
 import { Router } from "express";
-import { readDB, writeDB } from "../../db_layer";
+
 import { requireAuth } from "../middleware/auth";
 import { broadcastPreferenceChange } from "../memory";
 import { broadcastToOrg } from '../org/ws_sync';
-import { getStoredOperationMode, saveStoredOperationMode } from "../cognition/operation_mode_store";
+import { getStoredOperationMode, saveStoredOperationMode, getStoredDesktopExecutionPreference, saveStoredDesktopExecutionPreference } from "../cognition/operation_mode_store";
 
 export function mountPreferencesRoutes(router: Router, _jwtSecret: string) {
   const petPreferenceKey = (user: NonNullable<Express.Request['user']>) => (
@@ -12,8 +13,7 @@ export function mountPreferencesRoutes(router: Router, _jwtSecret: string) {
 
   router.get("/preferences/pet", requireAuth, (req, res) => {
     try {
-      const db = readDB();
-      const setting = (db.settings || []).find((s: any) => s.key === petPreferenceKey(req.user!));
+      const setting = readSettingRecord(petPreferenceKey(req.user!));
       if (setting) {
         res.json(JSON.parse(setting.value));
       } else {
@@ -31,17 +31,7 @@ export function mountPreferencesRoutes(router: Router, _jwtSecret: string) {
         return res.status(403).json({ error: 'Only an organization owner or administrator can change the shared organization appearance overlay.' });
       }
       const { pet, accessories } = req.body || {};
-      const db = readDB();
-      if (!db.settings) db.settings = [];
-      const key = petPreferenceKey(req.user!);
-      const value = JSON.stringify({ pet: pet || null, accessories: accessories || [] });
-      const existing = db.settings.findIndex((s: any) => s.key === key);
-      if (existing >= 0) {
-        db.settings[existing].value = value;
-      } else {
-        db.settings.push({ key, value });
-      }
-      writeDB(db);
+      writeSetting(petPreferenceKey(req.user!), JSON.stringify({ pet: pet || null, accessories: accessories || [] }));
       const preference = { pet: pet || null, accessories: accessories || [] };
       if (req.user!.orgId) {
         broadcastToOrg(req.user!.orgId, 'preferences:changed', {
@@ -58,6 +48,19 @@ export function mountPreferencesRoutes(router: Router, _jwtSecret: string) {
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  router.get('/preferences/desktop_execution', requireAuth, (req, res) => {
+    res.json({ preference: getStoredDesktopExecutionPreference(req.user!.uid) });
+  });
+  router.put('/preferences/desktop_execution', requireAuth, async (req, res) => {
+    const preference = req.body?.preference;
+    if (preference !== 'internal' && preference !== 'external') return res.status(400).json({ error: 'Invalid desktop execution preference' });
+    try {
+      const saved = await saveStoredDesktopExecutionPreference(req.user!.uid, preference);
+      broadcastPreferenceChange(req.user!.uid, 'desktop_execution', { preference: saved }, { domain: req.user!.orgId ? 'work' : 'personal', orgId: req.user!.orgId });
+      res.json({ ok: true, preference: saved });
+    } catch { res.status(500).json({ error: 'Desktop execution preference could not be saved' }); }
   });
 
   router.get("/preferences/operation_mode", requireAuth, (req, res) => {

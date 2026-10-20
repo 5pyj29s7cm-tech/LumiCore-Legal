@@ -1,9 +1,28 @@
+import { readImplementationSource } from './implementation_source';
+// @vitest-environment jsdom
+import { createElement } from 'react';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const fixture = vi.hoisted(() => ({ uid: 'user-a', org: '', api: vi.fn(), on: vi.fn(), off: vi.fn() }));
+vi.mock('../src/contexts/AppContext', () => ({ useApp: () => ({ user: { uid: fixture.uid }, workDomain: fixture.org ? 'work' : 'personal', orgConnection: { connected: true, orgId: fixture.org } }) }));
+vi.mock('../src/services/apiClient', () => ({ apiFetch: fixture.api }));
+vi.mock('../src/services/socketService', () => ({ socketService: { getSocket: () => fixture } }));
+vi.mock('../src/hooks/useRuntimeStatus', () => ({ useRuntimeStatus: () => ({ status: null, loading: false, error: '', refresh: async () => {} }) }));
+vi.mock('../src/hooks/useLumiScene', () => ({ useLumiScene: () => ({ scene: null, loading: false, error: '', refresh() {} }) }));
+vi.mock('../src/components/LumiCoreSphere', () => ({ LumiCoreSphere: ({ tasks, state, labels }: any) => createElement('div', { 'data-testid': 'sphere', 'data-state': state, 'data-label': labels[state] }, tasks.map((t: any) => t.title).join('|')) }));
+vi.mock('motion/react', () => ({
+  motion: { div: ({ animate, initial, transition, ...props }: any) => createElement('div', props) },
+  AnimatePresence: ({ children }: any) => children,
+  useReducedMotion: () => false,
+}));
+import { CommandCenterPanel } from '../src/components/CommandCenterPanel';
+afterEach(() => { cleanup(); fixture.api.mockReset(); fixture.on.mockReset(); fixture.off.mockReset(); fixture.uid = 'user-a'; fixture.org = ''; });
 
 function source(relativePath: string): string {
-  return readFileSync(path.join(process.cwd(), relativePath), 'utf8').replace(/\r\n/g, '\n');
+  return readImplementationSource(path.join(process.cwd(), relativePath), 'utf8').replace(/\r\n/g, '\n');
 }
 
 describe('single-core command center', () => {
@@ -15,7 +34,7 @@ describe('single-core command center', () => {
     expect(panel).toContain('buildLumiCoreOrbitTasks(tasks)');
     expect(panel).toContain('tasks={orbitTasks}');
     expect(panel).toContain('state={coreState}');
-    expect(sphere).toContain('const activeTasks = tasks.filter(task => task.active).slice(0, 8)');
+    expect(sphere).toContain('const activeTasks = tasks.slice(0, 8)');
     expect(sphere).toContain('{activeTasks.map((task, index) =>');
   });
 
@@ -27,6 +46,7 @@ describe('single-core command center', () => {
     expect(sphere).toContain('const COSMOS_STARS = [');
     expect(sphere).toContain('useReducedMotion()');
     expect(sphere).toContain('data-lumi-core-field-state={state}');
+    expect(sphere).toContain('const motionEnabled = reducedMotion !== true;');
     expect(sphere).not.toContain('Math.random');
     expect(styles).toContain('.lumi-core-command-field__routes');
     expect(styles).toContain('@keyframes lumi-core-route-flow');
@@ -67,19 +87,130 @@ describe('single-core command center', () => {
 
     expect(panel).not.toContain('Math.random');
     expect(sphere).not.toContain('Math.random');
-    expect(panel).toContain('commandCenterTaskIsActive(task)');
-    expect(panel).toContain("const coreState = hasAttention ? 'attention' : activeTasks.length > 0 ? 'working' : 'ready'");
+    expect(panel).toContain('tasks.filter(commandCenterTaskIsActive)');
+    expect(panel).toContain("const coreState = orbitTasks.some(task => task.state === 'working') ? 'working' : 'ready'");
   });
 
-  it('keeps the command center mounted while task state refreshes', () => {
-    const panel = source('src/components/CommandCenterPanel.tsx');
+  it('stops completed video activity without letting old confirmation or failure history drive the background', async () => {
+    const history = [
+      { id: 'old-video-card', title: 'TikTok video', status: 'waiting_confirmation', phase: 'waiting_confirmation' },
+      { id: 'old-failure', title: 'Old task', status: 'blocked', phase: 'blocked', controls: { canCancel: false } },
+      { id: 'completed-video', title: 'Finished TikTok video', status: 'completed', phase: 'completed' },
+    ];
+    let items = history;
+    fixture.api.mockImplementation(async () => ({ ok: true, json: async () => ({ items }) }));
+    const view = render(createElement(CommandCenterPanel, { t: { langCode: 'en' }, view: 'office', backgroundOnly: true, onViewChange() {} }));
+    const sphere = view.getByTestId('sphere');
+    await waitFor(() => expect(fixture.api).toHaveBeenCalledTimes(1));
+    expect(sphere.dataset.state).toBe('ready');
+    expect(sphere.textContent).toBe('');
+    expect(sphere.dataset.label).not.toBe('Needs attention');
 
-    expect(panel).toContain('const refreshInFlightRef = useRef<Promise<void> | null>(null)');
-    expect(panel).toContain('if (refreshInFlightRef.current) return refreshInFlightRef.current');
-    expect(panel).toContain('<LumiCoreSphere');
-    expect(panel).not.toContain('loading ? (');
-    expect(panel).toContain("'autonomous:task_started'");
-    expect(panel).toContain('timer = setTimeout(() => { void refresh(); void refreshRuntime(); }, 100)');
+    items = [...history, { id: 'new-video', title: 'New video', status: 'running', phase: 'working' }];
+    act(() => fixture.on.mock.calls.find(([name]) => name === 'agent:status')![1]());
+    await waitFor(() => expect(sphere.textContent).toBe('New video'));
+    expect(sphere.dataset.state).toBe('working');
+
+    items = [...history, { id: 'new-video', title: 'New video', status: 'completed', phase: 'working' }];
+    act(() => fixture.on.mock.calls.find(([name]) => name === 'chat:conversation_updated')![1]());
+    await waitFor(() => expect(sphere.dataset.state).toBe('ready'));
+    expect(sphere.textContent).toBe('');
+
+    items = [...history, { id: 'queued-video', title: 'Queued video', status: 'queued', phase: 'queued' }];
+    act(() => fixture.on.mock.calls.find(([name]) => name === 'connect')![1]());
+    await waitFor(() => expect(sphere.textContent).toBe('Queued video'));
+    expect(sphere.dataset.state).toBe('ready');
+  });
+
+  it('clears stale activity when the task snapshot becomes unavailable', async () => {
+    fixture.api.mockResolvedValue({ ok: true, json: async () => ({ items: [{ id: 'running', title: 'Working', status: 'running' }] }) });
+    const view = render(createElement(CommandCenterPanel, { t: { langCode: 'en' }, view: 'office', onViewChange() {} }));
+    const sphere = view.getByTestId('sphere');
+    await waitFor(() => expect(sphere.dataset.state).toBe('working'));
+    fixture.api.mockRejectedValue(new Error('disconnected'));
+    act(() => fixture.on.mock.calls.find(([name]) => name === 'connect')![1]());
+    await waitFor(() => expect(sphere.dataset.state).toBe('ready'));
+    expect(sphere.textContent).toBe('');
+    expect(sphere.dataset.label).toBe('Runtime status is unavailable');
+  });
+
+  it('recovers a missed completion event during the next visible refresh and stops polling on unmount', async () => {
+    let status = 'running';
+    fixture.api.mockImplementation(async () => ({ ok: true, json: async () => ({ items: [{ id: 'video', title: 'Video', status }] }) }));
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    vi.useFakeTimers();
+    const view = render(createElement(CommandCenterPanel, { t: { langCode: 'en' }, view: 'office', onViewChange() {} }));
+    try {
+      await act(async () => {});
+      expect(view.getByTestId('sphere').dataset.state).toBe('working');
+      status = 'completed';
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(view.getByTestId('sphere').dataset.state).toBe('ready');
+      expect(view.getByTestId('sphere').textContent).toBe('');
+      view.unmount();
+      const count = fixture.api.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(fixture.api).toHaveBeenCalledTimes(count);
+    } finally { vi.useRealTimers(); hidden.mockRestore(); }
+  });
+
+  it('keeps decorative sphere animation after completion without leaving a task spinner', async () => {
+    const { LumiCoreSphere } = await vi.importActual<typeof import('../src/components/LumiCoreSphere')>('../src/components/LumiCoreSphere');
+    const { LumiCoreOrb } = await vi.importActual<typeof import('../src/components/LumiCoreOrb')>('../src/components/LumiCoreOrb');
+    const context = { clearRect: vi.fn(), beginPath: vi.fn(), arc: vi.fn(), fill: vi.fn(), stroke: vi.fn() };
+    const canvas = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context as any);
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(17);
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+    const labels = { aria: 'Core', lumiCore: 'LumiCore', ready: 'Ready', working: 'Working', noTasks: 'No running task' };
+    const view = render(createElement(LumiCoreSphere, { tasks: [{ id: 'video', title: 'Video', state: 'working' }], state: 'working', labels }));
+    try {
+      expect(raf).toHaveBeenCalledTimes(1);
+      expect(view.container.querySelector('[data-lumicore-orb]')?.getAttribute('data-reduced-motion')).toBe('false');
+      expect(view.container.querySelectorAll('.animate-spin')).toHaveLength(1);
+      view.rerender(createElement(LumiCoreSphere, { tasks: [], state: 'ready', labels }));
+      expect(cancel).not.toHaveBeenCalled();
+      raf.mock.calls[0][0](16);
+      expect(raf).toHaveBeenCalledTimes(2);
+      expect(context.clearRect).toHaveBeenCalled();
+      expect(view.container.querySelector('[data-lumicore-orb]')?.getAttribute('data-reduced-motion')).toBe('false');
+      expect(view.container.querySelectorAll('.animate-spin')).toHaveLength(0);
+      view.rerender(createElement(LumiCoreSphere, { tasks: [{ id: 'queued', title: 'Queued', state: 'queued' }], state: 'ready', labels }));
+      expect(raf).toHaveBeenCalledTimes(2);
+      expect(view.container.querySelectorAll('.animate-spin')).toHaveLength(0);
+      view.unmount();
+      expect(cancel).toHaveBeenCalledWith(17);
+      const avatar = render(createElement(LumiCoreOrb));
+      expect(raf).toHaveBeenCalledTimes(3);
+      avatar.unmount();
+    } finally { view.unmount(); canvas.mockRestore(); raf.mockRestore(); cancel.mockRestore(); }
+  });
+
+  it('keeps the command center mounted while task state refreshes', async () => {
+    const pending: Array<(value: any) => void> = [];
+    fixture.api.mockImplementation(() => new Promise(resolve => pending.push(resolve)));
+    const props = { t: { langCode: 'en' }, view: 'office' as const, onViewChange: () => {} };
+    const view = render(createElement(CommandCenterPanel, props));
+    const sphere = view.getByTestId('sphere');
+    const respond = (index: number, title: string) => pending[index]({ ok: true, json: async () => ({ items: [{ id: title, title, status: 'running' }] }) });
+    await waitFor(() => expect(pending).toHaveLength(1));
+    for (const name of ['autonomous:task_started', 'autonomous:task_completed', 'autonomous:task_cancelled'])
+      act(() => fixture.on.mock.calls.find(([event]) => event === name)![1]());
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(view.getByTestId('sphere')).toBe(sphere);
+    await act(async () => { respond(1, 'Newest task'); });
+    await act(async () => { respond(0, 'Stale task'); });
+    expect(sphere.textContent).toBe('Newest task');
+    for (const owner of ['account', 'organization']) {
+      fireEvent.click(view.getAllByTitle('Refresh')[0]); const previous = pending.length - 1;
+      if (owner === 'account') fixture.uid = 'user-b'; else fixture.org = 'org-b';
+      view.rerender(createElement(CommandCenterPanel, props));
+      await waitFor(() => expect(pending).toHaveLength(previous + 2));
+      expect(sphere.textContent).toBe('');
+      await act(async () => { respond(previous + 1, owner); respond(previous, 'Old owner'); });
+      expect(sphere.textContent).toBe(owner);
+    }
+    view.unmount();
+    expect(fixture.off.mock.calls.map(([name]) => name)).toEqual(fixture.on.mock.calls.map(([name]) => name));
   });
 
   it('keeps the command-center core behind a left conversation and right navigation rail', () => {
@@ -177,15 +308,15 @@ describe('single-core command center', () => {
     expect(surfaces).toContain("'open_command_center'");
   });
 
-  it('places image and video generation below Knowledge Base and renders a real media workspace', () => {
+  it('places one AI Creation entry below Knowledge Base and renders a real media workspace', () => {
     const chatPage = source('src/components/AgentChatPage.tsx');
     const knowledgeIndex = chatPage.indexOf('data-knowledge-base-switch');
-    const imageGenerationIndex = chatPage.indexOf('data-image-generation-switch');
-    const videoGenerationIndex = chatPage.indexOf('data-video-generation-switch');
+    const aiCreationIndex = chatPage.indexOf('data-ai-creation-switch');
 
     expect(knowledgeIndex).toBeGreaterThan(-1);
-    expect(imageGenerationIndex).toBeGreaterThan(knowledgeIndex);
-    expect(videoGenerationIndex).toBeGreaterThan(imageGenerationIndex);
+    expect(aiCreationIndex).toBeGreaterThan(knowledgeIndex);
+    expect(chatPage).not.toContain('data-image-generation-switch');
+    expect(chatPage).not.toContain('data-video-generation-switch');
     expect(chatPage).toContain('data-media-generation-studio');
     expect(chatPage).toContain("kind === 'video'");
     expect(chatPage).toContain('<FileResourceVideo');

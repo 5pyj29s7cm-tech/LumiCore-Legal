@@ -18,6 +18,11 @@ export interface IndustryWorkflowContract {
   confirmationBoundaries: string[];
   requiresFileArtifact: boolean;
   acceptedFileExtensions: string[];
+  /** Preferred executable capabilities for this exact outcome workspace. */
+  executionTools?: string[];
+  /** Canonical verified tool receipts that must exist before delivery. */
+  requiredToolReceipts?: string[];
+  requiredToolEvidence?: string[];
   draftRequired?: boolean;
   minMatchedContentTerms?: number;
 }
@@ -36,6 +41,15 @@ const ECOMMERCE_CONTRACTS: IndustryWorkflowContract[] = [
     confirmationBoundaries: ['External store changes, messages, publishing, price changes, and advertising spend require accountable approval and provider receipts.'],
     requiresFileArtifact: false,
     acceptedFileExtensions: [],
+    executionTools: [
+      'industry_ecommerce_today_snapshot',
+      'business_ecommerce_ecommerce_order_profit',
+      'business_ecommerce_campaign_roi_analyzer',
+      'business_ecommerce_after_sales_risk_report',
+      'read_xlsx',
+      'read_file',
+    ],
+    requiredToolReceipts: ['industry_ecommerce_today_snapshot'],
     minMatchedContentTerms: 2,
   },
   {
@@ -51,6 +65,8 @@ const ECOMMERCE_CONTRACTS: IndustryWorkflowContract[] = [
     confirmationBoundaries: ['Product selection, advertising spend, procurement, and content publishing require accountable approval.'],
     requiresFileArtifact: false,
     acceptedFileExtensions: [],
+    executionTools: ['industry_ecommerce_trend_discovery', 'web_search', 'url_fetch'],
+    requiredToolReceipts: ['industry_ecommerce_trend_discovery'],
     minMatchedContentTerms: 2,
   },
   {
@@ -66,6 +82,16 @@ const ECOMMERCE_CONTRACTS: IndustryWorkflowContract[] = [
     confirmationBoundaries: ['Read-only analysis may run automatically; any store mutation or external submission requires approval and a platform receipt.'],
     requiresFileArtifact: false,
     acceptedFileExtensions: [],
+    executionTools: [
+      'industry_ecommerce_store_data_snapshot',
+      'read_xlsx',
+      'read_file',
+      'business_ecommerce_ecommerce_snapshot_analyzer',
+      'business_ecommerce_platform_settlement_reconcile',
+      'business_ecommerce_review_source_normalizer',
+      'business_ecommerce_review_insight_analyzer',
+    ],
+    requiredToolReceipts: ['industry_ecommerce_store_data_snapshot'],
     minMatchedContentTerms: 2,
   },
   {
@@ -81,6 +107,15 @@ const ECOMMERCE_CONTRACTS: IndustryWorkflowContract[] = [
     confirmationBoundaries: ['Listing, delisting, price changes, and publishing require item-level approval and provider receipts.'],
     requiresFileArtifact: false,
     acceptedFileExtensions: [],
+    executionTools: [
+      'industry_ecommerce_listing_action_queue',
+      'business_ecommerce_product_listing_optimizer',
+      'business_ecommerce_inventory_restock_plan',
+      'business_ecommerce_after_sales_risk_report',
+      'read_xlsx',
+      'read_file',
+    ],
+    requiredToolReceipts: ['industry_ecommerce_listing_action_queue'],
     minMatchedContentTerms: 2,
   },
   {
@@ -96,6 +131,14 @@ const ECOMMERCE_CONTRACTS: IndustryWorkflowContract[] = [
     confirmationBoundaries: ['Customer messages, content publishing, refunds, compensation, and binding promises require approval and provider receipts.'],
     requiresFileArtifact: false,
     acceptedFileExtensions: [],
+    executionTools: [
+      'industry_ecommerce_customer_service_drafts',
+      'business_ecommerce_review_source_normalizer',
+      'business_ecommerce_review_insight_analyzer',
+      'read_xlsx',
+      'read_file',
+    ],
+    requiredToolReceipts: ['industry_ecommerce_customer_service_drafts'],
     draftRequired: true,
     minMatchedContentTerms: 2,
   },
@@ -180,18 +223,18 @@ const LEGAL_CONTRACTS: IndustryWorkflowContract[] = [
 
 const FINANCE_CONTRACTS: IndustryWorkflowContract[] = [
   // i18n-allow: Multilingual machine evidence terms; never rendered as UI copy.
-  ['business-dashboard', 'Business dashboard', 'Management operating report', false, ['revenue', 'margin', 'expense', 'cash', 'variance', '\u6536\u5165', '\u5229\u6da6', '\u8d39\u7528', '\u73b0\u91d1', '\u5dee\u5f02']],
+  ['business-dashboard', 'Business dashboard', 'Management operating report', false, ['revenue', 'margin', 'expense', 'cash', 'variance', '\u6536\u5165', '\u5229\u6da6', '\u8d39\u7528', '\u73b0\u91d1', '\u5dee\u5f02'], ['business_finance_finance_report_outline', 'business_finance_financial_ratio_analysis']],
   // i18n-allow: Multilingual machine evidence terms; never rendered as UI copy.
-  ['invoice-tax', 'Invoice and tax management', 'Invoice and tax review', false, ['invoice', 'tax', 'duplicate', 'rate', 'exception', '\u53d1\u7968', '\u7a0e', '\u91cd\u590d', '\u7a0e\u7387', '\u5f02\u5e38']],
+  ['invoice-tax', 'Invoice and tax management', 'Invoice and tax review', false, ['invoice', 'tax', 'duplicate', 'rate', 'exception', '\u53d1\u7968', '\u7a0e', '\u91cd\u590d', '\u7a0e\u7387', '\u5f02\u5e38'], ['business_finance_vat_invoice_review', 'business_finance_tax_position_estimator']],
   // i18n-allow: Multilingual machine evidence terms; never rendered as UI copy.
-  ['accounting', 'Accounting', 'Accounting reconciliation', false, ['ledger', 'reconciliation', 'receivable', 'payable', 'difference', '\u8d26\u7c3f', '\u6838\u5bf9', '\u5e94\u6536', '\u5e94\u4ed8', '\u5dee\u5f02']],
+  ['accounting', 'Accounting', 'Accounting reconciliation', false, ['ledger', 'reconciliation', 'receivable', 'payable', 'difference', '\u8d26\u7c3f', '\u6838\u5bf9', '\u5e94\u6536', '\u5e94\u4ed8', '\u5dee\u5f02'], ['business_finance_ledger_reconciliation', 'business_finance_ar_ap_aging']],
   // i18n-allow: Multilingual machine evidence terms; never rendered as UI copy.
-  ['tax-filing', 'Tax filing preparation', 'Review-ready tax filing packet', true, ['jurisdiction', 'taxpayer', 'period', 'filing', 'review', '\u8f96\u533a', '\u7eb3\u7a0e\u4eba', '\u671f\u95f4', '\u7533\u62a5', '\u590d\u6838']],
+  ['tax-filing', 'Tax filing preparation', 'Review-ready tax filing packet', true, ['jurisdiction', 'taxpayer', 'period', 'filing', 'review', '\u8f96\u533a', '\u7eb3\u7a0e\u4eba', '\u671f\u95f4', '\u7533\u62a5', '\u590d\u6838'], ['business_finance_tax_period_checklist', 'business_finance_tax_position_estimator']],
   // i18n-allow: Multilingual machine evidence terms; never rendered as UI copy.
-  ['cash-risk', 'Cash and risk', 'Cash risk forecast', false, ['cash', 'forecast', 'receivable', 'payable', 'scenario', 'risk', '\u73b0\u91d1', '\u9884\u6d4b', '\u5e94\u6536', '\u5e94\u4ed8', '\u60c5\u666f', '\u98ce\u9669']],
+  ['cash-risk', 'Cash and risk', 'Cash risk forecast', false, ['cash', 'forecast', 'receivable', 'payable', 'scenario', 'risk', '\u73b0\u91d1', '\u9884\u6d4b', '\u5e94\u6536', '\u5e94\u4ed8', '\u60c5\u666f', '\u98ce\u9669'], ['business_finance_cashflow_forecast', 'business_finance_ar_ap_aging']],
   // i18n-allow: Multilingual machine evidence terms; never rendered as UI copy.
-  ['report-delivery', 'Report delivery', 'Verified finance report package', true, ['statement', 'period', 'currency', 'source', 'difference', 'review', '\u62a5\u8868', '\u671f\u95f4', '\u5e01\u79cd', '\u6765\u6e90', '\u5dee\u5f02', '\u590d\u6838']],
-].map(([entryId, title, artifact, requiresFileArtifact, expectedContentTerms]) => ({
+  ['report-delivery', 'Report delivery', 'Verified finance report package', true, ['statement', 'period', 'currency', 'source', 'difference', 'review', '\u62a5\u8868', '\u671f\u95f4', '\u5e01\u79cd', '\u6765\u6e90', '\u5dee\u5f02', '\u590d\u6838'], ['business_finance_statement_consistency_review', 'business_finance_finance_report_outline']],
+].map(([entryId, title, artifact, requiresFileArtifact, expectedContentTerms, requiredToolEvidence]) => ({
   productLine: 'finance' as const,
   entryId: String(entryId),
   title: String(title),
@@ -205,6 +248,7 @@ const FINANCE_CONTRACTS: IndustryWorkflowContract[] = [
   requiresFileArtifact: Boolean(requiresFileArtifact),
   acceptedFileExtensions: requiresFileArtifact ? ['.xlsx', '.docx', '.pdf', '.zip'] : [],
   minMatchedContentTerms: 2,
+  requiredToolEvidence: requiredToolEvidence as string[],
 }));
 
 const CONTRACTS = [...ECOMMERCE_CONTRACTS, ...DESIGN_CONTRACTS, ...LEGAL_CONTRACTS, ...FINANCE_CONTRACTS];
@@ -220,12 +264,4 @@ export function normalizeIndustryProductLine(value: unknown): IndustryProductLin
 export function getIndustryWorkflowContracts(productLine: unknown): IndustryWorkflowContract[] {
   const normalized = normalizeIndustryProductLine(productLine);
   return normalized ? CONTRACTS.filter(contract => contract.productLine === normalized) : [];
-}
-
-export function getIndustryWorkflowContract(productLine: unknown, entryId: unknown): IndustryWorkflowContract | null {
-  const normalized = normalizeIndustryProductLine(productLine);
-  const normalizedEntryId = String(entryId || '').trim();
-  return normalized
-    ? CONTRACTS.find(contract => contract.productLine === normalized && contract.entryId === normalizedEntryId) || null
-    : null;
 }

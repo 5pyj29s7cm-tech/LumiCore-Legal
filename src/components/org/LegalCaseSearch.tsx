@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { AlertCircle, FileText, FolderOpen, Hash, Loader2, MapPin, Search, Scale } from 'lucide-react';
-import { toast } from 'sonner';
+import { useLegalDocument, useLegalDocumentScope } from '../../hooks/useLegalDocument';
+import { LegalDocumentHistoryNotice } from './legal_hub/two_pane_tool';
 import { useT } from '../../lib/useT';
 import { useApp } from '../../contexts/AppContext';
 import { runLegalTool } from '../../lib/legalToolClient';
@@ -24,57 +25,45 @@ function caseSearchSeed(caseFile?: LegalCaseFile | null): string {
   return [caseFile.cause, facts].filter(Boolean).join('\n');
 }
 
-export function LegalCaseSearch({
-  caseFile,
-  onAddMaterial,
-}: {
+type Props = {
   caseFile?: LegalCaseFile | null;
-  onAddMaterial?: (type: LegalCaseMaterial['type'], title: string, content?: string, source?: LegalCaseMaterial['source']) => void;
-}) {
+  onAddMaterial?: (type: LegalCaseMaterial['type'], title: string, content?: string, source?: LegalCaseMaterial['source']) => boolean | Promise<boolean>;
+};
+export function LegalCaseSearch(props: Props) {
+  return <CaseSearch key={useLegalDocumentScope(props.caseFile?.id)} {...props} />;
+}
+
+function CaseSearch({ caseFile, onAddMaterial }: Props) {
   const t = useT();
   const { workDomain, orgConnection } = useApp();
-  const isZh = t.langCode !== 'en';
-  const ui = (zh: string, en: string) => (isZh ? zh : en);
-  const defaultQuery = useMemo(() => caseSearchSeed(caseFile), [caseFile?.cause, caseFile?.notes]);
-  const [query, setQuery] = useState(defaultQuery);
-  const [results, setResults] = useState<CaseResult[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [searched, setSearched] = useState(false);
-  const [selected, setSelected] = useState<CaseResult | null>(null);
+  const { text: query, setText: setQuery, result, successfulResult, restoredResult, busy, generate, save } = useLegalDocument(caseSearchSeed(caseFile), { error: uiMessage('legal-case-search.error.67aaab3281') }, { caseFile, toolName: 'legal_search_case' });
+  const [selected, setSelected] = useState(0);
+  const loading = Boolean(busy);
+  const displayResult = successfulResult || (restoredResult ? result : '');
+  const results = useMemo<CaseResult[]>(() => {
+    if (!displayResult) return result ? [{ articleId: 'error', title: uiMessage('legal-case-search.error.67aaab3281'), chunk: result, score: 0 }] : [];
+    const parsed = parseChinaCaseSearchResults(displayResult);
+    return parsed.length ? parsed : [{ articleId: 'raw', title: t.legalCaseSearchResults || uiMessage('legal-case-search.search-results.4e08a3c3ba'), chunk: displayResult, score: 0 }];
+  }, [result, displayResult, t.legalCaseSearchResults]);
 
-  useEffect(() => {
-    setQuery(defaultQuery);
-    setResults([]);
-    setSelected(null);
-    setSearched(false);
-  }, [caseFile?.id]);
-
-  const search = async () => {
-    if (!query.trim() || loading) return;
-    setLoading(true);
-    setSearched(true);
-    setSelected(null);
-    try {
-      const text = await runLegalTool('legal_search_case', {
+  const search = () => {
+    if (!query.trim()) return;
+    return generate(signal => {
+      setSelected(0);
+      return runLegalTool('legal_search_case', {
         query,
         orgId: workDomain === 'work' && orgConnection?.orgId ? orgConnection.orgId : undefined,
         caseId: caseFile?.id,
         caseName: caseFile?.title || caseFile?.party || caseFile?.caseNumber || undefined,
         caseType: caseFile?.cause || undefined,
         persistCase: Boolean(caseFile),
-      });
-      const parsed = parseChinaCaseSearchResults(text);
-      setResults(parsed.length > 0 ? parsed : [{ articleId: 'raw', title: t.legalCaseSearchResults || uiMessage('legal-case-search.search-results.4e08a3c3ba'), chunk: text, score: 0 }]);
-    } catch (e: any) {
-      setResults([{ articleId: 'error', title: uiMessage('legal-case-search.error.67aaab3281'), chunk: e.message, score: 0 }]);
-    } finally {
-      setLoading(false);
-    }
+      }, signal);
+    });
   };
 
-  const active = selected || results[0] || null;
+  const active = results[selected] || results[0] || null;
   const archive = () => {
-    if (!active || active.articleId === 'error' || !onAddMaterial) return;
+    if (!successfulResult || !active || active.articleId === 'error' || !onAddMaterial) return;
     const caseTitle = caseFile?.title || caseFile?.party || caseFile?.caseNumber || uiMessage('legal-case-search.case.8a53cf13fb');
     const content = [
       active.title,
@@ -84,8 +73,7 @@ export function LegalCaseSearch({
       '',
       active.chunk,
     ].filter(Boolean).join('\n');
-    onAddMaterial('note', `${caseTitle} ${uiMessage('legal-case-search.similar-case-research.82308874a9')}`, content, 'tool');
-    toast.success(uiMessage('legal-case-search.similar-case-result-archived-to.9ac661af08'));
+    return save(() => onAddMaterial('note', `${caseTitle} ${uiMessage('legal-case-search.similar-case-research.82308874a9')}`, content, 'tool'), uiMessage('legal-case-search.similar-case-result-archived-to.9ac661af08'));
   };
 
   return (
@@ -105,7 +93,7 @@ export function LegalCaseSearch({
           </div>
         </section>
 
-        <LegalCaseContextBar caseFile={caseFile} state={loading ? 'running' : searched ? 'result' : 'input'} />
+        <LegalCaseContextBar caseFile={caseFile} state={loading ? 'running' : successfulResult ? 'result' : 'input'} />
 
         <section className="rounded-lg border border-white/10 bg-white/[0.04] p-4">
           <div className="grid gap-3 md:grid-cols-[1fr_auto]">
@@ -131,15 +119,14 @@ export function LegalCaseSearch({
           </div>
         </section>
 
+        <LegalDocumentHistoryNotice run={restoredResult} />
         <section className="grid min-h-[440px] gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
           <div className="rounded-lg border border-white/10 bg-white/[0.04] p-2">
             {loading ? (
               <div className="flex h-full min-h-[300px] items-center justify-center text-white/55">
                 <Loader2 size={24} className="animate-spin" />
               </div>
-            ) : searched && results.length === 0 ? (
-              <EmptyState text={t.legalCaseSearchNoResults || uiMessage('legal-case-search.no-cases-found.fb27bfd04d')} />
-            ) : !searched ? (
+            ) : !result ? (
               <EmptyState text={uiMessage('legal-case-search.enter-case-facts-to-start.a0300d09e3')} />
             ) : (
               <div className="space-y-2">
@@ -148,7 +135,7 @@ export function LegalCaseSearch({
                   return (
                     <button
                       key={`${result.articleId}-${index}`}
-                      onClick={() => setSelected(result)}
+                      onClick={() => setSelected(index)}
                       className={`w-full rounded-lg border p-3 text-left transition ${
                         isActive
                           ? 'border-amber-400/30 bg-amber-500/10'
@@ -186,8 +173,8 @@ export function LegalCaseSearch({
                       {active.score > 0 && <span className="rounded-md bg-amber-500/10 px-2 py-1 text-amber-200">{(active.score * 100).toFixed(1)}%</span>}
                     </div>
                   </div>
-                  {onAddMaterial && active.articleId !== 'error' && (
-                    <button onClick={archive} className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/65 transition hover:bg-white/10 hover:text-white">
+                  {onAddMaterial && successfulResult && active.articleId !== 'error' && (
+                    <button onClick={archive} disabled={loading} className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/65 transition hover:bg-white/10 hover:text-white disabled:opacity-50">
                       <FolderOpen size={14} />
                       {uiMessage('legal-case-search.archive-to-case.6dc41a223d')}
                     </button>

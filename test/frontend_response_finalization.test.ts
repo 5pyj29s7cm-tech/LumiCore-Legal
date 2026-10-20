@@ -1,3 +1,4 @@
+import { readImplementationSource } from './implementation_source';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -17,7 +18,7 @@ import {
 } from '../src/lib/chatProgress';
 
 const root = process.cwd();
-const read = (relativePath: string) => fs.readFileSync(path.join(root, relativePath), 'utf8');
+const read = (relativePath: string) => readImplementationSource(path.join(root, relativePath), 'utf8');
 
 describe('frontend agent response finalization gate', () => {
   it('detects concrete success claims without confusing failure wording for success', () => {
@@ -42,6 +43,8 @@ describe('frontend agent response finalization gate', () => {
     expect(shouldSpeakAgentResponse(blocked)).toBe(true);
     expect(isFinalizedSuccessfulResponse(verified)).toBe(true);
     expect(isFinalizedSuccessfulResponse(blocked)).toBe(false);
+    expect(isFinalizedSuccessfulResponse({ ...verified, reason: 'waiting_confirmation' })).toBe(false);
+    expect(isFinalizedSuccessfulResponse({ ...verified, status: 'waiting_for_confirmation' })).toBe(false);
   });
 
   it('does not hide a blocker merely because it reports the successful prefix of a partial operation', () => {
@@ -129,7 +132,7 @@ describe('frontend agent response finalization gate', () => {
   });
 
   it('uses natural failure language instead of exposing the missing-tool guard in progress', () => {
-    const blocked = describeTurnCompletionProgress(true, false, true, {
+    const blocked = describeTurnCompletionProgress(true, {
       finalized: true,
       blocked: true,
       reason: 'execution_recovery_incomplete',
@@ -165,8 +168,8 @@ describe('frontend agent response finalization gate', () => {
     expect(isTerminalAgentStatus('blocked')).toBe(true);
     expect(isTerminalAgentStatus('thinking')).toBe(false);
 
-    expect(describeTurnCompletionProgress(false, false, false).tone).not.toBe('done');
-    expect(describeTurnCompletionProgress(false, false, false, {
+    expect(describeTurnCompletionProgress(false).tone).not.toBe('done');
+    expect(describeTurnCompletionProgress(false, {
       finalized: true,
       blocked: false,
     }).tone).toBe('done');
@@ -183,8 +186,6 @@ describe('frontend dynamic output path audit', () => {
   it('gates every non-desktop response consumer in scope', () => {
     const displayGated = [
       'src/components/AgentChatPage.tsx',
-      'src/components/ChatPanel.tsx',
-      'src/components/org/CentralLumiChat.tsx',
       'src/components/ProactiveNotifications.tsx',
       'src/hooks/useVoiceCall.ts',
     ];
@@ -192,7 +193,6 @@ describe('frontend dynamic output path audit', () => {
       expect(read(relativePath), relativePath).toContain('shouldDisplayAgentResponse');
     }
 
-    expect(read('src/components/HolographicOverlay.tsx')).toContain('isUnverifiedActionClaim');
   });
 
   it('gates ordinary proactive output and limits the reminder exception to server-verified receipts', () => {
@@ -231,7 +231,6 @@ describe('frontend dynamic output path audit', () => {
   it('does not keep a browser system-voice fallback in chat surfaces', () => {
     for (const relativePath of [
       'src/components/AgentChatPage.tsx',
-      'src/components/ChatPanel.tsx',
     ]) {
       const source = read(relativePath);
       expect(source, relativePath).not.toContain('useTTS');
@@ -249,12 +248,5 @@ describe('frontend dynamic output path audit', () => {
     expect(idleBranch).toContain("setWorkflowStatus('idle')");
     expect(idleBranch).not.toContain("setWorkflowStatus('done')");
     expect(idleBranch).not.toContain('workflowResponseReady');
-
-    const chatPanel = read('src/components/ChatPanel.tsx');
-    const panelIdleStart = chatPanel.indexOf("if (data.status === 'idle') {");
-    const panelIdleEnd = chatPanel.indexOf('finishChatProgress(', panelIdleStart);
-    const panelIdleBranch = chatPanel.slice(panelIdleStart, panelIdleEnd);
-    expect(panelIdleBranch).toContain('clearChatProgress()');
-    expect(panelIdleBranch).not.toContain('describeTurnCompletionProgress');
   });
 });

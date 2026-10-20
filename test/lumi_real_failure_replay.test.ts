@@ -13,9 +13,9 @@ import {
 import { formatClientDiagnosticResult } from '../server/cognition/client_diagnostic_result';
 import { buildLumiCapabilitySelection } from '../server/cognition/capability_selection';
 import { buildLumiExecutionDecision } from '../server/cognition/execution_decision';
-import { isQuickCommand, matchQuickCommand } from '../server/cognition/quick_commands';
 import { shouldDeferModelOutputUntilFinalized } from '../server/cognition/response_delivery';
 import { finalizeLumiResponse } from '../server/cognition/result_finalizer';
+import { guardCompletionClaims } from '../server/work_product/completion_guard';
 import { routeToolsForTurn } from '../server/cognition/tool_router';
 import { buildLumiTurnDispatch } from '../server/cognition/turn_dispatch';
 
@@ -108,11 +108,13 @@ function decideFromContinuation(
   continuationContext: string,
   channel: 'chat' | 'voice' = 'voice',
   actionTaskState?: ConversationActionContinuationState | null,
+  continuationAppTarget = actionTaskState?.appTarget || '',
 ) {
   const dispatch = buildLumiTurnDispatch({
     userId,
     text,
     continuationContext,
+    continuationAppTarget,
     channel,
     source: channel,
     operationMode: 'assistant',
@@ -181,7 +183,14 @@ describe('Lumi real failure-chain replay', () => {
     expect(accepted.blocked).toBe(false);
     expect(accepted.text).toContain('AutoCAD');
     expect(rejected.blocked).toBe(true);
-    expect(rejected.reason).toBe('Missing core evidence for desktop_operation.');
+    const wrongTargetGuard = guardCompletionClaims({
+      task, response: '\u5df2\u6253\u5f00 AutoCAD\u3002',
+      source: 'voice', toolCalls: wrongReceipt,
+    });
+    expect(wrongTargetGuard).toMatchObject({ blocked: true, reasonCode: 'successful_irrelevant_evidence' });
+    expect(wrongTargetGuard.reason?.trim().length).toBeGreaterThan(0);
+    expect(rejected.reason).toBe(wrongTargetGuard.reason);
+    expect(rejected.text).not.toBe('\u5df2\u6253\u5f00 AutoCAD\u3002');
   });
 
   it('replays the real topology failure as a geometry receipt result instead of a desktop-window blocker', () => {
@@ -281,6 +290,8 @@ describe('Lumi real failure-chain replay', () => {
       text,
       bridge,
       'chat',
+      undefined,
+      state.appTarget,
     );
 
     expect(state.appTarget).toBe('WPS');
@@ -484,9 +495,8 @@ describe('Lumi real failure-chain replay', () => {
     expect(result.notification?.type).toBe('work_product_guard');
   });
 
-  it('answers the microphone audibility check immediately without self-check routing', async () => {
+  it('keeps a microphone audibility question out of repair and tool routing', async () => {
     const text = '\u4f60\u80fd\u542c\u89c1\u6211\u8bf4\u8bdd\u5417\uff1f';
-    const quick = await matchQuickCommand(text, 'real_replay_hearing_user', { surface: 'voice' });
     const dispatch = buildLumiTurnDispatch({
       userId: 'real_replay_hearing_user',
       text,
@@ -496,12 +506,6 @@ describe('Lumi real failure-chain replay', () => {
       targetIsLumi: true,
     });
 
-    expect(isQuickCommand(text)).toBe(true);
-    expect(quick).toMatchObject({
-      matched: true,
-      responseText: '\u80fd\u542c\u89c1\u3002\u4f60\u8bf4\u3002',
-    });
-    expect(quick?.toolCall).toBeUndefined();
     expect(dispatch.flow.selfRepairTurn).toBe(false);
     expect(dispatch.flow.allowToolUseForTurn).toBe(false);
     expect(shouldDeferModelOutputUntilFinalized({
@@ -511,7 +515,7 @@ describe('Lumi real failure-chain replay', () => {
 
     const finalized = finalizeLumiResponse({
       taskText: text,
-      responseText: quick!.responseText,
+      responseText: '能听见。你说。',
       toolRecords: [],
       source: 'voice',
       flow: dispatch.flow,
@@ -541,8 +545,9 @@ describe('Lumi real failure-chain replay', () => {
       toolRecords: records,
       source: 'voice',
     });
-    expect(finalized.blocked).toBe(false);
-    expect(finalized.text).toBe(responseText);
+    expect(finalized.blocked).toBe(true);
+    expect(finalized.text).toContain('AutoCAD');
+    expect(finalized.text).toMatch(/还没完成|还没有完成|尚未完成|未完成|没有完成/u);
     expect(finalized.text).not.toContain('\u81ea\u68c0');
   });
 });

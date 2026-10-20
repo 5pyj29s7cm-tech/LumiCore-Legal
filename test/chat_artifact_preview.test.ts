@@ -2,13 +2,16 @@ import { makeApp, JWT_SECRET } from './helpers';
 import fs from 'node:fs';
 import path from 'node:path';
 import jwt from 'jsonwebtoken';
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { collectChatArtifacts } from '../server/conversation/chat_artifacts';
 import { projectConversationMessageForCustomer } from '../server/routes/conversations';
 import { readDocumentPreview } from '../server/files/document_preview';
 import { startIsolatedConversation, addMessage } from '../server/conversation/manager';
 import { createXlsxWorkbook, writeXlsxWorkbook } from '../server/utils/spreadsheet';
 import type { ToolExecutionRecord } from '../server/tools/types';
+
+const opener = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../server/files/knowledge/paths', async original => ({ ...await original<typeof import('../server/files/knowledge/paths')>(), openPathWithDefaultApp: opener }));
 
 let app: Awaited<ReturnType<typeof makeApp>>;
 let conversationId: string;
@@ -126,4 +129,64 @@ it('extracts Word, PDF and presentation content locally for inline previews', as
   const presentation = new PptxGenJS(); presentation.addSlide().addText('Preview report 72', { x: 1, y: 1, w: 5, h: 1 });
   const pptx = path.join(root, 'preview.pptx'); await presentation.writeFile({ fileName: pptx });
   expect(await readDocumentPreview(pptx)).toMatchObject({ kind: 'text', extracted: true, text: expect.stringContaining('Preview report 72') });
+});
+
+
+it('opens a conversation output folder only with the matching owned receipt', async () => {
+  const endpoint = app.url + '/api/files/open?conversationId=' + conversationId;
+  const request = (headers: Record<string, string>) => fetch(endpoint, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ path: output, reveal: true }) });
+  const response = await request(auth);
+  expect(response.status).toBe(200);
+  expect((await response.json()).path).toBe(fs.realpathSync.native(path.dirname(output)));
+  expect(opener).toHaveBeenLastCalledWith(fs.realpathSync.native(path.dirname(output)));
+  opener.mockClear();
+  const other = { Cookie: 'token=' + jwt.sign({ uid: 'someone-else', role: 'admin' }, JWT_SECRET) };
+  expect((await request(other)).status).toBe(403);
+  expect(opener).not.toHaveBeenCalled();
+});
+
+it('attaches an explicitly retrieved existing file with the same owned preview and download boundary', async () => {
+  const crypto = await import('node:crypto');
+  const bytes = fs.readFileSync(output);
+  const payload = { ok: true, verified: true, status: 'retrieved', outputPath: output, artifacts: [{ path: output, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), size: bytes.length }] };
+  const record: ToolExecutionRecord = { name: 'owned_file_read', arguments: { includeOutput: true }, result: JSON.stringify(payload), terminalVerification: { status: 'verified', strategy: 'state_diff', reason: 'Actual owned file SHA matched' },
+    capability: { capabilityId: 'files.owned_read', lane: 'files', operation: 'observe', risk: 'low', sideEffects: [{ type: 'local_read', scope: 'owned file', reversible: true }], verification: { strategy: 'state_diff', required: true, requiredFields: ['ok', 'verified'], successStatuses: ['read', 'retrieved'], successSignals: [], limitations: [] } } };
+  const isolated = startIsolatedConversation(userId, 'lumi', 'personal', '').id;
+  addMessage({ userId, agentId: 'lumi', conversationId: isolated, role: 'assistant', content: 'Retrieved the existing file.', toolCalls: [record] });
+  const artifacts = collectChatArtifacts([record], isolated);
+  expect(artifacts).toHaveLength(1); expect(artifacts[0].path).toBe(output);
+  expect((await fetch(app.url + artifacts[0].url, { headers: auth })).status).toBe(200);
+  const other = { Cookie: 'token=' + jwt.sign({ uid: 'another-owner', role: 'admin' }, JWT_SECRET) };
+  expect((await fetch(app.url + artifacts[0].url, { headers: other })).status).toBe(403);
+  for (const rejected of [{ ...record, terminalVerification: undefined }, { ...record, outcome: 'failure' }, { ...record, result: JSON.stringify({ ...payload, status: 'read' }) }, { ...record, result: JSON.stringify({ ...payload, artifacts: [] }) }]) expect(collectChatArtifacts([rejected], isolated)).toEqual([]);
+});
+
+it('stops the existing tool loop and returns a truthful final response after verified existing-video delivery', async () => {
+  const crypto = await import('node:crypto');
+  const { hasCompletedCoreAction } = await import('../server/llm/tool_loop/projection');
+  const { finalizeLumiResponse } = await import('../server/cognition/result_finalizer');
+  const projectId = 'a590fef2-1d8f-4cea-a2b6-6a3ed5567e6a';
+  const target = path.join(root, 'already-finished-video.mp4'); fs.writeFileSync(target, 'existing video fixture');
+  const bytes = fs.readFileSync(target);
+  const identity = { requestId: 'retrieve-completion-request', taskId: 'retrieve-completion-task' };
+  const payload = { ok: true, verified: true, status: 'retrieved', projectId, revision: 22, selectedStyle: 'chat', outputPath: target,
+    artifacts: [{ type: 'video', path: target, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }] };
+  const record: ToolExecutionRecord = { ...identity, name: 'owned_video_read', arguments: { projectId, revision: 22, includeOutput: true }, result: JSON.stringify(payload),
+    terminalVerification: { status: 'verified', strategy: 'state_diff', reason: 'Actual owned output SHA matched' },
+    capability: { capabilityId: 'files.owned_video_read', lane: 'files', operation: 'observe', risk: 'low', sideEffects: [{ type: 'local_read', scope: 'owned output', reversible: true }],
+      verification: { strategy: 'state_diff', required: true, requiredFields: ['ok', 'verified'], successStatuses: ['read', 'retrieved'], successSignals: [], limitations: [] } } };
+  const task = "请把聊天唱歌工程 a590fef2-1d8f-4cea-a2b6-6a3ed5567e6a 当前第 22 版选中的聊天记录＋表情包视频作为本轮附件返回。这个工程已经有完整120秒的成片，请通过 chat_song_render 复用已有文件，不要重新起草、生成歌曲、图片或视频模型画面，不要制作动画版，不要发送到任何外部聊天软件，不用再次确认歌词。歌曲人工核对状态保持原值。";
+  expect(hasCompletedCoreAction(task, [record], identity)).toBe(true);
+  for (const source of ['chat', 'voice', 'task', 'workflow']) {
+    const input = { ...identity, taskText: task, responseText: '', toolRecords: [record], source };
+    const result = finalizeLumiResponse(input);
+    expect(result).toMatchObject({ blocked: false, reason: 'artifact_retrieved' });
+    expect(result?.text).toContain('取回已有文件'); expect(result?.text).not.toContain('已生成');
+    expect(finalizeLumiResponse({ ...input, responseText: result!.text }).blocked).toBe(false);
+  }
+  for (const bad of [{ ...record, requestId: 'previous-request' }, { ...record, error: 'Read failed' },
+    { ...record, arguments: { projectId, revision: 21, includeOutput: true } }]) {
+    expect(hasCompletedCoreAction(task, [bad], identity)).toBe(false);
+  }
+  expect(hasCompletedCoreAction('创建一个新的120秒视频并作为附件返回', [record], identity)).toBe(false);
 });

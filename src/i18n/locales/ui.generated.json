@@ -1,39 +1,55 @@
 {
+  "legal-hub.legacy-cases-unassigned": {
+    "en": "Unassigned legacy cases remain on this device. Confirm ownership before importing; originals are retained.",
+    "zh": "本机有未绑定账号的旧案件，未自动载入。请确认归属后导入；原始数据会保留。"
+  },
+  "legal-hub.confirm-legacy-case-ownership": {
+    "en": "Confirm these legacy cases belong to the current account and import them?",
+    "zh": "确认这些旧案件属于当前账号，并导入到当前账号？"
+  },
+  "legal-hub.import-legacy-cases": {
+    "en": "Confirm and import legacy cases",
+    "zh": "确认归属并导入旧案件"
+  },
+  "settings.lumi-website.29f47c3d10": {
+    "en": "Lumi website",
+    "zh": "Lumi 官网"
+  },
   "settings.background-face-presence.c07ac0f5cb": {
     "en": "Background face presence",
-    "zh": "\u540e\u53f0\u4eba\u8138\u5728\u573a\u8bc6\u522b"
+    "zh": "后台人脸在场识别"
   },
   "settings.when-enabled-lumi-may-use.25f7da1264": {
     "en": "When enabled, Lumi may use the camera in the background only after a face is enrolled. This is off by default.",
-    "zh": "\u5f00\u542f\u540e\uff0cLumi \u4ec5\u4f1a\u5728\u5df2\u5f55\u5165\u4eba\u8138\u4e14\u9700\u8981\u5728\u573a\u5224\u65ad\u65f6\u4e8e\u540e\u53f0\u4f7f\u7528\u6444\u50cf\u5934\uff1b\u9ed8\u8ba4\u5173\u95ed\u3002"
+    "zh": "开启后，Lumi 仅会在已录入人脸且需要在场判断时于后台使用摄像头；默认关闭。"
   },
   "settings.enable-camera-access-before-turning.fbd6cf6197": {
     "en": "Enable camera access before turning on background face presence.",
-    "zh": "\u8bf7\u5148\u542f\u7528\u6444\u50cf\u5934\uff0c\u518d\u5f00\u542f\u540e\u53f0\u4eba\u8138\u5728\u573a\u8bc6\u522b\u3002"
+    "zh": "请先启用摄像头，再开启后台人脸在场识别。"
   },
   "settings.no-models-configured.0c98ec7051": {
     "en": "No configured models",
-    "zh": "\u6682\u65e0\u5df2\u914d\u7f6e\u6a21\u578b"
+    "zh": "暂无已配置模型"
   },
   "settings.cloud-providers.134b71a80d": {
     "en": "Cloud",
-    "zh": "\u4e91\u670d\u52a1"
+    "zh": "云服务"
   },
   "settings.provider-scope-official-lumi.0f4d8e2a11": {
     "en": "Official (Lumi)",
-    "zh": "\u5b98\u65b9（Lumi）"
+    "zh": "官方（Lumi）"
   },
   "settings.provider-scope-local.3b7c1a9e20": {
     "en": "Local",
-    "zh": "\u672c\u5730"
+    "zh": "本地"
   },
   "settings.provider-scope-services.6e2f9c4b18": {
     "en": "Service Providers",
-    "zh": "\u670d\u52a1\u5546"
+    "zh": "服务商"
   },
   "settings.lumi-official-service.9a4e2d7c10": {
     "en": "Lumi Official API",
-    "zh": "Lumi \u5b98\u65b9 API"
+    "zh": "Lumi 官方 API"
   },
   "settings.lumi-official-service-description.2c8f6a1e05": {
     "en": "Use the documented Lumi/ModelDepot endpoint and keep the API key on the backend. The default endpoint is https://lumi.xingcyj.com/v1. It covers reasoning, vision, world actions, embeddings, reranking, image/video generation, and configurable speech adapters.",
@@ -41,19 +57,19 @@
   },
   "settings.lumi-official-relay.7d3b1f9c24": {
     "en": "Lumi Official API endpoint",
-    "zh": "Lumi \u5b98\u65b9 API \u7aef\u70b9"
+    "zh": "Lumi 官方 API 端点"
   },
   "settings.lumi-official-recharge-link.1c2d3e4f5a": {
     "en": "Recharge",
-    "zh": "\u5b98\u65b9\u5145\u503c"
+    "zh": "官方充值"
   },
   "settings.lumi-official-catalog-summary.2d3e4f5a6b": {
     "en": "Synced {value0} models from the official endpoint across {value1} LumiCore roles.",
-    "zh": "\u5df2\u4ece\u5b98\u65b9\u7aef\u70b9\u540c\u6b65 {value0} \u4e2a\u6a21\u578b\uff0c\u8986\u76d6 {value1} \u7c7b LumiCore \u6a21\u578b\u804c\u8d23\u3002"
+    "zh": "已从官方端点同步 {value0} 个模型，覆盖 {value1} 类 LumiCore 模型职责。"
   },
   "settings.lumi-official-api-label.a1b2c3d4e5": {
     "en": "Lumi Official API",
-    "zh": "Lumi \u5b98\u65b9 API"
+    "zh": "Lumi 官方 API"
   },
   "settings.lumi-official-capability-supported.b2c3d4e5f6": {
     "en": "All Lumi model roles are supported after the official endpoint is configured in AI Providers → Official.",
@@ -105,107 +121,107 @@
   },
   "settings.lumi-official-image-unavailable.e5f6a7b8c9": {
     "en": "image generation unavailable",
-    "zh": "\u6682\u4e0d\u652f\u6301\u56fe\u50cf\u751f\u6210"
+    "zh": "暂不支持图像生成"
   },
   "settings.lumi-official-video-unavailable.f6a7b8c9d0": {
     "en": "video generation unavailable",
-    "zh": "\u6682\u4e0d\u652f\u6301\u89c6\u9891\u751f\u6210"
+    "zh": "暂不支持视频生成"
   },
   "settings.lumi-official-rerank-unavailable.a7b8c9d0e1": {
     "en": "rerank unavailable",
-    "zh": "\u6682\u4e0d\u652f\u6301\u91cd\u6392"
+    "zh": "暂不支持重排"
   },
   "settings.capability-vision-world-actions.b8c9d0e1f2": {
     "en": "vision and world actions",
-    "zh": "\u89c6\u89c9\u548c\u4e16\u754c\u64cd\u4f5c"
+    "zh": "视觉和世界操作"
   },
   "settings.capability-image-video-generation.c9d0e1f2a3": {
     "en": "image and video generation",
-    "zh": "\u56fe\u50cf\u548c\u89c6\u9891\u751f\u6210"
+    "zh": "图像和视频生成"
   },
   "settings.capability-world-actions.d0e1f2a3b4": {
     "en": "world actions",
-    "zh": "\u4e16\u754c\u64cd\u4f5c"
+    "zh": "世界操作"
   },
   "settings.capability-embedding.e1f2a3b4c5": {
     "en": "embedding retrieval",
-    "zh": "\u5d4c\u5165\u68c0\u7d22"
+    "zh": "嵌入检索"
   },
   "settings.capability-reasoning.f2a3b4c5d6": {
     "en": "reasoning",
-    "zh": "\u63a8\u7406"
+    "zh": "推理"
   },
   "settings.capability-official-supported-roles.a3b4c5d6e7": {
     "en": "reasoning, vision, world actions, and embeddings",
-    "zh": "\u63a8\u7406\u3001\u89c6\u89c9\u3001\u4e16\u754c\u64cd\u4f5c\u548c\u5d4c\u5165\u68c0\u7d22"
+    "zh": "推理、视觉、世界操作和嵌入检索"
   },
   "settings.capability-official-unavailable-roles.b4c5d6e7f8": {
     "en": "image/video generation, reranking, and speech",
-    "zh": "\u56fe\u50cf/\u89c6\u9891\u751f\u6210\u3001\u91cd\u6392\u548c\u8bed\u97f3"
+    "zh": "图像/视频生成、重排和语音"
   },
   "settings.capability-speech-recognition-synthesis.c5d6e7f8a9": {
     "en": "speech recognition and synthesis",
-    "zh": "\u8bed\u97f3\u8bc6\u522b\u548c\u5408\u6210"
+    "zh": "语音识别和合成"
   },
   "settings.embedding-role-label.f7a8b9c0d1": {
     "en": "Embedding retrieval",
-    "zh": "\u5d4c\u5165\u68c0\u7d22"
+    "zh": "嵌入检索"
   },
   "settings.rerank-role-label.a8b9c0d1e2": {
     "en": "Reranking",
-    "zh": "\u91cd\u6392"
+    "zh": "重排"
   },
   "settings.speech-recognition-role-label.b9c0d1e2f3": {
     "en": "Speech recognition",
-    "zh": "\u8bed\u97f3\u8bc6\u522b"
+    "zh": "语音识别"
   },
   "settings.speech-synthesis-role-label.c0d1e2f3a4": {
     "en": "Speech synthesis",
-    "zh": "\u8bed\u97f3\u5408\u6210"
+    "zh": "语音合成"
   },
   "settings.service-model-providers.4f8a2c6d19": {
     "en": "Service Providers",
-    "zh": "\u670d\u52a1\u5546"
+    "zh": "服务商"
   },
   "settings.local-model-providers.8e1c4b6a20": {
     "en": "Local Providers",
-    "zh": "\u672c\u5730\u670d\u52a1"
+    "zh": "本地服务"
   },
   "agent-chat-page.memory-avatar.8c4e1f7a20": {
     "en": "Memory Avatar",
-    "zh": "\u8bb0\u5fc6\u5316\u8eab"
+    "zh": "记忆化身"
   },
   "agent-chat-page.open-memory-avatar.2d7a9c4e16": {
     "en": "Open Memory Avatar",
-    "zh": "\u6253\u5f00\u8bb0\u5fc6\u5316\u8eab"
+    "zh": "打开记忆化身"
   },
   "settings.local-compatible.4fda3a8732": {
     "en": "Local & Compatible",
-    "zh": "\u672c\u5730\u4e0e\u517c\u5bb9"
+    "zh": "本地与兼容"
   },
   "settings.specialized-providers.22dd71191b": {
     "en": "Specialized",
-    "zh": "\u4e13\u7528\u670d\u52a1"
+    "zh": "专用服务"
   },
   "settings.cloud-model-providers.55a86c3fed": {
     "en": "Cloud Model Providers",
-    "zh": "\u4e91\u6a21\u578b\u670d\u52a1\u5546"
+    "zh": "云模型服务商"
   },
   "settings.local-compatible-providers.f6a71d6a1e": {
     "en": "Local & Compatible Providers",
-    "zh": "\u672c\u5730\u4e0e\u517c\u5bb9\u670d\u52a1"
+    "zh": "本地与兼容服务"
   },
   "settings.local-compatible-providers-description.4a23f443d2": {
     "en": "Configure Ollama, LM Studio, and OpenAI-compatible endpoints here. Model Roles still owns model selection.",
-    "zh": "\u5728\u8fd9\u91cc\u914d\u7f6e Ollama\u3001LM Studio \u548c OpenAI \u517c\u5bb9\u63a5\u53e3\uff1b\u6a21\u578b\u9009\u62e9\u4ecd\u7531\u201c\u6a21\u578b\u89d2\u8272\u201d\u8d1f\u8d23\u3002"
+    "zh": "在这里配置 Ollama、LM Studio 和 OpenAI 兼容接口；模型选择仍由“模型角色”负责。"
   },
   "settings.specialized-model-providers.8cd92ca6fd": {
     "en": "Specialized Model Providers",
-    "zh": "\u4e13\u7528\u6a21\u578b\u670d\u52a1\u5546"
+    "zh": "专用模型服务商"
   },
   "settings.specialized-model-providers-description.f89e76f111": {
     "en": "Configure providers used only for generation or speech capabilities. General model credentials are not repeated here.",
-    "zh": "\u914d\u7f6e\u4ec5\u7528\u4e8e\u751f\u6210\u6216\u8bed\u97f3\u80fd\u529b\u7684\u4e13\u7528\u670d\u52a1\uff0c\u4e0d\u518d\u91cd\u590d\u586b\u5199\u901a\u7528\u6a21\u578b\u5bc6\u94a5\u3002"
+    "zh": "配置仅用于生成或语音能力的专用服务，不再重复填写通用模型密钥。"
   },
   "settings.ai-providers.38c3f21901": {
     "en": "AI Providers",
@@ -246,22 +262,6 @@
   "settings.language-model-providers.f146c23cb1": {
     "en": "Language Model Providers",
     "zh": "语言模型服务商"
-  },
-  "settings.vision-capable-providers.40ab375ce2": {
-    "en": "Vision-Capable Providers",
-    "zh": "视觉模型服务商"
-  },
-  "settings.vision-provider-description.77b9f301aa": {
-    "en": "Configure vision-capable model catalogs and local runtimes here. Choose which one is active under Model Roles.",
-    "zh": "在这里配置视觉模型目录和本地运行时；实际使用哪个模型在“模型分工”中选择。"
-  },
-  "settings.speech-model-providers.99e68f2051": {
-    "en": "Speech Model Providers",
-    "zh": "语音模型服务商"
-  },
-  "settings.speech-provider-description.ea8bf84041": {
-    "en": "Configure cloud speech credentials here. Speech recognition and synthesis roles are selected under Model Roles.",
-    "zh": "在这里配置云端语音凭据；语音识别与合成的实际分工在“模型分工”中选择。"
   },
   "settings.reasoning.6a171d96b4": {
     "en": "Reasoning",
@@ -486,14 +486,6 @@
   "settings.save-desktop-action-model.1fb3f1157c": {
     "en": "Save action model",
     "zh": "保存行动模型"
-  },
-  "settings.generation-model-providers.b4f1c95162": {
-    "en": "Generation Model Providers",
-    "zh": "生成模型服务商"
-  },
-  "settings.generation-model-providers-description.a548399017": {
-    "en": "Credentials for model services used by generative roles and installed generation skills. Data sources and tool runtimes are configured elsewhere.",
-    "zh": "管理生成模型角色和已安装生成技能使用的模型服务商凭据。数据源与工具运行服务在其他分类中配置。"
   },
   "settings.minimax-generation-provider-hint.2c939bd0f7": {
     "en": "Enables installed MiniMax model tools for image, video, music, speech, and voice generation.",
@@ -1545,7 +1537,7 @@
   },
   "chat-progress.tool-returned-result-awaiting-task-verification.4f8d02cb71": {
     "en": "The tool returned a result. I am still verifying the overall task.",
-    "zh": "\u5de5\u5177\u5df2\u8fd4\u56de\u7ed3\u679c\uff0c\u6574\u9879\u4efb\u52a1\u4ecd\u5728\u6838\u9a8c\u4e2d\u3002"
+    "zh": "工具已返回结果，整项任务仍在核验中。"
   },
   "chat-progress.that-step-hit-a-problem.1fcf172ada": {
     "en": "That step hit a problem. I am checking the cause and next move.",
@@ -1942,14 +1934,6 @@
   "design-hub.output-structure.1f914a8f2b": {
     "en": "Output Structure",
     "zh": "输出结构"
-  },
-  "design-hub.prompt-output-sections": {
-    "en": "Respond using the following sections:",
-    "zh": "请按以下模块输出："
-  },
-  "design-hub.prompt-user-requirement": {
-    "en": "User requirements:",
-    "zh": "用户需求："
   },
   "design-hub.paste-ui-code-design-tokens.13a0ec90c5": {
     "en": "Paste UI code, design tokens, or spec notes.",
@@ -3815,10 +3799,6 @@
     "en": "Trace",
     "zh": "开始追踪"
   },
-  "legal-asset-trace.verifiable-external-source-required.9b3fa7d6e1": {
-    "en": "A verifiable external source is required. Configure an official API or have counsel verify and import the source through an authorized browser.",
-    "zh": "缺少可核验的外部数据源；请配置官方 API，或由律师在授权浏览器中核验并导入材料。"
-  },
   "legal-bid-workbench.bid-proposal-workbench.354a284512": {
     "en": "Bid Proposal Workbench",
     "zh": "标书生成"
@@ -3854,18 +3834,6 @@
   "legal-bid-workbench.output.8520bb37e3": {
     "en": "Output",
     "zh": "输出"
-  },
-  "legal-bid-workbench.open-docx.6c2f1e4b9a": {
-    "en": "Open DOCX",
-    "zh": "打开 DOCX"
-  },
-  "legal-bid-workbench.open-docx-failed.3f7b19a8c2": {
-    "en": "Unable to open the DOCX artifact",
-    "zh": "打开 DOCX 失败"
-  },
-  "legal-bid-workbench.opened-verified-docx.47da920fb1": {
-    "en": "Opened the verified bid DOCX artifact",
-    "zh": "已打开可验证的 DOCX 标书工作底稿"
   },
   "legal-bid-workbench.parse-tender-requirements-and-generate.b2a47e1579": {
     "en": "Parse tender requirements and generate an editable commercial/technical proposal framework.",
@@ -4232,12 +4200,8 @@
     "zh": "已入案"
   },
   "legal-hub.ask-lumi-in-work-workspace.6fe76d2092": {
-    "en": "Ask Lumi in Work Workspace",
-    "zh": "让 Lumi 继续处理"
-  },
-  "legal-hub.no-case-selected.runtime": {
-    "en": "No case selected",
-    "zh": "未选择案件"
+    "en": "Ask Lumi in the Current Workspace",
+    "zh": "在当前空间询问 Lumi"
   },
   "legal-hub.asset-trace.24d93c8873": {
     "en": "Asset trace",
@@ -4324,8 +4288,8 @@
     "zh": "案情摘要"
   },
   "legal-hub.case-synced-to-organization-knowledge.e5d9130fb8": {
-    "en": "Case synced to organization knowledge base",
-    "zh": "案件已同步到组织知识库"
+    "en": "Case archive saved to the current knowledge base",
+    "zh": "案件归档已保存到当前知识库"
   },
   "legal-hub.case-workflow.f359a263f7": {
     "en": "Case Workflow",
@@ -4889,7 +4853,7 @@
   },
   "legal-hub.open-knowledge-base.fecb312d9e": {
     "en": "Open Knowledge Base",
-    "zh": "打开组织知识库"
+    "zh": "打开当前知识库"
   },
   "legal-hub.open-meeting-notes.8f232a1703": {
     "en": "Open meeting notes",
@@ -4900,8 +4864,8 @@
     "zh": "整理当事人陈述和证据材料"
   },
   "legal-hub.package-the-current-case-facts.ac1c53077e": {
-    "en": "Package the current case, facts, consultation notes, judgments, and tool outputs into organization knowledge for Lumi in the work workspace.",
-    "zh": "把当前案件、事实摘要、会谈纪要、裁判文书和工具产物汇总成组织知识，供工作域 Lumi 后续引用。"
+    "en": "Save the current case, facts, consultation notes, judgments, and tool outputs to the current workspace knowledge base. Syncing again updates the same case archive.",
+    "zh": "把当前案件、事实摘要、会谈纪要、裁判文书和工具产物保存到当前空间的知识库。再次同步会更新同一份案件归档。"
   },
   "legal-hub.packet.1758eaea66": {
     "en": "Packet",
@@ -5068,12 +5032,12 @@
     "zh": "同步知识库"
   },
   "legal-hub.sync-to-organization-knowledge.06ec3e8e07": {
-    "en": "Sync to Organization Knowledge",
-    "zh": "同步到组织知识库"
+    "en": "Sync to the Current Knowledge Base",
+    "zh": "同步到当前知识库"
   },
   "legal-hub.synced-to-the-organization-knowledge.f95c36e4c6": {
-    "en": "Synced to the organization knowledge base. Lumi can retrieve and cite this case archive in the work workspace.",
-    "zh": "已同步到组织知识库。工作域 Lumi 可以在组织知识中检索并引用这份案件归档。"
+    "en": "The case archive has been saved to the current knowledge base. Open the knowledge base to check indexing and retrieval verification.",
+    "zh": "案件归档已保存到当前知识库。可打开知识库查看索引与检索验证状态。"
   },
   "legal-hub.syncing.379d137ae4": {
     "en": "Syncing...",
@@ -6147,22 +6111,6 @@
     "en": "Done",
     "zh": "已完成"
   },
-  "reminder-panel.failed-to-create-reminder.880d5a66e2": {
-    "en": "Failed to create reminder",
-    "zh": "提醒创建失败"
-  },
-  "reminder-panel.failed-to-delete-reminder.0167264b7f": {
-    "en": "Failed to delete reminder",
-    "zh": "提醒删除失败"
-  },
-  "reminder-panel.failed-to-load-reminders.0092eaf0c9": {
-    "en": "Failed to load reminders",
-    "zh": "提醒加载失败"
-  },
-  "reminder-panel.failed-to-update-reminder.73f8821573": {
-    "en": "Failed to update reminder",
-    "zh": "提醒更新失败"
-  },
   "reminder-panel.mark-complete.0115f22552": {
     "en": "Mark complete",
     "zh": "标记完成"
@@ -6331,10 +6279,6 @@
     "en": "Connected via environment",
     "zh": "已通过环境变量连接"
   },
-  "settings.connected.4f18b17c87": {
-    "en": "CONNECTED",
-    "zh": "已连接"
-  },
   "settings.controls-whether-the-desktop-client.0b21f43460": {
     "en": "Controls whether the desktop client starts with the system and stays alive after closing the window.",
     "zh": "控制桌面客户端是否随系统启动，以及关闭窗口后是否继续留在后台。"
@@ -6414,10 +6358,6 @@
   "settings.enter-ark-api-key.9f82bf67e1": {
     "en": "Enter Ark API key...",
     "zh": "输入 Ark API Key..."
-  },
-  "settings.enter-gemini-api-key.4295b94e77": {
-    "en": "Enter Gemini API key...",
-    "zh": "输入 Gemini API Key..."
   },
   "settings.enter-glm-api-key.d9e86fca17": {
     "en": "Enter GLM API key...",
@@ -6551,10 +6491,6 @@
     "en": "Local TTS: Local CosyVoice / GPT-SoVITS; cloud: DashScope CosyVoice / Doubao.",
     "zh": "本地 TTS：Local CosyVoice / GPT-SoVITS；云端：DashScope CosyVoice / Doubao。"
   },
-  "settings.local-vision-processes-screenshots-and.94552138f2": {
-    "en": "Local vision processes screenshots and images on your machine. The selected model must support image input, otherwise vision tasks will fail explicitly.",
-    "zh": "本地视觉只在你的电脑上处理截图和图片。模型需要支持图像输入，否则视觉任务会失败并明确报错。"
-  },
   "settings.local-whisper-openai-whisper-doubao.ff3da59708": {
     "en": "Local Whisper, OpenAI Whisper, Doubao, and Qwen ASR are available.",
     "zh": "本地 Whisper、OpenAI Whisper、豆包和 Qwen ASR 可用。"
@@ -6634,10 +6570,6 @@
   "settings.please-enable-access-in-system.3fa8966e6c": {
     "en": "Please enable access in system permissions.",
     "zh": "璇峰湪绯荤粺鏉冮檺涓墦寮€璁块棶"
-  },
-  "settings.powers-qwen-asr-and-dashscope.519f4cb3da": {
-    "en": "Powers Qwen ASR and DashScope CosyVoice cloud TTS. Get your key at dashscope.aliyun.com",
-    "zh": "用于 Qwen ASR 和 DashScope CosyVoice 云端 TTS。可在 dashscope.aliyun.com 获取密钥。"
   },
   "settings.primary-reasoning-brain.5bdd279d51": {
     "en": "Primary Reasoning Brain",
@@ -6767,33 +6699,13 @@
     "en": "Unavailable",
     "zh": "不可用"
   },
-  "settings.use-as-vision.adf03f9489": {
-    "en": "Use as Vision",
-    "zh": "设为视觉"
-  },
   "settings.use-gpu-for-neural-core.de372afa5c": {
     "en": "Use GPU for neural core inference.",
     "zh": "使用 GPU 加速核心推理。"
   },
-  "settings.use-this-for-vllm-sglang.6ba52812bd": {
-    "en": "Use this for vLLM, SGLang, Xinference, or any local OpenAI-compatible vision endpoint.",
-    "zh": "用于 vLLM、SGLang、Xinference 或其他兼容 OpenAI Chat Completions 的本地视觉服务。"
-  },
   "settings.use.1ec0c92474": {
     "en": "Use",
     "zh": "设为主模型"
-  },
-  "settings.use.998b2bc522": {
-    "en": "Use",
-    "zh": "设为视觉"
-  },
-  "settings.vision-call-failed.adf12eb156": {
-    "en": "Vision call failed",
-    "zh": "视觉实调失败"
-  },
-  "settings.vision-call-passed-value0-ms.c80d92a068": {
-    "en": "Vision call passed · {value0} ms",
-    "zh": "视觉实调成功 · {value0} ms"
   },
   "settings.vision-is-used-only-for.9a9cf081fd": {
     "en": "Visual perception reads images, screenshots, OCR, and interfaces inside the World Model. It does not replace the primary reasoning or voice roles.",
@@ -6863,10 +6775,6 @@
     "en": "Lumi is Ready",
     "zh": "Lumi 已准备好"
   },
-  "setup-wizard.lumi-will-use-your-local.41a9c8a5bd": {
-    "en": "Lumi will use your local model for everyday conversations. For complex tasks, it will automatically fall back to the cloud.",
-    "zh": "Lumi 会用你的本地模型处理日常对话。复杂任务可自动切换到云端模型。"
-  },
   "setup-wizard.models.88ac61293d": {
     "en": "models",
     "zh": "个模型"
@@ -6907,10 +6815,6 @@
     "en": "Start Using Lumi",
     "zh": "开始使用 Lumi"
   },
-  "setup-wizard.test-voice.4ff1c4863a": {
-    "en": "Test Voice",
-    "zh": "测试语音"
-  },
   "setup-wizard.voice-check.b7976f3351": {
     "en": "Voice Check",
     "zh": "语音检查"
@@ -6922,10 +6826,6 @@
   "setup-wizard.voice-needs-configuration-you-can.8df8a50b27": {
     "en": "Voice needs configuration. You can set it up later in Settings.",
     "zh": "语音还需要配置，你可以稍后在设置中处理。"
-  },
-  "setup-wizard.you-re-all-set.9a7beff5d2": {
-    "en": "You're All Set",
-    "zh": "已经准备好了"
   },
   "setup-wizard.your-personal-ai-is-live.93671d768f": {
     "en": "Your personal AI is live. Start talking and it will learn and grow with you.",
@@ -6981,35 +6881,35 @@
   },
   "skill-center.validation-evidence.20260901": {
     "en": "Validation evidence",
-    "zh": "\u9a8c\u8bc1\u8bc1\u636e"
+    "zh": "验证证据"
   },
   "skill-center.artifact-hash.20260901": {
     "en": "Approved artifact hash",
-    "zh": "\u5df2\u5ba1\u6838\u4ea7\u7269\u54c8\u5e0c"
+    "zh": "已审核产物哈希"
   },
   "skill-center.execution-command.20260901": {
     "en": "Post-approval execution command",
-    "zh": "\u5ba1\u6279\u540e\u6267\u884c\u547d\u4ee4"
+    "zh": "审批后执行命令"
   },
   "skill-center.static-findings.20260901": {
     "en": "Static review findings",
-    "zh": "\u9759\u6001\u5ba1\u67e5\u7ed3\u679c"
+    "zh": "静态审查结果"
   },
   "skill-center.no-static-findings.20260901": {
     "en": "No blocked patterns were found. The generated handler has not been executed.",
-    "zh": "\u672a\u53d1\u73b0\u88ab\u7981\u6a21\u5f0f\uff1b\u751f\u6210\u7684 handler \u5c1a\u672a\u6267\u884c\u3002"
+    "zh": "未发现被禁模式；生成的 handler 尚未执行。"
   },
   "skill-center.generated-source.20260901": {
     "en": "Review generated source",
-    "zh": "\u67e5\u770b\u751f\u6210\u6e90\u7801"
+    "zh": "查看生成源码"
   },
   "skill-center.review-required.20260901": {
     "en": "Review required",
-    "zh": "\u9700\u8981\u5ba1\u6838"
+    "zh": "需要审核"
   },
   "skill-center.review-source.20260901": {
     "en": "Review source",
-    "zh": "\u5ba1\u67e5\u6e90\u7801"
+    "zh": "审查源码"
   },
   "skill-center.broken.565289cc16": {
     "en": "Broken",
@@ -7039,10 +6939,6 @@
     "en": "Configure {value0} before real calls can run.",
     "zh": "需要配置 {value0} 后才能真实调用。"
   },
-  "skill-center.connected-to-lumi-and-available.410a87e979": {
-    "en": "Connected to Lumi and available to chat, run logs, and tool routing.",
-    "zh": "已连接到 Lumi，聊天、运行日志和工具调度可使用。"
-  },
   "skill-center.connected-to-lumi-and-available.e7eedbc8db": {
     "en": "Connected to Lumi and available for chat, orchestration, and tool calls.",
     "zh": "已连接到 Lumi，可以在聊天、调度和工具调用中使用。"
@@ -7066,10 +6962,6 @@
   "skill-center.installed-but-its-local-service.0372816817": {
     "en": "Installed, but its local service is not connected to Lumi yet.",
     "zh": "已安装，但本地服务还没有连上 Lumi。"
-  },
-  "skill-center.installed-but-its-mcp-server.9f5145472b": {
-    "en": "Installed but its MCP server is not connected yet.",
-    "zh": "已安装但 MCP 进程尚未连接。"
   },
   "skill-center.installed-disabled.46156ea2d0": {
     "en": "Installed, disabled",
@@ -7099,17 +6991,9 @@
     "en": "Needs configuration",
     "zh": "需配置"
   },
-  "skill-center.needs-connection.a5cb6b78b7": {
-    "en": "Needs connection",
-    "zh": "待连接"
-  },
   "skill-center.needs-repair.53833da009": {
     "en": "Needs repair",
     "zh": "需修复"
-  },
-  "skill-center.needs-setup.e1bc0e20e1": {
-    "en": "Needs setup",
-    "zh": "需本机环境"
   },
   "skill-center.no-installed-skills-yet.48c5eca957": {
     "en": "No installed skills yet.",
@@ -7126,14 +7010,6 @@
   "skill-center.not-enough-work-signals-yet.c81ce5b488": {
     "en": "Not enough work signals yet, so recommendations stay conservative.",
     "zh": "暂时还没有足够的职业或工作信号，推荐会先保持保守。"
-  },
-  "skill-center.official-bundled-skill-install-and.c28c0f16b6": {
-    "en": "Official bundled skill. Install and connect it to call it.",
-    "zh": "官方内置技能，安装并连接后可直接调用。"
-  },
-  "skill-center.ready-after-install.9ccfaed578": {
-    "en": "Ready after install",
-    "zh": "安装后可用"
   },
   "skill-center.recommended-for-your-work.be5baee372": {
     "en": "Recommended for your work",
@@ -7158,10 +7034,6 @@
   "skill-center.repair.c5b19788e4": {
     "en": "Repair",
     "zh": "修复"
-  },
-  "skill-center.requires-local-dependencies-before-use.f9734c5f1c": {
-    "en": "Requires local dependencies before use.",
-    "zh": "需要先完成本机依赖安装。"
   },
   "skill-center.requires-local-dependencies-or-account.87aec9deaa": {
     "en": "Requires local dependencies or account setup before use.",
@@ -7743,26 +7615,6 @@
     "en": "Total Tokens",
     "zh": "Token 总量"
   },
-  "user-switch-prompt.confidence.dc2fc3df56": {
-    "en": "Confidence",
-    "zh": "置信度"
-  },
-  "user-switch-prompt.detected.7548e82813": {
-    "en": "Detected",
-    "zh": "检测到"
-  },
-  "user-switch-prompt.ignore.9330c23b1e": {
-    "en": "Ignore",
-    "zh": "忽略"
-  },
-  "user-switch-prompt.switch.5a77f0584c": {
-    "en": "Switch",
-    "zh": "切换"
-  },
-  "user-switch-prompt.switching.c197a0b742": {
-    "en": "Switching...",
-    "zh": "切换中..."
-  },
   "voice-forge.clone-your-digital-essence-or.30ff243ebc": {
     "en": "Clone your digital essence or select from neural presets.",
     "zh": "克隆你的声音，或从预设声音中选择。"
@@ -8297,123 +8149,123 @@
   },
   "agent-chat-page.execution-cancelled.4ec843f670": {
     "en": "Cancelled",
-    "zh": "\u5df2\u53d6\u6d88"
+    "zh": "已取消"
   },
   "agent-chat-page.restoring-task-state.0fb759a4dc": {
-    "en": "Reconnected. Restoring task state\u2026",
-    "zh": "\u5df2\u91cd\u65b0\u8fde\u63a5\uff0c\u6b63\u5728\u6062\u590d\u4efb\u52a1\u72b6\u6001\u2026"
+    "en": "Reconnected. Restoring task state…",
+    "zh": "已重新连接，正在恢复任务状态…"
   },
   "agent-chat-page.previous-task-not-recoverable.17e6ad375c": {
     "en": "The previous task could not be recovered.",
-    "zh": "\u65e0\u6cd5\u6062\u590d\u4e0a\u4e00\u6b21\u4efb\u52a1\u3002"
+    "zh": "无法恢复上一次任务。"
   },
   "agent-chat-page.rechecking-task-state.7d8729d39f": {
-    "en": "Rechecking task status\u2026",
-    "zh": "\u6b63\u5728\u91cd\u65b0\u786e\u8ba4\u4efb\u52a1\u72b6\u6001\u2026"
+    "en": "Rechecking task status…",
+    "zh": "正在重新确认任务状态…"
   },
   "agent-chat-page.connection-lost-task-will-resume.52cd95319f": {
     "en": "Connection lost. This task will resume after reconnecting.",
-    "zh": "\u8fde\u63a5\u5df2\u4e2d\u65ad\uff0c\u6062\u590d\u8fde\u63a5\u540e\u4f1a\u7ee7\u7eed\u6b64\u4efb\u52a1\u3002"
+    "zh": "连接已中断，恢复连接后会继续此任务。"
   },
   "agent-chat-page.backend-lost-task.8bbc4d5800": {
     "en": "The backend can no longer find this task.",
-    "zh": "\u540e\u7aef\u5df2\u65e0\u6cd5\u627e\u5230\u6b64\u4efb\u52a1\u3002"
+    "zh": "后端已无法找到此任务。"
   },
   "agent-chat-page.cancelling-task.18c33c6327": {
-    "en": "Cancelling task\u2026",
-    "zh": "\u6b63\u5728\u53d6\u6d88\u4efb\u52a1\u2026"
+    "en": "Cancelling task…",
+    "zh": "正在取消任务…"
   },
   "agent-chat-page.cancellation-not-confirmed.990f6802e1": {
     "en": "Cancellation is not confirmed yet; still waiting.",
-    "zh": "\u53d6\u6d88\u8bf7\u6c42\u5c1a\u672a\u5f97\u5230\u786e\u8ba4\uff0c\u6b63\u5728\u7ee7\u7eed\u7b49\u5f85\u3002"
+    "zh": "取消请求尚未得到确认，正在继续等待。"
   },
   "agent-chat-page.connection-lost-recheck-task.6c0952c278": {
     "en": "Connection lost; task state will be checked after reconnecting.",
-    "zh": "\u8fde\u63a5\u5df2\u4e2d\u65ad\uff0c\u6062\u590d\u8fde\u63a5\u540e\u4f1a\u518d\u6b21\u786e\u8ba4\u4efb\u52a1\u72b6\u6001\u3002"
+    "zh": "连接已中断，恢复连接后会再次确认任务状态。"
   },
   "agent-chat-page.unable-to-cancel-task.08547685ab": {
     "en": "The current task could not be cancelled.",
-    "zh": "\u65e0\u6cd5\u53d6\u6d88\u5f53\u524d\u4efb\u52a1\u3002"
+    "zh": "无法取消当前任务。"
   },
   "agent-chat-page.cancelling.7163e20e93": {
     "en": "Cancelling",
-    "zh": "\u6b63\u5728\u53d6\u6d88"
+    "zh": "正在取消"
   },
   "agent-chat-page.drop-files-to-chat.5ea87cc147": {
     "en": "Drop to add files to this chat",
-    "zh": "\u677e\u5f00\u5373\u53ef\u6dfb\u52a0\u5230\u804a\u5929"
+    "zh": "松开即可添加到聊天"
   },
   "agent-chat-page.dropped-files-become-session-materials.193cb17bd7": {
     "en": "Files become session materials and stay available for follow-up questions",
-    "zh": "\u6587\u4ef6\u4f1a\u4fdd\u5b58\u4e3a\u672c\u4f1a\u8bdd\u6750\u6599\uff0c\u540e\u7eed\u95ee\u9898\u53ef\u7ee7\u7eed\u4f7f\u7528"
+    "zh": "文件会保存为本会话材料，后续问题可继续使用"
   },
   "agent-chat-page.session-materials-active.f044bfab71": {
     "en": "{value0} material(s) available throughout this conversation",
-    "zh": "{value0} \u4efd\u6750\u6599\u6b63\u5728\u672c\u4f1a\u8bdd\u4e2d\u6301\u7eed\u4f7f\u7528"
+    "zh": "{value0} 份材料正在本会话中持续使用"
   },
   "agent-chat-page.clear-session-materials.d06ef7bb05": {
     "en": "Stop using these materials in this conversation",
-    "zh": "\u505c\u6b62\u5728\u672c\u4f1a\u8bdd\u4e2d\u4f7f\u7528\u8fd9\u4e9b\u6750\u6599"
+    "zh": "停止在本会话中使用这些材料"
   },
   "agent-chat-page.clear.25b4e5dc64": {
     "en": "Clear",
-    "zh": "\u6e05\u9664"
+    "zh": "清除"
   },
   "agent-chat-page.session-materials-cleared.53bea199b2": {
     "en": "Session materials cleared",
-    "zh": "\u5df2\u6e05\u9664\u672c\u4f1a\u8bdd\u6750\u6599"
+    "zh": "已清除本会话材料"
   },
   "agent-chat-page.some-dropped-files-skipped.d3df0abf37": {
     "en": "{value0} dropped file(s) could not be imported",
-    "zh": "{value0} \u4e2a\u62d6\u5165\u7684\u6587\u4ef6\u672a\u80fd\u5bfc\u5165"
+    "zh": "{value0} 个拖入的文件未能导入"
   },
   "agent-chat-page.using-session-materials.66f4979b61": {
     "en": "I am continuing with the materials from this conversation...",
-    "zh": "\u6211\u6b63\u5728\u7ee7\u7eed\u4f7f\u7528\u672c\u4f1a\u8bdd\u7684\u6750\u6599\u2026\u2026"
+    "zh": "我正在继续使用本会话的材料……"
   },
   "settings.doubao-speech-api-key-only.4ab619f21d": {
     "en": "Paste the new-console API Key value, not its name. Legacy AppID:AccessToken credentials are rejected. The live test verifies both streaming ASR and TTS without fallback.",
-    "zh": "\u7c98\u8d34\u65b0\u7248\u63a7\u5236\u53f0 API Key \u7684\u503c\uff0c\u4e0d\u662f\u540d\u79f0\u3002\u65e7\u7248 AppID:AccessToken \u51ed\u636e\u4f1a\u88ab\u62d2\u7edd\u3002\u5b9e\u8c03\u4f1a\u5728\u7981\u6b62\u964d\u7ea7\u7684\u60c5\u51b5\u4e0b\u540c\u65f6\u9a8c\u8bc1\u6d41\u5f0f ASR \u548c TTS\u3002"
+    "zh": "粘贴新版控制台 API Key 的值，不是名称。旧版 AppID:AccessToken 凭据会被拒绝。实调会在禁止降级的情况下同时验证流式 ASR 和 TTS。"
   },
   "focus-thread-panel.planning.46c9f7780c": {
     "en": "Planning",
-    "zh": "\u89c4\u5212\u4e2d"
+    "zh": "规划中"
   },
   "focus-thread-panel.executing.76b91cbb06": {
     "en": "Executing",
-    "zh": "\u6267\u884c\u4e2d"
+    "zh": "执行中"
   },
   "focus-thread-panel.waiting-confirmation.266caeaec0": {
     "en": "Awaiting approval",
-    "zh": "\u7b49\u5f85\u786e\u8ba4"
+    "zh": "等待确认"
   },
   "focus-thread-panel.blocked.d42294315f": {
     "en": "Blocked",
-    "zh": "\u5df2\u53d7\u963b"
+    "zh": "已受阻"
   },
   "focus-thread-panel.completed.d824a8a52c": {
     "en": "Completed",
-    "zh": "\u5df2\u5b8c\u6210"
+    "zh": "已完成"
   },
   "focus-thread-panel.cancelled.2c1db96e4c": {
     "en": "Cancelled",
-    "zh": "\u5df2\u53d6\u6d88"
+    "zh": "已取消"
   },
   "focus-thread-panel.user-confirmation.00a5dd69ad": {
     "en": "Your confirmation",
-    "zh": "\u7528\u6237\u786e\u8ba4"
+    "zh": "用户确认"
   },
   "focus-thread-panel.waiting-for.52c50d0b29": {
     "en": "Waiting for",
-    "zh": "\u7b49\u5f85"
+    "zh": "等待"
   },
   "focus-thread-panel.next-action.c19d64b6d0": {
     "en": "Next",
-    "zh": "\u4e0b\u4e00\u6b65"
+    "zh": "下一步"
   },
   "focus-thread-panel.resume-point.f54de8a76a": {
     "en": "Resume from",
-    "zh": "\u6062\u590d\u70b9"
+    "zh": "恢复点"
   },
   "focus-thread-panel.date-locale.43f735d2f1": {
     "en": "en-US",
@@ -8421,373 +8273,372 @@
   },
   "focus-thread-panel.evidence-task.40d66a3a28": {
     "en": "Evidence task",
-    "zh": "\u56de\u6267\u4efb\u52a1"
+    "zh": "回执任务"
   },
   "focus-thread-panel.active-focus.09d8da7b70": {
     "en": "Active focus",
-    "zh": "\u5f53\u524d\u7126\u70b9"
+    "zh": "当前焦点"
   },
   "focus-thread-panel.active-count.9f970d5ccb": {
     "en": "{count} active",
-    "zh": "{count} \u9879\u8fdb\u884c\u4e2d"
+    "zh": "{count} 项进行中"
   },
   "focus-thread-panel.syncing.b0915c9901": {
     "en": "Syncing",
-    "zh": "\u540c\u6b65\u4e2d"
+    "zh": "同步中"
   },
   "command-center.title.c5bb6d0f01": {
     "en": "Lumi Command",
-    "zh": "Lumi \u6307\u6325\u4e2d\u5fc3"
+    "zh": "Lumi 指挥中心"
   },
   "command-center.open.9d87f7d2c1": {
     "en": "Open Lumi Command Center",
-    "zh": "\u6253\u5f00 Lumi \u6307\u6325\u4e2d\u5fc3"
+    "zh": "打开 Lumi 指挥中心"
   },
   "command-center.switcher.4b7c2d1e09": {
     "en": "Command center destinations",
-    "zh": "\u6307\u6325\u4e2d\u5fc3\u5207\u6362"
+    "zh": "指挥中心切换"
   },
   "command-center.memory-avatar-hint.6a1d9e3c20": {
     "en": "Private memory space",
-    "zh": "\u79c1\u5bc6\u8bb0\u5fc6\u7a7a\u95f4"
+    "zh": "私密记忆空间"
   },
   "command-center.lumicore-hint.8f2d4c1a09": {
     "en": "Core and system view",
-    "zh": "\u6838\u5fc3\u4e0e\u7cfb\u7edf\u89c6\u56fe"
+    "zh": "核心与系统视图"
   },
   "command-center.inner-realm.4d8f2a1c09": {
     "en": "Breath Realm",
-    "zh": "\u7075\u606f\u4e4b\u5883"
+    "zh": "灵息之境"
   },
   "command-center.network.e5d531b657": {
     "en": "Lumi Network",
-    "zh": "Lumi \u7f51\u7edc"
+    "zh": "Lumi 网络"
   },
   "command-center.core.1b1073a209": {
     "en": "OS Core",
-    "zh": "OS \u6838\u5fc3"
+    "zh": "OS 核心"
   },
   "command-center.personal-scope.c7bb921ff1": {
     "en": "Personal domain",
-    "zh": "\u4e2a\u4eba\u57df"
+    "zh": "个人域"
   },
   "command-center.organization-scope.7e5a629a21": {
     "en": "Organization domain",
-    "zh": "\u7ec4\u7ec7\u57df"
+    "zh": "组织域"
   },
   "command-center.lumi-desk.752fe2bcb1": {
     "en": "Lumi command desk",
-    "zh": "Lumi \u6307\u6325\u53f0"
+    "zh": "Lumi 指挥台"
   },
   "command-center.dispatching.270bc5f426": {
     "en": "Coordinating the active work",
-    "zh": "\u6b63\u5728\u7edf\u7b79\u5f53\u524d\u5de5\u4f5c"
+    "zh": "正在统筹当前工作"
   },
   "command-center.ready.4a09f2582b": {
     "en": "Ready",
-    "zh": "\u5f85\u547d"
+    "zh": "待命"
   },
   "command-center.working.90f16b23a5": {
     "en": "Working",
-    "zh": "\u5de5\u4f5c\u4e2d"
+    "zh": "工作中"
   },
   "command-center.paused.7848cd9af5": {
     "en": "Paused",
-    "zh": "\u5df2\u6682\u505c"
+    "zh": "已暂停"
   },
   "command-center.attention.c47451e86a": {
     "en": "Needs attention",
-    "zh": "\u9700\u8981\u5173\u6ce8"
+    "zh": "需要关注"
   },
   "command-center.waiting-confirmation.1640ac02bb": {
     "en": "Waiting for confirmation",
-    "zh": "\u7b49\u5f85\u786e\u8ba4"
+    "zh": "等待确认"
   },
   "command-center.lumi-commander.32f6b27c0a": {
     "en": "Lumi command center",
-    "zh": "Lumi \u6307\u6325\u4e2d\u67a2"
+    "zh": "Lumi 指挥中枢"
   },
   "command-center.local-lumi.11866c1402": {
     "en": "This Lumi",
-    "zh": "\u672c\u673a Lumi"
+    "zh": "本机 Lumi"
   },
   "command-center.peer-lumi.687323eaaf": {
     "en": "Connected Lumi",
-    "zh": "\u5df2\u8fde\u63a5 Lumi"
+    "zh": "已连接 Lumi"
   },
   "command-center.no-peers.b9c177fcb5": {
     "en": "No trusted Lumi peer is connected. Discovery and handshake will appear here.",
-    "zh": "\u6682\u65e0\u5df2\u8fde\u63a5\u7684\u53ef\u4fe1 Lumi\uff0c\u540e\u7eed\u7684\u53d1\u73b0\u4e0e\u63e1\u624b\u4f1a\u5728\u8fd9\u91cc\u5b8c\u6210\u3002"
+    "zh": "暂无已连接的可信 Lumi，后续的发现与握手会在这里完成。"
   },
   "command-center.external-context.5de665e847": {
     "en": "Incoming Lumi knowledge remains external context until you explicitly approve absorption.",
-    "zh": "\u5176\u4ed6 Lumi \u7684\u77e5\u8bc6\u9ed8\u8ba4\u4fdd\u6301\u4e3a\u5916\u90e8\u4e0a\u4e0b\u6587\uff0c\u53ea\u6709\u7ecf\u4f60\u660e\u786e\u540c\u610f\u624d\u80fd\u5438\u6536\u3002"
+    "zh": "其他 Lumi 的知识默认保持为外部上下文，只有经你明确同意才能吸收。"
   },
   "command-center.available-capabilities.1a80c899d2": {
     "en": "Available external capabilities",
-    "zh": "\u53ef\u7528\u5916\u90e8\u80fd\u529b"
+    "zh": "可用外部能力"
   },
   "command-center.refresh.7436ee304a": {
     "en": "Refresh command state",
-    "zh": "\u5237\u65b0\u6307\u6325\u72b6\u6001"
+    "zh": "刷新指挥状态"
   },
   "command-center.open-core.66a1099fe1": {
     "en": "Enter distributed core",
-    "zh": "\u8fdb\u5165\u5206\u5e03\u5f0f\u6838\u5fc3"
+    "zh": "进入分布式核心"
   },
   "command-center.show-workspace.8cbc21838f": {
     "en": "Show command workspace",
-    "zh": "\u663e\u793a\u6307\u6325\u5de5\u4f5c\u533a"
+    "zh": "显示指挥工作区"
   },
   "command-center.back-to-chat.b71016948a": {
     "en": "Back to chat",
-    "zh": "\u8fd4\u56de\u5bf9\u8bdd"
+    "zh": "返回对话"
   },
   "command-center.active-tasks.e3c67ca0fe": {
     "en": "Active",
-    "zh": "\u6267\u884c\u4e2d"
+    "zh": "执行中"
   },
   "command-center.confirmations.60da2ef07a": {
     "en": "Confirm",
-    "zh": "\u5f85\u786e\u8ba4"
+    "zh": "待确认"
   },
   "command-center.real-task-ledger.5b1be77168": {
     "en": "Task ledger",
-    "zh": "\u771f\u5b9e\u4efb\u52a1\u8d26\u672c"
+    "zh": "真实任务账本"
   },
   "command-center.receipt-driven.c10f9390d4": {
     "en": "receipt-driven",
-    "zh": "\u4ee5\u56de\u6267\u4e3a\u51c6"
+    "zh": "以回执为准"
   },
   "command-center.verified-receipts.02cc95eeba": {
     "en": "verified receipts",
-    "zh": "\u5df2\u9a8c\u8bc1\u56de\u6267"
+    "zh": "已验证回执"
   },
   "command-center.authorized.4357a61fc6": {
     "en": "Authorized",
-    "zh": "\u5df2\u6388\u6743"
+    "zh": "已授权"
   },
   "command-center.pending-authorization.81ff59477b": {
     "en": "Pending approval",
-    "zh": "\u5f85\u6388\u6743"
+    "zh": "待授权"
   },
   "command-center.authorize.76b1820f2e": {
     "en": "Authorize",
-    "zh": "\u6388\u6743\u5f15\u5165"
+    "zh": "授权引入"
   },
   "command-center.cancel.7cc65d915c": {
     "en": "Cancel",
-    "zh": "\u53d6\u6d88"
+    "zh": "取消"
   },
   "command-center.authorize-lumi-title.846a6924d8": {
     "en": "Authorize this Lumi",
-    "zh": "\u6388\u6743\u8fd9\u4e2a Lumi"
+    "zh": "授权这个 Lumi"
   },
   "command-center.authorize-lumi-message.30ce57f561": {
     "en": "Bind this peer to the active workspace with these requested scopes. Incoming context remains external and cannot alter personality.",
-    "zh": "\u5c06\u8be5\u5bf9\u7aef\u7ed1\u5b9a\u5230\u5f53\u524d\u5de5\u4f5c\u533a\uff0c\u5e76\u6388\u4e88\u4e0b\u5217\u8bf7\u6c42\u8303\u56f4\u3002\u5bf9\u7aef\u4e0a\u4e0b\u6587\u4ecd\u5c5e\u5916\u90e8\u5185\u5bb9\uff0c\u4e0d\u5f97\u4fee\u6539\u4eba\u683c\u3002"
+    "zh": "将该对端绑定到当前工作区，并授予下列请求范围。对端上下文仍属外部内容，不得修改人格。"
   },
   "command-center.lumi-authorized.40cd471ea1": {
     "en": "Lumi peer authorized for this workspace",
-    "zh": "\u5df2\u4e3a\u5f53\u524d\u5de5\u4f5c\u533a\u6388\u6743\u8be5 Lumi"
+    "zh": "已为当前工作区授权该 Lumi"
   },
   "command-center.lumi-authorization-failed.3a7a2f588e": {
     "en": "Lumi authorization failed",
-    "zh": "Lumi \u6388\u6743\u5931\u8d25"
+    "zh": "Lumi 授权失败"
   },
   "command-center.revoke-lumi-title.78ce82ea42": {
     "en": "Revoke this Lumi",
-    "zh": "\u64a4\u9500\u8fd9\u4e2a Lumi"
+    "zh": "撤销这个 Lumi"
   },
   "command-center.revoke-lumi-message.84e087b4b4": {
     "en": "This removes the session, delegated work and temporary shared context from the active workspace.",
-    "zh": "\u5c06\u4ece\u5f53\u524d\u5de5\u4f5c\u533a\u79fb\u9664\u4f1a\u8bdd\u3001\u59d4\u6d3e\u4efb\u52a1\u548c\u4e34\u65f6\u5171\u4eab\u4e0a\u4e0b\u6587\u3002"
+    "zh": "将从当前工作区移除会话、委派任务和临时共享上下文。"
   },
   "command-center.revoke.6fd9cdb478": {
     "en": "Revoke",
-    "zh": "\u64a4\u9500"
+    "zh": "撤销"
   },
   "command-center.lumi-revoked.2aa9c7cb16": {
     "en": "Lumi peer revoked",
-    "zh": "\u5df2\u64a4\u9500 Lumi \u5bf9\u7aef"
+    "zh": "已撤销 Lumi 对端"
   },
   "command-center.lumi-revoke-failed.c5522c7067": {
     "en": "Failed to revoke Lumi peer",
-    "zh": "\u64a4\u9500 Lumi \u5bf9\u7aef\u5931\u8d25"
+    "zh": "撤销 Lumi 对端失败"
   },
   "command-center.context-firewall.17a3907fd4": {
     "en": "Context firewall",
-    "zh": "\u4e0a\u4e0b\u6587\u9632\u706b\u5899"
+    "zh": "上下文防火墙"
   },
   "command-center.runtime-unavailable.52e4d243c4": {
     "en": "Runtime state unavailable",
-    "zh": "\u8fd0\u884c\u65f6\u72b6\u6001\u4e0d\u53ef\u7528"
+    "zh": "运行时状态不可用"
   },
   "command-center.tasks.1ddfd1ee9d": {
     "en": "Tasks",
-    "zh": "\u4efb\u52a1"
+    "zh": "任务"
   },
   "command-center.receipts.291d3480e2": {
     "en": "Receipts",
-    "zh": "\u56de\u6267"
+    "zh": "回执"
   },
   "command-center.pair-another-lumi.166e66dcab": {
     "en": "Pair another Lumi",
-    "zh": "\u914d\u5bf9\u53e6\u4e00\u4e2a Lumi"
+    "zh": "配对另一个 Lumi"
   },
   "command-center.pairing-ticket-note.48c906291e": {
     "en": "Create a ten-minute, single-use token. The peer remains inert until you approve its exact identity and scopes here.",
-    "zh": "\u521b\u5efa\u4e00\u679a 10 \u5206\u949f\u5185\u6709\u6548\u4e14\u53ea\u80fd\u4f7f\u7528\u4e00\u6b21\u7684\u4ee4\u724c\u3002\u5bf9\u7aef\u4ecd\u9700\u4f60\u5728\u6b64\u786e\u8ba4\u5176\u8eab\u4efd\u548c\u6743\u9650\u540e\u624d\u80fd\u5de5\u4f5c\u3002"
+    "zh": "创建一枚 10 分钟内有效且只能使用一次的令牌。对端仍需你在此确认其身份和权限后才能工作。"
   },
   "command-center.create-pairing-ticket.23c7b7105a": {
     "en": "Create token",
-    "zh": "\u521b\u5efa\u4ee4\u724c"
+    "zh": "创建令牌"
   },
   "command-center.click-to-copy.3a8b4d21c1": {
     "en": "Click to copy",
-    "zh": "\u70b9\u51fb\u590d\u5236"
+    "zh": "点击复制"
   },
   "command-center.pairing-ticket-failed.18a94503f7": {
     "en": "Failed to create pairing token",
-    "zh": "\u521b\u5efa\u914d\u5bf9\u4ee4\u724c\u5931\u8d25"
+    "zh": "创建配对令牌失败"
   },
   "command-center.pairing-token-copied.e23d53b09a": {
     "en": "Pairing token copied",
-    "zh": "\u914d\u5bf9\u4ee4\u724c\u5df2\u590d\u5236"
+    "zh": "配对令牌已复制"
   },
   "command-center.copy-failed.150177ecfd": {
     "en": "Copy failed",
-    "zh": "\u590d\u5236\u5931\u8d25"
+    "zh": "复制失败"
   },
   "command-center.sandbox-probe.8dd49c2607": {
     "en": "Sandbox capability probe",
-    "zh": "\u6c99\u7bb1\u80fd\u529b\u63a2\u6d4b"
+    "zh": "沙箱能力探测"
   },
   "command-center.sandbox-probe-placeholder.7cde36e482": {
     "en": "Give the peer one small verification task",
-    "zh": "\u7ed9\u5bf9\u7aef\u4e00\u4e2a\u5c0f\u578b\u9a8c\u8bc1\u4efb\u52a1"
+    "zh": "给对端一个小型验证任务"
   },
   "command-center.run-probe.a9d83908f4": {
     "en": "Probe",
-    "zh": "\u8bd5\u7528"
+    "zh": "试用"
   },
   "command-center.sandbox-limits.289559ff72": {
     "en": "No tools, local files or memory are shared. Unknown outcomes are never replayed automatically.",
-    "zh": "\u4e0d\u5171\u4eab\u5de5\u5177\u3001\u672c\u5730\u6587\u4ef6\u6216\u8bb0\u5fc6\uff1b\u7ed3\u679c\u672a\u77e5\u65f6\u7edd\u4e0d\u81ea\u52a8\u91cd\u53d1\u3002"
+    "zh": "不共享工具、本地文件或记忆；结果未知时绝不自动重发。"
   },
   "command-center.probe-prompt-required.087c5892c3": {
     "en": "Enter a sandbox probe task first",
-    "zh": "\u8bf7\u5148\u8f93\u5165\u6c99\u7bb1\u63a2\u6d4b\u4efb\u52a1"
+    "zh": "请先输入沙箱探测任务"
   },
   "command-center.probe-running.a478c0bc0e": {
     "en": "Waiting for a verified peer acknowledgement",
-    "zh": "\u6b63\u5728\u7b49\u5f85\u5bf9\u7aef\u7684\u53ef\u9a8c\u8bc1\u63a5\u6536\u56de\u6267"
+    "zh": "正在等待对端的可验证接收回执"
   },
   "command-center.probe-accepted.66ac386914": {
     "en": "Peer accepted the isolated probe",
-    "zh": "\u5bf9\u7aef\u5df2\u63a5\u6536\u9694\u79bb\u63a2\u6d4b\u4efb\u52a1"
+    "zh": "对端已接收隔离探测任务"
   },
   "command-center.probe-failed.c49ff322d4": {
     "en": "Sandbox probe failed",
-    "zh": "\u6c99\u7bb1\u63a2\u6d4b\u5931\u8d25"
+    "zh": "沙箱探测失败"
   },
   "command-center.probe-peer-result.bdb7e14f0e": {
     "en": "Untrusted peer-reported result",
-    "zh": "\u5bf9\u7aef\u56de\u62a5\u7ed3\u679c\uff08\u672a\u7ecf\u672c\u5730\u4e1a\u52a1\u9a8c\u8bc1\uff09"
+    "zh": "对端回报结果（未经本地业务验证）"
   },
   "command-center.probe-late-result.9258116370": {
     "en": "Late peer-reported result archived",
-    "zh": "\u5df2\u5f52\u6863\u5bf9\u7aef\u8fdf\u5230\u7ed3\u679c"
+    "zh": "已归档对端迟到结果"
   },
   "command-center.probe-empty-result.3305720766": {
     "en": "No output was returned",
-    "zh": "\u5bf9\u7aef\u672a\u8fd4\u56de\u8f93\u51fa"
+    "zh": "对端未返回输出"
   },
   "command-center.probe-unknown.2a2fb722a9": {
     "en": "Outcome unknown; automatic replay was blocked",
-    "zh": "\u7ed3\u679c\u672a\u77e5\uff0c\u5df2\u963b\u6b62\u81ea\u52a8\u91cd\u53d1"
+    "zh": "结果未知，已阻止自动重发"
   },
   "command-center.probe-in-progress.218ffae286": {
     "en": "Sandbox task is still in progress",
-    "zh": "\u6c99\u7bb1\u4efb\u52a1\u4ecd\u5728\u6267\u884c"
+    "zh": "沙箱任务仍在执行"
   },
   "command-center.community-lumi.2a9df06015": {
     "en": "Community Lumi directory",
-    "zh": "\u793e\u533a Lumi \u76ee\u5f55"
+    "zh": "社区 Lumi 目录"
   },
   "command-center.community-node.75930e79ad": {
     "en": "Community node",
-    "zh": "\u793e\u533a\u8282\u70b9"
+    "zh": "社区节点"
   },
   "command-center.community-empty.2ff60e4e91": {
     "en": "The connected directory has no public Lumi profiles.",
-    "zh": "\u5df2\u8fde\u63a5\u7684\u76ee\u5f55\u4e2d\u5c1a\u65e0\u516c\u5f00 Lumi \u6863\u6848\u3002"
+    "zh": "已连接的目录中尚无公开 Lumi 档案。"
   },
   "command-center.community-offline.37b0415de7": {
     "en": "The configured community directory is unavailable",
-    "zh": "\u5df2\u914d\u7f6e\u7684\u793e\u533a\u76ee\u5f55\u5f53\u524d\u4e0d\u53ef\u7528"
+    "zh": "已配置的社区目录当前不可用"
   },
   "command-center.community-not-configured.70ac8f734b": {
     "en": "No community directory is configured. Lumi will not fabricate discoverable peers.",
-    "zh": "\u5c1a\u672a\u914d\u7f6e\u793e\u533a Lumi \u76ee\u5f55\uff0c\u5ba2\u6237\u7aef\u4e0d\u4f1a\u4f2a\u9020\u53ef\u53d1\u73b0\u5bf9\u8c61\u3002"
+    "zh": "尚未配置社区 Lumi 目录，客户端不会伪造可发现对象。"
   },
   "command-center.community-boundary.181ef36bbd": {
     "en": "Directory profiles are discovery metadata only. Collaboration still requires one-time pairing, local authorization and sandbox verification.",
-    "zh": "\u76ee\u5f55\u6863\u6848\u4ec5\u7528\u4e8e\u53d1\u73b0\uff1b\u534f\u4f5c\u4ecd\u987b\u7ecf\u8fc7\u4e00\u6b21\u6027\u914d\u5bf9\u3001\u672c\u673a\u6388\u6743\u548c\u6c99\u7bb1\u9a8c\u8bc1\u3002"
+    "zh": "目录档案仅用于发现；协作仍须经过一次性配对、本机授权和沙箱验证。"
   },
   "command-center.selective-absorption.56fd31ae52": {
     "en": "Selective absorption",
-    "zh": "\u9009\u62e9\u6027\u5438\u6536"
+    "zh": "选择性吸收"
   },
   "command-center.inspect-context.8966bf16d6": {
     "en": "Inspect",
-    "zh": "\u67e5\u770b\u5916\u90e8\u4e0a\u4e0b\u6587"
+    "zh": "查看外部上下文"
   },
   "command-center.no-external-context.762357399e": {
     "en": "No eligible peer context is loaded. Inspecting does not write memory.",
-    "zh": "\u5c1a\u672a\u52a0\u8f7d\u53ef\u7528\u7684\u5bf9\u7aef\u4e0a\u4e0b\u6587\uff1b\u67e5\u770b\u4e0d\u4f1a\u5199\u5165\u8bb0\u5fc6\u3002"
+    "zh": "尚未加载可用的对端上下文；查看不会写入记忆。"
   },
   "command-center.absorb.55c9e779c1": {
     "en": "Absorb",
-    "zh": "\u5438\u6536"
+    "zh": "吸收"
   },
   "command-center.absorb-title.c816db1ecf": {
     "en": "Absorb this knowledge",
-    "zh": "\u5438\u6536\u8fd9\u6761\u77e5\u8bc6"
+    "zh": "吸收这条知识"
   },
   "command-center.absorb-warning.b839cc486f": {
     "en": "This creates one long-term memory in the active workspace with LAP source attribution. It cannot alter Lumi's personality.",
-    "zh": "\u8fd9\u4f1a\u5728\u5f53\u524d\u5de5\u4f5c\u533a\u521b\u5efa\u4e00\u6761\u5e26 LAP \u6765\u6e90\u7684\u957f\u671f\u8bb0\u5fc6\uff0c\u4f46\u4e0d\u80fd\u6539\u53d8 Lumi \u4eba\u683c\u3002"
+    "zh": "这会在当前工作区创建一条带 LAP 来源的长期记忆，但不能改变 Lumi 人格。"
   },
   "command-center.absorbed-with-provenance.5bf8ad2639": {
     "en": "Knowledge absorbed with LAP provenance",
-    "zh": "\u77e5\u8bc6\u5df2\u5438\u6536\u5e76\u4fdd\u7559 LAP \u6765\u6e90"
+    "zh": "知识已吸收并保留 LAP 来源"
   },
   "command-center.absorb-failed.b79b8245d7": {
     "en": "Knowledge absorption was blocked",
-    "zh": "\u77e5\u8bc6\u5438\u6536\u5df2\u88ab\u963b\u6b62"
+    "zh": "知识吸收已被阻止"
   },
   "command-center.context-load-failed.d5b5a2c9f7": {
     "en": "Failed to load peer context",
-    "zh": "\u5bf9\u7aef\u4e0a\u4e0b\u6587\u52a0\u8f7d\u5931\u8d25"
+    "zh": "对端上下文加载失败"
   },
   "settings.scheduled-routines.5f06751a14": {
     "en": "Scheduled routines",
-    "zh": "\u5b9a\u65f6\u4efb\u52a1"
+    "zh": "定时任务"
   },
   "skill-center.installed.7730eadf9a": {
     "en": "Installed",
-    "zh": "\u5df2\u5b89\u88c5"
+    "zh": "已安装"
   },
   "skill-center.install.8a47f50b4d": {
     "en": "Install",
-    "zh": "\u5b89\u88c5"
+    "zh": "安装"
   },
   "system-explorer.conversations.5e19d226fb": {
     "en": "Conversations",
-    "zh": "\u4f1a\u8bdd"
-  }
-,
+    "zh": "会话"
+  },
   "memory-avatar-lab.8-d-personality-vector.7aae255fba": {
     "en": "8-D Personality Vector",
     "zh": "8 维人格向量"
@@ -8814,7 +8665,7 @@
   },
   "memory-avatar.switch-avatar.2c6f8a1d04": {
     "en": "Switch memory avatar",
-    "zh": "\u5207\u6362\u8bb0\u5fc6\u5316\u8eab"
+    "zh": "切换记忆化身"
   },
   "memory-avatar-lab.create-sanctuary.f2cde9d0b0": {
     "en": "Create Sanctuary",
@@ -9015,5 +8866,173 @@
   "sanctuary.request-unavailable.9d1c4a7e20": {
     "en": "This memory avatar could not accept the message. Please try again.",
     "zh": "这个记忆化身暂时无法接收消息，请稍后重试。"
+  },
+  "settings.vision-capable-providers.40ab375ce2": {
+    "en": "Vision-Capable Providers",
+    "zh": "视觉模型服务商"
+  },
+  "settings.vision-provider-description.77b9f301aa": {
+    "en": "Configure vision-capable model catalogs and local runtimes here. Choose which one is active under Model Roles.",
+    "zh": "在这里配置视觉模型目录和本地运行时；实际使用哪个模型在“模型分工”中选择。"
+  },
+  "settings.speech-model-providers.99e68f2051": {
+    "en": "Speech Model Providers",
+    "zh": "语音模型服务商"
+  },
+  "settings.speech-provider-description.ea8bf84041": {
+    "en": "Configure cloud speech credentials here. Speech recognition and synthesis roles are selected under Model Roles.",
+    "zh": "在这里配置云端语音凭据；语音识别与合成的实际分工在“模型分工”中选择。"
+  },
+  "settings.generation-model-providers.b4f1c95162": {
+    "en": "Generation Model Providers",
+    "zh": "生成模型服务商"
+  },
+  "settings.generation-model-providers-description.a548399017": {
+    "en": "Credentials for model services used by generative roles and installed generation skills. Data sources and tool runtimes are configured elsewhere.",
+    "zh": "管理生成模型角色和已安装生成技能使用的模型服务商凭据。数据源与工具运行服务在其他分类中配置。"
+  },
+  "design-hub.prompt-output-sections": {
+    "en": "Respond using the following sections:",
+    "zh": "请按以下模块输出："
+  },
+  "design-hub.prompt-user-requirement": {
+    "en": "User requirements:",
+    "zh": "用户需求："
+  },
+  "legal-asset-trace.verifiable-external-source-required.9b3fa7d6e1": {
+    "en": "A verifiable external source is required. Configure an official API or have counsel verify and import the source through an authorized browser.",
+    "zh": "缺少可核验的外部数据源；请配置官方 API，或由律师在授权浏览器中核验并导入材料。"
+  },
+  "legal-bid-workbench.open-docx.6c2f1e4b9a": {
+    "en": "Open DOCX",
+    "zh": "打开 DOCX"
+  },
+  "legal-bid-workbench.open-docx-failed.3f7b19a8c2": {
+    "en": "Unable to open the DOCX artifact",
+    "zh": "打开 DOCX 失败"
+  },
+  "legal-bid-workbench.opened-verified-docx.47da920fb1": {
+    "en": "Opened the verified bid DOCX artifact",
+    "zh": "已打开可验证的 DOCX 标书工作底稿"
+  },
+  "legal-hub.no-case-selected.runtime": {
+    "en": "No case selected",
+    "zh": "未选择案件"
+  },
+  "reminder-panel.failed-to-create-reminder.880d5a66e2": {
+    "en": "Failed to create reminder",
+    "zh": "提醒创建失败"
+  },
+  "reminder-panel.failed-to-delete-reminder.0167264b7f": {
+    "en": "Failed to delete reminder",
+    "zh": "提醒删除失败"
+  },
+  "reminder-panel.failed-to-load-reminders.0092eaf0c9": {
+    "en": "Failed to load reminders",
+    "zh": "提醒加载失败"
+  },
+  "reminder-panel.failed-to-update-reminder.73f8821573": {
+    "en": "Failed to update reminder",
+    "zh": "提醒更新失败"
+  },
+  "settings.connected.4f18b17c87": {
+    "en": "CONNECTED",
+    "zh": "已连接"
+  },
+  "settings.enter-gemini-api-key.4295b94e77": {
+    "en": "Enter Gemini API key...",
+    "zh": "输入 Gemini API Key..."
+  },
+  "settings.local-vision-processes-screenshots-and.94552138f2": {
+    "en": "Local vision processes screenshots and images on your machine. The selected model must support image input, otherwise vision tasks will fail explicitly.",
+    "zh": "本地视觉只在你的电脑上处理截图和图片。模型需要支持图像输入，否则视觉任务会失败并明确报错。"
+  },
+  "settings.powers-qwen-asr-and-dashscope.519f4cb3da": {
+    "en": "Powers Qwen ASR and DashScope CosyVoice cloud TTS. Get your key at dashscope.aliyun.com",
+    "zh": "用于 Qwen ASR 和 DashScope CosyVoice 云端 TTS。可在 dashscope.aliyun.com 获取密钥。"
+  },
+  "settings.use-as-vision.adf03f9489": {
+    "en": "Use as Vision",
+    "zh": "设为视觉"
+  },
+  "settings.use-this-for-vllm-sglang.6ba52812bd": {
+    "en": "Use this for vLLM, SGLang, Xinference, or any local OpenAI-compatible vision endpoint.",
+    "zh": "用于 vLLM、SGLang、Xinference 或其他兼容 OpenAI Chat Completions 的本地视觉服务。"
+  },
+  "settings.use.998b2bc522": {
+    "en": "Use",
+    "zh": "设为视觉"
+  },
+  "settings.vision-call-failed.adf12eb156": {
+    "en": "Vision call failed",
+    "zh": "视觉实调失败"
+  },
+  "settings.vision-call-passed-value0-ms.c80d92a068": {
+    "en": "Vision call passed · {value0} ms",
+    "zh": "视觉实调成功 · {value0} ms"
+  },
+  "setup-wizard.lumi-will-use-your-local.41a9c8a5bd": {
+    "en": "Lumi will use your local model for everyday conversations. For complex tasks, it will automatically fall back to the cloud.",
+    "zh": "Lumi 会用你的本地模型处理日常对话。复杂任务可自动切换到云端模型。"
+  },
+  "setup-wizard.test-voice.4ff1c4863a": {
+    "en": "Test Voice",
+    "zh": "测试语音"
+  },
+  "setup-wizard.you-re-all-set.9a7beff5d2": {
+    "en": "You're All Set",
+    "zh": "已经准备好了"
+  },
+  "skill-center.connected-to-lumi-and-available.410a87e979": {
+    "en": "Connected to Lumi and available to chat, run logs, and tool routing.",
+    "zh": "已连接到 Lumi，聊天、运行日志和工具调度可使用。"
+  },
+  "skill-center.installed-but-its-mcp-server.9f5145472b": {
+    "en": "Installed but its MCP server is not connected yet.",
+    "zh": "已安装但 MCP 进程尚未连接。"
+  },
+  "skill-center.needs-connection.a5cb6b78b7": {
+    "en": "Needs connection",
+    "zh": "待连接"
+  },
+  "skill-center.needs-setup.e1bc0e20e1": {
+    "en": "Needs setup",
+    "zh": "需本机环境"
+  },
+  "skill-center.official-bundled-skill-install-and.c28c0f16b6": {
+    "en": "Official bundled skill. Install and connect it to call it.",
+    "zh": "官方内置技能，安装并连接后可直接调用。"
+  },
+  "skill-center.ready-after-install.9ccfaed578": {
+    "en": "Ready after install",
+    "zh": "安装后可用"
+  },
+  "skill-center.requires-local-dependencies-before-use.f9734c5f1c": {
+    "en": "Requires local dependencies before use.",
+    "zh": "需要先完成本机依赖安装。"
+  },
+  "user-switch-prompt.confidence.dc2fc3df56": {
+    "en": "Confidence",
+    "zh": "置信度"
+  },
+  "user-switch-prompt.detected.7548e82813": {
+    "en": "Detected",
+    "zh": "检测到"
+  },
+  "user-switch-prompt.ignore.9330c23b1e": {
+    "en": "Ignore",
+    "zh": "忽略"
+  },
+  "user-switch-prompt.switch.5a77f0584c": {
+    "en": "Switch",
+    "zh": "切换"
+  },
+  "user-switch-prompt.switching.c197a0b742": {
+    "en": "Switching...",
+    "zh": "切换中..."
+  },
+  "legal-hub.key-fact-occurrence-date.8d58a6cf10": {
+    "en": "Key fact occurrence date",
+    "zh": "关键事实发生日期"
   }
 }

@@ -1,9 +1,10 @@
+import { readImplementationSource } from './implementation_source';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 function readRepoFile(relativePath: string): string {
-  return readFileSync(path.join(process.cwd(), relativePath), 'utf8');
+  return readImplementationSource(path.join(process.cwd(), relativePath), 'utf8');
 }
 
 describe('core capability boundaries', () => {
@@ -11,7 +12,6 @@ describe('core capability boundaries', () => {
     const coreSources = [
       'server/socket/chat.ts',
       'server/socket/voice.ts',
-      'server/socket/task.ts',
       'server/cognition/turn_flow.ts',
       'server/cognition/turn_dispatch.ts',
       'server/cognition/capability_selection.ts',

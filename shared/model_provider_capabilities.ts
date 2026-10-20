@@ -56,8 +56,8 @@ export const LUMI_OFFICIAL_DEFAULT_MODELS: Readonly<Record<LumiModelRoleId, stri
   world: 'aliyun/qwen3-vl-flash',
   image_generation: 'aliyun/qwen-image',
   image_edit: 'aliyun/qwen-image-edit-2509',
-  video_generation: 'aliyun/Wan2.2-T2V-A14B',
-  image_to_video: 'aliyun/Wan2.2-I2V-A14B',
+  video_generation: 'aliyun/wan3.0-video',
+  image_to_video: 'aliyun/wan3.0-video',
   embedding: 'aliyun/bge-m3',
   rerank: 'aliyun/bge-reranker-v2-m3',
   speech_recognition: 'aliyun/qwen-audio-3.0-asr-flash-streaming',
@@ -133,7 +133,3 @@ export const LUMI_OFFICIAL_SUPPORTED_ROLES = LUMI_MODEL_ROLE_IDS.filter(
 export const LUMI_OFFICIAL_UNSUPPORTED_ROLES = LUMI_MODEL_ROLE_IDS.filter(
   role => !LUMI_OFFICIAL_ROLE_CAPABILITIES[role],
 );
-
-export function isLumiOfficialRoleSupported(role: string): boolean {
-  return LUMI_OFFICIAL_ROLE_CAPABILITIES[role as LumiModelRoleId] === true;
-}

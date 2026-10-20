@@ -1,9 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import jwt from 'jsonwebtoken';
 import { makeApp, JWT_SECRET } from './helpers';
+
+const opener = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../server/files/knowledge/paths', async original => ({ ...await original<typeof import('../server/files/knowledge/paths')>(), openPathWithDefaultApp: opener }));
 
 let cleanup = () => {};
 let testUrl = '';
@@ -14,6 +17,10 @@ let mp4ArtifactPath = '';
 let movArtifactPath = '';
 let keysPath = '';
 let envPath = '';
+let legalArtifactPath = '';
+let unrecordedLegalPath = '';
+let foreignLegalPath = '';
+let linkedLegalPath = '';
 
 const userCookie = `token=${jwt.sign({
   uid: 'generated-output-user',
@@ -32,7 +39,8 @@ describe('Generated-output route security boundary', () => {
     const appContext = await makeApp();
     const { app, apiRouter } = appContext;
     const { default: fileRoutes } = await import('../routes/files');
-    const { getDataPath, getGeneratedOutputDir } = await import('../server/config/data_path');
+    const { getDataPath, getGeneratedOutputDir, getLegalDeliveryRoot } = await import('../server/config/data_path');
+    const { createCase, recordWorkflowRun, legalWorkspaceNamespace } = await import('../server/org/legal_cases');
     const {
       requireAdmin,
       requireAuth,
@@ -53,6 +61,25 @@ describe('Generated-output route security boundary', () => {
     fs.writeFileSync(movArtifactPath, 'generated-mov-ok', 'utf8');
     fs.writeFileSync(keysPath, '{"secret":"must-not-leak"}', 'utf8');
     fs.writeFileSync(envPath, 'PRIVATE_TOKEN=must-not-leak', 'utf8');
+
+    const workspaceId = legalWorkspaceNamespace('generated-output-admin');
+    const legalRoot = getLegalDeliveryRoot(workspaceId);
+    const packetDir = path.join(legalRoot, 'packet');
+    fs.mkdirSync(packetDir, { recursive: true });
+    legalArtifactPath = path.join(packetDir, 'verified-draft.txt');
+    unrecordedLegalPath = path.join(packetDir, 'unrecorded.txt');
+    foreignLegalPath = path.join(getLegalDeliveryRoot(legalWorkspaceNamespace('another-owner')), 'foreign.txt');
+    fs.writeFileSync(legalArtifactPath, 'owned-legal-draft', 'utf8');
+    fs.writeFileSync(unrecordedLegalPath, 'unrecorded-private-text', 'utf8');
+    fs.writeFileSync(foreignLegalPath, 'another-owner-private-text', 'utf8');
+    const linkDir = path.join(legalRoot, 'linked-packet');
+    fs.symlinkSync(packetDir, linkDir, process.platform === 'win32' ? 'junction' : 'dir');
+    linkedLegalPath = path.join(linkDir, path.basename(legalArtifactPath));
+    const caseFile = createCase(workspaceId, 'generated-output-admin', { title: 'Synthetic output ownership' });
+    recordWorkflowRun(workspaceId, 'generated-output-admin', caseFile.id, {
+      tool: 'legal_generate_litigation_packet', ok: true, status: 'generated', materialIds: [],
+      artifacts: [legalArtifactPath, keysPath, foreignLegalPath, linkedLegalPath],
+    });
 
     // Mount the production static-output middleware chain. The first middleware
     // lets one test emulate a non-loopback peer without trusting proxy headers.
@@ -119,6 +146,26 @@ describe('Generated-output route security boundary', () => {
     );
     expect(generatedResponse.status).toBe(200);
     expect(await generatedResponse.text()).toBe('generated-artifact-ok');
+  });
+
+  it('downloads and reveals a recorded file in the authenticated legal workspace', async () => {
+    const download = await fetch(`${testUrl}/api/files/generated?path=${encodeURIComponent(legalArtifactPath)}`, { headers: { Cookie: adminCookie } });
+    expect(download.status).toBe(200);
+    expect(await download.text()).toBe('owned-legal-draft');
+    const opened = await fetch(`${testUrl}/api/files/open`, { method: 'POST', headers: { Cookie: adminCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ path: legalArtifactPath, reveal: true }) });
+    expect(opened.status).toBe(200);
+    expect(opener).toHaveBeenCalledWith(path.dirname(legalArtifactPath));
+  });
+
+  it.each([
+    ['unrecorded file', () => unrecordedLegalPath],
+    ['another workspace even with a receipt', () => foreignLegalPath],
+    ['a redirected output parent', () => linkedLegalPath],
+    ['a secret outside legal output even with a receipt', () => keysPath],
+  ])('rejects legal output access to %s', async (_label, getPath) => {
+    const response = await fetch(`${testUrl}/api/files/generated?path=${encodeURIComponent(getPath())}`, { headers: { Cookie: adminCookie } });
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toMatch(/private-text|must-not-leak|owned-legal-draft/);
   });
 
   it.each([
@@ -217,4 +264,33 @@ describe('Generated-output route security boundary', () => {
       fs.rmSync(linkedDir, { force: true });
     }
   });
+
+  describe('generated file folder opener', () => {
+  it('opens the verified parent while preserving normal file opening', async () => {
+    for (const reveal of [true, false]) {
+      const response = await fetch(testUrl + '/api/files/open', { method: 'POST', headers: { Cookie: adminCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ path: artifactPath, reveal }) });
+      expect(response.status).toBe(200);
+      const expected = fs.realpathSync.native(reveal ? path.dirname(artifactPath) : artifactPath);
+      expect((await response.json()).path).toBe(expected);
+      expect(opener).toHaveBeenLastCalledWith(expected);
+    }
+  });
+  it('opens an owned archived file by ID using its actual knowledge directory', async () => {
+    const { getPersonalKnowledgeDirectory } = await import('../server/files/knowledge_directory');
+    const { dir } = getPersonalKnowledgeDirectory('generated-output-user');
+    fs.writeFileSync(path.join(dir, 'archived-image.png'), 'image');
+    const response = await fetch(testUrl + '/api/files/open?domain=personal', { method: 'POST', headers: { Cookie: userCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'archived-image.png', reveal: true }) });
+    expect(response.status).toBe(200);
+    expect((await response.json()).path).toBe(fs.realpathSync.native(dir));
+    expect(opener).toHaveBeenLastCalledWith(fs.realpathSync.native(dir));
+  });
+  it('refuses secret paths, missing files, anonymous requests and ordinary-user raw paths', async () => {
+    for (const [cookie, target, status] of [[adminCookie, keysPath, 403], [adminCookie, path.join(generatedDir, 'missing.png'), 404], [userCookie, artifactPath, 403], ['', artifactPath, 401]] as const) {
+      opener.mockClear();
+      const response = await fetch(testUrl + '/api/files/open', { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ path: target, reveal: true }) });
+      expect(response.status).toBe(status);
+      expect(opener).not.toHaveBeenCalled();
+    }
+  });
+});
 });

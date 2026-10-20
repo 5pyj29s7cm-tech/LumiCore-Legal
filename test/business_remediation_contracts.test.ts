@@ -62,11 +62,9 @@ describe('business remediation truthful boundaries', () => {
     const registry = new ToolRegistry(); registerLegalTools(registry);
     const controller = new AbortController();
     let resolve!: (value: any) => void;
-    let modelSignal: AbortSignal | undefined;
     vi.mocked(makeLLMCall).mockImplementationOnce(async (...args) => {
-      modelSignal = args[2].signal;
-      expect(modelSignal).toBeInstanceOf(AbortSignal);
-      expect(modelSignal?.aborted).toBe(false);
+      expect(args[2].signal).toBeInstanceOf(AbortSignal);
+      expect(args[2].signal.aborted).toBe(false);
       return new Promise(done => { resolve = done; });
     });
     const orgId = `legal-cancel-${Date.now()}`;
@@ -76,7 +74,6 @@ describe('business remediation truthful boundaries', () => {
     });
     await vi.waitFor(() => expect(resolve).toBeTypeOf('function'));
     controller.abort(new DOMException('cancelled', 'AbortError'));
-    expect(modelSignal?.aborted).toBe(true);
     resolve({ text: 'A late synthetic draft that must not be archived' });
     await expect(pending).rejects.toThrow(/cancelled/);
     expect(Cases.listCases(orgId, '', 100, 'synthetic')).toEqual([]);

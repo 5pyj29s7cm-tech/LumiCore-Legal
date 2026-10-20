@@ -2,6 +2,22 @@ import type { LegalSourceCapability } from '../../../legal/sources';
 import type { WebLoginSitePreset } from '../../../web_login/legal_presets';
 
 export const CN_ASSET_TRACE_SOURCE_COPY = {
+  nextActions: {
+  "qccConfigured": "可调用企业主体数据库查询；MCP 默认只查工商，股东、实控人与风险按 queryType 明确选择，并保存原始来源。",
+  "qccUnconfigured": "官方 MCP 仅需 QICHACHA_API_KEY；旧版开放 API 另需 APP_KEY 与 SECRET_KEY。也可使用授权网页登录。",
+  "tycConfigured": "可通过 企业信息查询 / 财产线索核验 查询企业信息，并将律师确认结果入库。",
+  "pkulawConfigured": "可调用 法源与类案检索 检索权威法律依据，并把结果写入来源登记。",
+  "faruiConfigured": "可调用 法源与类案检索 检索法规/案例；结果进入来源登记和引用核验。",
+  "alpha": "使用 授权站点设置 / 授权网页登录 打开 Alpha，律师确认结果后导入 Lumi 知识库。",
+  "wenshu": "使用授权浏览器检索、下载或复制材料，再调用 材料入库 入库。"
+},
+  qichacha: {
+    label: '企查查',
+    mcpBoundary: '已配置企查查官方 MCP 单密钥，按请求查询公司或风险信息；返回内容仍需核对，不代表律师核准。',
+    legacyBoundary: '已配置旧版开放 API 的 App Key 与 Secret Key，可按授权额度查询企业信息。',
+    unconfiguredBoundary: '尚未配置企查查 MCP API Key 或旧版开放 API 双密钥，只能使用授权网页登录协作。',
+    mcpSourceName: '企查查官方 MCP',
+  },
   qixinbao: {
     label: '启信宝',
     configuredBoundary: '已配置律所获授权的启信宝 API/数据网关；查询范围仍受供应商合同、套餐、频控和用途限制。',

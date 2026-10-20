@@ -1,9 +1,10 @@
+import { readImplementationSource } from './implementation_source';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 function source(relativePath: string): string {
-  return readFileSync(path.join(process.cwd(), relativePath), 'utf8');
+  return readImplementationSource(path.join(process.cwd(), relativePath), 'utf8');
 }
 
 function expectFinalizationMetadataOnEveryAgentResponse(relativePath: string): void {
@@ -57,38 +58,25 @@ function expectFinalizationMetadataOnEveryAgentResponse(relativePath: string): v
 }
 
 describe('finalized output paths', () => {
-  it('buffers task model text and finalizes against actual tool records', () => {
-    const task = source('server/socket/task.ts');
-
-    expect(task).toContain('shouldDeferModelOutputUntilFinalized');
-    expect(task).toContain('createPreFinalizationTextGate');
-    expect(task).toContain('const taskTextGate = createPreFinalizationTextGate()');
-    expect(task).toContain('if (!authority.isCancelled() && !deferTaskModelOutput)');
-    expect(task).toContain('const safeText = taskTextGate.push(chunk)');
-    expect(task).toContain('taskTextGate.finish()');
-    expect(task).toMatch(/(?:const|let) finalTaskToolRecords = attachDesktopReceipt\(result\.toolCalls\)/);
-    expect(task).toContain('toolRecords: taskAwareRecords(finalTaskToolRecords)');
-    expect(task).toContain('finalized: true');
-    expect(task).toContain('blocked: finalTaskResponse.blocked');
-  });
-
   it('keeps ordinary REST streaming but buffers action output until the final SSE event', () => {
     const rest = source('server/routes/chat_routes.ts');
 
-    expect(rest).toContain('const restToolSessionActive = restExecutionPipeline.executionRequested');
+    expect(rest).toContain('const deferRestStream = execution.executionRequested');
     expect(rest).toContain('shouldDeferModelOutputUntilFinalized');
     expect(rest).toContain('createPreFinalizationTextGate');
     expect(rest).toContain('restTextGate.push(chunk)');
-    expect(rest).toContain('if (!deferRestStream)');
-    expect(rest).toContain('const restModelToolPolicy = restExecutionPipeline.authorizationPolicy');
-    expect(rest).toContain('const restModelToolProjection = restExecutionPipeline.modelToolProjection');
-    expect(rest).toContain('additionalForbiddenTools: restBoundaryForbiddenTools');
+    expect(rest).toContain('return await runLumiEntryTurn({');
+    expect(source('server/cognition/turn_execution.ts')).toContain('...assembled.model, execution, messages,');
+    expect(source('server/cognition/turn_model.ts')).toContain('modelToolProjection: execution.modelToolProjection');
+    expect(rest).toContain('executionBoundary,');
     expect(rest).toContain("'remote_restricted'");
-    expect(rest).toContain('toolPolicy: restModelToolPolicy');
-    expect(rest).toContain('restModelToolPolicy.maxIterations || 3');
-    expect(rest).toContain("finalizeRestToolResult(responseText, result, 'rest_chat_stream')");
-    expect(rest).toContain('finalizeExecutionForOutboundDelivery');
-    expect(rest).toContain("'rest_chat_guard_recovery'");
+    expect(source('server/cognition/turn_model.ts')).toContain('toolPolicy: execution.authorizationPolicy');
+    expect(rest).toContain('execution.authorizationPolicy.maxIterations || 3');
+    expect(rest).toContain('runLumiEntryTurn({');
+    expect(source('server/cognition/turn_execution.ts')).toContain('await runPreparedLumiTurn({');
+    expect(source('server/cognition/prepared_turn.ts')).toContain('await finalizeLumiResponseForDelivery({');
+    expect(source('server/cognition/response_delivery.ts')).toContain('finalizeExecutionForOutboundDelivery');
+    expect(source('server/cognition/prepared_turn.ts')).toContain("input.model.context?.source || input.model.config.source || source) + '_guard_recovery'");
     expect(rest).toContain('finalized: true');
     expect(rest).toContain('blocked: finalized.blocked');
   });
@@ -115,25 +103,23 @@ describe('finalized output paths', () => {
   it('resets frontend finalization state for every new request', () => {
     for (const component of [
       source('src/components/AgentChatPage.tsx'),
-      source('src/components/ChatPanel.tsx'),
     ]) {
-      expect(component).toContain('currentResponseFinalizationRef');
-      expect(component).toContain('currentResponseFinalizationRef.current = finalization');
-      expect(component).toContain('currentResponseFinalizationRef.current = null');
+      expect(component).toContain('currentTurnUiMetaRef');
+      expect(component).toContain('currentTurnUiMetaRef.current.finalization = finalization');
+      expect(component).toContain('currentTurnUiMetaRef.current = { hadTool: false, finalization: null }');
+      expect(component).not.toContain('currentResponseFinalizationRef');
     }
   });
 
   it('marks every socket response with finalization metadata', () => {
     expectFinalizationMetadataOnEveryAgentResponse('server/socket/chat.ts');
     expectFinalizationMetadataOnEveryAgentResponse('server/socket/voice.ts');
-    expectFinalizationMetadataOnEveryAgentResponse('server/socket/task.ts');
   });
 
   it('persists a request-fenced blocked disposition from every foreground socket', () => {
     for (const relativePath of [
       'server/socket/chat.ts',
       'server/socket/voice.ts',
-      'server/socket/task.ts',
     ]) {
       const code = source(relativePath);
       expect(code).toContain('terminalTaskDisposition');
@@ -150,23 +136,25 @@ describe('finalized output paths', () => {
     expect(chat).toContain('responseText = finalResponse.text;');
   });
 
-  it('keeps MCP chat chunks, speech, and returns behind the shared finalizer', () => {
+  it('keeps MCP chunks, speech and returns behind the shared durable turn driver', () => {
     const mcp = source('server/mcp/lumi_server.ts');
-
-    expect(mcp).toContain("import { finalizeLumiResponse } from '../cognition/result_finalizer';");
-    expect(mcp).toContain('const bufferedChunks: string[] = [];');
-    expect(mcp).toContain('chunk => bufferedChunks.push(chunk)');
-    expect(mcp).not.toContain("(chunk) => bc('mcp:chunk'");
-    expect(mcp).toContain('finalizeMcpResponseForDelivery({');
-    expect(mcp).toContain('finalizeExecutionForOutboundDelivery({');
-    expect(mcp).toContain("'mcp_chat_guard_recovery'");
-    expect(mcp).toContain("source: background ? 'mcp_chat_background' : 'mcp_chat'");
-    expect(mcp).toContain('bc(\'agent:response\', {');
+    const driver = source('server/cognition/turn_execution.ts');
+    expect(mcp).toContain('const responsePromise = runLumiEntryTurn({');
+    expect(source('server/mcp/server_tools/conversation.ts')).not.toContain('finalizeLumiResponseForDelivery({');
+    expect(mcp).not.toContain('runResolvedLumiTurn(');
+    expect(driver).toContain('await runPreparedLumiTurn({');
+    expect(source('server/cognition/prepared_turn.ts')).toContain('await finalizeLumiResponseForDelivery({');
+    expect(source('server/cognition/prepared_turn.ts')).toContain("input.model.context?.source || input.model.config.source || source) + '_guard_recovery'");
+    expect(driver.indexOf('await commit(finalized,')).toBeLessThan(driver.indexOf('return await input.deliver(executed)'));
+    expect(mcp).toContain('const deliver = async ({ finalized, toolRecords }: ExecutedLumiTurn)');
+    expect(mcp).toContain("source: 'mcp_chat', action: 'chat'");
+    expect(mcp).toContain("deliverySource: () => background ? entry.source + '_background' : entry.source");
+    expect(mcp).toContain("emit('agent:response', {");
     expect(mcp).toContain('finalized: true');
     expect(mcp).toContain('blocked: finalized.blocked');
     expect(mcp).toContain('const ttsResult = await synthesizeSpeech(finalized.text');
     expect(mcp).toContain("content: [{ type: 'text' as const, text: delivered.finalized.text }]");
-    expect(mcp).toContain('.then(backgroundResponse => deliverFinalizedChatResponse(backgroundResponse, true))');
+    expect(mcp).not.toContain("chunk => emit('mcp:chunk'");
   });
 
   it('keeps proactive MCP speech behind the shared finalizer', () => {
@@ -187,8 +175,11 @@ describe('finalized output paths', () => {
     const mcp = source('server/mcp/lumi_server.ts');
 
     expect(mcp).toContain("source: 'mcp_route_task'");
-    expect(mcp).toContain('toolRecords: result.toolCalls');
-    expect(mcp).toContain('result: finalized.text');
+    expect(mcp).toContain("runMcpConversationTurn(runtime, { message: task, personalityId: 'lumi' }, MCP_TASK_ENTRY)");
+    expect(source('server/cognition/prepared_turn.ts')).toContain('mergeToolExecutionRecords(input.toolRecords || [], result.toolCalls || [])');
+    expect(source('server/cognition/prepared_turn.ts')).toContain('taskId: input.taskId, requestId: input.requestId');
+    expect(mcp).toContain('result: response.content[0].text');
+    expect(mcp).toContain('text: delivered.finalized.text');
     expect(mcp).not.toContain("action: 'route_task', status: 'completed'");
   });
 
@@ -211,41 +202,32 @@ describe('finalized output paths', () => {
 
   it('never queues model candidate speech before the shared voice finalizer', () => {
     const voice = source('server/socket/voice.ts');
+    const driver = source('server/cognition/prepared_turn.ts');
+    const modelEntry = source('server/socket/voice/turn/execute_voice_model_turn.ts');
+    const deliveryEntry = source('server/socket/voice/turn/finalize_voice_model_turn.ts');
     const terminalBoundaryStart = voice.indexOf('const commitVoiceTerminal = async');
     const terminalBoundaryEnd = voice.indexOf('const maxIterations =', terminalBoundaryStart);
     const terminalBoundary = voice.slice(terminalBoundaryStart, terminalBoundaryEnd);
-    // Include the stream callback as well as both shared entry points. Starting
-    // at only the runWithTools call would miss speech queued from onChunk.
-    const modelCandidateStart = voice.indexOf('const modelConfig: LLMConfig = {');
-    const sharedTurnStart = voice.indexOf('const result = toolSessionActive', modelCandidateStart);
-    const sharedToolStart = voice.indexOf('await runWithTools(', sharedTurnStart);
-    const sharedConversationStart = voice.indexOf('await runConversationTurn({', sharedTurnStart);
-    const finalizerStart = voice.indexOf('let finalResponse: ReturnType<typeof finalizeLumiResponse>', sharedTurnStart);
-    const finalCommitStart = voice.indexOf('mainTerminalCommitted = await commitVoiceTerminal({', finalizerStart);
-    const modelCandidatePath = voice.slice(modelCandidateStart, finalizerStart);
-    const finalCommitPath = voice.slice(finalCommitStart, finalCommitStart + 1_000);
-
+    const modelStart = driver.indexOf('await runResolvedLumiTurn(input.model)');
+    const finalizerStart = driver.indexOf('await finalizeLumiResponseForDelivery({');
+    expect(modelStart).toBeGreaterThan(0); expect(finalizerStart).toBeGreaterThan(modelStart);
+    expect(source('server/socket/voice_conversation_turn.ts')).toContain('await runLumiEntryTurn<void>({');
+    expect(modelEntry).toContain('systemPrompt: context.voiceSystemPrompt, messages, taskText: context.routedUserText');
+    expect(modelEntry).not.toContain('runPreparedLumiTurn(');
+    expect(deliveryEntry).toContain('context.responseText = completed.finalized.text;');
+    expect(deliveryEntry).toContain('const finalResponse = completed.finalized;');
+    expect(deliveryEntry).toContain('mainTerminalCommitted = await context.finishVoiceTerminal({');
+    expect(deliveryEntry).not.toContain('runResolvedLumiRecovery');
+    expect(source('server/cognition/turn_model.ts')).toContain('if (!execution.executionRequested)');
     expect(terminalBoundaryStart).toBeGreaterThan(0);
-    expect(modelCandidateStart).toBeGreaterThan(0);
-    expect(sharedTurnStart).toBeGreaterThan(modelCandidateStart);
-    expect(sharedToolStart).toBeGreaterThan(sharedTurnStart);
-    expect(sharedConversationStart).toBeGreaterThan(sharedToolStart);
-    expect(finalizerStart).toBeGreaterThan(sharedConversationStart);
-    expect(finalCommitStart).toBeGreaterThan(finalizerStart);
-    expect(terminalBoundary.indexOf('recordChatExecutionTerminalEventDurably(')).toBeGreaterThan(0);
-    expect(terminalBoundary.indexOf('publishCommitted:')).toBeGreaterThan(
-      terminalBoundary.indexOf('recordChatExecutionTerminalEventDurably('),
-    );
-    expect(terminalBoundary.indexOf('queueFinalizedSpeech(input.speechText!)')).toBeGreaterThan(
-      terminalBoundary.indexOf('publishCommitted:'),
-    );
-    expect(modelCandidatePath).not.toContain('flushSentence(');
-    expect(modelCandidatePath).not.toContain('queueFinalizedSpeech(');
-    expect(modelCandidatePath).toContain('const onChunk = (chunk: string) => {');
-    expect(modelCandidatePath).toContain("responseText = result.text || '';");
-    expect(modelCandidatePath).toContain('completionGuard = result.completionGuard;');
-    expect(finalCommitPath).toContain('speechText: responseText');
-    expect(voice.slice(finalizerStart, finalCommitStart + 1_000)).not.toContain('modelGateSnapshot');
+    expect(terminalBoundary.indexOf('persistAuthorizedTerminalReceipt(')).toBeGreaterThan(0);
+    expect(terminalBoundary.indexOf('publishCommitted:')).toBeGreaterThan(terminalBoundary.indexOf('persistAuthorizedTerminalReceipt('));
+    expect(terminalBoundary.indexOf('queueFinalizedSpeech(input.speechText!)')).toBeGreaterThan(terminalBoundary.indexOf('publishCommitted:'));
+    expect(modelEntry).not.toContain('flushSentence('); expect(modelEntry).not.toContain('queueFinalizedSpeech(');
+    expect(modelEntry).toContain('const onChunk = (chunk: string) => {');
+    expect(modelEntry).toContain('context.modelTextGate.finish();');
+    expect(deliveryEntry).toContain('speechText: context.responseText');
+    expect(deliveryEntry).not.toContain('modelGateSnapshot');
   });
 
   it('quarantines blocked early-return socket responses from history and learning', () => {
@@ -254,27 +236,20 @@ describe('finalized output paths', () => {
 
     expect(chat).not.toContain('executeSkillWorkflowAdapter');
     expect(chat).not.toContain('persistBackgroundResult(');
-    expect(chat).toContain("cognitiveIntent: finalResponse.blocked ? 'work_product_guard' : cognition.intent.category");
+    expect(chat).toContain("cognitiveIntent: finalResponse.blocked ? 'work_product_guard' : executionPipeline.normalizedIntent.kind");
     expect(chat).toContain('if (!finalResponse.blocked) {');
 
-    for (const [finalized, committed] of [
-      ['finalizedRecentAction', 'recentActionCommitted'],
-      ['finalizedWorkflow', 'workflowCommitted'],
-      ['finalizedMode', 'modeCommitted'],
-      ['quickFinalized', 'quickCommitted'],
-      ['confirmedFinal', 'confirmationCommitted'],
-    ]) {
+    for (const finalized of ['finalizedRecentAction', 'finalizedMode', 'confirmedFinal']) {
       expect(voice).toContain(`cognitiveIntent: ${finalized}.blocked ? 'work_product_guard' :`);
-      expect(voice).toContain(`if (${committed} && !${finalized}.blocked) {`);
     }
-    expect(voice.match(/cognitiveIntent: directFinal\.blocked \? 'work_product_guard' :/g)).toHaveLength(3);
-    for (const committed of [
-      'messagingReadCommitted',
-      'messagingSendCommitted',
-      'cognitionCommitted',
-    ]) {
-      expect(voice).toContain(`if (${committed} && !directFinal.blocked) {`);
-    }
+    expect(voice.match(/cognitiveIntent: directFinal\.blocked \? 'work_product_guard' :/g)).toHaveLength(1);
+    expect(voice.match(/await finishVoiceTerminal\(\{/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(voice).not.toContain('await commitVoiceTerminal(');
+    expect(voice).toContain('commit: commitVoiceTerminal');
+    const completion = source('server/socket/voice/terminal_completion.ts');
+    expect(completion).toContain('if (committed && !input.blocked) options.onCommitted?.()');
+    expect(completion.indexOf('if (!deps.isCurrent())')).toBeLessThan(completion.indexOf('options.onCommitted?.()'));
+
   });
 
   it('keeps named workflow regex shortcuts out of main chat', () => {
@@ -287,29 +262,28 @@ describe('finalized output paths', () => {
     expect(chat).not.toContain('quickFinalized');
   });
 
-  it('falls back to the finalized primary workflow response when a speech summary is blocked', () => {
-    const voice = source('server/socket/voice.ts');
-    const workflowStart = voice.indexOf('const finalizedWorkflow = finalizeLumiResponse({');
-    const workflowEnd = voice.indexOf('return;', workflowStart);
-    const workflowPath = voice.slice(workflowStart, workflowEnd);
-
-    expect(workflowPath).toContain('const finalizedWorkflowSpeech = finalizedWorkflow.blocked || !workflowSpeechSummary');
-    expect(workflowPath).toContain('const workflowSpeechText = finalizedWorkflowSpeech.blocked');
-    expect(workflowPath).toContain('? responseText');
-    expect(workflowPath).toContain('const workflowCommitted = await commitVoiceTerminal({');
-    expect(workflowPath).toContain('speechText: workflowSpeechText');
-    expect(workflowPath).not.toContain('queueFinalizedSpeech(');
+  it('keeps both interactive transports on model-owned natural-language execution', () => {
+    for (const file of ['server/socket/chat.ts', 'server/socket/voice.ts']) {
+      const entry = source(file);
+      expect(entry).not.toContain('executeSkillWorkflowAdapter');
+      expect(entry).not.toContain('preMatchedQuickResult');
+      expect(entry).not.toContain('quickFinalized');
+      expect(entry).toContain('runLumiEntryTurn<void>({');
+    }
   });
 
   it('keeps chat on one canonical route with the shared capability policy and finalizer', () => {
     const chat = source('server/routes/chat_routes.ts');
     const misc = source('server/routes/misc_routes.ts');
 
-    expect(chat).toContain('buildLumiTurnDispatch({');
-    expect(chat).toContain('buildLumiExecutionPipeline({');
-    expect(chat).toContain('restExecutionPipeline.authorizationPolicy');
-    expect(chat).toContain('toolPolicy: restModelToolPolicy');
-    expect(chat).toContain('finalizeRestChatResponse({');
+    expect(chat).toContain('runLumiEntryTurn({');
+    const driver = source('server/cognition/turn_execution.ts');
+    expect(driver).toContain('buildLumiExecutionPipeline({');
+    expect(chat).toContain('execution.authorizationPolicy.maxIterations || 3');
+    expect(driver).toContain('...assembled.model, execution, messages,');
+    expect(source('server/cognition/turn_model.ts')).toContain('toolPolicy: execution.authorizationPolicy');
+    expect(driver).toContain('await runPreparedLumiTurn({');
+    expect(source('server/cognition/prepared_turn.ts')).toContain('await finalizeLumiResponseForDelivery({');
     expect(chat).toContain("source: 'rest_chat'");
     expect(chat).toContain('blocked: finalized.blocked');
     expect(chat).toContain('reason: finalized.reason');
@@ -323,11 +297,11 @@ describe('finalized output paths', () => {
     const feed = source('src/components/AutonomousFeed.tsx');
     const desktop = source('src/components/DesktopUI.tsx');
     const proactive = source('src/components/ProactiveNotifications.tsx');
-    const scheduler = source('server/scheduler.ts');
+    const scheduler = source('server/scheduler.ts') + source('server/scheduler/delivery_finalization.ts') + source('server/scheduler/builtins/personal_memory.ts') + source('server/scheduler/builtins/growth.ts');
 
     expect(autonomous).toContain('evaluateAutonomousTaskOutcome');
-    expect(autonomous).toContain('finalizeAutonomousTaskOutcomeForDelivery');
-    expect(autonomous).toContain('finalizeExecutionForOutboundDelivery');
+    expect(source('server/cognition/prepared_turn.ts')).toContain('await finalizeLumiResponseForDelivery({');
+    expect(autonomous).not.toContain('finalizeAutonomousTaskOutcomeForDelivery');
     expect(autonomous).toContain('toolRecords,');
     expect(autonomous).toContain('if (!outcome.verified || !terminalAcceptance?.accepted)');
     expect(autonomous).toContain('verified: true');
@@ -346,7 +320,7 @@ describe('finalized output paths', () => {
     expect(linkedPlanPath.indexOf("plan.status = 'completed'")).toBeGreaterThan(linkedPlanPath.indexOf('if (plan.steps.every('));
     const hideUnsavedPlan = linkedPlanPath.indexOf('pendingAutonomousPlanCompletions.set(taskId, pending)');
     expect(hideUnsavedPlan).toBeGreaterThanOrEqual(0);
-    expect(linkedPlanPath.indexOf('writeDB(db)')).toBeGreaterThan(hideUnsavedPlan);
+    expect(linkedPlanPath.indexOf('commitDatabaseTables(db)')).toBeGreaterThan(hideUnsavedPlan);
     expect(planner).toContain('.map(projectPlanCompletion)');
     expect(planner).toContain('return plan ? projectPlanCompletion(plan) : null');
     expect(autonomous).toContain('stageAutonomousPlanCompletion(task.id, task.planId, planScopeForTask(task), clipPlanResult(summary))');
@@ -376,7 +350,6 @@ describe('finalized output paths', () => {
     expect(desktop).toContain("setAgentStatus(responseBlocked ? 'error' : 'done')");
     expect(desktop).not.toContain("text: `${data.name} ${t.workflowToolDone || 'done'}`");
 
-    expect(proactive).toContain('export function classifyToolNotification');
     expect(proactive).not.toContain("socket.on('agent:tool_call'");
     expect(proactive).not.toContain("from 'sonner'");
     expect(proactive).not.toContain('toast.success(`Tool:');
@@ -391,13 +364,28 @@ describe('finalized output paths', () => {
     const mcp = source('server/mcp/lumi_server.ts');
     const messaging = source('server/regions/packs/cn/messaging_routes.ts');
 
-    expect(rest).toContain('finalizeExecutionForOutboundDelivery({');
-    expect(mcp).toContain('finalizeExecutionForOutboundDelivery({');
+    const delivery = source('server/cognition/response_delivery.ts');
+    expect(rest).toContain('runLumiEntryTurn({');
+    expect(source('server/cognition/turn_execution.ts')).toContain('await runPreparedLumiTurn({');
+    expect(source('server/cognition/prepared_turn.ts')).toContain('await finalizeLumiResponseForDelivery({');
+    expect(delivery).toContain('finalizeExecutionForOutboundDelivery({');
+    expect(mcp).toContain('runLumiEntryTurn({');
+    expect(source('server/cognition/turn_execution.ts')).toContain('await runPreparedLumiTurn({');
+    expect(source('server/cognition/prepared_turn.ts')).toContain('await finalizeLumiResponseForDelivery({');
     expect(messaging).toContain('finalizeMessagingResponseForDelivery({');
-    expect(messaging).toContain('finalizeExecutionForOutboundDelivery({');
-    expect(messaging).toContain('`${source}_guard_recovery`');
-    expect(rest.match(/\bfinalizeLumiResponse\(\{/g)).toHaveLength(2);
-    expect(mcp.match(/\bfinalizeLumiResponse\(\{/g)).toHaveLength(2);
+    expect(messaging).toContain('finalizeLumiResponseForDelivery({ ...input, toolRecords: currentMessagingFinalizationRecords(input) });');
+    const messagingModel = source('server/regions/packs/cn/messaging_turn/model_execution.ts');
+    expect(messaging).toContain('return runLumiEntryTurn({');
+    expect(messagingModel).toContain('satisfies AssembledLumiTurnData');
+    expect(messagingModel).toContain('taskText: context.routingText');
+    expect(messagingModel).not.toContain('runPreparedLumiTurn(');
+    expect(messagingModel).not.toContain('runResolvedLumiRecovery(');
+    expect(delivery.match(/\bfinalizeLumiResponse\(\{/g)).toHaveLength(1);
+    expect(delivery).toContain('input.initialFinalization || finalize(input.responseText, toolRecords, input.source, input.completionGuard)');
+    expect(delivery).toContain('input.refinalize || ((candidateText, records, completionGuard) => finalize(candidateText, records, `${input.source}_guard_recovery`, completionGuard))');
+    expect(rest).not.toMatch(/\bfinalizeLumiResponse\(\{/);
+    expect(mcp).not.toMatch(/\bfinalizeLumiResponse\(\{/);
+    expect(mcp).not.toContain('async function finalizeMcpResponseForDelivery');
   });
 
   it('uses one guarded summary scheduler for chat and every persisted voice path', () => {
@@ -412,15 +400,17 @@ describe('finalized output paths', () => {
     const terminalBoundaryStart = voice.indexOf('const commitVoiceTerminal = async');
     const terminalBoundaryEnd = voice.indexOf('const maxIterations =', terminalBoundaryStart);
     const terminalBoundary = voice.slice(terminalBoundaryStart, terminalBoundaryEnd);
-    expect(voice.match(/await commitVoiceTerminal\(\{/g)?.length || 0).toBeGreaterThanOrEqual(13);
+    expect(voice.match(/await (?:commitVoiceTerminal|finishVoiceTerminal)\(\{/g)?.length || 0).toBe(11);
     expect(terminalBoundary).toContain('persistVoiceAssistantMessage(');
-    expect(terminalBoundary).toContain('recordChatExecutionTerminalEventDurably(');
+    expect(terminalBoundary).toContain('persistAuthorizedTerminalReceipt(');
+    expect(source('server/socket/chat_terminal_boundary.ts')).toContain('recordChatExecutionTerminalEventDurably(');
     expect(terminalBoundary).toContain('publishCommitted:');
     expect(terminalBoundary).toContain('scheduleVoiceSummary(conversationTurn.conversation.id)');
     expect(terminalBoundary.indexOf('scheduleVoiceSummary(conversationTurn.conversation.id)')).toBeGreaterThan(
       terminalBoundary.indexOf('publishCommitted:'),
     );
-    expect(ambient).toContain('Auto-summary eligible for conversation');
+    expect(ambient).not.toContain('triggerIdleProcessing');
+    expect(ambient).not.toContain('readDB');
     expect(ambient).not.toContain('Triggered auto-summary');
   });
 
@@ -435,20 +425,19 @@ describe('finalized output paths', () => {
     expect(voice).toContain('if (currentToolRecords.length === 0) return null;');
     expect(chat.match(/persistChatTakeoverExecution\(/g)?.length || 0).toBeGreaterThanOrEqual(2);
     expect(chat).not.toContain('executeSkillWorkflowAdapter');
-    expect(voice.match(/persistVoiceTakeoverExecution\(/g)?.length || 0).toBeGreaterThanOrEqual(6);
+    expect(voice.match(/persistVoiceTakeoverExecution\(/g)?.length || 0).toBe(3);
     expect(writeback).toContain('input.flow.workTakeover.shouldResumeTask');
 
     expect(chat).not.toContain('registerBackgroundTask');
     for (const marker of [
       "source: 'voice_mode'",
-      "source: 'voice_quick_command'",
-      "source: 'voice_foreground_messaging'",
       "source: 'voice_confirmation'",
-      "source: 'voice_cognition_direct'",
     ]) {
       expect(voice).toContain(marker);
     }
 
+    expect(voice).toContain("const source = reading ? 'voice_foreground_messaging_read' : 'voice_foreground_messaging'");
+    expect(voice).toContain('persistVoiceTakeoverExecution(responseText, { toolRecords: [toolRecord], source,');
     const chatHistoryStart = chat.indexOf('const recentFailureExplanation =');
     const chatHistoryEnd = chat.indexOf('let pendingConfirmationCreatedThisTurn', chatHistoryStart);
     const chatHistoryPath = chat.slice(chatHistoryStart, chatHistoryEnd);
@@ -456,7 +445,7 @@ describe('finalized output paths', () => {
     expect(chatHistoryPath).not.toContain('agent:response');
     expect(chatHistoryPath).not.toContain('persistChatTakeoverExecution(');
     const voiceHistoryStart = voice.indexOf('if (recentActionExplanation) {');
-    const voiceHistoryEnd = voice.indexOf('const specialWorkflow =', voiceHistoryStart);
+    const voiceHistoryEnd = voice.indexOf('const directlyAppliedMode:', voiceHistoryStart);
     expect(voice.slice(voiceHistoryStart, voiceHistoryEnd)).not.toContain('persistVoiceTakeoverExecution(');
 
     expect(chat).not.toContain('const terminalBackgroundRecords: ToolExecutionRecord[] = backgroundToolRecords.length > 0');

@@ -13,14 +13,20 @@ export function isTauriRuntime(): boolean {
 
 export function getBackendOrigin(): string {
   if (typeof window === 'undefined') return 'http://127.0.0.1:3000';
-  // Desktop shell flag set by installApiBridge() — always route to local backend
-  if ((window as any).__LUMI_DESKTOP__) return 'http://127.0.0.1:3000';
+  const { protocol, hostname, origin } = window.location;
+  // Development variants serve their UI and API on the same loopback port.
+  // Honor that origin before the desktop fallback, including during imports
+  // that run before installApiBridge(). Packaged custom protocols still use
+  // the bundled backend below.
+  if (
+    (protocol === 'http:' || protocol === 'https:')
+    && ['127.0.0.1', 'localhost', '[::1]'].includes(hostname)
+  ) return origin;
   // In Tauri production, WebView2 custom protocol can't reach the backend;
   // always route through the bundled Node.js server.
-  const protocol = window.location.protocol;
-  const hostname = window.location.hostname;
   if (
-    isTauriRuntime()
+    window.__LUMI_DESKTOP__
+    || isTauriRuntime()
     || protocol === 'tauri:'
     || protocol === 'asset:'
     || hostname === 'tauri.localhost'
@@ -28,7 +34,7 @@ export function getBackendOrigin(): string {
   ) {
     return 'http://127.0.0.1:3000';
   }
-  return window.location.origin;
+  return origin;
 }
 
 export function getSocketOrigin(): string {
@@ -39,7 +45,7 @@ export function installApiBridge(): void {
   if (typeof window === 'undefined' || window.__LUMI_API_BRIDGE_INSTALLED__) return;
 
   const win = window as any;
-  win.__LUMI_DESKTOP__ = true; // signal to getBackendOrigin that we're in a desktop shell
+  win.__LUMI_DESKTOP__ = isTauriRuntime();
 
   const nativeFetch = window.fetch.bind(window);
   window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
@@ -70,8 +76,7 @@ export function installApiBridge(): void {
       } catch {}
 
       // In Tauri production, rewrite /api/* requests to the bundled Node.js backend
-      const backendOrigin = 'http://127.0.0.1:3000';
-      return nativeFetch(backendOrigin + url, patched);
+      return nativeFetch(getBackendOrigin() + url, patched);
     }
 
     return nativeFetch(input, init);

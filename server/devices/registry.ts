@@ -1,4 +1,3 @@
-import { readDB, writeDB } from '../../db_layer';
 import { DeviceInfo, DeviceType, DeviceCapabilities, DeviceScope } from './types';
 import type { NativeClientIdentity } from '../../shared/native_client_identity';
 import { nativeClientIdentitySha256 } from './native_identity';
@@ -136,7 +135,7 @@ class DeviceRegistry {
   }
 
   disconnect(socketId: string): void {
-    for (const [id, device] of this.devices) {
+    for (const device of this.devices.values()) {
       if (device.socketId === socketId) {
         device.status = 'offline';
         device.socketId = null;

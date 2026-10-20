@@ -1,3 +1,4 @@
+import { readImplementationSource } from './implementation_source';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -6,7 +7,7 @@ import {
   sanitizeChatAgentErrorPayload,
 } from '../server/socket/chat_public_error';
 
-const source = (relativePath: string) => fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8');
+const source = (relativePath: string) => readImplementationSource(path.join(process.cwd(), relativePath), 'utf8');
 
 describe('chat public terminal errors', () => {
   it('replaces raw exception content and unknown codes with reviewed public fields', () => {
@@ -70,6 +71,10 @@ describe('chat public terminal errors', () => {
       chat.indexOf('const emitConversationUpdated'),
     );
     expect(terminalBoundary.indexOf('normalizeAgentPayload(terminalEvent, input.payload)'))
-      .toBeLessThan(terminalBoundary.indexOf('recordChatExecutionTerminalEventDurably('));
+      .toBeLessThan(terminalBoundary.indexOf('persistAuthorizedTerminalReceipt('));
+    const receipt = chat.slice(chat.indexOf('const persistAuthorizedTerminalReceipt'), chat.indexOf('const commitDeterministicTerminal'));
+    expect(receipt).toContain('persistAuthorizedReceipt({ scope: executionScope, requestId: requestId, event, payload, unknownPayload');
+    const shared = source('server/socket/chat_terminal_boundary.ts');
+    expect(shared).toContain('recordChatExecutionTerminalEventDurably(input.scope, input.requestId, input.event, input.payload, input.unknownPayload');
   });
 });

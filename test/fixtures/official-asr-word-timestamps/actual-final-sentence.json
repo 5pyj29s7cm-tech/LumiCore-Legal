@@ -1,0 +1,296 @@
+{
+  "text": "请坐，今天想聊什么？想离婚，财产怎么分呢？房子、存款先列清楚。我想先把心事说清楚。你眼里的火烧了半天，有人半夜还在聊着天，手机反面还神神秘秘，那聊天记录藏得很严。",
+  "begin_time": 360,
+  "end_time": 29000,
+  "sentence_end": true,
+  "words": [
+    {
+      "begin_time": 360,
+      "end_time": 680,
+      "text": "请",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 680,
+      "end_time": 1040,
+      "text": "坐",
+      "punctuation": "，"
+    },
+    {
+      "begin_time": 1360,
+      "end_time": 1840,
+      "text": "今天",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 1840,
+      "end_time": 2040,
+      "text": "想",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 2040,
+      "end_time": 2280,
+      "text": "聊",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 2280,
+      "end_time": 3040,
+      "text": "什么",
+      "punctuation": "？"
+    },
+    {
+      "begin_time": 3920,
+      "end_time": 4160,
+      "text": "想",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 4160,
+      "end_time": 4760,
+      "text": "离婚",
+      "punctuation": "，"
+    },
+    {
+      "begin_time": 5040,
+      "end_time": 5560,
+      "text": "财产",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 5560,
+      "end_time": 5880,
+      "text": "怎么",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 5880,
+      "end_time": 6240,
+      "text": "分",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 6240,
+      "end_time": 6840,
+      "text": "呢",
+      "punctuation": "？"
+    },
+    {
+      "begin_time": 7560,
+      "end_time": 7880,
+      "text": "房子",
+      "punctuation": "、"
+    },
+    {
+      "begin_time": 8080,
+      "end_time": 8880,
+      "text": "存款",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 8880,
+      "end_time": 9200,
+      "text": "先",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 9200,
+      "end_time": 9480,
+      "text": "列",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 9480,
+      "end_time": 10320,
+      "text": "清楚",
+      "punctuation": "。"
+    },
+    {
+      "begin_time": 11240,
+      "end_time": 11760,
+      "text": "我想",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 11760,
+      "end_time": 12400,
+      "text": "先把",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 12400,
+      "end_time": 13080,
+      "text": "心事",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 13080,
+      "end_time": 13360,
+      "text": "说",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 13360,
+      "end_time": 14040,
+      "text": "清楚",
+      "punctuation": "。"
+    },
+    {
+      "begin_time": 14960,
+      "end_time": 15200,
+      "text": "你",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 15200,
+      "end_time": 15440,
+      "text": "眼",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 15440,
+      "end_time": 16040,
+      "text": "里的",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 16040,
+      "end_time": 16600,
+      "text": "火烧",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 16600,
+      "end_time": 17200,
+      "text": "了",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 17200,
+      "end_time": 17800,
+      "text": "半",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 18000,
+      "end_time": 18300,
+      "text": "天",
+      "punctuation": "，"
+    },
+    {
+      "begin_time": 18640,
+      "end_time": 19160,
+      "text": "有人",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 19160,
+      "end_time": 20000,
+      "text": "半",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 20000,
+      "end_time": 20173,
+      "text": "夜",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 20173,
+      "end_time": 20346,
+      "text": "还",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 20346,
+      "end_time": 20520,
+      "text": "在",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 20520,
+      "end_time": 20720,
+      "text": "聊",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 20720,
+      "end_time": 20920,
+      "text": "着",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 20960,
+      "end_time": 21560,
+      "text": "天",
+      "punctuation": "，"
+    },
+    {
+      "begin_time": 22320,
+      "end_time": 22840,
+      "text": "手机",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 22840,
+      "end_time": 23480,
+      "text": "反面",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 23480,
+      "end_time": 23680,
+      "text": "还",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 23680,
+      "end_time": 23960,
+      "text": "神",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 23960,
+      "end_time": 24640,
+      "text": "神秘",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 24640,
+      "end_time": 25240,
+      "text": "秘",
+      "punctuation": "，"
+    },
+    {
+      "begin_time": 26000,
+      "end_time": 26320,
+      "text": "那",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 26320,
+      "end_time": 27440,
+      "text": "聊天记录",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 27440,
+      "end_time": 27680,
+      "text": "藏",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 27680,
+      "end_time": 28400,
+      "text": "得很",
+      "punctuation": ""
+    },
+    {
+      "begin_time": 28400,
+      "end_time": 29000,
+      "text": "严",
+      "punctuation": "。"
+    }
+  ]
+}

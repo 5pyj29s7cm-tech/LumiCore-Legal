@@ -1,3 +1,4 @@
+import { providerGetterArguments } from "../llm/provider_getters";
 /**
  * Personality Distillation Pipeline — 4-dimension human distillation
  * Inspired by GitHub's immortal-skill, relic.skill, and colleague-skill ecosystems.
@@ -94,9 +95,11 @@ export function parseChatLog(raw: string, format: 'wechat' | 'qq' | 'plain'): No
   const lines = raw.split('\n').filter(l => l.trim());
   const pairs: NormalizedMessagePair[] = [];
 
-  if (format === 'wechat') {
-    // WeChat export format: "YYYY-MM-DD HH:MM:SS Name\nMessage content"
-    const wxRegex = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+(.+)$/;
+  if (format === 'wechat' || format === 'qq') {
+    // Both exports use a timestamp/speaker header followed by message lines.
+    const headerRegex = format === 'qq'
+      ? /^(\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}:\d{2})\s+(.+?)$/
+      : /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+(.+)$/;
     let currentSpeaker = '';
     let currentTimestamp = '';
     let currentContent: string[] = [];
@@ -113,38 +116,9 @@ export function parseChatLog(raw: string, format: 'wechat' | 'qq' | 'plain'): No
     };
 
     for (const line of lines) {
-      const m = line.match(wxRegex);
-      if (m) {
-        flush();
-        currentTimestamp = m[1];
-        currentSpeaker = m[2].trim();
-      } else if (currentSpeaker) {
-        currentContent.push(line);
-      }
-    }
-    flush();
-  } else if (format === 'qq') {
-    // QQ export format: "YYYY-MM-DD HH:MM:SS Speaker\nMessage"
-    const qqRegex = /^(\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}:\d{2})\s+(.+?)$/;
-    let currentSpeaker = '';
-    let currentTimestamp = '';
-    let currentContent: string[] = [];
-
-    const flush = () => {
-      if (currentSpeaker && currentContent.length > 0) {
-        pairs.push({
-          speaker: currentSpeaker,
-          content: currentContent.join('\n').trim(),
-          timestamp: currentTimestamp || undefined,
-        });
-      }
-      currentContent = [];
-    };
-
-    for (const line of lines) {
-      const m = line.match(qqRegex);
-    // i18n-allow: imported chat-export markers are input recognition literals.
-      if (m && !line.includes('[图片]') && !line.includes('[语音]') && m[1].length >= 16) {
+      const m = line.match(headerRegex);
+      // i18n-allow: imported chat-export markers are input recognition literals.
+      if (m && (format !== 'qq' || (!line.includes('[图片]') && !line.includes('[语音]')))) {
         flush();
         currentTimestamp = m[1];
         currentSpeaker = m[2].trim();
@@ -189,11 +163,6 @@ function identifyTargetSpeaker(pairs: NormalizedMessagePair[], targetName?: stri
     if (!genericNames.includes(name.toLowerCase())) return name;
   }
   return sorted[0]?.[0] || 'Target';
-}
-
-/** Extract only the target's messages in chronological order */
-function getTargetMessages(pairs: NormalizedMessagePair[], targetSpeaker: string): NormalizedMessagePair[] {
-  return pairs.filter(p => p.speaker === targetSpeaker);
 }
 
 /** Build conversation context (10 pairs as sample) */
@@ -256,9 +225,7 @@ async function callDistillLLM(
       signal: llmGetters.signal,
       maxTokens: 3000,
     },
-    llmGetters.getDeepSeek, llmGetters.getGemini, llmGetters.getOpenAI, llmGetters.getAnthropic, llmGetters.getQwen,
-    llmGetters.getOllama, llmGetters.getLmStudio, llmGetters.getArk, llmGetters.getXiaomi,
-    llmGetters.getKimi, llmGetters.getGlm, llmGetters.getRelay,
+    ...providerGetterArguments(llmGetters),
   );
   llmGetters.signal?.throwIfAborted();
   return result.text || '';
@@ -404,8 +371,6 @@ Return ONLY valid JSON:
 function profileToPersonalityConfig(
   cognitive: CognitiveProfile,
   expression: ExpressionProfile,
-  behavioral: BehavioralProfile,
-  emotional: EmotionalProfile,
   targetName: string,
   relationshipType: string,
 ): PersonalityConfig {
@@ -645,7 +610,7 @@ export async function distillPersona(options: DistillOptions, llmGetters: LLMGet
   const { memories: seedMemories, evidenceMap } = await extractSeedMemories(transcript, inferredName, configuredGetters);
 
   // 6. Synthesize personality config
-  const personalityConfig = profileToPersonalityConfig(cognitive, expression, behavioral, emotional, inferredName, relationshipType);
+  const personalityConfig = profileToPersonalityConfig(cognitive, expression, inferredName, relationshipType);
 
   // 7. Generate narrative
   const narrative = await generateNarrative(cognitive, expression, behavioral, emotional, inferredName, relationshipType, seedMemories.length, configuredGetters);

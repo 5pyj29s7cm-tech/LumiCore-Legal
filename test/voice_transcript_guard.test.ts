@@ -1,3 +1,4 @@
+import { readVoiceImplementationSource } from './voice_implementation_source';
 import fs from 'fs';
 import path from 'path';
 import { describe, expect, it } from 'vitest';
@@ -54,7 +55,7 @@ describe('voice transcript execution guard', () => {
   });
 
   it('wires clarification ahead of active-work routing and disables tool admission', () => {
-    const source = fs.readFileSync(path.join(process.cwd(), 'server/socket/voice.ts'), 'utf8');
+    const source = readVoiceImplementationSource();
     const activeWorkGuard = source.indexOf("transcriptExecutionGuard.action === 'clarify'", source.indexOf('session.lastAcceptedCommandKey'));
     const activeWorkRouter = source.indexOf('classifyActiveVoiceWorkInput(', activeWorkGuard);
     expect(activeWorkGuard).toBeGreaterThan(0);
@@ -65,14 +66,14 @@ describe('voice transcript execution guard', () => {
 
     const directClarification = source.indexOf("source: 'voice_transcript_guard'");
     const deterministicResponse = source.indexOf('const deterministicConversationResponse =', directClarification);
-    const isolatedWorkflow = source.indexOf('const specialWorkflow =', directClarification);
+    const isolatedWorkflow = source.indexOf('const directlyAppliedMode:', directClarification);
     expect(directClarification).toBeGreaterThan(0);
     expect(deterministicResponse).toBeGreaterThan(directClarification);
     expect(isolatedWorkflow).toBeGreaterThan(directClarification);
   });
 
   it('binds voice execution-fact questions to the immediately preceding request and current task', () => {
-    const source = fs.readFileSync(path.join(process.cwd(), 'server/socket/voice.ts'), 'utf8');
+    const source = readVoiceImplementationSource();
     const start = source.indexOf('const deterministicConversationResponse =');
     const end = source.indexOf('if (deterministicConversationResponse)', start);
     const block = source.slice(start, end);

@@ -1,15 +1,26 @@
+import { readImplementationSource } from './implementation_source';
+import { extractSourceExpression } from './source_expression';
 // Real voice/meeting handlers with isolated models, PCM and DesktopUI callbacks.
 import './helpers';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
-import * as ts from 'typescript';
 
 const mocks = vi.hoisted(() => ({
-  stream: vi.fn(), model: vi.fn(), transcribe: vi.fn(), learning: vi.fn(),
-  summaries: vi.fn(), flushGate: vi.fn(), stt: [] as any[],
+  errors: [] as string[], tools: vi.fn(), stream: vi.fn(), model: vi.fn(), transcribe: vi.fn(), learning: vi.fn(),
+  summaries: vi.fn(), convergence: vi.fn(), flushGate: vi.fn(), receiptGate: vi.fn(), stt: [] as any[],
 }));
+vi.mock('../db_layer', async original => {
+  const actual = await original<typeof import('../db_layer')>();
+  return { ...actual, runSQL: async (...args: Parameters<typeof actual.runSQL>) => {
+    const result = await actual.runSQL(...args);
+    if (args[0].includes('INSERT INTO chat_execution_terminal_receipts') && args[1]?.[6] === 'completed')
+      await mocks.receiptGate();
+    return result;
+  } };
+});
+vi.mock('../logger', () => ({ logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: (...args: any[]) => { mocks.errors.push(args.map(String).join(' ')); } } }));
 vi.mock('../server/stt/adapter', async original => ({
   ...await original<typeof import('../server/stt/adapter')>(),
   getActiveStreamingSTTProvider: () => 'ark',
@@ -30,7 +41,14 @@ vi.mock('../server/socket/chat_terminal_boundary', async original => {
     await input.flush(); await mocks.flushGate();
   } }) };
 });
-vi.mock('../server/stt/file_transcription', () => ({ transcribeAudioFile: (...args: any[]) => mocks.transcribe(...args) }));
+vi.mock('../server/conversation/manager', async original => {
+  const actual = await original<typeof import('../server/conversation/manager')>();
+  return { ...actual, convergeForegroundRequestBeforeRelease: (...args: Parameters<typeof actual.convergeForegroundRequestBeforeRelease>) => {
+    mocks.convergence(...args);
+    return actual.convergeForegroundRequestBeforeRelease(...args);
+  } };
+});
+vi.mock('../server/stt/file_transcription', async original => ({ ...await original<typeof import('../server/stt/file_transcription')>(), transcribeAudioFile: (...args: any[]) => mocks.transcribe(...args) }));
 vi.mock('../server/tts/adapter', async original => ({
   ...await original<typeof import('../server/tts/adapter')>(),
   getActiveProvider: () => null,
@@ -43,7 +61,7 @@ vi.mock('../server/llm/providers', async original => ({
 }));
 vi.mock('../server/llm/adapter', async original => ({
   ...await original<typeof import('../server/llm/adapter')>(),
-  runWithTools: vi.fn(() => { throw new Error('Unexpected tool execution in voice audit'); }),
+  runWithTools: (...args: any[]) => mocks.tools(...args),
 }));
 vi.mock('../server/llm/embedding_provider', async original => ({
   ...await original<typeof import('../server/llm/embedding_provider')>(),
@@ -70,11 +88,13 @@ vi.mock('../server/cognition/post_turn_learning', async original => {
   } };
 });
 
-import { initDatabase, readDB, flushDBOrThrow } from '../db_layer';
+import { initDatabase, readDB, flushDBOrThrow, querySQL } from '../db_layer';
 import { registerVoiceHandlers } from '../server/socket/voice';
+import { toolRegistry } from '../server/tools/registry';
+import { registerAllTools } from '../server/tools/definitions';
 import { createOrg, addMember, removeMember, getMember, updateMemberRole } from '../server/org/db';
 import { addMessage, getMessages, getOrCreateActiveConversation } from '../server/conversation/manager';
-import { waitForChatExecutionPersistence } from '../server/socket/chat_execution_registry';
+import { getChatExecution, waitForChatExecutionPersistence } from '../server/socket/chat_execution_registry';
 
 const ORG_MARKER = 'SYNTHETIC_ORG_PLAN_ALPHA';
 const USER_TEXT = '我希望你以后回答自然顺畅，请解释我们之前记录的项目安排。';
@@ -114,10 +134,14 @@ function fixture(organization = false) {
   return { socket, userId, org };
 }
 const start = (sessionId: string, transcriptionOnly = false) => ({ sessionId, captureSessionId: sessionId, audioInputKind: 'physical_microphone', transcriptionOnly });
-beforeAll(async () => { await initDatabase(); });
+beforeAll(async () => { await initDatabase(); registerAllTools(toolRegistry); });
 beforeEach(() => {
+  mocks.errors.length = 0;
+  mocks.tools.mockReset().mockImplementation(() => { throw new Error('Unexpected tool execution in voice audit'); });
   mocks.stream.mockReset(); mocks.model.mockReset(); mocks.transcribe.mockReset();
-  mocks.learning.mockClear(); mocks.summaries.mockClear(); mocks.flushGate.mockReset().mockResolvedValue(undefined); mocks.stt.length = 0;
+  mocks.learning.mockClear(); mocks.summaries.mockClear(); mocks.flushGate.mockReset().mockResolvedValue(undefined);
+  mocks.receiptGate.mockReset().mockResolvedValue(undefined);
+  mocks.convergence.mockReset(); mocks.stt.length = 0;
   mocks.model.mockResolvedValue({ text: JSON.stringify({ correctsIdentity: false }), toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
 });
 afterEach(async () => {
@@ -130,29 +154,20 @@ afterEach(async () => {
 
 // Extract and execute the exact callbacks from the currently mounted DesktopUI.
 // React rendering and the OS media devices are intentionally not simulated here.
-const desktopSource = fs.readFileSync(new URL('../src/components/DesktopUI.tsx', import.meta.url), 'utf8');
-const desktopAst = ts.createSourceFile('DesktopUI.tsx', desktopSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-function realDesktopCallback(name: string, context: Record<string, any>): any {
-  let callback: ts.Expression | undefined;
-  const visit = (node: ts.Node) => {
-    if (ts.isVariableDeclaration(node) && node.name.getText(desktopAst) === name && node.initializer && ts.isCallExpression(node.initializer)) callback = node.initializer.arguments[0];
-    ts.forEachChild(node, visit);
-  };
-  visit(desktopAst);
-  if (!callback || !ts.isArrowFunction(callback)) throw new Error(`Missing actual DesktopUI callback ${name}`);
-  const code = ts.transpileModule(`return (${callback.getText(desktopAst)});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  return new Function(...Object.keys(context), code)(...Object.values(context));
-}
+const realDesktopCallback = extractSourceExpression.bind(null, 'src/components/DesktopUI.tsx');
 function meetingUi(socket: FixtureSocket) {
   const state = { notes: [] as any[], persisted: [] as any[], report: '', startedAt: 1000, paused: false };
   const writes = new Map<string, string>();
   const events = new EventTarget();
   const common: Record<string, any> = {
+    crypto, Date, window: { confirm: () => true }, copy: { newConfirm: 'Clear synthetic meeting?' },
+    pauseMeetingCapture: () => { state.paused = true; },
+    meetingArchiveBusy: false, meetingReportGenerating: false, meetingExportBusy: false, operationMode: 'assistant', meetingPaused: true,
     lang: 'en', meetingPreferenceScopeKey: 'fixture-scope', meetingStartedAt: state.startedAt, meetingStorageKeys: { report: 'report', notes: 'notes', startedAt: 'started' },
-    setMeetingNotes: (value: any) => { state.notes = typeof value === 'function' ? value(state.notes) : value; },
+    // The actual hook now persists through its Dispatch wrappers; this socket fixture models that boundary.
+    setMeetingNotes: (value: any) => { state.notes = typeof value === 'function' ? value(state.notes) : value; state.persisted = state.notes; },
     setMeetingSpeakerCount: vi.fn(), setMeetingReport: (value: string) => { state.report = value; },
     setMeetingStartedAt: (value: any) => { state.startedAt = typeof value === 'function' ? value(state.startedAt) : value; },
-    persistMeetingNotes: (notes: any[]) => { state.persisted = notes; },
     localStorage: { getItem: (key: string) => writes.get(key) || null, setItem: (key: string, value: string) => writes.set(key, value), removeItem: (key: string) => writes.delete(key) },
     toast: { success: vi.fn(), info: vi.fn(), error: vi.fn() }, uiMessage: (key: string) => key,
     lastMeetingTranscriptRef: { current: {} }, lastLegalMeetingArchiveRef: { current: '' },
@@ -162,6 +177,8 @@ function meetingUi(socket: FixtureSocket) {
     setMeetingReportGenerating: vi.fn(),
   };
   common.renewMeetingIdentity = realDesktopCallback('renewMeetingIdentity', common);
+  // Archive/new-record persistence is covered by the mounted hook suites, not by this media/authorization fixture.
+  common.createMeetingRecord = () => { common.renewMeetingIdentity(); state.notes = []; state.persisted = []; state.report = ''; return true; };
   const apply = realDesktopCallback('applyRefinedMeetingTranscript', common);
   const append = realDesktopCallback('appendMeetingTranscript', common);
   socket.client.on('audio:transcript', data => append(data.text, data.isFinal, data));
@@ -223,7 +240,7 @@ describe('voice organization authority through actual STT and model pipeline', (
     await flushDBOrThrow();
   }, 15000);
 
-  it('revocation during terminal flush replaces unpublished success with one safe cancellation and skips learning', async () => {
+  it.each(['flush', 'receipt'] as const)('revocation during terminal %s makes delivery, transcript and SQLite receipt agree on cancellation', async boundary => {
     const { socket, userId, org } = fixture(true);
     const entered = deferred(); const gate = deferred();
     mocks.stream.mockImplementation(async (_m: any, _t: any, _o: any, onChunk: any) => {
@@ -231,7 +248,7 @@ describe('voice organization authority through actual STT and model pipeline', (
       onChunk(MODEL_TEXT);
       return { text: MODEL_TEXT, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
     });
-    mocks.flushGate.mockImplementationOnce(async () => { entered.resolve(); await gate.promise; });
+    mocks[boundary === 'flush' ? 'flushGate' : 'receiptGate'].mockImplementationOnce(async () => { entered.resolve(); await gate.promise; });
     await socket.receive('audio:start', start('terminal-authority'));
     await mocks.stt.at(-1).final(USER_TEXT);
     await entered.promise;
@@ -241,10 +258,100 @@ describe('voice organization authority through actual STT and model pipeline', (
     expect(socket.outputs.filter(([event, data]) => event === 'agent:response' && data.finalized)[0][1]).toMatchObject({ reason: 'cancelled' });
     expect(mocks.learning).not.toHaveBeenCalled();
     expect(mocks.summaries).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(socket.data.audioSession.isProcessing).toBe(false));
+    await waitForChatExecutionPersistence();
+    const terminal = socket.outputs.find(([event, data]) => event === 'agent:response' && data.finalized)![1];
+    const receipts = await querySQL<any>('SELECT status, payload FROM chat_execution_terminal_receipts WHERE userId = ? AND requestId = ?', [userId, terminal.requestId]);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].status).toBe('cancelled');
+    expect(JSON.parse(receipts[0].payload)).toMatchObject({ reason: 'cancelled', text: terminal.text });
+    expect(getChatExecution({ userId, domain: 'work', orgId: org!.id, source: 'voice', conversationId: terminal.conversationId }, terminal.requestId)).toMatchObject({ status: 'cancelled', terminal: true });
+    const assistants = getMessages(terminal.conversationId, 20).filter(message => message.role === 'assistant' && message.requestId === terminal.requestId);
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].message).toBe(terminal.text);
+    expect(assistants[0].completionFeedback?.status).toBe('cancelled');
+    expect(mocks.convergence.mock.calls.filter(([input]) => input.identity.requestId === terminal.requestId)).toHaveLength(1);
   });
 });
 
 describe('meeting capture ownership and complete paused recordings', () => {
+  it('uses the selected relay file plan for end-of-meeting refinement instead of forcing the configured Qwen account', async () => {
+    const { transcribeAudioFile: actualTranscribe } = await vi.importActual<typeof import('../server/stt/file_transcription')>('../server/stt/file_transcription');
+    const official = await import('../server/stt/providers/official');
+    const qwen = await import('../server/stt/providers/dashscope-file');
+    const preference = await import('../server/config/voice_preference');
+    const prior = preference.getVoicePreference();
+    const model = 'aliyun/qwen-audio-3.0-asr-flash-streaming';
+    vi.stubEnv('LUMI_PRIVACY', 'standard');
+    vi.stubEnv('RELAY_API_KEY', 'synthetic-relay-no-network');
+    vi.stubEnv('RELAY_BASE_URL', 'https://meeting-provider.example/v1');
+    vi.stubEnv('DASHSCOPE_API_KEY', 'synthetic-qwen-also-configured');
+    const noNetwork = vi.fn(() => { throw new Error('Real network forbidden in meeting provider regression'); });
+    vi.stubGlobal('fetch', noNetwork);
+    const relay = vi.spyOn(official, 'transcribe').mockResolvedValue({ text: 'SELECTED RELAY MEETING', isFinal: true, model, segments: [] });
+    const dashscope = vi.spyOn(qwen, 'transcribe').mockRejectedValue(new Error('Qwen must not be selected before the configured relay'));
+    try {
+      preference.setVoicePreference({ stt: 'relay', sttModel: model });
+      mocks.transcribe.mockImplementation((audio, options) => actualTranscribe(audio, options));
+      const { socket } = fixture(); const ui = meetingUi(socket);
+      await socket.receive('audio:start', start('selected-relay-meeting', true));
+      await socket.receive('audio:chunk', Buffer.alloc(32000, 0x35));
+      const completed = ui.wait('selected-relay-meeting');
+      await socket.receive('audio:stop', { sessionId: 'selected-relay-meeting', refineTranscript: true, refinementId: ui.identity.current.refinementId });
+      expect(await completed).toBeTruthy();
+      expect(relay).toHaveBeenCalledOnce(); expect(dashscope).not.toHaveBeenCalled(); expect(noNetwork).not.toHaveBeenCalled();
+      const [wav, language, options] = relay.mock.calls[0];
+      expect(wav.subarray(0, 4).toString()).toBe('RIFF'); expect(wav.subarray(44)).toEqual(Buffer.alloc(32000, 0x35));
+      expect(language).toBe('zh'); expect(options).toMatchObject({ model, mimeType: 'audio/wav', signal: expect.any(AbortSignal) });
+      const callOptions = mocks.transcribe.mock.calls[0][1];
+      expect(callOptions).toMatchObject({ allowLocal: true, signal: expect.any(AbortSignal) });
+      expect(callOptions).not.toHaveProperty('preferredProvider'); expect(callOptions).not.toHaveProperty('allowQwenFileStt');
+      expect(socket.outputs.find(([event]) => event === 'meeting:refined_transcript')?.[1]).toMatchObject({ provider: 'relay', model, text: 'SELECTED RELAY MEETING' });
+      expect(ui.state.persisted.map(note => note.text)).toEqual(['SELECTED RELAY MEETING']);
+    } finally {
+      relay.mockRestore(); dashscope.mockRestore(); vi.unstubAllGlobals(); vi.unstubAllEnvs();
+      preference.setVoicePreference({ ...prior, sttModel: prior.sttModel, ttsModel: prior.ttsModel });
+    }
+  });
+
+  it('aborts the selected relay refinement when organization authority changes and rejects its late transcript', async () => {
+    const { transcribeAudioFile: actualTranscribe } = await vi.importActual<typeof import('../server/stt/file_transcription')>('../server/stt/file_transcription');
+    const official = await import('../server/stt/providers/official');
+    const qwen = await import('../server/stt/providers/dashscope-file');
+    const preference = await import('../server/config/voice_preference');
+    const prior = preference.getVoicePreference(), gate = deferred<{ text: string; model: string; isFinal: boolean }>(), entered = deferred();
+    let signal: AbortSignal | undefined;
+    vi.stubEnv('LUMI_PRIVACY', 'standard'); vi.stubEnv('RELAY_API_KEY', 'synthetic-relay-no-network');
+    vi.stubEnv('RELAY_BASE_URL', 'https://meeting-provider.example/v1'); vi.stubEnv('DASHSCOPE_API_KEY', 'synthetic-qwen-also-configured');
+    vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Real network forbidden in cancellation regression'); }));
+    const relay = vi.spyOn(official, 'transcribe').mockImplementation(async (_audio, _language, options) => {
+      signal = options?.signal; entered.resolve(); return gate.promise;
+    });
+    const dashscope = vi.spyOn(qwen, 'transcribe').mockRejectedValue(new Error('Unexpected Qwen fallback'));
+    try {
+      preference.setVoicePreference({ stt: 'relay' });
+      mocks.transcribe.mockImplementation((audio, options) => actualTranscribe(audio, options));
+      const { socket, userId, org } = fixture(true); const ui = meetingUi(socket);
+      await socket.receive('audio:start', start('relay-authority-meeting', true));
+      await socket.receive('audio:chunk', Buffer.alloc(32000, 0x36));
+      const completed = ui.wait('relay-authority-meeting');
+      await socket.receive('audio:stop', { sessionId: 'relay-authority-meeting', refineTranscript: true, refinementId: ui.identity.current.refinementId });
+      await entered.promise;
+      removeMember(org!.id, userId);
+      await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+      gate.resolve({ text: 'LATE PRIVATE RELAY TRANSCRIPT', model: 'synthetic-relay', isFinal: true });
+      expect(await completed).toBeNull();
+      await vi.waitFor(() => expect(socket.outputs.some(([event]) => event === 'meeting:refine_error')).toBe(true));
+      expect(relay).toHaveBeenCalledOnce(); expect(dashscope).not.toHaveBeenCalled();
+      expect(socket.outputs.some(([event]) => event === 'meeting:refined_transcript')).toBe(false);
+      expect(JSON.stringify(socket.outputs)).not.toContain('LATE PRIVATE RELAY TRANSCRIPT');
+    } finally {
+      gate.resolve({ text: 'late cleanup', model: 'synthetic', isFinal: true });
+      relay.mockRestore(); dashscope.mockRestore(); vi.unstubAllGlobals(); vi.unstubAllEnvs();
+      preference.setVoicePreference({ ...prior, sttModel: prior.sttModel, ttsModel: prior.ttsModel });
+    }
+  });
+
   it('normal uninterrupted capture refines both recorded chunks and applies the full result', async () => {
     const { socket } = fixture();
     const ui = meetingUi(socket);
@@ -274,7 +381,7 @@ describe('meeting capture ownership and complete paused recordings', () => {
     const firstWaiter = ui.wait('meeting-before-clear');
     await socket.receive('audio:stop', { sessionId: 'meeting-before-clear', refineTranscript: true, refinementId: ui.identity.current.refinementId });
     expect(mocks.transcribe).toHaveBeenCalledOnce();
-    ui.clear(); // The real Clear button is enabled even while reportGenerating.
+    ui.clear(); // Confirmed creation replaces identity, fencing the pending refinement.
     expect(ui.state.notes).toEqual([]);
     await socket.receive('audio:start', start('meeting-after-clear', true));
     await socket.receive('audio:chunk', Buffer.alloc(16000, 0x44));
@@ -444,7 +551,7 @@ describe('meeting capture ownership and complete paused recordings', () => {
     await socket.receive('audio:stop', { preserveMeeting: true });
     const directory = path.dirname(firstPath);
     const manifest = path.join(directory, `meeting_${meetingId.length}_${meetingId}_segments.json`);
-    const original = fs.readFileSync(manifest, 'utf8');
+    const original = readImplementationSource(manifest, 'utf8');
     const rename = fs.renameSync;
     const failure = vi.spyOn(fs, 'renameSync').mockImplementation((source, target) => {
       if (String(target) === manifest) throw new Error('Synthetic disk replacement failure');
@@ -452,9 +559,43 @@ describe('meeting capture ownership and complete paused recordings', () => {
     });
     try { await socket.receive('audio:start', { ...start('atomic-second', true), meetingId }); }
     finally { failure.mockRestore(); }
-    expect(fs.readFileSync(manifest, 'utf8')).toBe(original);
-    expect(fs.readFileSync(firstPath)).toEqual(Buffer.alloc(16000, 0x37));
+    expect(readImplementationSource(manifest, 'utf8')).toBe(original);
+    expect(readImplementationSource(firstPath)).toEqual(Buffer.alloc(16000, 0x37));
     expect(fs.readdirSync(directory).filter(name => name.endsWith('.pcm'))).toEqual([path.basename(firstPath)]);
     expect(fs.readdirSync(directory).some(name => name.endsWith('.tmp'))).toBe(false);
   });
+});
+
+describe('natural voice commands use the shared model and tool loop', () => {
+  it.each(['打开聊天界面', '打开AutoCAD。', '看一下现在知识库里有多少的文件内容。',
+    '打开 WPS，然后新建文档，在正文写入：语音共享入口测试。'])(
+    'routes %s through the shared loop without a detached shortcut and releases after the durable terminal', async text => {
+      const { socket } = fixture();
+      socket.data.trustedLocalExecution = true;
+      mocks.tools.mockResolvedValue({ text: 'This synthetic attempt cannot complete the requested action.',
+        toolCalls: [], usageRecords: [], completionGuard: { blocked: true, text: 'This synthetic attempt cannot complete the requested action.',
+          reason: 'missing_execution_evidence' } });
+      await socket.receive('audio:start', start('shared-model-' + sequence));
+      await mocks.stt.at(-1).final(text);
+      await vi.waitFor(() => expect(mocks.tools, JSON.stringify({ errors: mocks.errors, outputs: socket.outputs.map(([event, data]) => ({ event, status: data?.status, reason: data?.reason, message: data?.message, text: data?.text })) })).toHaveBeenCalled(), { timeout: 5000 });
+      const acceptedText = socket.outputs.find(([event]) => event === 'audio:confirm')?.[1].text;
+      expect(mocks.tools.mock.calls[0][0].at(-1).content).toBe(acceptedText);
+      expect(mocks.tools.mock.calls[0][11].toolPolicy).toBeDefined();
+      await vi.waitFor(() => expect(socket.outputs.filter(([event, data]) => event === 'agent:response' && data.finalized)).toHaveLength(1));
+      await vi.waitFor(() => expect(socket.data.audioSession.isProcessing).toBe(false));
+      expect(mocks.tools.mock.calls.length).toBeLessThanOrEqual(2); // One shared, bounded evidence recovery is permitted.
+      for (const call of mocks.tools.mock.calls) {
+        expect(call[11].requestId).toBe(mocks.tools.mock.calls[0][11].requestId);
+        expect(call[11].toolPolicy).toBe(mocks.tools.mock.calls[0][11].toolPolicy);
+      }
+      expect(socket.outputs.some(([event]) => event === 'desktop:tool_call')).toBe(false);
+      const terminal = socket.outputs.filter(([event, data]) => event === 'agent:response' && data.finalized)[0][1];
+      expect(terminal.blocked).toBe(true);
+      await waitForChatExecutionPersistence();
+      expect(terminal.conversationId).toBeTruthy();
+      const saved = getMessages(terminal.conversationId, 20).filter(message => message.role === 'assistant');
+      expect(saved).toHaveLength(1);
+      expect(saved[0].message).toBe(terminal.text);
+    }, 15000,
+  );
 });

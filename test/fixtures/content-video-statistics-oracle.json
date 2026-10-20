@@ -1,0 +1,46 @@
+{
+  "kind": "fictional creator-export CSV; no actual account data",
+  "mapping": {
+    "videoId": "视频编号",
+    "title": "标题",
+    "views": "播放量",
+    "likes": "点赞量",
+    "comments": "评论量",
+    "saves": "收藏量",
+    "shares": "分享量",
+    "completionRate": "完播率"
+  },
+  "expected": {
+    "rowCount": 25,
+    "totals": {
+      "views": 31000,
+      "likes": 3100,
+      "comments": 310,
+      "saves": 620,
+      "shares": 310
+    },
+    "ratesPercent": {
+      "likes": 10,
+      "comments": 1,
+      "saves": 2,
+      "shares": 1,
+      "engagement": 14,
+      "completionWeightedByViews": 63.870968
+    },
+    "lastRow": {
+      "videoId": "v25",
+      "title": "虚构标题,最后一条",
+      "completionRate": 90
+    }
+  },
+  "scope": [
+    "All 25 supplied records, including record 25",
+    "Descriptive counts and rates only, with explicit CSV-column provenance"
+  ],
+  "notProved": [
+    "Creator platform authorization or data acquisition",
+    "Douyin publishing",
+    "Video-content quality or causal weak links",
+    "Revenue, profit, future performance"
+  ]
+}

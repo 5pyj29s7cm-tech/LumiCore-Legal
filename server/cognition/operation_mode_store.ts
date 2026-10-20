@@ -1,4 +1,5 @@
-import { readDB, writeDB } from '../../db_layer';
+import { normalizeDesktopExecutionPreference, type DesktopExecutionPreference } from '../../shared/operation_modes';
+import { readSetting, writeSetting, writeSettingDurably } from '../persistence/settings_repository';
 import {
   normalizeOperationMode,
   parseStoredOperationMode,
@@ -10,9 +11,8 @@ function preferenceKey(userId: string): string {
 }
 
 export function getStoredOperationMode(userId: string): OperationMode {
-  const db = readDB();
-  const setting = (db.settings || []).find((item: any) => item.key === preferenceKey(userId));
-  return setting ? parseStoredOperationMode(setting.value) : 'assistant';
+  const value = readSetting(preferenceKey(userId));
+  return value === undefined ? 'assistant' : parseStoredOperationMode(value);
 }
 
 export function saveStoredOperationMode(userId: string, requestedMode: string): {
@@ -20,15 +20,21 @@ export function saveStoredOperationMode(userId: string, requestedMode: string): 
   autonomyLevel?: 'reactive' | 'semi' | 'full';
 } {
   const mode = normalizeOperationMode(requestedMode);
-  const db = readDB();
-  if (!db.settings) db.settings = [];
-  const key = preferenceKey(userId);
-  const value = JSON.stringify({ mode });
-  const existing = db.settings.findIndex((item: any) => item.key === key);
-  if (existing >= 0) db.settings[existing].value = value;
-  else db.settings.push({ key, value });
-  writeDB(db);
+  writeSetting(preferenceKey(userId), JSON.stringify({ mode }));
 
   // Compatibility state must never rewrite background-work authorization or budgets.
   return { mode };
+}
+
+export function getStoredDesktopExecutionPreference(userId: string): DesktopExecutionPreference {
+  try {
+    const raw = readSetting('desktop_execution_' + userId);
+    return normalizeDesktopExecutionPreference(raw ? JSON.parse(raw)?.preference : undefined);
+  } catch { return 'internal'; }
+}
+
+export async function saveStoredDesktopExecutionPreference(userId: string, preference: DesktopExecutionPreference): Promise<DesktopExecutionPreference> {
+  if (preference !== 'internal' && preference !== 'external') throw new Error('Invalid desktop execution preference');
+  await writeSettingDurably('desktop_execution_' + userId, JSON.stringify({ preference }));
+  return preference;
 }

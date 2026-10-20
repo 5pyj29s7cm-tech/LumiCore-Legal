@@ -2,13 +2,11 @@
  * Skill translation cache — auto-translates skill metadata via LLM,
  * persists to DB so each skill is translated only once.
  */
-import { readDB, writeDB } from '../../db_layer';
+import { readDatabaseTables, commitDatabaseTables } from '../../db_layer';
 import { logger } from '../../logger';
-import { CN_TIMER_SKILL_METADATA } from '../regions/packs/cn/skill_messages';
+import { CN_TIMER_SKILL_METADATA } from "../regions/messages/skill_messages";
 
 const SUPPORTED_LANGS = ['zh', 'en'];
-const FIELDS_TO_TRANSLATE = ['displayName', 'description', 'setupNote'] as const;
-
 const BUILTIN_ZH_TRANSLATIONS: Record<string, TranslationEntry> = {
   'skill-cad-drafting': {
     displayName: 'CAD 制图包',
@@ -136,7 +134,7 @@ const BUILTIN_ZH_TRANSLATIONS: Record<string, TranslationEntry> = {
   },
   'skill-hermes': {
     displayName: 'Hermes 助手',
-    description: '研究、写作和编码等通用智能体能力，可作为 Lumi 的团队成员接入。',
+    description: '研究、写作和编码等通用能力，需要通过经过审查的 LumiCore 工具适配器接入。', // i18n-allow: Reviewed Chinese skill catalog copy.
   },
   'skill-image': {
     displayName: '图片处理',
@@ -268,14 +266,14 @@ interface TranslationCache {
 }
 
 function loadCache(): TranslationCache {
-  const db = readDB();
+  const db = readDatabaseTables(["skillTranslations"]);
   return db.skillTranslations || {};
 }
 
 function saveCache(cache: TranslationCache) {
-  const db = readDB();
+  const db = readDatabaseTables(["skillTranslations"]);
   db.skillTranslations = cache;
-  writeDB(db);
+  commitDatabaseTables(db);
 }
 
 export function getTranslation(skillId: string, lang: string): TranslationEntry | null {

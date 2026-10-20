@@ -101,7 +101,7 @@ export function registerRuntimeWorkTools(registry: ToolRegistry): void {
     capability: {
       id: 'runtime.work.cancel',
       family: 'runtime_work',
-      lane: 'agents',
+      lane: 'system',
       operation: 'mutate',
       risk: 'medium',
       sideEffects: [{ type: 'local_write', scope: 'active Lumi task state', reversible: false }],
@@ -125,7 +125,7 @@ export function registerRuntimeWorkTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'runtime_work_pause',
-    description: 'Pause checkpoint-capable delegated or autonomous Lumi work without discarding its task identity, execution checkpoint, or receipts. Use only when the user explicitly asks to pause or temporarily suspend work.',
+    description: 'Pause checkpoint-capable autonomous LumiCore work without discarding its task identity, execution checkpoint, or receipts. Use only when the user explicitly asks to pause or temporarily suspend work.',
     // i18n-allow: Chinese input-recognition vocabulary; not user-visible copy.
     routingHints: ['\u6682\u505c\u540e\u53f0\u4efb\u52a1', '\u5148\u505c\u4e00\u4e0b', 'pause background work', 'suspend current task'],
     parameters: {
@@ -147,7 +147,7 @@ export function registerRuntimeWorkTools(registry: ToolRegistry): void {
     capability: {
       id: 'runtime.work.pause',
       family: 'runtime_work',
-      lane: 'agents',
+      lane: 'system',
       operation: 'mutate',
       risk: 'low',
       sideEffects: [{ type: 'local_write', scope: 'active Lumi task state', reversible: true }],
@@ -171,14 +171,14 @@ export function registerRuntimeWorkTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'runtime_work_resume',
-    description: 'Resume paused delegated or autonomous Lumi work from its durable checkpoint and existing receipt ledger. Use only when the user explicitly asks to continue paused work.',
+    description: 'Resume paused autonomous LumiCore work from its durable checkpoint and existing receipt ledger. Use only when the user explicitly asks to continue paused work.',
     // i18n-allow: Chinese input-recognition vocabulary; not user-visible copy.
     routingHints: ['\u7ee7\u7eed\u540e\u53f0\u4efb\u52a1', '\u6062\u590d\u4efb\u52a1', 'resume background work', 'continue paused task'],
     parameters: {
       type: 'object',
       properties: {
         taskId: { type: 'string', description: 'Optional exact runtime task id. Omit to resume all matching paused work.' },
-        kinds: { type: 'array', items: { type: 'string', enum: ['delegation', 'autonomy'] } },
+        kinds: { type: 'array', items: { type: 'string', enum: ['autonomy'] } },
       },
       required: [],
     },
@@ -193,7 +193,7 @@ export function registerRuntimeWorkTools(registry: ToolRegistry): void {
     capability: {
       id: 'runtime.work.resume',
       family: 'runtime_work',
-      lane: 'agents',
+      lane: 'system',
       operation: 'mutate',
       risk: 'low',
       sideEffects: [{ type: 'local_write', scope: 'paused Lumi task state', reversible: true }],

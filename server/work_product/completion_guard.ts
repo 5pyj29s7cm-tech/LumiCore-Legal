@@ -1,20 +1,24 @@
 import fs from 'fs';
 import path from 'path';
+import { artifactRecordMatchesTurn } from '../tools/artifact_evidence';
+import { parseReceiptObject, toolRecordTerminalPayload } from '../tools/receipt_payload';
 import { ToolExecutionRecord, type ToolContext } from '../tools/types';
 import {
-  buildActionContract,
+  buildActionEvidenceContract,
   claimsCurrentAppSaveCompletion,
   hasCoreActionEvidence,
+  hasRequestedDesktopOpenEvidence,
   hasCurrentAppSaveEvidence,
   hasCurrentAppUiMutationEvidence,
   requiresCurrentAppUiMutation,
 } from '../cognition/action_contract';
-import { formatCnToolFailureDetail } from '../regions/packs/cn/voice_fast_path_messages';
-import { CN_COMPLETION_GUARD_MESSAGES } from '../regions/packs/cn/completion_guard_messages';
+import { CN_COMPLETION_GUARD_MESSAGES } from "../regions/messages/completion_guard_messages";
 import { normalizeActionIntent, isStoredMemoryRecallQuestion } from '../cognition/normalized_action_intent';
 import { formatGroundedKnowledgeObservation, isKnowledgeInventoryRequest } from '../cognition/knowledge_result';
 
 export interface CompletionGuardResult {
+  /** Set only by the current primary-model terminal decoder, never model JSON or a client payload. */
+  primaryGoalResult?: true;
   text: string;
   blocked: boolean;
   reason?: string;
@@ -29,37 +33,36 @@ function buildActionPromiseGuardedResponse(
   const isZh = /[\u3400-\u9fff]/.test(task);
   const clientSurfaceTask = isClientSurfaceTask(task);
   const desktopActionTask = isDesktopActionTask(task);
-  const lastFailure = summarizeFailedToolCalls(failed, isZh);
   const confirmationBlocked = failed.some(call =>
     /requires user confirmation|requires confirmation|user confirmation|\u7528\u6237\u786e\u8ba4|\u9700\u8981\u786e\u8ba4/i.test(toolFailureDetail(call))
   );
 
   if (!isZh) {
     if (clientSurfaceTask) {
-      return `I could not complete that client action${lastFailure ? `: ${lastFailure}` : ''}. The request is still available to retry from this step.`;
+      return `I could not complete that client action. The request is still available to retry from this step.`;
     }
     if (desktopActionTask) {
-      return `I could not complete that desktop action${lastFailure ? `: ${lastFailure}` : ''}. The target can be checked again before retrying.`;
+      return `I could not complete that desktop action. The target can be checked again before retrying.`;
     }
     if (confirmationBlocked) {
-      return `This action is waiting for your confirmation${lastFailure ? `: ${lastFailure}` : ''}. Confirm it in the client to continue.`;
+      return `This action is waiting for your confirmation. Confirm it in the client to continue.`;
     }
-    return `I could not start that action${lastFailure ? `: ${lastFailure}` : ''}. The request is still available to retry from this step.`;
+    return `I could not start that action. The request is still available to retry from this step.`;
   }
 
   if (clientSurfaceTask) {
-    return CN_COMPLETION_GUARD_MESSAGES.promiseClient(lastFailure);
+    return CN_COMPLETION_GUARD_MESSAGES.promiseClient();
   }
 
   if (desktopActionTask) {
-    return CN_COMPLETION_GUARD_MESSAGES.promiseDesktop(lastFailure);
+    return CN_COMPLETION_GUARD_MESSAGES.promiseDesktop();
   }
 
   if (confirmationBlocked) {
-    return CN_COMPLETION_GUARD_MESSAGES.confirmation(lastFailure);
+    return CN_COMPLETION_GUARD_MESSAGES.confirmation();
   }
 
-  return CN_COMPLETION_GUARD_MESSAGES.promiseGeneric(lastFailure);
+  return CN_COMPLETION_GUARD_MESSAGES.promiseGeneric();
 }
 
 interface CompletionGuardInput {
@@ -70,6 +73,7 @@ interface CompletionGuardInput {
   requestId?: string;
   taskId?: string;
   acceptedTaskTarget?: ToolContext['acceptedTaskTarget'];
+  acceptedActionContract?: ToolContext['acceptedActionContract'];
 }
 
 const EXTERNAL_WORK_TASK_RE =
@@ -77,7 +81,7 @@ const EXTERNAL_WORK_TASK_RE =
 
 const COMPLETION_CLAIM_RE =
   // i18n-allow: Chinese execution-claim recognition pattern; not user-visible copy.
-  /(?:任务|工作|全部|都)?(?:已经|已)?[^。！？\n]{0,18}(?:完成|搞定|做好|做完)|(?:已经|已)[^。！？\n]{0,18}(?:生成|新建|创建|保存|输出|写入|写好|写完|打开|加载|导出)|(?:生成好了|新建好了|创建好了|保存好了|输出好了|写好了|写完了|打开了|加载好了|搞定了)|\b(?:task complete|completed successfully|created|saved|opened|exported|generated)\b/i;
+  /(?:任务|工作|全部|都)?(?:已经|已)?[^。！？\n]{0,18}(?:完成|搞定|做好|做完)|(?:已经|已)[^。！？\n]{0,18}(?:生成|新建|创建|保存|输出|写入|写好|写完|打开|加载|导出|归档)|(?:生成好了|新建好了|创建好了|保存好了|输出好了|写好了|写完了|打开了|加载好了|搞定了)|\b(?:task complete|completed successfully|created|saved|opened|exported|generated|archived)\b/i;
 
 const SELF_COMPLETION_CLAIM_RE =
   // i18n-allow: Chinese self-completion recognition pattern; not user-visible copy.
@@ -111,30 +115,15 @@ const OPEN_CLAIM_RE =
 
 const FILE_CREATION_CLAIM_RE =
   // i18n-allow: Chinese file-production claim recognition pattern; not user-visible copy.
-  /(?:已经|已|都)?[^。！？\n]{0,18}(?:生成|新建|创建|保存|输出|写入|写好|写完|导出)|(?:生成好了|新建好了|创建好了|保存好了|输出好了|写好了|写完了)|\b(?:created|saved|exported|generated)\b/i;
+  /(?:已经|已|都)?[^。！？\n]{0,18}(生成|新建|创建|保存|输出|写入|写好|写完|导出|归档)|\b(created|saved|exported|generated|archived)\b/i;
 
-// i18n-allow: Multilingual artifact-subject recognition; not user-visible copy.
+// i18n-allow: Multilingual physical-output subject recognition; not user-visible copy.
 const ARTIFACT_PRODUCTION_SUBJECT_RE =
-  /(?:文件|文档|产物|报告|表格|演示文稿|幻灯片|图像|图片|图纸|附件|导出物|输出文件|保存路径|文件路径|路径|PPT|PDF|DOCX|XLSX|DXF|DWG|(?:[A-Za-z]:[\\/]|\/)[^\s，。！？!?；;"'<>|]{1,240}\.(?:txt|md|docx?|xlsx?|pptx?|pdf|csv|json|dxf|dwg|svg|png|jpe?g|webp|html?)|(?:^|[\s"'（(])[^\s，。！？!?；;"'<>|\\/]{1,160}\.(?:txt|md|docx?|xlsx?|pptx?|pdf|csv|json|dxf|dwg|svg|png|jpe?g|webp|html?)\b)|\b(?:file|document|artifact|report|spreadsheet|workbook|presentation|slide\s*deck|deck|image|drawing|attachment|output\s+file|file\s+path|path)\b/iu;
+  /(?:文件|表格|演示文稿|幻灯片|图像|图片|图纸|附件|导出物|输出文件|保存路径|文件路径|路径|PPT|PDF|DOCX|XLSX|DXF|DWG|(?:[A-Za-z]:[\\/]|\/)[^\s，。！？!?；;"'<>|]{1,240}\.(?:txt|md|docx?|xlsx?|pptx?|pdf|csv|json|dxf|dwg|svg|png|jpe?g|webp|html?)|(?:^|[\s"'（(])[^\s，。！？!?；;"'<>|\\/]{1,160}\.(?:txt|md|docx?|xlsx?|pptx?|pdf|csv|json|dxf|dwg|svg|png|jpe?g|webp|html?)\b)|\b(?:file|spreadsheet|workbook|presentation|slide\s*deck|deck|image|drawing|attachment|output\s+file|file\s+path|path)\b/iu;
 
 // i18n-allow: Multilingual receipt/status persistence-claim recognition; not user-visible copy.
 const NON_ARTIFACT_PRODUCTION_CLAIM_RE =
   /(?:(?:已经|已|都)?[^。！？!?；;，,\n]{0,12}(?:生成|新建|创建|保存|输出|写入|写好|写完|导出)(?:好|完|成功|完成|了)?(?:的)?\s*(?:回执|记录|账本|证据|状态|结果)|(?:回执|记录|账本|证据|状态|结果)[^。！？!?；;，,\n]{0,12}(?:(?:已经|已|都)?[^。！？!?；;，,\n]{0,8})?(?:生成|新建|创建|保存|输出|写入|写好|写完|导出)(?:好|完|成功|完成|了)?)|\b(?:(?:created|saved|exported|generated|written)\s+(?:the\s+)?(?:receipt|log|ledger|evidence|status|result)s?|(?:receipt|log|ledger|evidence|status|result)s?\s+(?:(?:has|have|had|was|were|is|are)\s+(?:been\s+)?)?(?:created|saved|exported|generated|written))\b/iu;
-
-// A statement that explicitly denies producing an artifact is evidence about
-// a read-only assessment, not a production claim. Keep this clause-local so a
-// separate positive claim in the same response is still guarded.
-// i18n-allow: Multilingual negated artifact-claim recognition; not user-visible copy.
-const NEGATED_ARTIFACT_PRODUCTION_CLAIM_RE =
-  /(?:没有|未|并未|不会|不能证明|无法证明|不是|只完成)[^。！？!?；;，,\n]{0,32}(?:生成|新建|创建|保存|输出|写入|写好|写完|导出)|\b(?:did\s+not|didn't|was\s+not|wasn't|without|cannot\s+prove|could\s+not\s+verify)[^.!?;\n]{0,48}\b(?:create|save|export|generate|write)\w*\b/iu;
-
-// Prospective next steps describe work that remains to be done. They must not
-// be mistaken for a claim that an artifact already exists.
-const PROSPECTIVE_ARTIFACT_PRODUCTION_CLAIM_RE =
-  /^(?:[-*#>]\s*)*(?:\u4e0b\u4e00\u6b65|\u540e\u7eed|\u5efa\u8bae|\u9700\u8981|\u5e94\u5f53|\u5e94\u8be5|\u5f85|\u5c06|\u53ef\u4ee5|\u53ef|next\s+step|later|recommend(?:ed)?|need(?:s)?\s+to|should|will|can)\s*[:\uff1a-]?[\s\S]{0,80}(?:\u751f\u6210|\u65b0\u5efa|\u521b\u5efa|\u4fdd\u5b58|\u8f93\u51fa|\u5199\u5165|\u5bfc\u51fa|create|save|export|generate|write)/iu;
-
-const UNVERIFIED_ARTIFACT_EXISTENCE_CLAIM_RE =
-  /(?:\u4e0d\u80fd\u8bc1\u5b9e|\u65e0\u6cd5\u8bc1\u5b9e)[^\n.!?;\u3002\uff01\uff1f\uff1b]{0,48}(?:\u751f\u6210|\u65b0\u5efa|\u521b\u5efa|\u4fdd\u5b58|\u8f93\u51fa|\u5199\u5165|\u5bfc\u51fa|create|save|export|generate|write)/iu;
 
 /**
  * Persistence words are not inherently file-production claims. In
@@ -142,22 +131,25 @@ const UNVERIFIED_ARTIFACT_EXISTENCE_CLAIM_RE =
  * than an artifact. Exempt only clauses where receipt/log/ledger/evidence/
  * status/result is explicitly the persisted subject. Bare save claims remain
  * guarded, while a path or filename also makes the artifact subject explicit.
+ * A verified inline work product proves its returned text, never a physical file.
  */
-function hasArtifactCreationClaim(value: string): boolean {
+function hasArtifactCreationClaim(value: string, inlineWorkProduct?: { generated: boolean; persisted: boolean }): boolean {
   const clauses = String(value || '')
     .split(/[。！？!?；;，,\n]+/u)
     .map(clause => clause.trim())
     .filter(Boolean);
 
   return clauses.some(clause => {
-    if (!FILE_CREATION_CLAIM_RE.test(clause)) return false;
-    if (NEGATED_ARTIFACT_PRODUCTION_CLAIM_RE.test(clause)) return false;
-    if (UNVERIFIED_ARTIFACT_EXISTENCE_CLAIM_RE.test(clause)) return false;
-    if (PROSPECTIVE_ARTIFACT_PRODUCTION_CLAIM_RE.test(clause)) return false;
+    const action = FILE_CREATION_CLAIM_RE.exec(clause);
+    if (!action) return false;
+    // i18n-allow: Archiving the existing source is a persisted state, not physical file creation.
+    if (action[1] === '归档' || action[2]?.toLowerCase() === 'archived') return !inlineWorkProduct?.persisted;
     const hasArtifactSubject = ARTIFACT_PRODUCTION_SUBJECT_RE.test(clause);
     if (hasArtifactSubject) return true;
     if (NON_ARTIFACT_PRODUCTION_CLAIM_RE.test(clause)) return false;
-    return true;
+    // i18n-allow: Reuse the production action captured above; not output copy.
+    const generatesText = ['生成', '新建', '创建', '输出', 'created', 'generated'].includes((action[1] || action[2]).toLowerCase());
+    return !inlineWorkProduct || !(generatesText ? inlineWorkProduct.generated : inlineWorkProduct.persisted);
   });
 }
 
@@ -230,11 +222,11 @@ function stripNegatedClaimClauses(value: string): string {
       ' ',
     )
     .replace(
-      /(?:\u6ca1\u6709|\u6ca1|\u5e76\u672a|\u5c1a\u672a|\u672a\u66fe|\u4e0d\u4f1a|\u4e0d\u80fd|\u4e0d\u5e94|\u4e0d\u8981|\u7981\u6b62|(?:\u5e76)?\u4e0d(?:\u4ee3\u8868|\u610f\u5473\u7740)|\u672a)(?=[^\u3002\uFF1B\uFF01\uFF1F\n\r]{0,48}(?:\u5b8c\u6210|\u505a\u5b8c|\u505a\u597d|\u641e\u5b9a|\u6253\u5f00|\u542f\u52a8|\u53d1\u9001|\u751f\u6210|\u65b0\u5efa|\u521b\u5efa|\u4fdd\u5b58|\u5bfc\u51fa|\u5199\u5165|\u5199\u597d|\u5199\u5b8c|\u8bfb\u53d6|\u67e5\u770b|\u8c03\u7528|\u4f7f\u7528|\u6267\u884c|\u5904\u7406))[^\u3002\uFF1B\uFF01\uFF1F\n\r]*/gu,
+      /(?:\u6ca1\u6709|\u6ca1|\u5e76\u672a|\u5c1a\u672a|\u672a\u66fe|\u4e0d\u4f1a|\u4e0d\u80fd|\u4e0d\u5e94|\u4e0d\u8981|\u7981\u6b62|(?:\u5e76)?\u4e0d(?:\u4ee3\u8868|\u610f\u5473\u7740)|\u672a)(?=[^\u3002\uFF1B\uFF01\uFF1F\n\r]{0,48}(?:\u5b8c\u6210|\u505a\u5b8c|\u505a\u597d|\u641e\u5b9a|\u6253\u5f00|\u542f\u52a8|\u53d1\u9001|\u751f\u6210|\u65b0\u5efa|\u521b\u5efa|\u4fdd\u5b58|\u5bfc\u51fa|\u5f52\u6863|\u5199\u5165|\u5199\u597d|\u5199\u5b8c|\u8bfb\u53d6|\u67e5\u770b|\u8c03\u7528|\u4f7f\u7528|\u6267\u884c|\u5904\u7406))[^\u3002\uFF1B\uFF01\uFF1F\n\r]*/gu,
       ' ',
     )
     .replace(
-      /\b(?:did\s+not|didn't|does\s+not|doesn't|have\s+not|haven't|has\s+not|hasn't|will\s+not|won't|cannot|can't|must\s+not|do\s+not|don't|never)\b(?=[^.;!?\n\r]{0,64}\b(?:complete|open|launch|send|create|generate|save|export|read|view|call|use|execute|run)\b)[^.;!?\n\r]*/giu,
+      /\b(?:did\s+not|didn't|does\s+not|doesn't|have\s+not|haven't|has\s+not|hasn't|will\s+not|won't|cannot|can't|must\s+not|do\s+not|don't|never)\b(?=[^.;!?\n\r]{0,64}\b(?:complete|open|launch|send|create|generate|save|export|archive|read|view|call|use|execute|run)\b)[^.;!?\n\r]*/giu,
       ' ',
     );
 }
@@ -412,20 +404,8 @@ function toolFailureDetail(call: ToolExecutionRecord): string {
   return '';
 }
 
-function summarizeFailedToolCalls(failed: ToolExecutionRecord[], chinese = false): string {
-  const summaries = failed.slice(-2).map(call => {
-    const detail = toolFailureDetail(call);
-    const safeDetail = chinese && detail
-      ? formatCnToolFailureDetail(detail)
-      : detail;
-    return safeDetail || (chinese
-      ? '\u8fd9\u4e00\u6b65\u6ca1\u6709\u8fd4\u56de\u53ef\u7528\u7ed3\u679c' // i18n-allow: reviewed Chinese completion-guard response.
-      : 'This step did not return a usable result');
-  });
-  return [...new Set(summaries)].join(chinese ? '\uff1b' : '; ');
-}
-
 function isSuccessfulToolCall(call: ToolExecutionRecord): boolean {
+  if (call.envelope && call.envelope.status !== 'verified_success') return false;
   if (call.terminalVerification?.status === 'failed') return false;
   if (call.error || !String(call.result || '').trim()) return false;
   const parsed = parseStructuredToolResult(call.result || '');
@@ -468,11 +448,10 @@ function buildExecutionStatusGuardedResponse(
   failed: ToolExecutionRecord[],
 ): string {
   const isZh = /[\u3400-\u9fff]/.test(task);
-  const lastFailure = summarizeFailedToolCalls(failed, isZh);
   if (!isZh) {
-    return `That action has not started${lastFailure ? `: ${lastFailure}` : ''}. It can be retried from here.`;
+    return `That action has not started. It can be retried from here.`;
   }
-  return CN_COMPLETION_GUARD_MESSAGES.statusNotStarted(lastFailure);
+  return CN_COMPLETION_GUARD_MESSAGES.statusNotStarted();
 }
 
 export function needsCompletionEvidence(task: string): boolean {
@@ -494,15 +473,20 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
   const failed = toolOutcomes
     .filter(outcome => !outcome.successful && Boolean(outcome.call.error || String(outcome.call.result || '').trim()))
     .map(outcome => outcome.call);
+  const actionContract = buildActionEvidenceContract(task, undefined, input.acceptedActionContract);
+  const hasDomainCompletionEvidence = actionContract.applies
+    && hasCoreActionEvidence(actionContract, successful.filter(call => artifactRecordMatchesTurn(call, input)), task, undefined,
+      { requestId: input.requestId, taskId: input.taskId }, input.acceptedTaskTarget);
   const completionClaimText = stripReflectiveSelfDevelopmentCompletionClauses(task, claimText);
   const claimsSelfCompletion = hasSelfCompletionClaim(completionClaimText);
+  const claimsCompletion = COMPLETION_CLAIM_RE.test(completionClaimText) || claimsSelfCompletion;
   const executionStatusClaimText = stripReflectiveSelfImprovementStatusClauses(task, claimText);
   const claimsExecutionStatus = SELF_EXECUTION_STATUS_RE.test(executionStatusClaimText);
   const needsEvidence =
     needsCompletionEvidence(task) ||
     EXTERNAL_WORK_TASK_RE.test(response) ||
     claimsSelfCompletion ||
-    claimsExecutionStatus;
+    claimsExecutionStatus || FILE_CREATION_CLAIM_RE.test(completionClaimText);
   const desktopActionTask = isDesktopActionTask(task);
   const hasSuccessfulDesktopActionEvidence = successful.some(call =>
     DESKTOP_ACTION_EVIDENCE_TOOL_RE.test(call.name)
@@ -517,11 +501,11 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
     (!INSPECTION_ONLY_TOOL_RE.test(call.name) && Boolean(call.result || call.name))
   );
   const hasReadReviewEvidence = successful.some(call => READ_REVIEW_EVIDENCE_TOOL_RE.test(call.name));
-  const missingPromisedEvidence = claimsExecutionStatus && desktopActionTask
+  const missingPromisedEvidence = !hasDomainCompletionEvidence && (claimsExecutionStatus && desktopActionTask
     ? !hasSuccessfulDesktopActionEvidence
     : desktopActionTask
     ? !hasDesktopActionAttempt
-    : (successful.length === 0 || (promisesReadReviewAction ? !hasReadReviewEvidence : !hasPromiseEvidence));
+    : (successful.length === 0 || (promisesReadReviewAction ? !hasReadReviewEvidence : !hasPromiseEvidence)));
   const promisesActionWithoutEvidence =
     (
       claimsExecutionStatus ||
@@ -536,6 +520,14 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
       )
     ) &&
     missingPromisedEvidence;
+
+  if ((claimsCompletion || claimsExecutionStatus || promisesActionWithoutEvidence)
+    && toolCalls.some(call => call.envelope?.status === 'unknown_outcome' && artifactRecordMatchesTurn(call, input))) {
+    return { text: /[\u3400-\u9fff]/.test(task)
+      ? CN_COMPLETION_GUARD_MESSAGES.unknownOutcome()
+      : 'The result of this action is not confirmed. Check its receipt before deciding what to do next.',
+    blocked: true, reason: 'Current-turn canonical execution outcome is unknown.' };
+  }
 
   if (promisesActionWithoutEvidence) {
     const reason = claimsExecutionStatus
@@ -552,7 +544,6 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
     };
   }
 
-  const claimsCompletion = COMPLETION_CLAIM_RE.test(completionClaimText) || claimsSelfCompletion;
   if (!needsEvidence || !claimsCompletion) return { text: response, blocked: false };
 
   const currentAppMutationTask = requiresCurrentAppUiMutation(task);
@@ -578,17 +569,6 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
     };
   }
 
-  const actionContract = buildActionContract(task);
-  const hasDomainCompletionEvidence = actionContract.applies
-    && hasCoreActionEvidence(actionContract, toolCalls, task, undefined,
-      { requestId: input.requestId, taskId: input.taskId }, input.acceptedTaskTarget);
-  // Persistent-task creation has its own receipt contract. Once that exact
-  // contract is satisfied, do not run the response through generic
-  // file/desktop heuristics: wording such as "created and persisted" is about
-  // the internal task ledger, not a file artifact or desktop mutation.
-  if (actionContract.kind === 'work_task' && hasDomainCompletionEvidence) {
-    return { text: response, blocked: false };
-  }
   const unverifiedReceipts = hasDomainCompletionEvidence
     ? []
     : unverifiedCompletionReceipts(claimText, successful);
@@ -606,7 +586,7 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
 
   const hasAnySuccess = successful.length > 0;
   const hasActionTool = successful.some(call => !INSPECTION_ONLY_TOOL_RE.test(call.name));
-  const hasFileProducer = successful.some(call =>
+  const hasFileProducer = (hasDomainCompletionEvidence && actionContract.kind === 'media_generation') || successful.some(call =>
     (
       call.terminalVerification?.status === 'verified'
       && call.terminalVerification.strategy === 'artifact'
@@ -618,7 +598,32 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
       /File written:|Text file:|Output file:|Saved to:|written:|created:|saved:|exported:|\.dxf|\.pptx|\.docx|\.pdf|\.md|\.txt/i.test(call.result || '')
     )
   );
-  const hasOpenTool = successful.some(call => OPEN_TOOL_RE.test(call.name));
+  const inlineWorkProduct = successful.slice().reverse().find(call => {
+    if (!artifactRecordMatchesTurn(call, input) || call.terminalVerification?.status !== 'verified'
+      || call.capability?.operation !== 'create' || !call.capability.capabilityId.startsWith('legal.')
+      || !call.capability.sideEffects.some(effect => effect.type === 'local_state_change')
+      || call.capability.sideEffects.some(effect => !['local_state_change', 'network_read', 'none'].includes(effect.type))) return false;
+    const receipt = parseReceiptObject(toolRecordTerminalPayload(call));
+    return receipt?.ok === true && (receipt.status === 'generated' || receipt.persisted === true)
+      && call.capability.verification.successStatuses?.includes(receipt.status) === true
+      && typeof receipt.persisted === 'boolean' && Array.isArray(receipt.changedCaseIds)
+      && Array.isArray(receipt.articleIds) && Array.isArray(receipt.artifacts)
+      && typeof receipt.content === 'string' && receipt.content.trim() !== '' && receipt.content === call.result;
+  });
+  const localTransaction = successful.find(call => {
+    if (!input.requestId || !input.taskId || call.capability || !artifactRecordMatchesTurn(call, input)
+      || call.envelope?.verification?.status !== 'verified' || call.envelope?.requestId !== input.requestId || call.envelope.taskId !== input.taskId
+      || call.envelope.status !== 'verified_success' || call.terminalVerification?.status !== 'verified') return false;
+    const receipt = parseReceiptObject(toolRecordTerminalPayload(call));
+    return receipt?.ok === true && receipt.verified === true && receipt.status === 'completed'
+      && receipt.verificationMethod === 'organization-server-transaction' && receipt.persisted === true
+      && [receipt.changedCaseIds, receipt.articleIds].some(ids => Array.isArray(ids) && ids.some(id => typeof id === 'string' && id.trim()));
+  });
+  const hasOpenTool = successful.some(call => OPEN_TOOL_RE.test(call.name))
+    || hasRequestedDesktopOpenEvidence(successful, task, task.match(/https?:\/\/[^\s，。；;！？!?<>"]+/iu)?.[0] || '')
+    || successful.some(call => call.name === 'browser_open_task'
+      && call.terminalVerification?.status === 'verified'
+      && hasRequestedDesktopOpenEvidence([call], task, String(call.arguments?.url || call.arguments?.query || '')));
   const hasPassingVerification = successful.some(call => /work_product_verify/i.test(call.name) && VERIFY_PASS_RE.test(call.result || ''));
   const pathsExist = extractLocalPaths(response)
     .some(filePath => {
@@ -637,20 +642,31 @@ export function guardCompletionClaims(input: CompletionGuardInput): CompletionGu
   } else if (OPEN_CLAIM_RE.test(claimText) && !hasOpenTool) {
     reason = '回复声称已经打开或加载，但没有成功的打开/客户端动作记录';
   } else if (
-    hasArtifactCreationClaim(claimText)
+    hasArtifactCreationClaim(claimText, inlineWorkProduct
+      ? { generated: parseReceiptObject(toolRecordTerminalPayload(inlineWorkProduct))?.status === 'generated',
+        persisted: parseReceiptObject(toolRecordTerminalPayload(inlineWorkProduct))?.persisted === true }
+      : localTransaction ? { generated: false, persisted: true }
+         : hasDomainCompletionEvidence && successful.some(call =>
+           call.capability?.operation === 'create' && call.terminalVerification?.status === 'verified')
+           ? { generated: true, persisted: false } : undefined)
     && !currentAppMutationTask
     && !hasFileProducer
     && !hasPassingVerification
   ) {
     reason = '回复声称已经生成或保存产物，但没有成功的写入/生成/验收记录';
-  } else if (!hasActionTool && !hasPassingVerification && !pathsExist && !hasDomainCompletionEvidence) {
+  } else if (!hasDomainCompletionEvidence
+    && (actionContract.applies || !hasActionTool && !hasPassingVerification && !pathsExist)) {
     reason = '\u6210\u529f\u6267\u884c\u4e86\u67e5\u8be2\u6216\u68c0\u67e5\u5de5\u5177\uff0c\u4f46\u8fd9\u4e9b\u7ed3\u679c\u4e0d\u662f\u5b8c\u6210\u5f53\u524d\u8bf7\u6c42\u6240\u9700\u7684\u6267\u884c\u8bc1\u636e'; // i18n-allow: reviewed Chinese evidence-accuracy reason.
     reasonCode = 'successful_irrelevant_evidence';
   }
 
   if (!reason) return { text: response, blocked: false };
 
-  const guardedText = buildGuardedResponse(task, reason, successful, failed);
+  const incompleteTargets = actionContract.components?.filter(item => !hasCoreActionEvidence(
+    item.contract, successful.filter(call => artifactRecordMatchesTurn(call, input)), item.text, undefined,
+    { requestId: input.requestId, taskId: input.taskId }, input.acceptedTaskTarget,
+  )).map(item => item.text) || [];
+  const guardedText = buildGuardedResponse(task, reason, successful, failed, incompleteTargets);
   return {
     text: guardedText,
     blocked: true,
@@ -671,40 +687,46 @@ function buildGuardedResponse(
   _reason: string,
   successful: ToolExecutionRecord[],
   failed: ToolExecutionRecord[],
+  incompleteTargets: string[] = [],
 ): string {
   const isZh = /[\u3400-\u9fff]/.test(task);
   const clientSurfaceTask = isClientSurfaceTask(task);
   const desktopActionTask = isDesktopActionTask(task);
   const hasVerifiedProgress = successful.length > 0;
-  const lastFailure = summarizeFailedToolCalls(failed, isZh);
   const confirmationBlocked = failed.some(call =>
     /requires user confirmation|requires confirmation|user confirmation|\u7528\u6237\u786e\u8ba4|\u9700\u8981\u786e\u8ba4/i.test(toolFailureDetail(call))
   );
 
+  if (incompleteTargets.length) {
+    return isZh
+      ? CN_COMPLETION_GUARD_MESSAGES.incompleteTargets(incompleteTargets, hasVerifiedProgress)
+      : `Not complete: ${incompleteTargets.join('; ')}. ${hasVerifiedProgress ? 'Completed work is preserved; ' : ''}the remaining steps can be continued.`;
+  }
+
   if (isZh && desktopActionTask && !clientSurfaceTask) {
-    return CN_COMPLETION_GUARD_MESSAGES.blockedDesktop(lastFailure, hasVerifiedProgress);
+    return CN_COMPLETION_GUARD_MESSAGES.blockedDesktop(hasVerifiedProgress);
   }
 
   if (!isZh) {
     if (clientSurfaceTask) {
-      return `That client action is not complete${lastFailure ? `: ${lastFailure}` : ''}. ${hasVerifiedProgress ? 'Completed work is preserved, and the request ' : 'The request '}can be retried from this step.`;
+      return `That client action is not complete. ${hasVerifiedProgress ? 'Completed work is preserved, and the request ' : 'The request '}can be retried from this step.`;
     }
     if (desktopActionTask) {
-      return `That desktop action is not complete${lastFailure ? `: ${lastFailure}` : ''}. ${hasVerifiedProgress ? 'Completed work is preserved; ' : ''}the target can be checked again before retrying.`;
+      return `That desktop action is not complete. ${hasVerifiedProgress ? 'Completed work is preserved; ' : ''}the target can be checked again before retrying.`;
     }
     if (confirmationBlocked) {
-      return `This action still needs your confirmation${lastFailure ? `: ${lastFailure}` : ''}. Confirm it in the client to continue.`;
+      return `This action still needs your confirmation. Confirm it in the client to continue.`;
     }
-    return `That action is not complete${lastFailure ? `: ${lastFailure}` : ''}. ${hasVerifiedProgress ? 'Completed work is preserved, and it ' : 'It '}can be retried from this step.`;
+    return `That action is not complete. ${hasVerifiedProgress ? 'Completed work is preserved, and it ' : 'It '}can be retried from this step.`;
   }
 
   if (clientSurfaceTask) {
-    return CN_COMPLETION_GUARD_MESSAGES.blockedClient(lastFailure, hasVerifiedProgress);
+    return CN_COMPLETION_GUARD_MESSAGES.blockedClient(hasVerifiedProgress);
   }
 
   if (confirmationBlocked) {
-    return CN_COMPLETION_GUARD_MESSAGES.confirmation(lastFailure);
+    return CN_COMPLETION_GUARD_MESSAGES.confirmation();
   }
 
-  return CN_COMPLETION_GUARD_MESSAGES.blockedGeneric(lastFailure, hasVerifiedProgress);
+  return CN_COMPLETION_GUARD_MESSAGES.blockedGeneric(hasVerifiedProgress);
 }

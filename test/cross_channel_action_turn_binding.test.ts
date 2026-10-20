@@ -1,37 +1,19 @@
+import { readImplementationSource } from './implementation_source';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const source = (relativePath: string) => readFileSync(path.join(process.cwd(), relativePath), 'utf8');
+const source = (relativePath: string) => readImplementationSource(path.join(process.cwd(), relativePath), 'utf8');
 
 describe('cross-channel action turn ownership wiring', () => {
-  it('persists and binds the exact task socket transcript before action preparation', () => {
-    const task = source('server/socket/task.ts');
-    const admission = task.indexOf('const taskAdmission = await admitAcceptedUserTurnDurably({');
-    const persisted = task.indexOf('persistAcceptedUserTurn: () => addMessageIdempotent({', admission);
-    const flushed = task.indexOf('flush: flushDBOrThrow', persisted);
-    const accepted = task.indexOf('const taskUserMessageId = taskAdmission.persisted;', flushed);
-    const prepared = task.indexOf('const actionTaskExecution = prepareConversationActionExecution({', accepted);
-    const rejected = task.indexOf("if ('bindingFailure' in actionTaskExecution)", prepared);
-
-    expect(admission).toBeGreaterThan(-1);
-    expect(persisted).toBeGreaterThan(-1);
-    expect(flushed).toBeGreaterThan(persisted);
-    expect(accepted).toBeGreaterThan(flushed);
-    expect(task.slice(persisted, prepared)).toContain('deferActionPreparation: true');
-    expect(task).toContain('.filter(message => message.id !== taskUserMessageId)');
-    expect(task.slice(prepared, rejected)).toContain('userMessageId: taskUserMessageId');
-    expect(rejected).toBeGreaterThan(prepared);
-  });
-
   it('persists and binds the exact voice transcript before action preparation', () => {
     const voice = source('server/socket/voice.ts');
-    const persisted = voice.indexOf('voiceUserMessageId = addMessageIdempotent({');
+    const persisted = voice.indexOf('voiceUserMessageId = writeVoiceMessage({');
     const admission = voice.indexOf('const voiceAdmission = await admitAcceptedUserTurnDurably({', persisted);
-    const admittedPersist = voice.indexOf('persistAcceptedUserTurn: () => persistVoiceUserMessage()', admission);
+    const admittedPersist = voice.indexOf('persistAcceptedUserTurn: () => { turnAuthorization.assertCurrent(); return persistVoiceUserMessage(); },', admission);
     const flushed = voice.indexOf('flush: flushDBOrThrow', admittedPersist);
     const accepted = voice.indexOf('voiceUserMessageId = voiceAdmission.persisted;', flushed);
-    const prepared = voice.indexOf('prepareConversationActionExecution({', accepted);
+    const prepared = voice.indexOf('preparePlannedConversationExecution({', accepted);
     const rejected = voice.indexOf("if ('bindingFailure' in actionTaskExecution)", prepared);
 
     expect(persisted).toBeGreaterThan(-1);
@@ -49,7 +31,7 @@ describe('cross-channel action turn ownership wiring', () => {
     const persisted = messaging.indexOf('const messageId = addMessageIdempotent({');
     const accepted = messaging.indexOf('const acceptedMessage: IncomingMessage = {', persisted);
     const routed = messaging.indexOf('const routeBaseMessage = accepted.message', accepted);
-    const prepared = messaging.indexOf('prepareConversationActionExecution({', routed);
+    const prepared = messaging.indexOf('preparePlannedConversationExecution({', routed);
     const rejected = messaging.indexOf("if ('bindingFailure' in actionTaskExecution)", prepared);
 
     expect(persisted).toBeGreaterThan(-1);
@@ -63,16 +45,23 @@ describe('cross-channel action turn ownership wiring', () => {
 
   it('carries durable receipts through every single-core recovery path', () => {
     const chat = source('server/socket/chat.ts');
-    const task = source('server/socket/task.ts');
     const voice = source('server/socket/voice.ts');
     const messaging = source('server/regions/packs/cn/messaging_routes.ts');
 
-    for (const code of [chat, task, voice]) {
-      expect(code).toContain('attempt: async ({ instruction, priorToolRecords, recordTool })');
-      expect(code).toContain('priorToolRecords,');
-    }
-    expect(messaging).toContain('toolRecords: preDeliveryRecords');
-    expect(messaging).toContain('`${source}_guard_recovery`');
+    expect(chat).toContain('await runLumiEntryTurn<void>({');
+    expect(voice).toContain('await runLumiEntryTurn<void>({');
+    expect(messaging).toContain('return runLumiEntryTurn({');
+    expect(readFileSync('server/cognition/turn_execution.ts', 'utf8')).toContain('await runPreparedLumiTurn({');
+    const driver = readFileSync('server/cognition/prepared_turn.ts', 'utf8');
+    expect(driver).toContain('attempt: async recovery =>');
+    expect(driver).toContain('await runResolvedLumiRecovery({ model, responseText, recovery })');
+    const recoveryOwner = readFileSync('server/cognition/turn_recovery.ts', 'utf8');
+    expect(recoveryOwner).toContain('priorToolRecords: recovery.priorToolRecords');
+    expect(recoveryOwner).toContain('completionGuard: result.completionGuard');
+    const messagingModel = readFileSync('server/regions/packs/cn/messaging_turn/model_execution.ts', 'utf8');
+    expect(messagingModel).toContain('projectRecords: records => currentMessagingFinalizationRecords({');
+    expect(messagingModel).toContain('context.taskAwareRecords(mergeToolExecutionRecords(context.toolRecords, records))');
+    expect(messagingModel).not.toContain('runResolvedLumiRecovery(');
   });
 
   it('starts a fail-closed lease heartbeat after preparation in every foreground channel', () => {
@@ -80,23 +69,15 @@ describe('cross-channel action turn ownership wiring', () => {
       {
         name: 'chat',
         code: source('server/socket/chat.ts'),
-        prepare: 'const actionTaskExecution = acceptedRuntimeCleanupOffer',
+        prepare: 'const actionTaskExecution = preparePlannedConversationExecution({',
         heartbeat: 'actionLeaseHeartbeat = startConversationActionExecutionHeartbeat({',
         abort: 'abortController,',
         stop: 'actionLeaseHeartbeat?.stop();',
       },
       {
-        name: 'task',
-        code: source('server/socket/task.ts'),
-        prepare: 'const actionTaskExecution = prepareConversationActionExecution({',
-        heartbeat: 'actionLeaseHeartbeat = startConversationActionExecutionHeartbeat({',
-        abort: 'abortController: taskAbortController,',
-        stop: 'actionLeaseHeartbeat?.stop();',
-      },
-      {
         name: 'voice',
         code: source('server/socket/voice.ts'),
-        prepare: 'const actionTaskExecution = turnFlow.conceptualCapabilityQuestion',
+        prepare: 'const actionTaskExecution = preparePlannedConversationExecution({',
         heartbeat: 'actionLeaseHeartbeat = startConversationActionExecutionHeartbeat({',
         abort: 'abortController: pipelineAbort,',
         stop: 'actionLeaseHeartbeat?.stop();',
@@ -104,7 +85,7 @@ describe('cross-channel action turn ownership wiring', () => {
       {
         name: 'messaging',
         code: source('server/regions/packs/cn/messaging_routes.ts'),
-        prepare: 'const actionTaskExecution = isIdentityBound && conversation',
+        prepare: 'const actionTaskExecution = preparePlannedConversationExecution({',
         heartbeat: '? startConversationActionExecutionHeartbeat({',
         abort: 'abortController: actionAbortController,',
         stop: 'actionLeaseHeartbeat?.stop();',
@@ -124,8 +105,7 @@ describe('cross-channel action turn ownership wiring', () => {
 
     expect(channels[0].code).toContain('recordChatExecutionPersistenceUnknownDurably(');
     expect(channels[1].code).toContain('recordChatExecutionPersistenceUnknownDurably(');
-    expect(channels[2].code).toContain('recordChatExecutionPersistenceUnknownDurably(');
-    expect(channels[3].code).toContain('signal: actionAbortController.signal');
-    expect(channels[3].code).toContain('isCancelled: actionWasCancelled');
+    expect(channels[2].code).toContain('signal: actionAbortController.signal');
+    expect(channels[2].code).toContain('isCancelled: actionWasCancelled');
   });
 });

@@ -1,4 +1,6 @@
+import { readImplementationSource } from './implementation_source';
 import './helpers';
+import { prepareForegroundRequest, taskFor } from './foreground_request_fixture';
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initDatabase, readDB, writeDB } from '../db_layer';
@@ -20,49 +22,7 @@ const TOOL_POLICY = {
   maxIterations: 4,
 };
 
-function prepareChatRequest(label: string): ChatForegroundRequestIdentity {
-  const nonce = `${Date.now()}-${Math.random()}`;
-  const userId = `chat-release-${label}-${nonce}`;
-  const conversation = getOrCreateActiveConversation(userId, 'lumi', 'personal', '');
-  const requestId = `request-${label}-${nonce}`;
-  const userText = `Run the ${label} task.`;
-  const userMessageId = addMessageIdempotent({
-    userId,
-    agentId: 'lumi',
-    conversationId: conversation.id,
-    role: 'user',
-    content: userText,
-    requestId,
-    deferActionPreparation: true,
-    domain: 'personal',
-    source: 'test',
-    channel: 'chat',
-  });
-  const prepared = prepareConversationActionExecution({
-    conversationId: conversation.id,
-    userId,
-    userText,
-    requestId,
-    userMessageId,
-    toolPolicy: TOOL_POLICY,
-    forceTask: true,
-  });
-  expect(prepared.state?.taskId).toBeTruthy();
-  return Object.freeze({
-    conversationId: conversation.id,
-    userId,
-    requestId,
-    expectedTaskId: prepared.state!.taskId!,
-  });
-}
-
-function taskFor(identity: ChatForegroundRequestIdentity): any {
-  return readDB().conversationActionTasks.find((row: any) => (
-    row.id === identity.expectedTaskId
-    && row.conversationId === identity.conversationId
-    && row.userId === identity.userId
-  ));
-}
+const prepareChatRequest = (label: string) => prepareForegroundRequest('chat', label, TOOL_POLICY);
 
 describe('chat foreground release convergence', () => {
   beforeAll(async () => {
@@ -264,7 +224,7 @@ describe('chat foreground release convergence', () => {
   });
 
   it('places convergence before desktop/serial release and persists ordinary failures as assistant responses', () => {
-    const source = readFileSync('server/socket/chat.ts', 'utf8');
+    const source = readImplementationSource('server/socket/chat.ts', 'utf8');
     const releaseStart = source.indexOf('const chatReleaseGate = createDurableForegroundReleaseGate({');
     const convergeAt = source.indexOf('convergeChatForegroundRequestBeforeRelease({', releaseStart);
     const durableSuccessAt = source.indexOf('if (!releaseResult.converged)', convergeAt);
@@ -283,8 +243,11 @@ describe('chat foreground release convergence', () => {
     const ordinaryFailureStart = source.indexOf('console.error("[Socket Agent Error]:", error);');
     const ordinaryFailureEnd = source.indexOf('} finally {', ordinaryFailureStart);
     const ordinaryFailure = source.slice(ordinaryFailureStart, ordinaryFailureEnd);
-    expect(ordinaryFailure).toContain('persistAssistantMessage: () => addMessageIdempotent({');
-    expect(ordinaryFailure).toContain("role: 'assistant'");
+    expect(ordinaryFailure).toContain('await commitChatReply({');
+    expect(ordinaryFailure).toContain('message: () => ({');
+    const replyBoundary = readImplementationSource('server/socket/chat/terminal_reply.ts', 'utf8');
+    expect(replyBoundary).toContain("role: 'assistant'");
+    expect(replyBoundary).toContain('persistAssistantMessage: () => input.write({');
     expect(ordinaryFailure).toContain('CN_VOICE_WORK_MESSAGES.processingFailed');
     expect(ordinaryFailure).not.toContain("event: 'agent:error'");
   });

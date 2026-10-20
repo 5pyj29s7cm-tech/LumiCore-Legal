@@ -41,6 +41,10 @@ export function isAgentResponseBlocked(data: AgentResponseDelivery): boolean {
   return data.blocked === true || FAILURE_STATUS_RE.test(String(data.status || '').trim());
 }
 
+export function isAgentResponseWaitingConfirmation(data: AgentResponseDelivery): boolean {
+  return WAITING_STATUS_RE.test(String(data.status || '').trim()) || WAITING_STATUS_RE.test(String(data.reason || '').trim());
+}
+
 /**
  * A terminal notice must remain visible even when it quotes the part of an
  * operation that did succeed. For example, "the file was written, but its
@@ -49,11 +53,7 @@ export function isAgentResponseBlocked(data: AgentResponseDelivery): boolean {
  * strands the request in a perpetual-looking busy state.
  */
 export function isAgentResponseTerminalNotice(data: AgentResponseDelivery): boolean {
-  const status = String(data.status || '').trim();
-  const reason = String(data.reason || '').trim();
-  return isAgentResponseBlocked(data)
-    || WAITING_STATUS_RE.test(status)
-    || WAITING_STATUS_RE.test(reason);
+  return isAgentResponseBlocked(data) || isAgentResponseWaitingConfirmation(data);
 }
 
 export function isUnverifiedActionClaim(data: AgentResponseDelivery): boolean {
@@ -77,17 +77,10 @@ export function shouldSpeakAgentResponse(data: AgentResponseDelivery): boolean {
   return !isActionSuccessClaim(String(data.text || '')) || data.finalized === true;
 }
 
-/**
- * The backend normally sends customer-ready prose. This final client boundary
- * also protects restored legacy conversations and late events from an older
- * backend process, without truncating or rewriting ordinary Markdown replies.
- */
-export function sanitizeAgentResponseTextForDisplay(
-  value: unknown,
-  language?: PublicExecutionLanguage,
-): string {
-  return sanitizePublicExecutionText(value, language);
-}
+export {
+  sanitizePublicExecutionText as sanitizeAgentResponseTextForDisplay,
+  containsInternalExecutionLanguage as hasInternalAgentExecutionDetail,
+} from '../../shared/public_execution_language';
 
 /**
  * Buffers the very beginning of a streamed reply until there is enough text
@@ -100,20 +93,14 @@ export function sanitizeAgentStreamingTextForDisplay(
   value: unknown,
   language?: PublicExecutionLanguage,
 ): string {
-  const text = String(value || '');
-  if (!text) return '';
-  if (containsInternalExecutionLanguage(text)) {
-    return sanitizePublicExecutionText(text, language);
-  }
-  return Array.from(text).length < 24 ? '' : text;
-}
-
-export function hasInternalAgentExecutionDetail(value: unknown): boolean {
-  return containsInternalExecutionLanguage(value);
+  const raw = String(value || '');
+  const text = containsInternalExecutionLanguage(raw) ? raw : raw.replace(/(?:<|&lt;)[^>]*$/u, '');
+  if (!text || (!containsInternalExecutionLanguage(text) && Array.from(text).length < 24)) return '';
+  return sanitizePublicExecutionText(text, language);
 }
 
 export function isFinalizedSuccessfulResponse(data: AgentResponseDelivery): boolean {
-  return data.finalized === true && !isAgentResponseBlocked(data);
+  return data.finalized === true && !isAgentResponseTerminalNotice(data);
 }
 
 export function isTerminalAgentStatus(status: string): boolean {
@@ -130,7 +117,7 @@ export function describeAgentResponseDelivery(
 ): string {
   const copy = executionFeedbackCopy(isZh ? 'zh' : 'en');
   const reason = String(data.reason || '').trim().toLowerCase();
-  if (WAITING_STATUS_RE.test(reason) || WAITING_STATUS_RE.test(String(data.status || ''))) {
+  if (isAgentResponseWaitingConfirmation(data)) {
     return copy.confirmation;
   }
   if (/^(?:cancelled|canceled|request_cancelled)$/.test(reason)) {
@@ -146,7 +133,6 @@ export function describeAgentResponseDelivery(
     return copy.targetChanged;
   }
   const text = String(data.text || '').replace(/\s+/g, ' ').trim();
-  if (text && !containsInternalExecutionLanguage(text)) return text.slice(0, 160);
   if (text) return sanitizePublicExecutionText(text, isZh ? 'zh' : 'en').slice(0, 160);
   return copy.retainedBlocker;
 }

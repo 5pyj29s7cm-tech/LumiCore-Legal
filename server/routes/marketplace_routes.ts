@@ -1,10 +1,9 @@
+import { type ProviderGetters as SharedProviderGetters, providerGetterArguments } from "../llm/provider_getters";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { isStrictPrivacy } from '../config/privacy';
-import path from "path";
 import fs from "fs";
-import { fileURLToPath } from "url";
 import { activateInstalledSkill, mcpManager } from "../mcp";
-import { getMarketplaceSkills, getSkillById, searchSkills, getCategories, recordInstall, publishSkill, rateSkill, getSkillRatings } from "../marketplace/registry";
+import { getMarketplaceSkills, getSkillById, searchSkills, getCategories, recordMarketplaceInstallBestEffort, publishSkill, rateSkill, getSkillRatings } from "../marketplace/registry";
 import { translateSkills } from "../skills/translations";
 import { makeLLMCall, type NormalizedMessage } from "../llm/providers";
 import { getUserPreferredLLMConfig } from "../llm/user_preferences";
@@ -21,9 +20,6 @@ import { isLoopbackAddress } from "../config/local_identity";
 import { toolRegistry } from "../tools/registry";
 import { getExtensionRuntimeStates } from "../skills/runtime_state";
 import { createBundledSkillIdentity } from "../marketplace/official_identity";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 function requireNativeDesktopSession(req: Request, res: Response, next: NextFunction): void {
   if (!req.user || !verifyDesktopSessionProof(req.headers[DESKTOP_SESSION_HEADER], req.user.uid)) {
@@ -154,32 +150,11 @@ function marketplaceInstallMessage(displayName: string, activation: { usable: bo
     : `Skill "${displayName}" is installed but still needs its required configuration before Lumi can use it.`;
 }
 
-function recordMarketplaceInstallBestEffort(skillId: string): void {
-  try {
-    recordInstall(skillId);
-  } catch (error: any) {
-    console.warn(`[SkillHall] Runtime activation succeeded, but install analytics could not be recorded for ${skillId}:`, error?.message || error);
-  }
-}
-
 export function mountMarketplaceRoutes(
   router: Router,
   jwtSecret: string,
   io: { emit: (event: string, data: any) => void },
-  llmGetters?: {
-    getDeepSeek: () => any;
-    getGemini: () => any;
-    getOpenAI?: () => any;
-    getAnthropic?: () => any;
-    getQwen?: () => any;
-    getOllama?: () => any;
-    getLmStudio?: () => any;
-    getArk?: () => any;
-    getXiaomi?: () => any;
-    getKimi?: () => any;
-    getGlm?: () => any;
-    getRelay?: () => any;
-  },
+  llmGetters?: SharedProviderGetters,
 ) {
   // Discoverable marketplace skills (dynamic from registry)
   router.get("/marketplace/skills", optionalAuth, (req, res) => {
@@ -447,18 +422,7 @@ export function mountMarketplaceRoutes(
           messages,
           [],
           getUserPreferredLLMConfig(userId, { maxTokens: 4096 }),
-          llmGetters.getDeepSeek,
-          llmGetters.getGemini,
-          llmGetters.getOpenAI,
-          llmGetters.getAnthropic,
-          llmGetters.getQwen,
-          llmGetters.getOllama,
-          llmGetters.getLmStudio,
-          llmGetters.getArk,
-          llmGetters.getXiaomi,
-          llmGetters.getKimi,
-          llmGetters.getGlm,
-          llmGetters.getRelay,
+          ...providerGetterArguments(llmGetters),
         );
         return response.text || "";
       });

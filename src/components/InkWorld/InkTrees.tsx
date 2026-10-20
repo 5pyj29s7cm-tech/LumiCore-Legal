@@ -1,4 +1,4 @@
-import React, { useMemo, useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { terrainHeight } from './InkTerrain';
@@ -15,7 +15,7 @@ export function InkTrees() {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const timeRef = useRef(0);
 
-  const { treeGeo, treeMat, positions } = useMemo(() => {
+  const { treeGeo, treeMat } = useMemo(() => {
     // Single tree geometry: trunk + 3 cones
     const trunk = new THREE.CylinderGeometry(0.1, 0.14, 1.6, 6);
     const cones: THREE.BufferGeometry[] = [];
@@ -24,12 +24,10 @@ export function InkTrees() {
     cones.push(new THREE.ConeGeometry(0.2, 0.5, 6));
 
     // Merge into one geometry
-    const merger = new THREE.BufferGeometry();
     const trunkPos = trunk.attributes.position;
     const trunkIdx = trunk.index;
 
     // Simple merge: combine trunk + 3 cones using BufferGeometryUtils equivalent
-    const allGeos = [trunk, ...cones];
     const positions: number[] = [];
     const normals: number[] = [];
     const indices: number[] = [];
@@ -83,7 +81,7 @@ export function InkTrees() {
     geo.computeBoundingSphere();
 
     const mat = new THREE.MeshBasicMaterial({ color: 0x0a0a0a });
-    return { treeGeo: geo, treeMat: mat, positions: [] as number[] };
+    return { treeGeo: geo, treeMat: mat };
   }, []);
 
   // Place trees on terrain — baked once

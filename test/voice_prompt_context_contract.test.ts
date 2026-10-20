@@ -1,9 +1,10 @@
+import { readImplementationSource } from './implementation_source';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('voice provider prompt contract', () => {
-  const source = fs.readFileSync(
+  const source = readImplementationSource(
     path.join(process.cwd(), 'server/socket/voice.ts'),
     'utf8',
   );
@@ -27,15 +28,11 @@ describe('voice provider prompt contract', () => {
     expect(source).toContain('pendingConfirmationOverlay');
   });
 
-  it('uses the minimal required schema subset and buffers action candidates', () => {
-    const adapter = fs.readFileSync(path.join(process.cwd(), 'server/llm/adapter.ts'), 'utf8');
-    expect(source).toContain('runWithTools(');
+  it('delegates tool projection to the shared adapter', () => {
+    expect(source).toContain('await runLumiEntryTurn<void>({');
+    expect(fs.readFileSync(path.join(process.cwd(), 'server/cognition/turn_execution.ts'), 'utf8')).toContain('await runPreparedLumiTurn({');
     expect(source).toContain('modelToolProjection');
     expect(source).not.toContain('resolveRequiredToolNamesForModel(');
-    expect(adapter).toContain('resolveRequiredToolNamesForModel(');
-    expect(adapter).toContain('protectedToolNames: resolveRequiredToolNamesForModel(');
-    expect(adapter).toContain('localRequiredToolNames: resolveRequiredToolNamesForModel(');
-    expect(adapter).toContain('bufferStreamUntilCandidateSuccess: toolSessionActive');
     expect(source).not.toContain('protectedToolNames: toolDeclarations.map');
     expect(source).not.toContain('localRequiredToolNames: toolDeclarations.map');
   });

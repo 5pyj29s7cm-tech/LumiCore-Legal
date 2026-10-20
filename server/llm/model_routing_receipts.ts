@@ -1,5 +1,10 @@
 import crypto from 'node:crypto';
-import { readDB, writeDB } from '../../db_layer';
+import { ModelAttemptDeadlineError } from './provider/deadlines';
+import { completionMetadata } from './provider/response';
+import type { NormalizedLLMResponse } from '../tools/types';
+import { readDatabaseTables, commitDatabaseTables } from '../../db_layer';
+import { cloneDatabaseValue } from '../db/snapshot_changes';
+import type { ProviderRuntimeObservation } from './provider_health';
 import type { UserLLMSelectionMode } from './user_preferences';
 import { normalizeNativeRequestBinding } from '../devices/native_identity';
 import { normalizeVoiceTurnProvenance } from '../socket/voice_provenance';
@@ -10,10 +15,11 @@ import {
 
 export type ModelRouteAttemptStatus = 'succeeded' | 'failed' | 'skipped';
 
-export interface ModelRouteAttempt {
+export interface ModelRouteAttempt extends Pick<NormalizedLLMResponse, 'finishReason' | 'usage'> {
   provider: string;
   model: string;
   status: ModelRouteAttemptStatus;
+  configurationEpoch?: string;
   reason?: string;
   errorCategory?: string;
   errorDigest?: string;
@@ -68,6 +74,7 @@ function compact(value: unknown, limit = 200): string {
 }
 
 export function modelRoutingErrorReason(error: unknown): string {
+  if (error instanceof ModelAttemptDeadlineError && error.completedEmpty) return error.finishReason === 'length' ? 'output_limit' : 'empty_response';
   if ((error as any)?.code === 'MODEL_TOOL_ARGUMENTS_INVALID') return 'invalid_tool_arguments';
   if ((error as any)?.name === 'LocalModelContextBudgetError') return 'local_context_budget_exceeded';
   const message = compact((error as any)?.message || error, 500).toLowerCase();
@@ -90,6 +97,14 @@ export function modelRoutingErrorDigest(error: unknown): string {
   return message ? crypto.createHash('sha256').update(message).digest('hex') : '';
 }
 
+export function modelAttemptCompletion(value: Pick<NormalizedLLMResponse, 'finishReason' | 'usage'> = {}) {
+  const usage = value.usage;
+  return { ...completionMetadata(value.finishReason),
+    ...(usage && [usage.promptTokens, usage.completionTokens, usage.totalTokens].every(count => Number.isSafeInteger(count) && count >= 0)
+      ? { usage: { promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, totalTokens: usage.totalTokens } } : {}),
+  };
+}
+
 function normalizeAttempt(value: ModelRouteAttempt): ModelRouteAttempt {
   const provider = compact(value.provider);
   const model = compact(value.model);
@@ -108,6 +123,7 @@ function normalizeAttempt(value: ModelRouteAttempt): ModelRouteAttempt {
     provider,
     model,
     status: value.status,
+    ...(value.configurationEpoch ? { configurationEpoch: compact(value.configurationEpoch, 100) } : {}),
     ...(value.reason ? { reason: compact(value.reason) } : {}),
     ...(value.errorCategory ? { errorCategory: compact(value.errorCategory, 64) } : {}),
     ...(value.errorDigest ? { errorDigest: compact(value.errorDigest, 64) } : {}),
@@ -116,6 +132,7 @@ function normalizeAttempt(value: ModelRouteAttempt): ModelRouteAttempt {
     ...(value.durationMs !== undefined ? { durationMs: Math.max(0, Math.trunc(Number(value.durationMs) || 0)) } : {}),
     ...(value.visibleOutputCommitted !== undefined ? { visibleOutputCommitted: value.visibleOutputCommitted === true } : {}),
     ...(outboundMessagesEvidence ? { outboundMessagesEvidence } : {}),
+    ...modelAttemptCompletion(value),
   };
 }
 
@@ -158,22 +175,20 @@ export function persistModelRoutingReceipt(input: Omit<ModelRoutingReceipt, 'id'
     completedAt: input.completedAt,
     durationMs: Math.max(0, Math.trunc(Number(input.durationMs) || 0)),
   };
-  const db = readDB();
-  if (!Array.isArray(db.modelRoutingReceipts)) db.modelRoutingReceipts = [];
-  db.modelRoutingReceipts.push(receipt);
+  const db = readDatabaseTables(["modelRoutingReceipts"]);
+  const rows = [...(Array.isArray(db.modelRoutingReceipts) ? db.modelRoutingReceipts : []), cloneDatabaseValue(receipt)];
   let remainingForUser = MAX_RECEIPTS_PER_USER;
   const retained: ModelRoutingReceipt[] = [];
-  for (let index = db.modelRoutingReceipts.length - 1; index >= 0; index -= 1) {
-    const candidate = db.modelRoutingReceipts[index] as ModelRoutingReceipt;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const candidate = rows[index] as ModelRoutingReceipt;
     if (candidate.userId === receipt.userId) {
       if (remainingForUser <= 0) continue;
       remainingForUser -= 1;
     }
     retained.push(candidate);
   }
-  db.modelRoutingReceipts = retained.reverse();
-  writeDB(db);
-  return { ...receipt, attempts: receipt.attempts.map(attempt => ({ ...attempt })) };
+  commitDatabaseTables({ ...db, modelRoutingReceipts: retained.reverse() });
+  return cloneDatabaseValue(receipt);
 }
 
 export function listModelRoutingReceipts(
@@ -185,7 +200,7 @@ export function listModelRoutingReceipts(
   const conversationId = compact(filter.conversationId);
   const requestId = compact(filter.requestId);
   const interactionId = compact(filter.interactionId);
-  const db = readDB();
+  const db = readDatabaseTables(["modelRoutingReceipts"]);
   return (Array.isArray(db.modelRoutingReceipts) ? db.modelRoutingReceipts : [])
     .filter((receipt: ModelRoutingReceipt) => receipt.userId === uid)
     .filter((receipt: ModelRoutingReceipt) => !conversationId || receipt.conversationId === conversationId)
@@ -195,8 +210,43 @@ export function listModelRoutingReceipts(
       Date.parse(right.completedAt || '') - Date.parse(left.completedAt || '')
     ))
     .slice(0, Math.max(1, Math.min(Math.trunc(limit) || 100, 1000)))
-    .map((receipt: ModelRoutingReceipt) => ({
-      ...receipt,
-      attempts: (receipt.attempts || []).map(attempt => ({ ...attempt })),
-    }));
+    .map((receipt: ModelRoutingReceipt) => cloneDatabaseValue(receipt));
+}
+
+/** One detached receipt snapshot for all providers in a status response. */
+export function createProviderRuntimeObservationReader() {
+  let receipts: any[] = [];
+  try {
+    const db = readDatabaseTables(["modelRoutingReceipts"]);
+    receipts = Array.isArray(db.modelRoutingReceipts) ? db.modelRoutingReceipts : [];
+  } catch {}
+  return (provider: string, model: string, configurationEpoch?: string): ProviderRuntimeObservation | null => {
+    for (let receiptIndex = receipts.length - 1; receiptIndex >= 0; receiptIndex -= 1) {
+      const receipt = receipts[receiptIndex] as any;
+      const attempts = Array.isArray(receipt?.attempts) ? receipt.attempts : [];
+      for (let attemptIndex = attempts.length - 1; attemptIndex >= 0; attemptIndex -= 1) {
+        const attempt = attempts[attemptIndex];
+        if (String(attempt?.provider || '') !== provider || String(attempt?.model || '') !== model) continue;
+        if (configurationEpoch && attempt.configurationEpoch !== configurationEpoch) continue;
+        // Policy/circuit skips and user cancellation did not test the model.
+        // They must not hide the actual failure (or recovery) behind them.
+        if (!['succeeded', 'failed'].includes(attempt.status) || attempt.reason === 'cancelled') continue;
+        return {
+          provider,
+          model,
+          status: attempt.status,
+          ...(attempt.configurationEpoch ? { configurationEpoch: String(attempt.configurationEpoch).slice(0, 100) } : {}),
+          observedAt: String(attempt.completedAt || receipt.completedAt || ''),
+          ...(attempt.durationMs !== undefined ? { durationMs: Math.max(0, Math.trunc(Number(attempt.durationMs) || 0)) } : {}),
+          ...(attempt.reason ? { reason: String(attempt.reason).slice(0, 100) } : {}),
+          ...(attempt.errorCategory ? { errorCategory: String(attempt.errorCategory).slice(0, 64) } : {}),
+        };
+      }
+    }
+    return null;
+  };
+}
+
+export function findProviderRuntimeObservation(provider: string, model: string, configurationEpoch?: string): ProviderRuntimeObservation | null {
+  return createProviderRuntimeObservationReader()(provider, model, configurationEpoch);
 }

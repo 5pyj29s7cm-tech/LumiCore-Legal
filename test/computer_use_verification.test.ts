@@ -1,5 +1,10 @@
 import './helpers';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { saveStoredDesktopExecutionPreference } from '../server/cognition/operation_mode_store';
+import { updateClientState } from '../server/client/self/state';
+import { initDatabase } from '../db_layer';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+beforeAll(async () => { await initDatabase(); });
 
 const mocks = vi.hoisted(() => ({
   makeLLMCall: vi.fn(),
@@ -335,6 +340,8 @@ describe('computer use completion verification', () => {
       llmGetters: { getDeepSeek: () => null, getGemini: () => null, getOpenAI: () => ({}) },
     };
 
+    updateClientState(context.userId, { workDomain: 'personal', surfaces: { wallpaperMode: true } } as any);
+    await saveStoredDesktopExecutionPreference(context.userId, 'external');
     const first = registry.execute('computer_use', { task: 'First task', max_steps: 1 }, context);
     await vi.waitFor(() => expect(mocks.makeLLMCall).toHaveBeenCalledTimes(1));
 
@@ -343,5 +350,6 @@ describe('computer use completion verification', () => {
 
     releaseModel(modelResult(JSON.stringify({ action: 'done', message: 'First observation.' })));
     await first;
+    expect(desktop.relay.mock.calls.map(call => call[0])).not.toContain('desktop_set_wallpaper_mode');
   });
 });

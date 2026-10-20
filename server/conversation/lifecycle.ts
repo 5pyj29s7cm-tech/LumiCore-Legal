@@ -1,6 +1,6 @@
-import { readDB } from '../../db_layer';
+import { ownedConversationExists } from './history_repository';
 
-export type ConversationOwner = { userId: string; domain: 'personal' | 'work'; orgId?: string; agentId?: string };
+export type ConversationOwner = { userId: string; domain: 'personal' | 'work'; orgId?: string; agentId?: string; surface?: 'chat' | 'creation' };
 export type RequestAuthorization = {
   isCurrent(): boolean;
   assertCurrent(): void;
@@ -9,24 +9,19 @@ export type RequestAuthorization = {
 
 /** Closing/rolling over a transcript is allowed; deleting its identity is terminal. */
 export function conversationExists(conversationId: string, owner: ConversationOwner): boolean {
-  if (!conversationId) return false;
-  return (readDB().conversations || []).some(row => row.id === conversationId
-    && row.userId === owner.userId
-    && (!owner.agentId || row.agentId === owner.agentId)
-    && (owner.domain === 'work'
-      ? row.domain === 'work' && String(row.orgId || '') === String(owner.orgId || '')
-      : row.domain !== 'work' && !row.orgId));
+  return ownedConversationExists(conversationId, owner);
 }
 
-export function captureConversationAuthorization(
-  owner: ConversationOwner,
-  conversationId: () => string,
+/** A revocation is permanent for this request and aborts every registered owner. */
+export function captureRequestAuthorization(
+  isAuthorized: () => boolean,
+  reason: string,
 ): RequestAuthorization {
   let revoked = false;
   const controllers = new Set<AbortController>();
-  const error = () => new DOMException('Conversation was deleted or is no longer available.', 'AbortError');
+  const error = () => new DOMException(reason, 'AbortError');
   const isCurrent = () => {
-    if (!conversationExists(conversationId(), owner)) revoked = true;
+    if (!isAuthorized()) revoked = true;
     if (revoked) for (const controller of controllers) {
       if (!controller.signal.aborted) controller.abort(error());
     }
@@ -43,6 +38,14 @@ export function captureConversationAuthorization(
       return () => { clearInterval(timer); controllers.delete(controller); };
     },
   };
+}
+
+export function captureConversationAuthorization(
+  owner: ConversationOwner,
+  conversationId: () => string,
+): RequestAuthorization {
+  return captureRequestAuthorization(() => conversationExists(conversationId(), owner),
+    'Conversation was deleted or is no longer available.');
 }
 
 export function combineRequestAuthorizations(...guards: RequestAuthorization[]): RequestAuthorization {

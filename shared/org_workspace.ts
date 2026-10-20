@@ -1,40 +1,45 @@
+import { PRODUCT_VARIANT } from './product_variant';
+
 export type OrganizationRole = 'owner' | 'admin' | 'member' | 'viewer';
 
 export type OrganizationWorkspaceView =
   | 'dashboard'
   | 'kb'
   | 'kb-edit'
-  | 'chat'
   | 'messaging'
   | 'members'
   | 'audit'
   | 'settings'
   | 'branch'
-  | 'legal';
+  | 'legal'
+  | 'spatial-design'
+  | 'brand-design';
 
 export const ORGANIZATION_WORKSPACE_VIEWS: readonly OrganizationWorkspaceView[] = [
   'dashboard',
   'kb',
   'kb-edit',
-  'chat',
   'messaging',
   'members',
   'audit',
   'settings',
   'branch',
   'legal',
+  'spatial-design',
+  'brand-design',
 ] as const;
 
 export const ORGANIZATION_WORKSPACE_PUBLIC_VIEWS: readonly OrganizationWorkspaceView[] = [
   'dashboard',
   'kb',
-  'chat',
   'messaging',
   'members',
   'audit',
   'settings',
   'branch',
   'legal',
+  'spatial-design',
+  'brand-design',
 ] as const;
 
 const VIEW_ALIASES: Record<string, OrganizationWorkspaceView> = {
@@ -48,9 +53,6 @@ const VIEW_ALIASES: Record<string, OrganizationWorkspaceView> = {
   'org-kb': 'kb',
   'organization-knowledge': 'kb',
   'company-knowledge': 'kb',
-  'company-lumi': 'chat',
-  'organization-lumi': 'chat',
-  'org-lumi': 'chat',
   messages: 'messaging',
   'message-access': 'messaging',
   feishu: 'messaging',
@@ -64,6 +66,11 @@ const VIEW_ALIASES: Record<string, OrganizationWorkspaceView> = {
   'branch-connection': 'branch',
   'law-firm': 'legal',
   lawyer: 'legal',
+  spatial: 'spatial-design',
+  architecture: 'spatial-design',
+  design: 'spatial-design',
+  brand: 'brand-design',
+  creative: 'brand-design',
 };
 
 const ADMIN_ONLY_VIEWS = new Set<OrganizationWorkspaceView>(['members', 'audit']);
@@ -86,6 +93,7 @@ export function canAccessOrganizationWorkspaceView(
   role: string | null | undefined,
   view: OrganizationWorkspaceView,
 ): boolean {
+  if (PRODUCT_VARIANT.productLine === 'legal' && (view === 'spatial-design' || view === 'brand-design')) return false;
   const candidate = String(role || '').toLowerCase();
   const normalizedRole: OrganizationRole = ['owner', 'admin', 'member', 'viewer'].includes(candidate)
     ? candidate as OrganizationRole
