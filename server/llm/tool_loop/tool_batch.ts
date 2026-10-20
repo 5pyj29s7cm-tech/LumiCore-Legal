@@ -1,3 +1,4 @@
+import { tryFinalizeVerifiedBoundedAction } from '../../cognition/result_finalizer';
 import { getArtifactTaskProgress } from '../../cognition/action_contract';
 import { artifactPathFromRecord, isArtifactProducerRecord, sameArtifactPath } from '../../tools/artifact_evidence';
 import { isCanonicalToolExecutionRecord } from '../../tools/execution_engine';
@@ -207,6 +208,19 @@ export async function executePlannedToolBatch(state: ToolLoopState, { normalized
         recordWorkflowIfToolsUsed(state.executionLog, state.messages, state.config);
         const text = buildConfirmationBlockedSummary(state.executionLog, getPrimaryUserText(state.messages));
         return state.finish(text, { text, blocked: true, reason: 'waiting_confirmation' });
+      }
+
+      const completedBoundedAction = tryFinalizeVerifiedBoundedAction({
+        taskText: state.primaryTask,
+        responseText: '',
+        toolRecords: state.executionLog,
+        source: state.context?.source || 'tool_loop',
+        taskId: state.context?.taskId,
+        requestId: state.context?.requestId || state.config.requestId,
+      }, state.context?.acceptedTaskTarget);
+      if (completedBoundedAction) {
+        recordWorkflowIfToolsUsed(state.executionLog, state.messages, state.config);
+        return state.finish(completedBoundedAction.text);
       }
 
     }

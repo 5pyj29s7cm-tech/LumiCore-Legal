@@ -78,7 +78,7 @@ describe('verified bounded actions in the real shared tool loop', () => {
     ] }).mockResolvedValueOnce({text:'图片已生成。',toolCalls:[]});
     const result = await run(task, value);
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(mocks.makeLLMCall).toHaveBeenCalledTimes(2);
+    expect(mocks.makeLLMCall).toHaveBeenCalledTimes(1);
     expect(result.text).toBe('图片已生成。');
     const current = result.toolCalls.filter(record => record.requestId === value.context.requestId);
     expect(current).toHaveLength(1);
@@ -138,7 +138,7 @@ describe('verified bounded actions in the real shared tool loop', () => {
     expect(result.toolCalls?.[0].terminalVerification?.status).toBe('verified');
     expect(fs.readFileSync(value.target, 'utf8')).toBe(content);
     expect(result.text).toContain(value.target);
-    expect(mocks.makeLLMCall).toHaveBeenCalledTimes(2);
+    expect(mocks.makeLLMCall).toHaveBeenCalledTimes(1);
   });
 
   it('waits for the bound same-path readback before the primary terminal reply', async () => {
@@ -150,7 +150,7 @@ describe('verified bounded actions in the real shared tool loop', () => {
     const result = await run(`在 ${value.target} 新建文本文件，只写入“${content}”，写完回读并告诉我全文。`, value);
     expect(result.toolCalls?.map(record => record.name)).toEqual(['write_file', 'read_file']);
     expect(result.text).toContain(content);
-    expect(mocks.makeLLMCall).toHaveBeenCalledTimes(2); // Bound readback plus the original primary terminal reply.
+    expect(mocks.makeLLMCall).toHaveBeenCalledTimes(1); // Bound readback plus the original primary terminal reply.
   });
 
   it('does not confuse reading the source with delivering the requested calculation', async () => {
@@ -194,7 +194,7 @@ describe('verified bounded actions in the real shared tool loop', () => {
       .toEqual(['desktop_open', 'desktop_active_window']);
     expect(result.toolCalls?.[0].terminalVerification?.status).toBe('verified');
     expect(result.text).toContain('Notepad');
-    expect(mocks.makeLLMCall).toHaveBeenCalledTimes(2);
+    expect(mocks.makeLLMCall).toHaveBeenCalledTimes(1);
   });
 
   it('does not reuse a different turn receipt or prematurely finish a compound action', async () => {

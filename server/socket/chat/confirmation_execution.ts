@@ -9,7 +9,7 @@ import { toolRegistry } from "../../tools/registry";
 import { buildConfirmedStepContinuationMessages, type LLMResult } from "../../llm/adapter";
 
 import { withDesktopExecutionReceipt } from "../../desktop/execution_runtime";
-import { finalizeLumiResponse } from "../../cognition/result_finalizer";
+import { finalizeLumiResponse, tryFinalizeVerifiedBoundedAction } from "../../cognition/result_finalizer";
 import { buildForegroundTaskCompletionFeedback } from "../../cognition/acceptance_evidence";
 
 import { formatPendingConfirmationRequest } from "../../tools/pending_confirmation";
@@ -72,12 +72,21 @@ export async function executeConfirmedChatTurn(context: executeConfirmedChatTurn
         let confirmationRecords: ToolExecutionRecord[] = [confirmedRecord];
         let confirmationLlmWasCalled = false;
         let confirmationCompletionGuard: LLMResult['completionGuard'];
-        let candidate = (toolRecordSucceeded(confirmedRecord)
+        const completedConfirmedAction = tryFinalizeVerifiedBoundedAction({
+          taskText: confirmedTask,
+          responseText: '',
+          toolRecords: context.taskAwareRecords([confirmedRecord]),
+          source: 'chat_confirmation',
+          flow: { ...context.turnFlow, routeText: confirmedTask },
+          taskId: context.durableTaskId,
+          requestId: context.requestId,
+        });
+        let candidate = completedConfirmedAction?.text || (toolRecordSucceeded(confirmedRecord)
           ? CN_VOICE_FAST_PATH_MESSAGES.confirmationExecuted
           : CN_VOICE_FAST_PATH_MESSAGES.confirmationFailed(
               confirmedRecord.error || confirmedRecord.result,
             ));
-        if (!context.isChatCancelled()) {
+        if (!completedConfirmedAction && !context.isChatCancelled()) {
           confirmationLlmWasCalled = true;
           const continuation = await context.runAuthorizedTools({
             execution: context.executionPipeline,

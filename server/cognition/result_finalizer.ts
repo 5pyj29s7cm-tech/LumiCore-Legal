@@ -557,6 +557,101 @@ function groundedBusinessAnalysis(input: LumiResultFinalizerInput): LumiResultFi
 }
 
 
+export function tryFinalizeVerifiedBoundedAction(
+  input: LumiResultFinalizerInput,
+  acceptedTaskTarget?: LumiTurnFlow['acceptedTaskTarget'],
+): LumiResultFinalizerResult | null {
+  if (!input.requestId || !input.taskId) return null;
+  const task = resultTaskText(input);
+  const records = coalesceToolExecutionRecords(input.toolRecords || [])
+    .filter(record => artifactRecordMatchesTurn(record, input));
+  const scopedInput = { ...input, toolRecords: records, responseText: '' };
+  const business = groundedBusinessAnalysis(scopedInput);
+  if (business) return business;
+  const windowObservation = groundedReadOnlyWindowObservation(scopedInput);
+  if (windowObservation) return windowObservation;
+  const sessionObservation = browserSessionObservation(records, task);
+  if (sessionObservation) return { text: sessionObservation, blocked: false, reason: 'verified_browser_session_inspection' };
+  const cliStatus = verifiedExternalCliStatus(task, records, input);
+  if (cliStatus) return { text: formatExternalCliStatus(task, cliStatus), blocked: false, reason: 'verified_external_cli_status' };
+  // The same verified-media projection owns both loop termination and channel
+  // delivery. A complete generation needs no second model call; compound
+  // publication/delivery tasks and missing artifacts still fail this check.
+  const media = groundedMediaGeneration(scopedInput);
+  if (media) return media;
+  const modelIdentity = groundedModelIdentity(scopedInput);
+  if (modelIdentity) return modelIdentity;
+  const workflow = formatGroundedWorkflowProgress(scopedInput);
+  if (workflow && ['workflow_completed', 'workflow_incomplete'].includes(workflow.reason || '')) return workflow;
+  const contract = taskActionContract(scopedInput);
+  if (!hasCoreActionEvidence(contract, records, task, undefined, {
+    requestId: input.requestId, taskId: input.taskId,
+  }, input.flow?.acceptedTaskTarget || acceptedTaskTarget)) return null;
+  if (contract.components?.length) {
+    const complete = finalizeLumiResponse(scopedInput);
+    return complete.blocked ? null : complete;
+  }
+  if (findDesktopCompletionReview(records, { requestId: input.requestId, taskId: input.taskId })) return null;
+  if (contract.kind === 'desktop_operation' && extractSimpleDesktopOpenTarget(task)) {
+    if (!records.some(record => /^(?:desktop_open|browser_open_task)$/u.test(record.name)
+      && isVerifiedCurrentTurnRecord(scopedInput, record))) return null;
+    const result = formatGroundedSimpleDesktopOpenResult(scopedInput);
+    return result && !result.blocked ? result : null;
+  }
+  if (contract.kind === 'skill_authoring') return formatGroundedSkillDraft(scopedInput);
+  if (contract.kind !== 'artifact_work') return null;
+  if (contract.artifactMode === 'retrieve') return formatGroundedArtifactResult(scopedInput);
+  // Structured spreadsheet writers persist real formulas/charts and return
+  // computed cells. Once the shared contract verifies every required step,
+  // deliver those facts rather than asking an optional text-file checker to
+  // approve spreadsheet semantics it cannot inspect.
+  const structuredDelivery = resolveArtifactDelivery(records, record => isVerifiedCurrentTurnRecord(scopedInput, record));
+  const computed = structuredDelivery && parseReceiptObject(toolRecordTerminalPayload(structuredDelivery.producer))?.calculatedCells;
+  const taskInstruction = withoutLocationLiterals(task);
+  const additionalWork = /(?:运行|发送|发邮件|发给|发布|上传|分析|总结|解释|对比|比较|翻译|删除|移动|复制|重命名|安装|提醒|另外|还要|分别)|\b(?:run|send|publish|upload|analy[sz]\w*|summari[sz]\w*|explain|compare|translate|delete|move|copy|rename|install|remind|another|each)\b/iu.test(taskInstruction); // i18n-allow: additional semantic/action obligations.
+  if (structuredDelivery && /\.xlsx$/iu.test(structuredDelivery.outputPath)
+    && Array.isArray(computed) && computed.length > 0 && !additionalWork) {
+    const result = formatGroundedArtifactResult(scopedInput);
+    if (result && !result.blocked) return result;
+  }
+  // The tool loop and channel delivery consume the same producer/readback
+  // projection. An artifact's mere existence is not a second completion rule.
+  if (requiresArtifactPostWriteReadback(task)) {
+    const delivery = resolveArtifactDelivery(records, record => isVerifiedCurrentTurnRecord(scopedInput, record));
+    // Compound tasks and additional analysis still need their own outcome.
+    // i18n-allow: outstanding user action recognition, not user-facing copy.
+    // Requested opening is already checked by the shared action contract.
+    // Merely seeing "open" (including "do not open") cannot create another
+    // obligation after the current saved/read version is fully verified.
+    const extraAction = additionalWork;
+    if (delivery?.readback && !extraAction) {
+      const result = formatGroundedArtifactResult(scopedInput);
+      if (result && !result.blocked) return result;
+    }
+    return null;
+  }
+  if (!extractExplicitArtifactTextRequirements(task).length) return null;
+  if (requiresSourceGroundedArtifactContent(task)) return null;
+  const instruction = extractExplicitArtifactTextRequirements(task)
+    .reduce((text, payload) => text.split(payload).join(''), withoutLocationLiterals(task));
+  // Only exact local text production and its requested readback are bounded.
+  // A later open, calculation, delivery, or other mutation still needs its own result.
+  // i18n-allow: compound action recognition, not user-facing copy.
+  if (/(?:打开|启动|运行|发送|发邮件|发给|发布|上传|计算|分析|汇总|总结|翻译|删除|移动|复制|重命名|另存|导出|安装|提醒)|\b(?:open|launch|run|send|publish|upload|calculat\w*|analy[sz]\w*|summari[sz]\w*|translate|delete|move|copy|rename|export|install|remind)\b/iu.test(instruction)) return null;
+  const writes = records.filter(record => /^(?:write_file|desktop_write_text_file)$/u.test(record.name)
+    && isVerifiedCurrentTurnRecord(scopedInput, record));
+  if (writes.length !== 1) return null;
+  const requestedPath = buildTaskTargetAnchorProjection({
+    taskText: task,
+    previousTarget: (input.flow?.acceptedTaskTarget || acceptedTaskTarget)?.target,
+  }).target.path;
+  const normalizePath = (value: string) => /^[a-z]:[\\/]|^\\\\/iu.test(value)
+    ? value.replace(/\\/gu, '/').toLowerCase() : value.replace(/\\/gu, '/');
+  if (!requestedPath || normalizePath(requestedPath) !== normalizePath(artifactPathFromRecord(writes[0]))) return null;
+  const result = formatGroundedArtifactResult(scopedInput);
+  return result && !result.blocked ? result : null;
+}
+
 export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResultFinalizerResult {
   input = {
     ...input,
@@ -590,7 +685,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
         isChineseText(actionText) ? CN_EXECUTION_EVIDENCE_MESSAGES.artifactStillIncomplete : 'The whole task is not complete.'].filter(Boolean).join('\n')).join('\n'),
     blocked: true, reason: 'artifact_components_pending',
   };
-  const artifactProgress = actionContract.kind === 'artifact_work' && !artifactComponents.length
+  const artifactProgress = actionContract.kind === 'artifact_work' && !actionContract.components?.length
     ? getArtifactTaskProgress(actionText, input.toolRecords || [], input) : null;
   if (artifactProgress && !artifactProgress.complete) return {
     text: formatArtifactProgress(artifactProgress, actionText), blocked: true,
@@ -634,16 +729,17 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       const sourceRead = !outputs.length && requestsExactReadOnlyArtifactInspection(component.text)
         ? records.find(record => isVerifiedCurrentTurnRecord(scoped, record) && isSuccessfulExactDocumentRead(record)
           && documentReadMatchesRequestedTarget(record, component.text, input.flow?.acceptedTaskTarget, input.flow?.currentAttachmentPaths)) : undefined;
-      const componentInput = { ...scoped, taskText: component.text, flow: undefined, completionGuard: undefined,
+      const componentInput = { ...scoped, taskText: component.text, flow: { rootTaskText: actionText } as LumiTurnFlow, completionGuard: undefined,
         responseText: outputs.length === 1 ? '' : input.responseText || (sourceRead ? actualDocumentReadContent(sourceRead) : '') };
       const result = (outputs.length === 1 ? formatGroundedArtifactResult(componentInput) : null)
         || finalizeLumiResponse(componentInput);
       const complete = verified && !result.blocked && Boolean(result.text);
-      return { complete, text: complete ? result.text
+      return { complete, reason: result.blocked ? result.reason : undefined, text: complete || result.blocked && result.text ? result.text
         : isChineseText(actionText) ? CN_EXECUTION_EVIDENCE_MESSAGES.incompleteComponent(component.text) : `Not completed: ${component.text}` };
     });
     return preserveModelWordingOnGroundedSuccess(input, { text: outcomes.map(outcome => outcome.text).join('\n'), blocked: outcomes.some(outcome => !outcome.complete),
-      reason: outcomes.every(outcome => outcome.complete) ? 'All requested operations verified.' : 'Some requested operations remain unverified.' }, true);
+      reason: outcomes.every(outcome => outcome.complete) ? 'All requested operations verified.'
+        : outcomes.filter(outcome => !outcome.complete).map(outcome => outcome.reason).filter(Boolean).join('; ') || 'Some requested operations remain unverified.' }, true);
   }
   const workflowProgress = formatGroundedWorkflowProgress(input);
   if (workflowProgress) return preserveModelWordingOnGroundedSuccess(input, workflowProgress, true);
