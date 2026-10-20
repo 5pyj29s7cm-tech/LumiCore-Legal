@@ -860,7 +860,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   if (
     hasLegalExternalPlatformSignal(actionText) &&
     claimsExternalLegalPlatformResult(input.responseText || '') &&
-    !hasLegalExternalPlatformResultEvidence(input.toolRecords || [])
+    !hasLegalExternalPlatformResultEvidence(input.toolRecords || [], { requestId: input.requestId, taskId: input.taskId, taskText: actionText })
   ) {
     return blockedCompletionClaim(input, 'Missing external legal platform result evidence.');
   }

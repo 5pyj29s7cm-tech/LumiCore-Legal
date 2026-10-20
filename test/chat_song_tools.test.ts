@@ -244,7 +244,7 @@ async function deliverExistingVideoThroughChat(p: ChatSongProject, language: 'en
     const fields = messages.find(message => message.promptBlock?.id === 'current-execution-authorization')?.promptBlock?.fields;
     if (mock.llm.mock.calls.length === 1) {
       expect(declarations.map(item => item.function.name), JSON.stringify(diagnostic)).toContain('chat_song_read');
-      return { text: '', finishReason: 'tool_calls', toolCalls: [{ id: 'accepted-existing-song-read', name: 'chat_song_read', arguments: { projectId: p.id, revision: p.revision, includeOutput: true } }] };
+      return { text: '', finishReason: 'tool_calls', routingReceiptId: 'synthetic-model-routing-' + requestId, toolCalls: [{ id: 'accepted-existing-song-read', name: 'chat_song_read', arguments: { projectId: p.id, revision: p.revision, includeOutput: true } }] };
     }
     const evidence = fields?.completionEvidence as Array<{ id: string; operation: string; effects: unknown[] }>;
     return { text: JSON.stringify({ answer: 'Here is the selected existing video.', goals: [{ text, operation: evidence[0].operation, effects: evidence[0].effects, status: 'completed', evidenceIds: [evidence[0].id] }] }), finishReason: 'stop', toolCalls: [] };
@@ -275,11 +275,13 @@ it.each(['en', 'zh'] as const)('delivers an explicitly requested existing video 
   const record = entry.result.toolRecords[0];
   expect(record.error).toBeFalsy(); expect(record.terminalVerification?.status).toBe('verified');
   expect(isCanonicalToolExecutionRecord(record)).toBe(true);
-  expect(record).toMatchObject({ requestId: entry.identity.requestId, taskId: entry.result.taskId });
+  expect(record).toMatchObject({ requestId: entry.identity.requestId, taskId: entry.result.taskId, executionOrigin: 'model_selected', modelRoutingReceiptId: 'synthetic-model-routing-' + entry.identity.requestId });
   expect(entry.result.finalized.blocked).toBe(false);
   expect(readDB().conversationActionTasks.find(row => row.id === entry.result.taskId)?.status).toBe('completed');
   const durable = await querySQL<{ taskId: string; requestId: string; toolName: string }>('SELECT taskId, requestId, toolName FROM conversation_action_receipts WHERE requestId = ?', [entry.identity.requestId]);
   expect(durable).toEqual([{ taskId: entry.result.taskId, requestId: entry.identity.requestId, toolName: 'chat_song_read' }]);
+  const provenance = await querySQL<{ executionOrigin: string; modelRoutingReceiptId: string }>('SELECT executionOrigin, modelRoutingReceiptId FROM conversation_action_receipts WHERE requestId = ?', [entry.identity.requestId]);
+  expect(provenance).toEqual([{ executionOrigin: 'model_selected', modelRoutingReceiptId: 'synthetic-model-routing-' + entry.identity.requestId }]);
   const result = JSON.parse(record.result!);
   expect(result).toMatchObject({ ok: true, verified: true, status: 'retrieved', selectedStyle: 'chat', outputPath: filePath, artifacts: [{ type: 'video', path: filePath, sha256: render.sha256, size: fs.statSync(filePath).size }] });
   expect(result.project).toBeUndefined(); expect(result.library).toBeUndefined(); expect(result.handoff).toBeUndefined();

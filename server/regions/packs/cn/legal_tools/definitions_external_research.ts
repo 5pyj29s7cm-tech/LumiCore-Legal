@@ -1,3 +1,4 @@
+import { explicitNoMutationScope } from '../../../../cognition/tool_intent';
 import { type ToolDefinition } from "../../../../tools/types";
 import { defineLegalTool } from "./tool_contracts";
 import { stringField } from "./tool_contracts";
@@ -104,6 +105,8 @@ orgId: stringField('组织 ID，默认上下文 orgId 或 default'),
 userId: stringField('操作用户 ID，默认上下文 userId 或 system'),
 },
 required: ['name'],
+serverOwnedArgumentBinder: (args, context) => explicitNoMutationScope(context?.acceptedActionContract?.taskText || '').local
+  ? { ...args, persistCase: false, confirmedForKb: false } : args,
 handler: withLegalReceipt(companyDatabaseLookupHandler, { status: 'observed', expectCaseMutation: 'when_requested' })
 }),
 defineLegalTool({

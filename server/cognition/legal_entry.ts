@@ -94,7 +94,6 @@ export function buildUnifiedLegalEntryPrompt(input: {
     '## Unified Legal Casework Entry',
     'Legal work is available from personal chat, company/work chat, voice, task center, and Feishu/WeCom/WeChat bot intake. Treat these as entrances into the same legal casework capability, not as separate scripts or ordinary messaging.',
     scopeLine,
-    'Execution order for requested casework or document production: intake/case space -> identity/facts -> major premise -> minor premise -> conclusion/subsumption -> current-law gate -> filing handoff -> delivery/archive. A question about source facts does not request this production workflow.',
     remoteIntake
       ? 'Remote legal messages and forwarded SMS/court links should use legal_message_intake_to_case or legal_process_notice_link, then bind the source, sender, link, extracted document, and next case step into the case workspace.'
       : '',
