@@ -95,7 +95,6 @@ describe('unified execution pipeline', () => {
     const pipeline = buildLumiExecutionPipeline({ dispatch: { userId: 'read-only-player', channel, source: channel,
       operationMode: 'assistant', text, targetIsLumi: true }, registry: createRegistry(),
       personalityToolPolicy: { allowedTools: ['*'], requireConfirmation: [], forbiddenTools: [], maxIterations: 10 } });
-    expect(pipeline.turnIntent.flow.modelToolAccess).toBe('manifest');
     expect(pipeline.modelToolProjection.toolNames).toContain('ocr_screen');
     expect(pipeline.modelToolProjection.toolNames).not.toContain('computer_use');
     expect(pipeline.modelToolProjection.toolNames).not.toContain('mouse_click');
@@ -183,7 +182,6 @@ describe('unified execution pipeline', () => {
     expect({ allow: pipeline.turnIntent.flow.allowToolUseForTurn, boundary: pipeline.turnIntent.boundary,
       action: pipeline.executionRequested, trace: pipeline.intentTrace }).toMatchObject({ allow: false, action: false, boundary: 'conversation' });
     expect(pipeline.turnIntent.flow.completionEvidenceNeeded).toBe(false);
-    expect(pipeline.turnIntent.flow.modelToolAccess).toBe('hard_off');
     expect(finalizeLumiResponse({ taskText: text, responseText: '我不知道，没有找到对应的已保存记忆。', source: channel, toolRecords: [], flow: pipeline.turnIntent.flow }).blocked).toBe(false);
   });
 
@@ -193,7 +191,6 @@ describe('unified execution pipeline', () => {
       operationMode: 'assistant', text, targetIsLumi: true }, registry: createRegistry(),
       personalityToolPolicy: { allowedTools: ['*'], requireConfirmation: [], forbiddenTools: [], maxIterations: 10 } });
     expect(pipeline.executionRequested).toBe(true);
-    expect(pipeline.turnIntent.flow.modelToolAccess).toBe('manifest');
   });
   it.each(['chat', 'voice', 'task'] as const)('binds short plan acceptance to the latest user goal for %s', channel => {
     const text = '按刚才的计划执行。';
@@ -696,4 +693,16 @@ it('exposes existing-video retrieval in the real full-registry readonly pipeline
   expect(pipeline.authorizationPolicy.forbiddenTools).toContain('chat_song_render');
   expect(pipeline.modelToolProjection.toolNames).not.toContain('generate_video');
   expect(registry.findRelevant('chat_song_render').map(entry => entry.name)).toContain('chat_song_read');
+});
+
+it.each(['chat', 'voice'] as const)('keeps an explicit no-tool veto authoritative over %s runtime and workflow hints', channel => {
+  for (const text of ['不要调用工具，告诉我后台任务进度。', '不要调用工具，Lumi, show me a visible demo of yourself']) {
+    const pipeline = buildLumiExecutionPipeline({ dispatch: { userId: 'explicit-no-tool-owner', channel, source: channel, text, targetIsLumi: true },
+      registry: createRegistry(), personalityToolPolicy: { allowedTools: ['*'], forbiddenTools: [], requireConfirmation: [], maxIterations: 10 } });
+    expect(pipeline.turnIntent.flow.allowToolUseForTurn).toBe(false);
+    expect(pipeline.execution.allowToolUse).toBe(false);
+    expect(pipeline.executionRequested).toBe(false);
+    expect(pipeline.modelToolProjection.toolNames).toEqual([]);
+    expect(pipeline.capabilityPlan.taskLedgerRequired).toBe(false);
+  }
 });
