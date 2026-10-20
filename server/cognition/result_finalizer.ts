@@ -3,7 +3,7 @@ import { CN_TASK_EXECUTION_MESSAGES } from '../regions/messages/task_execution_m
 import { CN_ACTION_CONTRACT_COPY } from "../regions/messages/action_contract_copy";
 import type { ToolExecutionRecord } from '../tools/types';
 import { isCanonicalToolExecutionRecord } from '../tools/execution_engine';
-import { actualDocumentReadContent, isSuccessfulExactDocumentRead } from './action_desktop_evidence';
+import { actualDocumentReadContent, isSuccessfulExactDocumentRead, requestsExactReadOnlyArtifactInspection } from './action_desktop_evidence';
 import { coalesceToolExecutionRecords, toolRecordSucceeded } from './task_execution_ledger';
 import { parseReceiptObject, toolRecordTerminalPayload, toolRecordTerminalText } from '../tools/receipt_payload';
 import { formatRuntimeCleanupReceipt } from "../regions/messages/runtime_cleanup_messages";
@@ -570,7 +570,6 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
         : { ...record, result: toolRecordTerminalText(record) }
     )),
   };
-  if (input.completionGuard?.blocked) return { ...input.completionGuard };
   const actionText = resultTaskText(input);
   const missingInput = missingTaskInputResult(actionText,
     (input.toolRecords || []).filter(record => artifactRecordMatchesTurn(record, input)));
@@ -627,11 +626,16 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     const outcomes = composite.components.map(component => {
       const outputs = component.contract.kind === 'artifact_work' ? requestedArtifactInstructions(component.text) : [];
       const records = outputs.length === 1 ? (input.toolRecords || []).filter(record => !isArtifactProducerRecord(record)
-        || sameArtifactPath(artifactPathFromRecord(record), outputs[0].path)) : input.toolRecords || [];
+        || sameArtifactPath(artifactPathFromRecord(record), outputs[0].path))
+        : requestsExactReadOnlyArtifactInspection(component.text) ? (input.toolRecords || []).filter(record => !isArtifactProducerRecord(record))
+        : input.toolRecords || [];
       const scoped = { ...input, toolRecords: records };
       const verified = hasResultCoreActionEvidence(scoped, component.contract, records, component.text);
+      const sourceRead = !outputs.length && requestsExactReadOnlyArtifactInspection(component.text)
+        ? records.find(record => isVerifiedCurrentTurnRecord(scoped, record) && isSuccessfulExactDocumentRead(record)
+          && documentReadMatchesRequestedTarget(record, component.text, input.flow?.acceptedTaskTarget, input.flow?.currentAttachmentPaths)) : undefined;
       const componentInput = { ...scoped, taskText: component.text, flow: undefined, completionGuard: undefined,
-        responseText: outputs.length === 1 ? '' : input.responseText };
+        responseText: outputs.length === 1 ? '' : input.responseText || (sourceRead ? actualDocumentReadContent(sourceRead) : '') };
       const result = (outputs.length === 1 ? formatGroundedArtifactResult(componentInput) : null)
         || finalizeLumiResponse(componentInput);
       const complete = verified && !result.blocked && Boolean(result.text);

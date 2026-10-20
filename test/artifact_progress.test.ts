@@ -74,7 +74,9 @@ describe('one artifact checkpoint for continuation and completion', () => {
   });
   it('retains saved/read progress without overriding an explicit blocked finalization', () => {
     const result = finalizeLumiResponse({ ...turn, source: 'chat', taskText: task, responseText: '', toolRecords: [saved, read(incomplete)], completionGuard: { blocked: true, text: '未发起新的操作', reason: 'model_failed_before_tool_execution' } });
-    expect(result).toMatchObject({blocked:true,text:'未发起新的操作',reason:'model_failed_before_tool_execution'});
+    expect(result.blocked).toBe(true);
+    expect(result.text).toContain('文件已保存');
+    expect(result.text).not.toContain('未发起新的操作');
     const progress = getArtifactTaskProgress(task, [saved, read(incomplete)], turn)!;
     expect(progress).toMatchObject({savedPath:'D:/work/meeting.docx',readBack:true,next:'repair_content',complete:false});
     expect(progress.missingContent).toEqual([{kind:'blank_section',value:'会议结论',status:'missing'}]);
