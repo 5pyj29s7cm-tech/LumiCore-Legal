@@ -10,7 +10,7 @@ import { LegalContractReview } from '../src/components/org/LegalContractReview';
 import { LegalCaseSearch } from '../src/components/org/LegalCaseSearch';
 import { LegalAssetTrace } from '../src/components/org/LegalAssetTrace';
 import { LegalHub } from '../src/components/org/LegalHub';
-import { createEmptyLegalCase, readLegalCaseFiles, writeLegalCaseFiles, getActiveLegalCaseId, LEGAL_CASES_CHANGED_EVENT, ACTIVE_LEGAL_CASE_STORAGE, type LegalCaseFile } from '../src/lib/legalCaseStore';
+import { createEmptyLegalCase, readLegalCaseFiles, writeLegalCaseFiles, getActiveLegalCaseId, LEGAL_CASES_CHANGED_EVENT, ACTIVE_LEGAL_CASE_STORAGE, setLegalCaseAccount, type LegalCaseFile } from '../src/lib/legalCaseStore';
 import { toast } from 'sonner';
 import { chinaLegalCopy } from '../src/i18n/regions/cn/legal';
 import { legalReviewQualityCopy } from '../src/i18n/regions/cn/legalReviewQuality';
@@ -18,12 +18,21 @@ const fixture = vi.hoisted(() => ({ net: vi.fn(), user: 'owner', domain: 'work',
 vi.mock('../src/contexts/AppContext', () => ({ useApp: () => ({ user: { uid: fixture.user }, workDomain: fixture.domain, orgConnection: { orgId: fixture.org, connected: fixture.connected, orgRole: 'owner' } }) }));
 vi.mock('../src/lib/useT', () => ({ useT: () => ({ langCode: fixture.language, legalContractReview: 'contract-review', legalCaseStrategy: 'strategy', legalCaseStrategyAnalyze: 'analyze-strategy', legalCaseStrategyPlaceholder: 'strategy-facts', legalCaseStrategyTitle: 'Strategy', legalCaseStrategyDesc: 'Description', legalVerifyCitation: 'citations', legalVerifyCitationVerify: 'verify-citations', legalVerifyCitationPlaceholder: 'citation-text', legalVerifyCitationTitle: 'Citation verification', legalImportJudgment: 'import-judgment', legalImportJudgmentTitle: 'Import judgment' }) }));
 vi.mock('../src/i18n/uiMessages', () => ({ uiMessage: (key: string) => key.split('.')[1], formatUiMessage: (key: string, values: any) => key.split('.')[1] + ' ' + Object.values(values).join(' ') }));
-vi.mock('../src/services/apiClient', async () => ({ apiFetch: fixture.net, apiJson: (await import('./source_expression')).extractSourceExpression('src/services/apiClient.ts', 'apiJson', { apiFetch: fixture.net }) }));
+vi.mock('../src/services/apiClient', async () => {
+  const request = (await import('./source_expression')).extractSourceExpression('src/services/apiClient.ts', 'apiJson', { apiFetch: fixture.net });
+  return { apiFetch: fixture.net, apiJson: async (url: string, init?: RequestInit) => {
+    if (url === '/api/legal/client-case-sync') {
+      if (init?.method === 'POST') return { case: JSON.parse(String(init.body)).case };
+      return { cases: (await import('../src/lib/legalCaseStore')).readLegalCaseFiles(), removedCaseIds: [] };
+    }
+    return request(url, init);
+  } };
+});
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
 const reply = (body: any, status = 200) => ({ ok: status < 400, status, json: async () => body && typeof body.text === 'string' ? { verification: { status: 'verified' }, ...body } : body });
 function deferred() { let resolve!: (value: any) => void; const promise = new Promise<any>(done => { resolve = done; }); return { promise, resolve }; }
 const caseFile = (id = 'a', title = id) => ({ id, title, clientRole: 'plaintiff', cause: 'contract', court: 'court', stage: 'trial', materials: [] } as any);
-beforeEach(() => { localStorage.clear(); fixture.connected = true; fixture.user = 'owner'; fixture.domain = 'work'; fixture.org = 'org-a'; fixture.language = 'en'; fixture.net.mockResolvedValue(reply({ text: 'Completed document' })); vi.stubGlobal('fetch', fixture.net); });
+beforeEach(() => { localStorage.clear(); setLegalCaseAccount('owner'); fixture.connected = true; fixture.user = 'owner'; fixture.domain = 'work'; fixture.org = 'org-a'; fixture.language = 'en'; fixture.net.mockResolvedValue(reply({ text: 'Completed document' })); vi.stubGlobal('fetch', fixture.net); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.resetAllMocks(); });
 
 describe.each(['bid'])('%s document workbench', kind => {
@@ -105,7 +114,7 @@ it('keeps evidence supplementation labeled and empty instead of flattening archi
   expect(JSON.parse(call[1].body).args).not.toHaveProperty('sourceCase');
 });
 const hubEvent = () => act(() => window.dispatchEvent(new Event('lumi:org-legal-cases-changed')));
-const hubPage = () => { localStorage.setItem('lumi_work_domain', fixture.domain); localStorage.setItem('lumi_org_connection', JSON.stringify({ orgId: fixture.org })); return <LegalHub />; };
+const hubPage = () => { setLegalCaseAccount(fixture.user); localStorage.setItem('lumi_work_domain', fixture.domain); localStorage.setItem('lumi_org_connection', JSON.stringify({ orgId: fixture.org })); return <LegalHub />; };
 const workspaceCopy = () => chinaLegalCopy(fixture.language === 'en' ? 'en' : 'zh').workspace;
 const hubNav = (name: string) => fireEvent.click(within(screen.getByRole('navigation')).getByRole('button', {
   name: name === 'citations' ? workspaceCopy().documentCheck : name === 'strategy' ? workspaceCopy().strategyAnalysis : name === 'Case overview' ? workspaceCopy().caseOverview : name,
@@ -119,11 +128,12 @@ const selectAdvancedLegalTool = (tool: string) => {
   expect(selector.closest('details')).toBe(advanced);
   fireEvent.change(selector, { target: { value: tool } });
 };
-it('keeps this local installation case list available across account changes without an ownership migration', () => {
-  fixture.domain = 'personal'; localStorage.setItem('lumi_legal_cases_v1', JSON.stringify([hubCase('Local case')]));
-  const view = render(hubPage()); expect(screen.getByRole('heading', { name: 'Local case' })).toBeTruthy();
-  fixture.user = 'other'; view.rerender(hubPage()); expect(screen.getByRole('heading', { name: 'Local case' })).toBeTruthy();
-  expect(readLegalCaseFiles()).toHaveLength(1);
+it('keeps unclaimed old archives hidden and isolates the signed-in personal cache', () => {
+  fixture.domain = 'personal'; localStorage.setItem('lumi_legal_cases_v1', JSON.stringify([hubCase('Unclaimed old case')]));
+  writeLegalCaseFiles([hubCase('Owned case')]);
+  const view = render(hubPage()); expect(screen.getByRole('heading', { name: 'Owned case' })).toBeTruthy();
+  fixture.user = 'other'; view.rerender(hubPage()); expect(screen.queryByRole('heading', { name: 'Owned case' })).toBeNull();
+  expect(readLegalCaseFiles()).toHaveLength(0); expect(localStorage.getItem('lumi_legal_cases_v1')).toContain('Unclaimed old case');
 });
 it.each(['organization', 'account', 'domain', 'disconnect', 'close'])('isolates the actual legal hub and late writes on %s', async change => {
   fixture.net.mockResolvedValue(reply({ cases: [hubCase('Case A')] })); const view = render(hubPage()); await screen.findByRole('heading', { name: 'Case A' });
@@ -151,9 +161,9 @@ it('uses only the latest organization refresh, preserves edits from older reads,
 
 it('shares personal list and active-case synchronization across local and storage events', () => {
   fixture.domain = 'personal'; writeLegalCaseFiles([hubCase('Personal A'), hubCase('Personal B')], 'missing'); const view = render(hubPage());
-  expect(screen.getByRole('heading', { name: 'Personal A' })).toBeTruthy(); expect(localStorage.getItem(ACTIVE_LEGAL_CASE_STORAGE)).toBe('Personal A');
+  expect(screen.getByRole('heading', { name: 'Personal A' })).toBeTruthy(); expect(localStorage.getItem(`${ACTIVE_LEGAL_CASE_STORAGE}:user:owner`)).toBe('missing');
   act(() => writeLegalCaseFiles([hubCase('Personal B')], 'Personal B')); expect(screen.getByRole('heading', { name: 'Personal B' })).toBeTruthy();
-  localStorage.setItem('lumi_legal_cases_v1', '[]'); act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'lumi_legal_cases_v1' }))); expect(screen.queryByRole('heading', { name: 'Personal B' })).toBeNull(); expect(getActiveLegalCaseId()).toBe('');
+  localStorage.setItem('lumi_legal_cases_v1:user:owner', '[]'); act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'lumi_legal_cases_v1' }))); expect(screen.queryByRole('heading', { name: 'Personal B' })).toBeNull(); expect(getActiveLegalCaseId()).toBe('Personal B');
   act(() => window.dispatchEvent(new Event(LEGAL_CASES_CHANGED_EVENT))); expect(fixture.net).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'new-case' })); fireEvent.change(screen.getByPlaceholderText('example-alpha-v-beta-sales'), { target: { value: 'Personal draft' } });
   fixture.connected = false; view.rerender(hubPage()); expect(screen.getByDisplayValue('Personal draft')).toBeTruthy();
@@ -546,15 +556,15 @@ it.each(['case', 'close'])('cancels a pending full-contract read on %s without a
   await act(async () => full.resolve(reply({ text: 'Stale full contract', truncated: false }))); expect(signal.aborted).toBe(true); expect(screen.queryByText('Stale full contract')).toBeNull();
   if (change === 'case') expect(document.querySelector('textarea')!.value).toBe('');
 });
-it.each(['case', 'close'])('serializes asset preflight and stops its continuation after %s', async change => {
+it.each(['case', 'close'])('serializes one asset trace and suppresses its result after %s', async change => {
   const copy = chinaLegalCopy('en').assetTraceWorkflow, preflight = deferred(), update = vi.fn(); fixture.net.mockReturnValueOnce(preflight.promise);
   const view = render(<StrictMode><LegalAssetTrace caseFile={caseFile()} onUpdateCase={update} /></StrictMode>);
   fireEvent.change(screen.getByPlaceholderText(copy.subjectPlaceholder), { target: { value: 'Synthetic company' } });
   act(() => { fireEvent.click(screen.getByRole('button', { name: copy.start })); fireEvent.click(screen.getByRole('button', { name: copy.start })); }); expect(fixture.net).toHaveBeenCalledTimes(1);
-  expect(fixture.net.mock.calls[0][0]).toBe('/api/legal/tool/legal_external_source_status'); const signal = fixture.net.mock.calls[0][1].signal, writes = update.mock.calls.length;
+  expect(fixture.net.mock.calls[0][0]).toBe('/api/legal/tool/legal_trace_assets'); const signal = fixture.net.mock.calls[0][1].signal, writes = update.mock.calls.length;
   if (change === 'close') view.unmount(); else view.rerender(<LegalAssetTrace caseFile={caseFile('b')} onUpdateCase={update} />);
   await act(async () => preflight.resolve(reply({ text: 'Source is ready', receipt: { ok: true, status: 'ready' } })));
-  expect(signal.aborted).toBe(true); expect(fixture.net).toHaveBeenCalledTimes(1); expect(update).toHaveBeenCalledTimes(writes);
+  expect(signal.aborted).toBe(true); expect(fixture.net).toHaveBeenCalledTimes(1); expect(update).toHaveBeenCalledTimes(writes); expect(screen.queryByText('Source is ready')).toBeNull();
 });
 
 it('makes generated legal files reachable through the existing preview, save and folder controls', async () => {

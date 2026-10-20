@@ -1,3 +1,4 @@
+import { setLegalCaseAccount } from '../src/lib/legalCaseStore';
 // @vitest-environment jsdom
 import React from 'react';
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
@@ -12,7 +13,7 @@ vi.mock('../src/lib/legalCaseStore', async original => ({ ...await original<type
 vi.mock('../src/lib/legalToolClient', () => ({ runLegalTool: mocks.tool }));
 function fixture(): LegalCaseFile { return { ...createEmptyLegalCase(), id: 'remove-ui-case', title: 'Synthetic unlink UI', factDate: '2026-09-01', materials: Array.from({ length: 10 }, (_,i) => ({ id: 'material-'+i, type: 'evidence', title: 'Synthetic source '+i, source: 'import', createdAt: '2026-09-01', content: 'ORIGINAL-'+i+'-TAIL' })) }; }
 function props(activeCase: LegalCaseFile, onRemoveMaterial = vi.fn().mockResolvedValue(true)) { return { activeCase, cases: [activeCase], caseFilter: '', setCaseFilter: vi.fn(), onCreateCase: vi.fn(), onDeleteCase: vi.fn(), onSelectCase: vi.fn(), onUpdateCase: vi.fn(() => true), onSetView: vi.fn(), onStartConsultation: vi.fn(), onOpenMeetingNotes: vi.fn(), onCreateReminder: vi.fn(), onCreatePlan: vi.fn(), onAddMaterial: vi.fn(() => true), onRemoveMaterial, onRefreshCases: vi.fn(), orgBacked: false, canDeleteCases: false, refreshing: false }; }
-beforeEach(() => { localStorage.clear(); mocks.domain = 'personal'; mocks.orgId = ''; mocks.api.mockReset(); mocks.sync.mockReset().mockResolvedValue(undefined); mocks.tool.mockReset();
+beforeEach(() => { localStorage.clear(); setLegalCaseAccount('focused-legal-owner'); mocks.domain = 'personal'; mocks.orgId = ''; mocks.api.mockReset(); mocks.sync.mockReset().mockResolvedValue(undefined); mocks.tool.mockReset();
   mocks.api.mockImplementation(async (url: string) => { const id = decodeURIComponent(url.split('/materials/')[1]?.split('/')[0] || 'material-0'); return { revision: 'a'.repeat(64), status: 'pending', scope: 'archived_text', content: fixture().materials.find(m => m.id === id)?.content }; }); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe('case material removal interface', () => {

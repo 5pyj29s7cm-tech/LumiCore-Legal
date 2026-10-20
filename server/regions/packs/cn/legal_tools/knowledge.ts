@@ -81,7 +81,7 @@ export async function searchStatuteHandler(args: Record<string, any>, context?: 
   }
 
   const lines = results.map((r, i) =>
-    `${i + 1}. **${r.title}** ${r.verificationStatus === 'verified' && r.isEffective ? '✓ 来源状态已核验，适用性待复核' : r.verificationStatus === 'repealed' ? '✗ 已废止，需检查历史适用' : '待核验有效性'}\n   ${r.chunk}\n   引用: ${r.citationKey || r.sourceUrl || r.articleId}`,
+    `${i + 1}. **${r.title}** ${r.verificationStatus === 'verified' && r.isEffective ? '✓ 来源状态已核验，适用性待复核' : r.verificationStatus === 'repealed' ? '✗ 已废止，需检查历史适用' : '待核验有效性'}\n   ${r.chunk?.trim() ? r.chunk : '未取得可展示的法条全文；请核验权威来源'}\n   引用: ${r.citationKey || r.sourceUrl || r.articleId}`,
   );
   const externalLines = externalResults.map((r, i) =>
     `${results.length + i + 1}. **${r.title}** ${r.effectiveStatus || '待律师复核'}\n   来源: ${r.sourceName}${r.url ? ` | ${r.url}` : ''}\n   ${r.summary.slice(0, 200)}`,

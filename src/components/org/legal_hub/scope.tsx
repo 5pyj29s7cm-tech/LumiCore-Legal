@@ -13,7 +13,7 @@ import { useT } from "../../../lib/useT";
 import { useApp } from "../../../contexts/AppContext";
 import { useLegalDocument } from "../../../hooks/useLegalDocument";
 import { apiJson } from "../../../services/apiClient";
-import { syncPersonalLegalCaseToRuntime, mergePersonalLegalCaseRuntimeSnapshot, deletePersonalLegalCaseFromRuntime, addLegalCaseMaterial, clearLegalConsultationCaseId, createEmptyLegalCase, getActiveLegalCaseId, getLegalConsultationCaseId, LEGAL_CASES_CHANGED_EVENT, readLegalCaseFiles, setActiveLegalCaseId, updateLegalCase, writeLegalCaseFiles, type LegalCaseFile, type LegalCaseMaterial } from "../../../lib/legalCaseStore";
+import { refreshPersonalLegalCasesFromRuntime, isLegalCaseAccount, syncPersonalLegalCaseToRuntime, mergePersonalLegalCaseRuntimeSnapshot, deletePersonalLegalCaseFromRuntime, addLegalCaseMaterial, clearLegalConsultationCaseId, createEmptyLegalCase, getActiveLegalCaseId, getLegalConsultationCaseId, LEGAL_CASES_CHANGED_EVENT, readLegalCaseFiles, setActiveLegalCaseId, updateLegalCase, writeLegalCaseFiles, type LegalCaseFile, type LegalCaseMaterial } from "../../../lib/legalCaseStore";
 import { uiMessage } from "../../../i18n/uiMessages";
 import type { LegalView, NavItem, LegalCaseCreateInput } from './contracts';
 import { resolveLegalCaseActiveId, legalCaseTitle } from './case_values';
@@ -45,20 +45,16 @@ export function LegalHubScope({ initialView = 'workspace', workspaceResetKey = 0
   const t = useT();
   const useOrgCases = workDomain === 'work' && Boolean(orgConnection?.connected && orgConnection?.orgId);
   const canDeleteCases = !useOrgCases || ['owner', 'admin'].includes(String(orgConnection?.orgRole || '').toLowerCase());
-  const isCurrent = () => !lifetime.current?.signal.aborted;
+  const isCurrent = () => isLegalCaseAccount(user?.uid) && !lifetime.current?.signal.aborted;
 
-  const refreshCases = useCallback(async () => {
+  const refreshCases = useCallback(async (readRuntime = true) => {
     if (!lifetime.current || !isCurrent()) return;
-    if (!useOrgCases) {
+    if (!useOrgCases && (workDomain === 'work' || !readRuntime)) {
       const loaded = workDomain === 'work' ? [] : readLegalCaseFiles();
-      const storedActiveId = getActiveLegalCaseId();
-      const resolvedActiveId = resolveLegalCaseActiveId(loaded, storedActiveId);
       setCases(loaded);
-      setActiveCaseIdState(resolvedActiveId);
-      if (workDomain !== 'work' && storedActiveId !== resolvedActiveId) setActiveLegalCaseId(resolvedActiveId);
+      setActiveCaseIdState(prev => resolveLegalCaseActiveId(loaded, prev || getActiveLegalCaseId()));
       return;
     }
-
     reading.current?.abort();
     const request = new AbortController();
     reading.current = request;
@@ -66,16 +62,18 @@ export function LegalHubScope({ initialView = 'workspace', workspaceResetKey = 0
     try {
       if (writing.current) await writing.current;
       if (request.signal.aborted || !isCurrent()) return;
-      const data = await apiJson('/api/org/legal/cases', { signal: request.signal });
+      const loaded = useOrgCases
+        ? (await apiJson('/api/org/legal/cases', { signal: request.signal })).cases
+        : await refreshPersonalLegalCasesFromRuntime(request.signal);
       if (request.signal.aborted || !isCurrent()) return;
-      const loaded = Array.isArray(data.cases) ? data.cases : [];
-      confirmedCases.current = loaded;
-      setCases(loaded);
-      setActiveCaseIdState(prev => resolveLegalCaseActiveId(loaded, prev));
+      const snapshot = Array.isArray(loaded) ? loaded : [];
+      confirmedCases.current = snapshot;
+      setCases(snapshot);
+      setActiveCaseIdState(prev => resolveLegalCaseActiveId(snapshot, prev || getActiveLegalCaseId()));
     } catch (err: any) {
-      if (!request.signal.aborted) toast.error(err?.message || uiMessage('legal-hub.failed-to-load-organization-cases.9523d68ad5'));
+      if (!request.signal.aborted && isCurrent()) toast.error(err?.message || uiMessage('token-dashboard.failed-to-load.1131733383'));
     } finally {
-      if (!request.signal.aborted) setOrgCasesLoading(false);
+      if (!request.signal.aborted && isCurrent()) setOrgCasesLoading(false);
     }
   }, [useOrgCases, workDomain, user?.uid]);
 
@@ -83,17 +81,21 @@ export function LegalHubScope({ initialView = 'workspace', workspaceResetKey = 0
     const owner = new AbortController();
     lifetime.current = owner;
     const eventName = useOrgCases ? 'lumi:org-legal-cases-changed' : LEGAL_CASES_CHANGED_EVENT;
+    const refreshCache = () => { void refreshCases(useOrgCases); };
+    const refreshRuntime = () => { void refreshCases(); };
     const syncStorage = (event: StorageEvent) => {
-      if (!useOrgCases && (!event.key || event.key.startsWith('lumi_legal_'))) void refreshCases();
+      if (!useOrgCases && (!event.key || event.key.startsWith('lumi_legal_'))) refreshCache();
     };
-    void refreshCases();
-    window.addEventListener(eventName, refreshCases);
+    refreshRuntime();
+    window.addEventListener(eventName, refreshCache);
     window.addEventListener('storage', syncStorage);
+    window.addEventListener('focus', refreshRuntime);
     return () => {
       owner.abort();
       reading.current?.abort();
-      window.removeEventListener(eventName, refreshCases);
+      window.removeEventListener(eventName, refreshCache);
       window.removeEventListener('storage', syncStorage);
+      window.removeEventListener('focus', refreshRuntime);
     };
   }, [refreshCases, useOrgCases]);
 
@@ -156,13 +158,13 @@ export function LegalHubScope({ initialView = 'workspace', workspaceResetKey = 0
     return cases.find(item => item.id === activeCaseId) || cases[0] || null;
   }, [activeCaseId, cases]);
   useEffect(() => {
-    if (useOrgCases || workDomain === 'work' || !activeCase) return;
+    if (useOrgCases || workDomain === 'work' || !activeCase || !isCurrent()) return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => { void syncPersonalLegalCaseToRuntime(activeCase, controller.signal).catch(error => {
-      if (!controller.signal.aborted) console.warn('[LegalHub] Active case synchronization failed:', error);
+      if (!controller.signal.aborted && isCurrent()) toast.error(error?.message || uiMessage('legal-hub.failed-to-save-case.90f7d722b2'));
     }); }, 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [activeCase, useOrgCases, workDomain]);
+  }, [activeCase, useOrgCases, workDomain, user?.uid]);
   const workflowStepIndex = workflowNavItems.findIndex(item => item.id === view);
   const isWorkflowView = initialView === 'workspace' && workflowStepIndex >= 0;
   const toolCase = isWorkflowView ? activeCase : null;

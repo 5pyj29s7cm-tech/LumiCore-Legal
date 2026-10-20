@@ -273,8 +273,8 @@ export async function reasoningMatrixHandler(args: Record<string, any>, context?
   }
 
   let caseFile: LegalCases.OrgLegalCaseFile | null = null;
-  let archiveLine = '- 案件空间：未归档（persistCase=false）';
-  if (persist) {
+  let archiveLine = persist ? '- 案件空间：未归档（来源关联未通过）' : '- 案件空间：未归档（persistCase=false）';
+  if (persist && traceability.passed) {
     const explicitCaseId = textArg(args, 'caseId');
     caseFile = explicitCaseId ? LegalCases.getCase(orgId, explicitCaseId, userId, 'write') : null;
     if (!caseFile) caseFile = LegalCases.listCases(orgId, caseName, 1, userId)[0] || null;
@@ -388,7 +388,7 @@ export async function caseWorkspaceHandler(args: Record<string, any>, context?: 
       cause: requestedCaseType || caseFile?.cause || caseType,
       court: court || caseFile?.court || '',
       stage: textArg(args, 'stage') ? stage : caseFile?.stage || stage,
-      notes: generatedNotes || caseFile?.notes || '',
+      notes: (facts || evidence) ? generatedNotes : caseFile?.notes || generatedNotes,
       clientPartyName: Object.hasOwn(args, 'clientPartyName') ? textArg(args, 'clientPartyName') : caseFile?.clientPartyName || '',
       clientRole: textArg(args, 'role') || caseFile?.clientRole || '',
       objective: claims || caseFile?.objective || '',

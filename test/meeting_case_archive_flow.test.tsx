@@ -13,7 +13,7 @@ import { createCase, getCase, legalWorkspaceNamespace } from '../server/org/lega
 import { isLegalSourceMaterial } from '../shared/legal_workflow_receipts';
 import { useMeetingTranscript } from '../src/components/desktop/useMeetingTranscript';
 import { useMeetingWorkflow } from '../src/components/desktop/useMeetingWorkflow';
-import { createEmptyLegalCase, getActiveLegalCaseId, getLegalCaseById, writeLegalCaseFiles, type LegalCaseFile } from '../src/lib/legalCaseStore';
+import { createEmptyLegalCase, getActiveLegalCaseId, getLegalCaseById, writeLegalCaseFiles, setLegalCaseAccount, type LegalCaseFile } from '../src/lib/legalCaseStore';
 import { desktopWorkflowCopy } from '../src/i18n/locales/desktopWorkflows';
 import { uiMessage } from '../src/i18n/uiMessages';
 const mock = vi.hoisted(() => ({ toast: {success:vi.fn(),error:vi.fn(),info:vi.fn()} }));
@@ -34,7 +34,7 @@ const keys=(scope:string)=>({identity:'integration-audio-'+scope,notes:'integrat
 const unavailable=()=>null;
 beforeAll(async()=>{app=await makeApp();mountChatRoutes(app.apiRouter,JWT_SECRET,{getDeepSeek:unavailable,getGemini:unavailable,getOpenAI:unavailable,getAnthropic:unavailable,getQwen:unavailable});mountOrgRoutes(app.apiRouter);const org=createOrg('Synthetic meeting flow organization','synthetic-meeting-flow-org',owner);orgId=org.id;addMember(orgId,owner,'owner');});
 afterAll(()=>app.cleanup());
-beforeEach(()=>{localStorage.clear();vi.clearAllMocks();holdArchive=null;archiveReceived=null;requests.length=0;token=jwt.sign({uid:owner,username:owner,role:'admin'},JWT_SECRET);vi.mocked(makeLLMCall).mockResolvedValue({text:report,toolCalls:[],finishReason:'stop'} as any);
+beforeEach(()=>{localStorage.clear();setLegalCaseAccount(owner);vi.clearAllMocks();holdArchive=null;archiveReceived=null;requests.length=0;token=jwt.sign({uid:owner,username:owner,role:'admin'},JWT_SECRET);vi.mocked(makeLLMCall).mockResolvedValue({text:report,toolCalls:[],finishReason:'stop'} as any);
   vi.stubGlobal('fetch',async(url:string|URL|Request,init?:RequestInit)=>{const path=typeof url==='string'?url:String(url);const headers=new Headers(init?.headers);headers.set('Authorization','Bearer '+token);const response=await nativeFetch(path.startsWith('http')?path:app.url+path,{...init,headers});const data=await response.clone().json().catch(()=>null);requests.push({path:new URL(path,app.url).pathname,body:typeof init?.body==='string'?JSON.parse(init.body):undefined,status:response.status,data});if(path.endsWith('/meeting/archive')){archiveReceived?.();if(holdArchive)await holdArchive;}return response;});
 });
 afterEach(()=>{cleanup();vi.unstubAllGlobals();});

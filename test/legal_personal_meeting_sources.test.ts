@@ -1,8 +1,9 @@
+import { setLegalCaseAccount } from '../src/lib/legalCaseStore';
 // @vitest-environment jsdom
 import {beforeEach,describe,expect,it} from 'vitest';
 import {createEmptyLegalCase,writeLegalCaseFiles,getLegalCaseById,getActiveLegalCaseId,mergePersonalLegalCaseRuntimeSnapshot} from '../src/lib/legalCaseStore';
 import {isLegalSourceMaterial} from '../shared/legal_workflow_receipts';
-beforeEach(()=>localStorage.clear());
+beforeEach(()=>{localStorage.clear();setLegalCaseAccount('meeting-sources-owner');});
 describe('single server archive snapshot returns to the personal workspace',()=>{
  it('keeps all imported speech separate from generated analysis without changing the active other case',()=>{
   const first={...createEmptyLegalCase(),title:'Archive destination A',notes:'Original facts not verified'};

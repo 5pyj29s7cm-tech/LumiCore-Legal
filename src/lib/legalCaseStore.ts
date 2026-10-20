@@ -49,6 +49,14 @@ export const LEGAL_CASES_STORAGE = 'lumi_legal_cases_v1';
 export const ACTIVE_LEGAL_CASE_STORAGE = 'lumi_legal_active_case_v1';
 export const LEGAL_CONSULTATION_CASE_STORAGE = 'lumi_legal_consultation_case_v1';
 export const LEGAL_CASES_CHANGED_EVENT = 'lumi:legal-cases-changed';
+let legalAccountId = '';
+export const isLegalCaseAccount = (uid?: string) => Boolean(uid) && uid === legalAccountId;
+export function setLegalCaseAccount(uid?: string) {
+  const next = String(uid || '').trim();
+  if (legalAccountId === next) return;
+  legalAccountId = next;
+  emitLegalCasesChanged();
+}
 
 function canUseStorage() {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
@@ -61,13 +69,23 @@ function currentLegalStorageScope(): { domain: 'personal' | 'work'; orgId: strin
     const orgId = String(JSON.parse(localStorage.getItem('lumi_org_connection') || 'null')?.orgId || '').trim();
     return orgId ? { domain: 'work', orgId } : { domain: 'work', orgId: 'pending' };
   } catch {
-    return { domain: 'personal', orgId: '' };
+    return { domain: 'work', orgId: 'pending' };
   }
 }
 
 function scopedLegalStateKey(base: string): string {
+  if (!legalAccountId) return '';
   const scope = currentLegalStorageScope();
-  return scope.domain === 'work' ? `${base}:org:${encodeURIComponent(scope.orgId)}` : base;
+  const key = `${base}:user:${encodeURIComponent(legalAccountId)}`;
+  return scope.domain === 'work' ? `${key}:org:${encodeURIComponent(scope.orgId)}` : key;
+}
+
+const deletedPersonalCaseCache = new Map<string, Set<string>>();
+function personalDeletedCaseIds(): Set<string> {
+  const key = scopedLegalStateKey(LEGAL_CASES_STORAGE);
+  let removed = deletedPersonalCaseCache.get(key);
+  if (!removed) { removed = new Set(); deletedPersonalCaseCache.set(key, removed); }
+  return removed;
 }
 
 function newId(prefix: string) {
@@ -82,6 +100,9 @@ export function createEmptyLegalCase(): LegalCaseFile {
     caseNumber: '',
     party: '',
     clientPartyName: '',
+    clientRole: '',
+    objective: '',
+    removedMaterialIds: [],
     cause: '',
     court: '',
     judge: '',
@@ -139,55 +160,56 @@ function normalizeCaseFile(value: any): LegalCaseFile | null {
 }
 
 export function readLegalCaseFiles(): LegalCaseFile[] {
-  if (!canUseStorage()) return [];
+  if (!canUseStorage() || !legalAccountId) return [];
   if (currentLegalStorageScope().domain === 'work') return [];
   try {
-    const parsed = JSON.parse(localStorage.getItem(LEGAL_CASES_STORAGE) || '[]');
+    const parsed = JSON.parse(localStorage.getItem(scopedLegalStateKey(LEGAL_CASES_STORAGE)) || '[]');
     if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalizeCaseFile).filter(Boolean) as LegalCaseFile[];
+    return parsed.map(normalizeCaseFile).filter((file): file is LegalCaseFile => file !== null && !personalDeletedCaseIds().has(file.id));
   } catch {
     return [];
   }
 }
 
+function readLegalCaseChoice(base: string): string {
+  if (!canUseStorage() || !legalAccountId) return '';
+  return localStorage.getItem(scopedLegalStateKey(base)) || '';
+}
+
+function writeLegalCaseChoice(base: string, caseId: string) {
+  if (!canUseStorage() || !legalAccountId) return;
+  const key = scopedLegalStateKey(base);
+  if (caseId) localStorage.setItem(key, caseId);
+  else localStorage.removeItem(key);
+}
+
 export function getActiveLegalCaseId(): string {
-  if (!canUseStorage()) return '';
-  return localStorage.getItem(scopedLegalStateKey(ACTIVE_LEGAL_CASE_STORAGE)) || '';
+  return readLegalCaseChoice(ACTIVE_LEGAL_CASE_STORAGE);
 }
 
 export function getLegalConsultationCaseId(): string {
-  if (!canUseStorage()) return '';
-  return localStorage.getItem(scopedLegalStateKey(LEGAL_CONSULTATION_CASE_STORAGE)) || '';
+  return readLegalCaseChoice(LEGAL_CONSULTATION_CASE_STORAGE);
 }
 
 export function setActiveLegalCaseId(caseId: string) {
-  if (!canUseStorage()) return;
-  const key = scopedLegalStateKey(ACTIVE_LEGAL_CASE_STORAGE);
-  if (caseId) localStorage.setItem(key, caseId);
-  else localStorage.removeItem(key);
+  if (!canUseStorage() || !legalAccountId || getActiveLegalCaseId() === caseId) return;
+  writeLegalCaseChoice(ACTIVE_LEGAL_CASE_STORAGE, caseId);
   emitLegalCasesChanged();
 }
 
 export function setLegalConsultationCaseId(caseId: string) {
-  if (!canUseStorage()) return;
-  const key = scopedLegalStateKey(LEGAL_CONSULTATION_CASE_STORAGE);
-  if (caseId) localStorage.setItem(key, caseId);
-  else localStorage.removeItem(key);
+  writeLegalCaseChoice(LEGAL_CONSULTATION_CASE_STORAGE, caseId);
 }
 
 export function clearLegalConsultationCaseId() {
-  if (!canUseStorage()) return;
-  localStorage.removeItem(scopedLegalStateKey(LEGAL_CONSULTATION_CASE_STORAGE));
+  setLegalConsultationCaseId('');
 }
 
 export function writeLegalCaseFiles(cases: LegalCaseFile[], activeCaseId?: string) {
-  if (!canUseStorage()) return;
+  if (!canUseStorage() || !legalAccountId) throw new Error('Sign in before saving personal cases');
   if (currentLegalStorageScope().domain === 'work') return;
-  localStorage.setItem(LEGAL_CASES_STORAGE, JSON.stringify(cases));
-  if (typeof activeCaseId === 'string') {
-    if (activeCaseId) localStorage.setItem(ACTIVE_LEGAL_CASE_STORAGE, activeCaseId);
-    else localStorage.removeItem(ACTIVE_LEGAL_CASE_STORAGE);
-  }
+  localStorage.setItem(scopedLegalStateKey(LEGAL_CASES_STORAGE), JSON.stringify(cases.filter(item => !personalDeletedCaseIds().has(item.id))));
+  if (typeof activeCaseId === 'string') writeLegalCaseChoice(ACTIVE_LEGAL_CASE_STORAGE, activeCaseId);
   emitLegalCasesChanged();
 }
 
@@ -242,9 +264,9 @@ export function getActiveLegalCase(): LegalCaseFile | null {
 }
 
 export function mergePersonalLegalCaseRuntimeSnapshot(snapshot: unknown): LegalCaseFile | null {
-  if (currentLegalStorageScope().domain !== 'personal') return null;
+  if (!legalAccountId || currentLegalStorageScope().domain !== 'personal') return null;
   const incoming = normalizeCaseFile(snapshot);
-  if (!incoming) return null;
+  if (!incoming || personalDeletedCaseIds().has(incoming.id)) return null;
   const cases = readLegalCaseFiles();
   const current = cases.find(item => item.id === incoming.id) || null;
   if (!current) {
@@ -281,15 +303,51 @@ export function mergePersonalLegalCaseRuntimeSnapshot(snapshot: unknown): LegalC
   return merged;
 }
 
+
+
+
+function capturePersonalCaseOwner(signal?: AbortSignal): () => void {
+  const account = legalAccountId, key = scopedLegalStateKey(LEGAL_CASES_STORAGE);
+  return () => {
+    signal?.throwIfAborted();
+    if (!account || account !== legalAccountId || currentLegalStorageScope().domain !== 'personal'
+      || key !== scopedLegalStateKey(LEGAL_CASES_STORAGE)) throw new DOMException('Case account changed', 'AbortError');
+  };
+}
+
+export async function refreshPersonalLegalCasesFromRuntime(signal?: AbortSignal): Promise<LegalCaseFile[]> {
+  const assertCurrent = capturePersonalCaseOwner(signal); assertCurrent();
+  const data = await apiJson('/api/legal/client-case-sync', { signal });
+  assertCurrent();
+  if (!Array.isArray(data?.cases) || !Array.isArray(data?.removedCaseIds)) throw new Error('Invalid personal case snapshot');
+  const removed = personalDeletedCaseIds();
+  for (const id of data.removedCaseIds) if (typeof id === 'string' && id.length > 0 && id.length <= 200) removed.add(id);
+  const current = readLegalCaseFiles();
+  const stored = JSON.parse(localStorage.getItem(scopedLegalStateKey(LEGAL_CASES_STORAGE)) || '[]');
+  if (Array.isArray(stored) && stored.some((item: any) => removed.has(String(item?.id || '')))) writeLegalCaseFiles(current);
+  for (const snapshot of data.cases) mergePersonalLegalCaseRuntimeSnapshot(snapshot);
+  return readLegalCaseFiles();
+}
+
 export async function syncPersonalLegalCaseToRuntime(caseFile: LegalCaseFile, signal?: AbortSignal): Promise<void> {
+  const assertCurrent = capturePersonalCaseOwner(signal); assertCurrent();
+  if (personalDeletedCaseIds().has(caseFile.id)) return;
   const data = await apiJson('/api/legal/client-case-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
     body: JSON.stringify({ case: caseFile, activate: getActiveLegalCaseId() === caseFile.id }),
   });
-  signal?.throwIfAborted();
-  if (data?.case) mergePersonalLegalCaseRuntimeSnapshot(data.case);
+  assertCurrent();
+  if (data?.case?.id !== caseFile.id) throw new Error('Invalid personal case synchronization receipt');
+  mergePersonalLegalCaseRuntimeSnapshot(data.case);
 }
+
 export async function deletePersonalLegalCaseFromRuntime(caseId: string, signal?: AbortSignal): Promise<void> {
-  if (caseId) await apiJson('/api/legal/client-case-sync/' + encodeURIComponent(caseId), { method: 'DELETE', signal });
+  const assertCurrent = capturePersonalCaseOwner(signal); assertCurrent();
+  if (!caseId) return;
+  const data = await apiJson('/api/legal/client-case-sync/' + encodeURIComponent(caseId), { method: 'DELETE', signal });
+  assertCurrent();
+  if (data?.caseId !== caseId || data?.tombstoned !== true) throw new Error('Invalid personal case deletion receipt');
+  personalDeletedCaseIds().add(caseId);
+  writeLegalCaseFiles(readLegalCaseFiles());
 }
 
 export function emitLegalCasesChanged() {

@@ -1,4 +1,5 @@
 import { reasoningChecks } from './legal_reasoning_fixture';
+import fs from 'node:fs';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { makeApp } from './helpers';
 import { createOrg, addMember } from '../server/org/db';
@@ -63,19 +64,25 @@ describe('legal reasoning failure truth and original source continuity', () => {
     [{ text: null, finishReason: 'stop' as const, toolCalls: null }, '未返回分析正文'],
     [{ text: '{"links":', toolCalls: null }, '格式不完整'],
     [{ text: '{"entries":[]}', toolCalls: null }, '模型未返回1–30项'],
-  ])('keeps failed analysis partial and archives its specific failure', async (response, reason) => {
+  ])('keeps failed analysis partial without archiving it, and preserves its specific failure file', async (response, reason) => {
     const { item } = fixture();
+    const originals = getCase(context.orgId, item.id, context.userId)!.materials;
     vi.mocked(makeLLMCall).mockResolvedValue(response);
-    const output = await run(item.id);
+    const output = await run(item.id, { writeFiles: true });
     expect(output.receipt).toMatchObject({ ok: false, status: 'partial', reasoningLinked: false });
     expect(output.content).toContain(reason);
     expect(output.content).not.toContain('底稿已生成');
     const archived = getCase(context.orgId, item.id, context.userId)!;
     expect(archived.workflowRuns?.at(-1)).toMatchObject({ ok: false, status: 'partial', reasoningLinked: false });
-    const analysis = archived.materials.find(m => m.title.includes('法律分析三段论'))!;
-    expect(analysis.content).toContain(reason);
-    expect(analysis.content).toContain('待逐项匹配法条');
-    expect(analysis.content).not.toMatch(/\| 通过 \|/);
+    expect(archived.materials).toEqual(originals);
+    expect(archived.workflowRuns?.at(-1)?.materialIds).toEqual([]);
+    const receipt = output.receipt;
+    if (!receipt || typeof receipt !== 'object' || !('artifacts' in receipt) || !Array.isArray(receipt.artifacts)) throw Error('Missing actual matrix artifact receipt');
+    const analysisPath = receipt.artifacts.find((file: unknown): file is string => typeof file === 'string' && file.endsWith('legal-reasoning-matrix.md'))!;
+    const analysis = fs.readFileSync(analysisPath, 'utf8');
+    expect(analysis).toContain(reason);
+    expect(analysis).toContain('待逐项匹配法条');
+    expect(analysis).not.toMatch(/\| 通过 \|/);
   });
 
   it('rejects truncated JSON even if the returned prefix happens to parse', async () => {

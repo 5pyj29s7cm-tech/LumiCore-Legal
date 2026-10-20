@@ -1,3 +1,4 @@
+import { setLegalCaseAccount } from '../src/lib/legalCaseStore';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ACTIVE_LEGAL_CASE_STORAGE,
@@ -44,6 +45,7 @@ beforeEach(() => {
   storage.clear();
   (globalThis as any).localStorage = storage;
   (globalThis as any).window = { localStorage: storage, dispatchEvent: vi.fn() };
+  setLegalCaseAccount('case-scope-owner');
   (globalThis as any).CustomEvent = class {
     constructor(public type: string, public init?: unknown) {}
   };
@@ -79,7 +81,7 @@ describe('legal case client scope', () => {
 
     usePersonalDomain();
     expect(readLegalCaseFiles().map(item => item.id)).toEqual(['personal-case']);
-    expect(storage.getItem(LEGAL_CASES_STORAGE)).toContain('personal-case');
+    expect(storage.getItem(`${LEGAL_CASES_STORAGE}:user:case-scope-owner`)).toContain('personal-case');
   });
 
   it('keeps active and consultation case choices separate per organization', () => {
@@ -106,7 +108,7 @@ describe('legal case client scope', () => {
     usePersonalDomain();
     expect(getActiveLegalCaseId()).toBe('personal-active');
     expect(getLegalConsultationCaseId()).toBe('personal-consultation');
-    expect(storage.getItem(ACTIVE_LEGAL_CASE_STORAGE)).toBe('personal-active');
+    expect(storage.getItem(`${ACTIVE_LEGAL_CASE_STORAGE}:user:case-scope-owner`)).toBe('personal-active');
   });
 
   it('clears a stale active case when the personal case list becomes empty', () => {

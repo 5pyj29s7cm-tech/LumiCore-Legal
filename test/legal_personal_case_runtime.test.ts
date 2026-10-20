@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { ToolRegistry } from '../server/tools/registry';
 import { registerLegalTools } from '../server/regions/packs/cn/legal_tools';
 import * as LegalCases from '../server/org/legal_cases';
-import { bindIndustryWorkspaceContext } from '../server/industry/workspace_context';
+import { bindIndustryWorkspaceContext, getActiveIndustryWorkspaceContext } from '../server/industry/workspace_context';
 
 beforeAll(async () => {
   const { initDatabase } = await import('../db_layer');
@@ -44,7 +44,7 @@ describe('personal legal case runtime continuity', () => {
     };
 
     LegalCases.upsertCaseSnapshot(orgId, userId, snapshot);
-    LegalCases.upsertCaseSnapshot(orgId, userId, { ...snapshot, notes: `${snapshot.notes} 待核对诉讼时效。` });
+    LegalCases.upsertCaseSnapshot(orgId, userId, { ...snapshot, notes: `${snapshot.notes} 待核对诉讼时效。`, updatedAt: new Date(Date.now() + 1000).toISOString() });
     expect(LegalCases.listCases(orgId, '矩衡律师版验收案', 10, userId)).toHaveLength(1);
 
     const toolMaterial = LegalCases.addMaterial(orgId, userId, caseId, {
@@ -80,7 +80,8 @@ describe('personal legal case runtime continuity', () => {
       orgId: '',
     } as any);
     expect(result).toContain('矩衡律师版验收案 案件闭环状态');
-    expect(result).toContain(caseId);
+    expect(getActiveIndustryWorkspaceContext({ userId, domain: 'personal', orgId: '' })?.attributes.caseId).toBe(caseId);
+    expect(afterStaleSync?.notes).toContain('待核对诉讼时效');
     expect(result).toContain('尚欠货款35万元');
     expect(result).toContain('合同与签收材料');
     expect(result).toContain('证据缺口');

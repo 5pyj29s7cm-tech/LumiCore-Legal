@@ -1,3 +1,4 @@
+import { setLegalCaseAccount } from '../src/lib/legalCaseStore';
 // @vitest-environment jsdom
 
 import { useState } from 'react';
@@ -26,7 +27,7 @@ function propsFor(activeCase: LegalCaseFile): WorkspaceProps {
 }
 
 beforeEach(() => {
-  localStorage.clear(); sessionStorage.clear(); setLocale('en');
+  localStorage.clear(); setLegalCaseAccount('focused-legal-owner'); sessionStorage.clear(); setLocale('en');
   localStorage.setItem('lumi_work_domain', 'personal');
   vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('External requests are forbidden in this regression'));
 });

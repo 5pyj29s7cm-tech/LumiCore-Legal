@@ -1,3 +1,4 @@
+import { setLegalCaseAccount } from '../lib/legalCaseStore';
 import { cancelAppConfirm } from '../lib/appConfirm';
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { toast } from 'sonner';
@@ -203,7 +204,7 @@ function useAppSessionAndPreferences({ children }: { children: ReactNode }) {
   const authGenerationRef = React.useRef(0);
   const domainSwitchRequest = React.useRef<AbortController | null>(null);
   const aiConfigRef = React.useRef(aiConfig);
-  useEffect(() => () => { authGenerationRef.current += 1; domainSwitchRequest.current?.abort(); notificationWriteRef.current?.abort(); }, []);
+  useEffect(() => () => { authGenerationRef.current += 1; domainSwitchRequest.current?.abort(); notificationWriteRef.current?.abort(); setLegalCaseAccount(); }, []);
   const [visionConfig, setVisionConfig] = useState<VisionConfig>(DEFAULT_VISION_CONFIG);
   const visionConfigRef = React.useRef(visionConfig);
   const visionPreferenceRequestRef = React.useRef(0);
@@ -211,6 +212,7 @@ function useAppSessionAndPreferences({ children }: { children: ReactNode }) {
   const modelReads = React.useRef<Partial<Record<'llm' | 'vision', AbortController>>>({});
   const modelAccountRef = React.useRef<string | undefined>(undefined);
   const setSessionUser = (next: UserProfile | null) => {
+    setLegalCaseAccount(next?.uid);
     if (modelAccountRef.current !== next?.uid) {
       Object.values(modelReads.current).forEach(read => read.abort());
       authGenerationRef.current++;

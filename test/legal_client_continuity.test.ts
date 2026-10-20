@@ -1,3 +1,4 @@
+import { setLegalCaseAccount } from '../src/lib/legalCaseStore';
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,7 +39,7 @@ function caseFile(material: LegalCaseFile['materials'][number]): LegalCaseFile {
 }
 
 beforeEach(() => {
-  localStorage.clear();
+  localStorage.clear(); setLegalCaseAccount('focused-legal-owner');
   sessionStorage.clear();
   localStorage.setItem('lumi_desktop_session_proof', 'desktop-proof-for-client-test');
 });
