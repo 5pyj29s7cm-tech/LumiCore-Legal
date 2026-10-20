@@ -6,7 +6,6 @@ import { decodeToolResult } from '../tools/result_envelope';
 import { assertOrganizationResourceAccess, OrganizationResourceAuthorizationError } from '../org/resource_acl';
 import { legalToolDefinitions } from '../regions/packs/cn/legal_tools';
 import { bindIndustryWorkspaceContext, getActiveIndustryWorkspaceContext, listIndustryWorkspaceContexts } from '../industry/workspace_context';
-import { PRODUCT_VARIANT } from '../../shared/product_variant';
 import { legalToolCaseIdentity, legalToolEntryId } from '../../shared/legal_tool_entry';
 import { runLumiEntryTurn } from "../cognition/turn_execution";
 import { captureRequestAuthorization, captureConversationAuthorization, combineRequestAuthorizations } from "../conversation/lifecycle";
@@ -21,6 +20,7 @@ import { requireNotStrict } from '../config/privacy';
 import { createCallerKeyProvider } from '../llm/caller_key_provider';
 
 import { createRequestAbortController } from '../http/request_abort';
+import { runtimeShutdownCancellation } from '../runtime/shutdown_work';
 import { makeLLMCall } from "../llm/providers";
 import { ToolRegistry, toolRegistry } from "../tools/registry";
 import { executeToolCall, executeToolCallOrThrow } from "../tools/execution_engine";
@@ -260,6 +260,7 @@ function mountConversationCompletionRoutes(router: Router, llm: SharedProviderGe
     const receiptObserver = businessTask ? createToolReceiptObserver(async record => {
       if (isBusinessAuthorized()) await observeIndustryWorkflowTool({ userId, domain, orgId }, businessTask.id, record);
     }) : undefined;
+    const unregisterShutdownCancellation = runtimeShutdownCancellation.register(request.controller);
     try {
       const anchored = businessMetadata?.conversationId ? resolveConversationForEntry(userId, { domain, orgId }, { kind: 'rest' }, businessMetadata.conversationId) : null;
       if (businessMetadata?.conversationId && !anchored) throw Object.assign(new Error('The bound business conversation is unavailable'), { code: 'CONVERSATION_ENTRY_UNAVAILABLE' });
@@ -335,7 +336,14 @@ function mountConversationCompletionRoutes(router: Router, llm: SharedProviderGe
         catch (persistenceError) { error = persistenceError; }
       }
       const authorizationRevoked = error?.code === 'CONVERSATION_ENTRY_UNAVAILABLE' || !isBusinessAuthorized();
-      if (request.signal.aborted && (!authorizationRevoked || res.destroyed)) return;
+      if (request.signal.aborted && (!authorizationRevoked || res.destroyed)) {
+        if (!res.destroyed && !res.writableEnded) {
+          const payload = { error: 'The chat request was cancelled before completion.', code: 'CHAT_REQUEST_CANCELLED', done: true, failed: true };
+          if (res.headersSent) { res.write(`data: ${JSON.stringify(payload)}\n\n`); res.end(); }
+          else res.status(503).json(payload);
+        }
+        return;
+      }
       console.error("AI Proxy Error:", error);
       const publicError = sanitizeChatAgentErrorPayload({
         code: authorizationRevoked ? 'CHAT_CONVERSATION_REFRESH_FAILED' : chatPublicErrorCodeForException(error),
@@ -352,6 +360,7 @@ function mountConversationCompletionRoutes(router: Router, llm: SharedProviderGe
         code: publicError.code,
       });
     } finally {
+      unregisterShutdownCancellation();
       membershipWatcher?.dispose();
       request.dispose();
     }
@@ -372,12 +381,12 @@ function mountLegalCompletionRoutes(router: Router, llm: SharedProviderGetters &
     }
     const orgId = resolveLegalCaseworkOrgId({ domain: 'personal', userOrgId: '', userId: req.user!.uid });
     const caseFile = LegalCases.upsertCaseSnapshot(orgId, req.user!.uid, input);
-    if (req.body.activate === true && PRODUCT_VARIANT.productLine === 'legal') {
-      const selectionScope = { userId: req.user!.uid, domain: 'personal' as const, orgId: '' };
+    if (req.body.activate === true) {
+      const selectionScope = { userId: req.user!.uid, domain: 'personal' as const, orgId: '', productLine: 'legal' };
       const active = getActiveIndustryWorkspaceContext(selectionScope);
       if (active?.attributes.caseId !== caseFile.id || active.name !== caseFile.title) {
         const existing = listIndustryWorkspaceContexts(selectionScope).find(item => item.attributes.caseId === caseFile.id);
-        bindIndustryWorkspaceContext(selectionScope, { id: existing?.id, name: caseFile.title,
+        bindIndustryWorkspaceContext(selectionScope, { id: existing?.id, productLine: 'legal', name: caseFile.title,
           attributes: { caseId: caseFile.id, caseName: caseFile.title, caseNumber: caseFile.caseNumber, clientName: caseFile.party, court: caseFile.court, stage: caseFile.stage } });
       }
     }

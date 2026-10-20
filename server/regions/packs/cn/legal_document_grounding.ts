@@ -20,11 +20,11 @@ export function legalDocumentReviewPrompt(markdown: string, sources: string): st
 本案原始材料：\n${sources}\n待核对文书：\n${JSON.stringify(documentLines(markdown).map(({ paragraphId, text }) => ({ paragraphId, text })))}`;
 }
 
-export function legalDocumentBatchReviewPrompt(documents: Array<{ baseName: string; markdown: string }>, sources: string): string {
+export function legalDocumentBatchReviewPrompt(documents: Array<{ baseName: string; markdown: string; sourceIds?: string[] }>, sources: string, sourceBindings = false): string {
   return `${LEGAL_DOCUMENT_REVIEW_INSTRUCTIONS}
 本次核对同一案件的多份文书，来源只读一次。每份独立返回结果，同时检查文书之间是否矛盾。只按提供的材料核对，不扩展检索或重新分析案件。
-仅输出 JSON {"documents":[{"baseName":"原标识","complete":true,"corrections":[{"paragraphId":"P1","replacement":"这一整行修正后的内容","reason":"原文与材料不一致之处"}],"unresolved":[]}]}，不能遗漏文书。
-本案原始材料：\n${sources}\n文书列表：${JSON.stringify(documents.map(({ baseName, markdown }) => ({ baseName, lines: documentLines(markdown).map(({ paragraphId, text }) => ({ paragraphId, text })) })))}`;
+仅输出 JSON {"documents":[{"baseName":"原标识","complete":true${sourceBindings ? ',"sourceIds":["本案已有原句编号"]' : ''},"corrections":[{"paragraphId":"P1","replacement":"这一整行修正后的内容","reason":"原文与材料不一致之处"}],"unresolved":[]}]}，不能遗漏文书。
+${sourceBindings ? 'sourceIds可纠正每份文书关联的原句编号，只能选择本案实际相关的已有来源；省略该字段时保留原绑定，不代表原绑定已通过语义核验。\n' : ''}本案原始材料：\n${sources}\n文书列表：${JSON.stringify(documents.map(({ baseName, markdown, sourceIds }) => ({ baseName, ...(sourceIds ? { sourceIds } : {}), lines: documentLines(markdown).map(({ paragraphId, text }) => ({ paragraphId, text })) })))}`;
 }
 
 export function applyLegalDocumentReview(value: unknown, markdown: string): { markdown: string; errors: string[]; corrections: number } {

@@ -977,7 +977,7 @@ fn app_launch_history_path() -> Option<PathBuf> {
         .ok()?;
     Some(
         PathBuf::from(base)
-            .join("LumiCore-Legal")
+            .join("LumiCore")
             .join("app-launch-history.json"),
     )
 }
@@ -993,7 +993,7 @@ fn read_app_launch_history() -> Vec<AppLaunchHistoryEntry> {
         let Some(base) = current_path.parent().and_then(Path::parent) else {
             return Vec::new();
         };
-        base.join("LumiOS-Legal").join("app-launch-history.json")
+        base.join("LumiOS").join("app-launch-history.json")
     };
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();

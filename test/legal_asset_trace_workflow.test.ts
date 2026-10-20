@@ -22,14 +22,14 @@ describe('legal asset trace workflow', () => {
       runMode: 'deep',
     });
 
-    expect(enterprise.steps.filter(step => step.stage === 'quick')).toHaveLength(2);
+    expect(enterprise.steps.filter(step => step.stage === 'quick')).toHaveLength(1);
     expect(enterprise.steps.filter(step => step.stage === 'deep')).toHaveLength(12);
     expect(enterprise.steps.filter(step => step.stage === 'analysis')).toHaveLength(4);
-    expect(individual.steps.filter(step => step.stage === 'quick')).toHaveLength(2);
+    expect(individual.steps.filter(step => step.stage === 'quick')).toHaveLength(1);
     expect(individual.steps.filter(step => step.stage === 'deep')).toHaveLength(10);
     expect(individual.steps.filter(step => step.stage === 'analysis')).toHaveLength(4);
-    expect(new Set(enterprise.steps.map(step => step.id)).size).toBe(18);
-    expect(new Set(individual.steps.map(step => step.id)).size).toBe(16);
+    expect(new Set(enterprise.steps.map(step => step.id)).size).toBe(17);
+    expect(new Set(individual.steps.map(step => step.id)).size).toBe(15);
     expect(enterprise.steps.find(step => step.id === 'enterprise-bids-receivables')?.tool).toBe('legal_search_tender_projects');
   });
 
@@ -39,17 +39,16 @@ describe('legal asset trace workflow', () => {
       subjectType: 'enterprise',
       runMode: 'quick',
     });
-    expect(getAssetTraceStepsInScope(workflow)).toHaveLength(2);
-    expect(getNextAssetTraceStep(workflow)?.id).toBe('source-preflight');
+    expect(getAssetTraceStepsInScope(workflow)).toHaveLength(1);
+    expect(getNextAssetTraceStep(workflow)?.id).toBe('quick-scan');
 
-    workflow = patchAssetTraceStep(workflow, 'source-preflight', { status: 'completed', output: 'ready' });
     workflow = patchAssetTraceStep(workflow, 'quick-scan', { status: 'completed', output: 'scan' });
     expect(workflow.status).toBe('completed');
-    expect(getAssetTraceCompletion(workflow)).toEqual({ done: 2, total: 2, percent: 100 });
+    expect(getAssetTraceCompletion(workflow)).toEqual({ done: 1, total: 1, percent: 100 });
 
     workflow = promoteAssetTraceWorkflow(workflow);
     expect(workflow.status).toBe('ready');
-    expect(getAssetTraceStepsInScope(workflow)).toHaveLength(18);
+    expect(getAssetTraceStepsInScope(workflow)).toHaveLength(17);
     expect(getNextAssetTraceStep(workflow)?.id).toBe('enterprise-company-profile');
   });
 
@@ -60,7 +59,6 @@ describe('legal asset trace workflow', () => {
       runMode: 'deep',
     });
     for (const stepId of [
-      'source-preflight',
       'quick-scan',
       'enterprise-company-profile',
       'enterprise-judicial-cases',
@@ -90,12 +88,12 @@ describe('legal asset trace workflow', () => {
       caseId: 'case-1',
       orgId: 'org-1',
     });
-    const interrupted = patchAssetTraceStep(workflow, 'source-preflight', { status: 'running' });
+    const interrupted = patchAssetTraceStep(workflow, 'quick-scan', { status: 'running' });
     const restored = normalizeAssetTraceWorkflow(JSON.parse(JSON.stringify(interrupted)));
 
     expect(restored?.caseId).toBe('case-1');
     expect(restored?.orgId).toBe('org-1');
-    expect(restored?.steps.find(step => step.id === 'source-preflight')?.status).toBe('pending');
+    expect(restored?.steps.find(step => step.id === 'quick-scan')?.status).toBe('pending');
     expect(restored?.status).toBe('ready');
   });
 });

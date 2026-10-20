@@ -1,25 +1,11 @@
-import { readLegalFolderMaterials } from "./documents";
 import path from "path";
-import { textArg } from "./context";
-import { inferFolderCaseType } from "./documents";
-import { roleLabel } from "./context";
-import { extractFolderParties } from "./documents";
-import { buildFolderEvidenceTable } from "./documents";
-import { summarizeFilesForFolder } from "./documents";
-import { listArg } from "./context";
-import { LEGAL_REASONING_BASELINE } from "./context";
-import { runLegalLLM } from "./context";
-import { generateArgumentOrOpinionHandler } from "./argument_drafting";
-import { buildSearchQueries } from "./context";
-import { expandLocalPath } from "./context";
-import { legalOutputDirName } from "./documents";
-import { legalWrite } from "../../../../legal/execution";
 import fs from "fs";
-import { legalWorkspaceId } from "./context";
-import { createLegalArticle } from "../../../../legal/kb";
-import { indexLegalArticle } from "../../../../legal/kb";
-import { legalExecutionSignal } from "../../../../legal/execution";
-import { encodeToolResult } from "../../../../tools/result_envelope";
+import { legalWrite, legalExecutionSignal } from "../../../../legal/execution";
+import { createLegalArticle, indexLegalArticle } from "../../../../legal/kb";
+import { readLegalFolderMaterials, inferFolderCaseType, extractFolderParties, buildFolderEvidenceTable, summarizeFilesForFolder, legalOutputDirName } from "./documents";
+import { textArg, roleLabel, listArg, LEGAL_REASONING_BASELINE, runLegalLLM, buildSearchQueries, expandLocalPath, legalWorkspaceId } from "./context";
+import { generateArgumentOrOpinionHandler } from "./argument_drafting";
+import { encodeToolResult, decodeToolResult } from "../../../../tools/result_envelope";
 
 export async function analyzeFolderAndDraftArgumentHandler(args: Record<string, any>, context?: any): Promise<string> {
   const read = await readLegalFolderMaterials(args);
@@ -83,7 +69,7 @@ ${LEGAL_REASONING_BASELINE}
   const analysisGenerated = Boolean(analysis.trim());
   if (!analysisGenerated) analysis = `# ${caseName} 案情分析未完成\n\n未取得模型分析；以下仅保留原始材料，未生成争点或法律结论。\n\n${read.corpus}`;
 
-  const argumentDraft = await generateArgumentOrOpinionHandler({
+  const argumentResult = await generateArgumentOrOpinionHandler({
     ...args,
     caseName,
     role,
@@ -96,6 +82,10 @@ ${LEGAL_REASONING_BASELINE}
     objective,
     materials: read.corpus,
   }, context);
+  const argument = decodeToolResult(argumentResult);
+  const argumentReceipt = argument.receipt as { ok?: boolean; status?: string } | undefined;
+  const argumentGenerated = argumentReceipt?.ok === true && argumentReceipt.status === 'generated';
+  const complete = analysisGenerated && argumentGenerated && read.skipped.length === 0;
 
   const researchPlan = `# ${caseName} 外部检索与复核清单
 
@@ -143,7 +133,7 @@ ${skippedLines}
     { name: '00_文件夹读取报告.md', content: readReport },
     { name: '01_案情分析与争议焦点.md', content: analysis },
     { name: '02_证据目录草稿.md', content: `# ${caseName} 证据目录草稿\n\n${evidenceTable}\n\n## 复核提示\n- 提交前逐项核对真实性、合法性、关联性、页码和原件状态。\n- 证明目的需与最终争议焦点保持一致。\n` },
-    { name: '03_代理词草稿.md', content: argumentDraft },
+    { name: '03_代理词草稿.md', content: argument.content },
     { name: '04_外部检索与复核清单.md', content: researchPlan },
   ];
 
@@ -172,12 +162,14 @@ ${skippedLines}
     kbLine = `\n- 知识库：已导入 articleId=${article.id}，索引块数=${indexed}`;
   }
 
-  return encodeToolResult(`# 案件文件夹代理词${analysisGenerated ? '草稿已生成' : '分析未完成，已保留原文及代理词草稿'}
+  return encodeToolResult(`# 案件文件夹代理词${complete ? '草稿已生成' : '处理未完成，已保留原文及已有底稿'}
 
 ## 一、处理结果
 - 案件：${caseName}
 - 文件夹：${read.folderPath}
 - 已读取材料：${read.filesRead.length} 个
+- 案情分析：${analysisGenerated ? '已生成待复核稿' : '未完成'}
+- 代理词：${argumentGenerated ? '已生成待复核稿' : '未完成'}
 - 暂未读取材料：${read.skipped.length} 个
 - 案由/类型：${caseType}
 - 我方身份：${role}
@@ -194,5 +186,5 @@ ${skippedLines}
 
 ## 五、边界
 - 代理词是律师工作底稿，不能直接作为最终庭审发表或提交文本。
-- 未核验法条、类案、证据原件和页码前，正式文书中应保留“待检索/待核验/待补证”标记。`, { ok: analysisGenerated, status: analysisGenerated ? 'generated' : 'partial' });
+- 未核验法条、类案、证据原件和页码前，正式文书中应保留“待检索/待核验/待补证”标记。`, { ok: complete, status: complete ? 'generated' : 'partial', analysisGenerated, argumentGenerated });
 }

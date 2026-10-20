@@ -99,7 +99,7 @@ describe('server-owned pleading fields with existing source-bound analysis and a
   expect(bindConversationActionTurnTask({userId:f.userId,conversationId:conversation.id,requestId,taskId}).bound).toBe(true);
   const chat={...f.context,source:'chat',conversationId:conversation.id,requestId,taskId};
   const resolved=resolveLegalCaseArguments('legal_generate_litigation_packet',{caseId:f.c.id,parties:'MODEL-PARTY',role:'defendant',claims:'MODEL-CLAIM',objective:'MODEL-OBJECTIVE'},chat);
-  expect(resolved).toMatchObject({parties:actual.args.parties,role:'plaintiff',claims:actual.args.claims});expect(resolved.materials).toContain(raw);expect(resolved.objective).toBeUndefined();
+  expect(resolved).toMatchObject({parties:actual.args.parties,role:'plaintiff',claims:actual.args.claims});expect(resolved.requirements).toBe(raw);expect(resolved.materials).not.toContain(raw);expect(resolved.objective).toBeUndefined();
   const direct=resolveLegalCaseArguments('legal_generate_litigation_packet',{caseId:f.c.id,parties:'EXPLICIT-PARTY',role:'defendant',claims:'EXPLICIT-CLAIM'},{...chat,source:'legal-direct-tool'});
   expect(direct).toMatchObject({parties:'EXPLICIT-PARTY',role:'defendant',claims:'EXPLICIT-CLAIM'});
   const noCase=resolveLegalCaseArguments('legal_generate_litigation_packet',{parties:'MODEL-PARTY',role:'plaintiff',claims:'MODEL-CLAIM'},chat);expect(noCase.parties).not.toBe('MODEL-PARTY');expect(noCase.claims).not.toBe('MODEL-CLAIM');expect(noCase.materials).toContain(raw);

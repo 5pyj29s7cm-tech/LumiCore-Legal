@@ -46,7 +46,7 @@ describe('bid wait budget reaches the actual streamed SDK with existing deadline
     expect(getToolExecutionTimeoutMs('legal_generate_bid')).toBe(LEGAL_BID_TOOL_TIMEOUT_MS); expect(getToolExecutionTimeoutMs('legal_review_contract')).toBe(120_000);
   });
 
-  it('stops never-returning SDK chapters at 180 seconds each within the unchanged 360-second workload budget without caching them as completed', async () => {
+  it('stops three never-returning SDK chapters in two 180-second worker waves without caching them as completed', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     const create = vi.fn(() => new Promise(() => {})); const f = fixture(create, 'never-returning-sdk-case'), before = snapshot(), start = Date.now();
     const resultPromise = run(f); await vi.advanceTimersByTimeAsync(180_001); expect(create).toHaveBeenCalledTimes(3); await vi.advanceTimersByTimeAsync(180_001);
@@ -60,6 +60,30 @@ describe('bid wait budget reaches the actual streamed SDK with existing deadline
     const f = fixture(create, 'parent-cancelled-sdk-case', controller.signal), before = snapshot();
     const cancelled = expect(run(f)).rejects.toThrow('virtual caller cancelled'); await vi.advanceTimersByTimeAsync(10_000); expect(create).toHaveBeenCalledTimes(2); controller.abort(new Error('virtual caller cancelled')); await cancelled;
     await vi.advanceTimersByTimeAsync(70_000); expect(create).toHaveBeenCalledTimes(2); expect(snapshot()).toEqual(before);
+  });
+
+  it('allows the sole remaining chapter its serial 159-second draft and 30-second review without regenerating reviewed chapters', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const network = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('OFFLINE_BUDGET_REGRESSION_ONLY'));
+    let recovering = false; const phases: Array<{ review: boolean; start: number; end: number }> = [];
+    const create = vi.fn((params: any, options: any) => {
+      const review = promptOf(params).includes('待核对JSON草稿：');
+      if (!recovering) return !review && promptOf(params).includes('本次只输出“技术')
+        ? Promise.reject(new Error('virtual technical chapter outage')) : response(params);
+      const phase = { review, start: Date.now(), end: 0 }; phases.push(phase);
+      return (async function* () { try { yield* sdkCompletion(params, completeResponse(params), review ? 30_000 : 159_000, options.signal); } finally { phase.end = Date.now(); } })();
+    });
+    const f = fixture(create, 'sole-remaining-serial-stages-case');
+    const first = await run(f);
+    expect(first.receipt).toMatchObject({ ok: false, status: 'partial' }); expect(create).toHaveBeenCalledTimes(5);
+    recovering = true; create.mockClear(); const pending = run(f, false);
+    await vi.advanceTimersByTimeAsync(159_001); expect(create).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(30_001); const result = await pending;
+    expect(result.receipt).toMatchObject({ ok: true, status: 'generated' }); expect(create).toHaveBeenCalledTimes(2);
+    expect(promptOf(create.mock.calls[0][0])).toContain('本次只输出“技术方案与实施计划”');
+    expect(phases.map(phase => phase.end - phase.start)).toEqual([159_000, 30_000]);
+    expect(result.content).toContain('接续复用 2 章'); expect(result.content).toContain(source);
+    expect(network).not.toHaveBeenCalled();
   });
 
   it('retains two actual SDK-generated chapters and retries only the missing chapter on the same source and selected model', async () => {

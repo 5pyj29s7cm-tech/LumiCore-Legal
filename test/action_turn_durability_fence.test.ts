@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe('accepted action-turn durability fence', () => {
-  it.each(['ok', 'okay', '行', '没问题', '开始吧', '确认', '好的'])('binds %s only to the exact durable pending action, once', async userText => {
+  it.each(['ok', 'okay', '行', '没问题', '开始吧', '确认', '好的', '确认，确认。', 'yes, yes.'])('binds %s only to the exact durable pending action, once', async userText => {
     const channelScope = buildTransportNeutralConfirmationScope({ domain: 'personal', conversationId: 'shared-confirmation' });
     const taskScope = buildTransportNeutralConfirmationScope({ domain: 'personal', conversationId: 'shared-confirmation', taskId: 'reviewed-task' });
     recordPendingConfirmation('confirmation-user', 'desktop_open', { target: 'Notepad' }, 'chat', taskScope);
@@ -369,7 +369,8 @@ describe('accepted action-turn durability fence', () => {
     const execute = confirmedOwner.indexOf('executeToolCall({');
     expect(durableConsume).toBeGreaterThanOrEqual(0);
     expect(execute).toBeGreaterThan(durableConsume);
-    expect(confirmedOwner).toContain('preflight: () => consumed');
+    expect(confirmedOwner).toContain('preflight: () => !consumed');
+    expect(confirmedOwner).toContain("? { allowed: false, arguments: exactArgs, reason: 'The one-time confirmation expired before execution.' }");
     expect(confirmedOwner).toContain("executionOrigin: 'confirmed_action_resume'");
     const routing = source.indexOf('await runLumiEntryTurn<void>({', flush);
     const core = fs.readFileSync(path.resolve('server/cognition/turn_execution.ts'), 'utf8');

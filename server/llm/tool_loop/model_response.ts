@@ -163,12 +163,13 @@ export async function prepareToolLoopModelResponse(state: ToolLoopState, iterati
         }],
       };
     } else {
+      const onChunk = state.onStreamChunk && (state.context?.currentTurnExecutionRequested ? () => undefined : state.onStreamChunk);
       response = state.modelBudget
-        ? await state.modelBudget.runModelAttempt(state.config.attemptTimeouts, state.context?.currentTurnExecutionRequested ? () => undefined : state.onStreamChunk, invokeModel)
+        ? await state.modelBudget.runModelAttempt(state.config.attemptTimeouts, onChunk, invokeModel)
         : await invokeModel({
             signal: state.config.signal || new AbortController().signal,
             attemptTimeouts: resolveModelAttemptTimeouts(state.config.attemptTimeouts),
-            onChunk: state.context?.currentTurnExecutionRequested ? () => undefined : state.onStreamChunk,
+            onChunk: onChunk,
           });
       recordLatency('llm', Date.now() - llmStart);
     }

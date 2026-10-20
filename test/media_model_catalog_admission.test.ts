@@ -113,15 +113,15 @@ describe('official video catalog admission and one-request selection', () => {
     expect(JSON.parse(record.result!)).toMatchObject({ model: LIVE, selectionReason: 'explicit_model', generationMode: 'text_to_video' });
     expect(getUserPreferredGenerationModels(USER)).toEqual(before);
   });
-  it('preserves the first frame and rejects a model not advertised for image-to-video', async () => {
+  it.each([LIVE, 'aliyun/wan3.0-video-prime'])('preserves the first frame for the documented unified route %s and rejects an unadvertised id', async model => {
     const firstFrame = path.join(process.env.LUMI_DATA_DIR!, 'catalog-first-frame.png');
     fs.writeFileSync(firstFrame, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'));
-    const record = await execute({ model: LIVE, first_frame_image: firstFrame, size: '854x480', duration: 5 });
+    const record = await execute({ model, first_frame_image: firstFrame, size: '854x480', duration: 5 });
     expect(record.error).toBeUndefined();
-    expect(requests.find(request => request.method === 'POST')?.body).toMatchObject({ model: LIVE, image: expect.stringMatching(/^data:image/), duration: 5, size: '854x480' });
+    expect(requests.find(request => request.method === 'POST')?.body).toMatchObject({ model, image: expect.stringMatching(/^data:image/), duration: 5, size: '854x480' });
     expect(JSON.parse(record.result!)).toMatchObject({ generationMode: 'image_to_video', inputReferenceAccepted: true, selectionReason: 'explicit_model' });
     requests = [];
-    await expectNotSubmitted(await execute({ model: 'aliyun/wan3.0-video-prime', first_frame_image: firstFrame, size: '854x480', duration: 5 }));
+    await expectNotSubmitted(await execute({ model: 'aliyun/wan3.0-video-unsupported', first_frame_image: firstFrame, size: '854x480', duration: 5 }));
   });
   it.each([{ duration: 31, size: '854x480' }, { duration: 5, size: '999x999' }, { duration: 5, size: '832x480' }])('keeps native duration and size restrictions before catalog or paid requests', async invalid => {
     const record = await execute({ model: LIVE, ...invalid });

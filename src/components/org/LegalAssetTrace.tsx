@@ -107,8 +107,6 @@ function buildTraceToolArgs(
   const common = assetTraceCaseArgs(caseFile, orgId);
   const stepCopy = getStepCopy(copy, step.id);
   switch (step.tool) {
-    case 'legal_external_source_status':
-      return {};
     case 'legal_trace_assets':
     case 'legal_equity_penetration':
     case 'legal_company_database_lookup':
@@ -264,6 +262,7 @@ function AssetTrace({ caseFile, orgId, onAddMaterial, onUpdateCase }: Props) {
     setManualNote(step.note || '');
     try {
       let receiptStatus = '';
+      let verified = true;
       let output = '';
       if (step.tool === 'local_timeline') {
         output = buildTimelineOutput(running, copy);
@@ -277,9 +276,10 @@ function AssetTrace({ caseFile, orgId, onAddMaterial, onUpdateCase }: Props) {
         );
         output = execution.text;
         receiptStatus = String(execution.receipt?.status || '').trim().toLowerCase();
+        verified = execution.verification?.status === 'verified' && execution.receipt?.ok !== false;
       }
       signal.throwIfAborted();
-      const needsSource = receiptStatus === 'needs_source';
+      const needsSource = !verified || receiptStatus === 'needs_source';
       const next = patchAssetTraceStep(running, stepId, {
         status: needsSource || step.executionMode === 'assisted' ? 'needs_action' : 'completed',
         output,
@@ -308,8 +308,7 @@ function AssetTrace({ caseFile, orgId, onAddMaterial, onUpdateCase }: Props) {
       setActiveTab('workflow');
       setManualNote('');
       let next = createAssetTraceWorkflow({ subjectName: name, subjectType, runMode, claimAmount, terminationDate, caseId: caseFile?.id, orgId });
-      next = await executeStep(next, 'source-preflight', signal);
-      if (next.steps.find(step => step.id === 'source-preflight')?.status === 'completed') next = await executeStep(next, 'quick-scan', signal);
+      next = await executeStep(next, 'quick-scan', signal);
       return combineAssetTraceOutputs(next);
     });
   };

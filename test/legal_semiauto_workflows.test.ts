@@ -444,7 +444,8 @@ describe('semi-automated legal workflows', () => {
     expect(output).toContain('归集未完成');
     expect(output).toContain('保留原始材料');
     expect(output).not.toContain('对方可能主张');
-    expect(output).toMatch(/律师|复核|确认/);
+    expect(decodeToolResult(output).receipt).toMatchObject({ ok: false, status: 'partial', persisted: false });
+    expect(output).not.toContain('案件空间：已归档');
   });
 
   it('creates unified legal case workspaces with case state and search order', async () => {
@@ -883,7 +884,7 @@ describe('semi-automated legal workflows', () => {
       caseType: '买卖合同纠纷',
       complaint: '请求支付货款及违约金。',
       evidence: '合同、送货单、签收单、银行流水。',
-    });
+    }, await legalModelContext(JSON.stringify({ entries: [{ issue: '付款条件及对应证据仍待核实', sourceIds: ['F1', 'F2'] }] })));
     const cases = await import('../server/org/legal_cases');
     const caseFile = cases.listCases(orgId, caseName, 1)[0];
     const sourceInput = await reasoningSourceInput(orgId, 'vitest', caseName, '原告主张已完成供货，被告主张质量待核验；付款与交易关联仍需核实。', caseFile.id);
@@ -919,6 +920,10 @@ describe('semi-automated legal workflows', () => {
     expect(titles).toContain('代理词草稿');
     expect(titles).toContain('应对策略草稿');
     expect(archived.materials.find(material => material.title.endsWith('应对策略草稿'))).toMatchObject({ type: 'note', source: 'tool' });
+    expect(decodeToolResult(focus).receipt).toMatchObject({ ok: true, status: 'generated', persisted: true });
+    expect(focus).toContain('请求支付货款及违约金。');
+    expect(focus).toContain('合同、送货单、签收单、银行流水。');
+    expect(focus).toContain('尚未开展外部检索');
     expect(decodeToolResult(argument).receipt).toMatchObject({ ok: true, reasoningLinked: true, reasoningReviewed: true });
     expect(decodeToolResult(strategy).receipt).toMatchObject({ ok: true, reasoningLinked: true, reasoningReviewed: true });
   });
@@ -1176,7 +1181,8 @@ describe('semi-automated legal workflows', () => {
 
     for (const output of [argument, opinion]) {
       expect(decodeToolResult(output).receipt).toMatchObject({ ok: true, reasoningLinked: true, reasoningReviewed: true });
-      expect(output).toContain('大前提');
+      expect(output).toContain('法律依据：');
+      expect(output).not.toMatch(/大前提：|小前提：/);
       expect(output).toContain('本案材料'); expect(output).toContain('规则原文衔接片段');
       expect(output).toContain('未经律师核准');
       expect(output).toMatch(/争议焦点|法律分析|证据评价|复核清单/);
@@ -1662,7 +1668,8 @@ describe('semi-automated legal workflows', () => {
       expect(output).toMatch(/跳过\/失败：1 份|跳过\/失败：1/);
       expect(output).toContain('起诉状.txt');
       expect(output).toContain('证据目录.md');
-      expect(output).toContain('ocr_image_file');
+      expect(output).toContain('图片文字识别');
+      expect(output).not.toContain('ocr_image_file');
       expect(output).not.toContain('legal_import_materials_to_kb');
 
       const results = await KB.searchKnowledgeBase('org-legal-material-import', '质量异议 付款条件', {

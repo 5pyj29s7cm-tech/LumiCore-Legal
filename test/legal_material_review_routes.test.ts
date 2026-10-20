@@ -1,4 +1,8 @@
 import { makeApp, JWT_SECRET } from './helpers';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { getDataRoot, legalDataMergeReceiptPath, legacyLegalDataFingerprint } from '../server/config/data_path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import jwt from 'jsonwebtoken';
 import { mountChatRoutes } from '../server/routes/chat_routes';
@@ -69,5 +73,46 @@ describe('native human material review route', () => {
   it('does not expose human review as a model tool', async () => {
     const response = await fetch(url + '/api/legal/tool/legal_confirm_material_review', { method: 'POST', headers: headers(), body: JSON.stringify({ lawyerApproved: true }) });
     expect(response.status).toBe(404);
+  });
+
+  it('reviews a migrated material from the verified shared file after the old data directory is gone', async () => {
+    const root = path.resolve(getDataRoot());
+    const sourceRoot = path.join(root, 'test-review-historical-root');
+    const relative = 'test-material-review-migrated/original.txt';
+    const oldFile = path.join(sourceRoot, 'data', relative);
+    const sharedFile = path.join(root, 'data', relative);
+    const manifestFile = path.join(root, 'runtime', 'test-material-review-migrated-manifest.json');
+    const receiptFile = legalDataMergeReceiptPath(sourceRoot, root);
+    const text = 'Synthetic full source material. Payment is unverified; tail marker retained.';
+    const sha = (value: string) => createHash('sha256').update(value).digest('hex');
+    for (const file of [oldFile, sharedFile, manifestFile, receiptFile]) fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(oldFile, text); fs.writeFileSync(sharedFile, text);
+    const fingerprint = legacyLegalDataFingerprint(sourceRoot);
+    const manifest = JSON.stringify({ sourceRoot, targetRoot: root, inputDigest: 'd'.repeat(64), migratedFiles: [{ path: relative, sha256: sha(text) }] });
+    fs.writeFileSync(manifestFile, manifest, { mode: 0o600 });
+    fs.writeFileSync(receiptFile, JSON.stringify({ version: 1, phase: 'completed', sourceRoot, targetRoot: root,
+      sourceFingerprint: fingerprint, inputDigest: 'd'.repeat(64), maintenanceManifest: manifestFile,
+      maintenanceManifestSha256: sha(manifest) }), { mode: 0o600 });
+    expect(path.resolve(sourceRoot).startsWith(root + path.sep)).toBe(true);
+    fs.rmSync(sourceRoot, { recursive: true });
+    try {
+      const f = fixture();
+      const material = cases.addMaterial(f.c.orgId, owner, f.c.id, { type: 'evidence', title: 'Synthetic migrated source', source: 'manual', content: text, localPath: oldFile })!;
+      const endpoint = url + '/api/legal/cases/' + f.c.id + '/materials/' + material.id + '/review';
+      const first = await (await fetch(endpoint, { headers: headers() })).json();
+      expect(first).toMatchObject({ status: 'pending', scope: 'archived_text_and_file', content: text });
+      const confirm = await fetch(endpoint, { method: 'POST', headers: headers(), body: JSON.stringify({ decision: 'confirmed', expectedRevision: first.revision }) });
+      expect(confirm.status).toBe(200);
+      expect(await confirm.json()).toMatchObject({ status: 'confirmed', scope: 'archived_text_and_file' });
+      expect(cases.getCase(f.c.orgId, f.c.id, owner)?.materials.find(item => item.id === material.id)?.localPath).toBe(oldFile);
+      expect(fs.existsSync(oldFile)).toBe(false);
+      fs.writeFileSync(sharedFile, text + ' Changed shared bytes.');
+      const changed = await (await fetch(endpoint, { headers: headers() })).json();
+      expect(changed.status).toBe('stale');
+      expect(changed.revision).not.toBe(first.revision);
+      expect((await fetch(endpoint, { method: 'POST', headers: headers(), body: JSON.stringify({ decision: 'confirmed', expectedRevision: first.revision }) })).status).toBe(409);
+    } finally {
+      for (const file of [sharedFile, manifestFile, receiptFile]) fs.unlinkSync(file);
+    }
   });
 });

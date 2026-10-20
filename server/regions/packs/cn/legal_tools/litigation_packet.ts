@@ -212,7 +212,7 @@ ${LEGAL_REASONING_BASELINE}
   const progress = legalDocumentProgress(writeFiles && args.persistCase !== false && textArg(args, 'caseId') ? JSON.stringify({
     orgId, userId: context?.userId || textArg(args, 'userId'), caseId: textArg(args, 'caseId'), caseContext,
     role, factDate: textArg(args, 'factDate'), temporalReviews: args.temporalReviews, dataRoutingPolicy: context?.dataRoutingPolicy,
-    authorities: textArg(args, 'legalAuthorities'), preference, recipe: { prompt, modelTargets, analysisSections: LITIGATION_ANALYSIS_SECTIONS, reviewPrompt: legalDocumentBatchReviewPrompt(modelTargets, sourceContext) },
+    authorities: textArg(args, 'legalAuthorities'), preference, recipe: { prompt, modelTargets, analysisSections: LITIGATION_ANALYSIS_SECTIONS, reviewPrompt: legalDocumentBatchReviewPrompt(modelTargets, sourceContext, true) },
   }) : null, args.forceRegenerate === true);
   for (const target of modelTargets) {
     const prior = progress.get(target.baseName);
@@ -226,28 +226,31 @@ ${LEGAL_REASONING_BASELINE}
     try {
       const remaining = deadline - Date.now();
       const entries = isCatalog(baseName) ? catalogEntries(JSON.parse(markdown)) : analysisEntries(JSON.parse(markdown), baseName);
-      const documents = entries.map(entry => ({ baseName: baseName + '/' + entry.sectionId,
+      const documents = entries.map(entry => ({ baseName: baseName + '/' + entry.sectionId, sourceIds: entry.sources.map(source => source.id),
         markdown: entry.response + (entry.missing ? '\n\n待核对：' + entry.missing : '') }));
-      const raw = remaining > 0 ? await runLegalLLMWithin(legalDocumentBatchReviewPrompt(documents, sourceContext),
+      const raw = remaining > 0 ? await runLegalLLMWithin(legalDocumentBatchReviewPrompt(documents, sourceContext, true),
         context, maxTokens, Math.min(LEGAL_CONTRACT_MODEL_TIMEOUT_MS, remaining), true) : null;
       const result = raw ? JSON.parse(raw.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '')) : null;
       const globalFailure = result?.unresolved !== undefined && (!Array.isArray(result.unresolved) || result.unresolved.length > 0);
-      const reviews = documents.map(document => {
+      const reviews = documents.map((document, index) => {
         const matches = !globalFailure && Array.isArray(result?.documents) ? result.documents.filter((entry: any) => entry?.baseName === document.baseName) : [];
         const response = matches.length === 1 ? matches[0] : null;
-        return { ...applyLegalDocumentReview(response, document.markdown), proposedCorrections: Array.isArray(response?.corrections) ? response.corrections.length : 0 };
+        return { ...applyLegalDocumentReview(response, document.markdown), proposedCorrections: Array.isArray(response?.corrections) ? response.corrections.length : 0,
+          sourceIds: response?.sourceIds === undefined ? entries[index].sources.map(source => source.id) : response.sourceIds };
       });
       const errors = reviews.flatMap(review => review.errors);
       if (errors.length) draftFailures.push({ baseName, reason: raw ? errors.join('；') : 'factual_review_timeout_or_empty' });
       else {
+        const rebound = { entries: entries.map((entry, index) => ({ sectionId: entry.sectionId, sourceIds: reviews[index].sourceIds, response: reviews[index].markdown, missing: '' })) };
+        const resolved = isCatalog(baseName) ? catalogEntries(rebound) : analysisEntries(rebound, baseName);
         const reviewed = isCatalog(baseName) ? '# ' + modelTargets.find(target => target.baseName === baseName)!.label + '（系统草稿）\n\n' + formatEvidenceCatalogRows(catalogRows.map(row => ({ ...row,
-          proofPurpose: reviews[entries.findIndex(entry => entry.sectionId === 'M' + row.index)].markdown })))
-          : canonical(entries.map((entry, index) => ({ ...entry, response: reviews[index].markdown, missing: '' }))); 
+          proofPurpose: resolved.find(entry => entry.sectionId === 'M' + row.index)!.response })))
+          : canonical(resolved);
         progress.save(baseName, reviewed, true, {
           proposedCorrections: reviews.reduce((count, review) => count + review.proposedCorrections, 0),
           appliedCorrections: reviews.reduce((count, review) => count + review.corrections, 0),
           before: JSON.stringify(documents),
-          after: JSON.stringify(documents.map((document, index) => ({ ...document, markdown: reviews[index].markdown }))),
+          after: JSON.stringify(documents.map((document, index) => ({ ...document, sourceIds: resolved.find(entry => entry.sectionId === entries[index].sectionId)!.sources.map(source => source.id), markdown: reviews[index].markdown }))),
         });
         provided.set(baseName, reviewed);
       }

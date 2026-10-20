@@ -1,3 +1,22 @@
+export type LegalRulePart = { id: string; start: number; end: number; quote: string };
+export type LegalApplicationCheck = { partId: string; ruleStart: number; ruleEnd: number; ruleQuote: string;
+  evidence: Array<{ materialId: string; quote: string; locator: string }>;
+  status: 'supported' | 'conditional' | 'unsupported'; application: string; conclusion: string; missingPremises: string[] };
+
+export interface LegalReasoningLink {
+  issue: string;
+  ruleCitation: string;
+  ruleQuote: string;
+  fact: string;
+  evidence: Array<{ materialId: string; quote: string; locator: string }>;
+  application: string;
+  conclusion: string;
+  limitations: string;
+  applicationChecks?: LegalApplicationCheck[];
+  ruleReferenceDate?: string;
+  ruleTemporalScope?: 'fact' | 'procedure';
+}
+
 /** Server-issued execution records. User documents are never progress receipts. */
 export interface LegalWorkflowRun {
   tool: string;

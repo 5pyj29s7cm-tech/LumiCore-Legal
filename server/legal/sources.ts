@@ -13,6 +13,7 @@ import { getKey } from '../config/keys';
 import { getDataDirectory } from '../config/data_path';
 import { requireLocalEndpoint } from '../config/privacy';
 import { mcpManager } from '../mcp/client';
+import { CN_QICHACHA_QUERY_COPY } from '../regions/packs/cn/qichacha_copy';
 import {
   CN_ASSET_TRACE_OFFICIAL_CAPABILITIES,
   CN_ASSET_TRACE_SOURCE_COPY,
@@ -696,24 +697,39 @@ export const QICHACHA_QUERY_TOOLS = {
 export type QichachaQueryType = keyof typeof QICHACHA_QUERY_TOOLS;
 export type ExternalSourceReceipt = { sourceName: string; sourceEndpoint: string; sourceTool: string; queriedAt: string; text: string };
 
+function qichachaFailure(code: keyof typeof CN_QICHACHA_QUERY_COPY.failureMessages): Error {
+  return new Error(CN_QICHACHA_QUERY_COPY.failurePrefix + ' [QCC_' + code.toUpperCase() + ']: ' + CN_QICHACHA_QUERY_COPY.failureMessages[code]);
+}
+
 async function callQichachaMcp(lane: 'company' | 'risk' | 'case' | 'regulation', tool: string, args: Record<string, unknown>, localOnly = false): Promise<ExternalSourceReceipt | null> {
   const apiKey = qichachaConfig().apiKey;
   if (!apiKey) return null;
   const sourceEndpoint = 'https://agent.qcc.com/mcp/' + lane + '/stream';
   requireLocalEndpoint(sourceEndpoint, 'Qichacha MCP', localOnly);
+  let text: string;
   try {
-    const text = await mcpManager.callToolForServer('qcc-' + lane, tool, args, { timeoutMs: 15000,
+    text = await mcpManager.callToolForServer('qcc-' + lane, tool, args, { timeoutMs: 15000,
       configuration: { enabled: true, source: 'external', transport: 'http', url: sourceEndpoint,
         headers: { Authorization: /^Bearer\s/i.test(apiKey) ? apiKey : 'Bearer ' + apiKey } } });
-    let data; try { data = JSON.parse(text); } catch { return null; }
-    const code = data?.code ?? data?.Code ?? data?.Status;
-    if (!data || data.error || data.Error || data.isError === true || (code !== undefined && !['0', '200'].includes(String(code)))) return null;
-    const payload = data.Result ?? data.result ?? data.Data ?? data.data ?? data;
-    const meaningful = Array.isArray(payload) ? payload.some(item => item && typeof item === 'object' && Object.keys(item).length)
-      : typeof payload === 'object' && Object.keys(payload).some(key => !['code', 'status', 'message', 'msg'].includes(key.toLowerCase()));
-    if (!meaningful) return null;
-    return { sourceName: CN_ASSET_TRACE_SOURCE_COPY.qichacha.mcpSourceName, sourceEndpoint, sourceTool: tool, queriedAt: new Date().toISOString(), text };
-  } catch { return null; }
+  } catch (error) {
+    // Classify transport failures without reflecting raw messages, URLs or credentials.
+    const failure = error as { status?: unknown; statusCode?: unknown; name?: unknown; message?: unknown };
+    const status = Number(failure?.status ?? failure?.statusCode);
+    const detail = String(failure?.message || '');
+    throw qichachaFailure(status === 401 || status === 403 || /\b(?:401|403|unauthorized|forbidden)\b/i.test(detail)
+      ? 'authorization' : /timeout|timed out|abort/i.test(String(failure?.name || '') + ' ' + detail) ? 'timeout' : 'connection');
+  }
+  let data: any;
+  try { data = JSON.parse(text); } catch { throw qichachaFailure('response'); }
+  const code = data?.code ?? data?.Code ?? data?.Status;
+  if (!data || data.error || data.Error || data.isError === true || (code !== undefined && !['0', '200'].includes(String(code)))) {
+    throw qichachaFailure(['401', '403'].includes(String(code)) ? 'authorization' : 'provider');
+  }
+  const payload = data.Result ?? data.result ?? data.Data ?? data.data ?? data;
+  const meaningful = Array.isArray(payload) ? payload.some(item => item && typeof item === 'object' && Object.keys(item).length)
+    : payload && typeof payload === 'object' && Object.keys(payload).some(key => !['code', 'status', 'message', 'msg'].includes(key.toLowerCase()));
+  if (!meaningful) throw qichachaFailure('empty');
+  return { sourceName: CN_ASSET_TRACE_SOURCE_COPY.qichacha.mcpSourceName, sourceEndpoint, sourceTool: tool, queriedAt: new Date().toISOString(), text };
 }
 
 export async function queryQichachaMcp(searchKey: string, kind: QichachaQueryType = 'registration', localOnly = false): Promise<ExternalSourceReceipt | null> {
@@ -727,8 +743,9 @@ async function searchQichachaCompany(keyword: string, localOnly = false): Promis
     const receipt = await queryQichachaMcp(keyword, 'registration', localOnly);
     if (!receipt) return null;
     const info = mapQichachaCompany(pickQichachaResult(JSON.parse(receipt.text)), keyword);
-    return info ? { ...info, sourceMode: 'mcp', sourceName: receipt.sourceName, sourceTool: receipt.sourceTool,
-      sourceEndpoint: receipt.sourceEndpoint, queriedAt: receipt.queriedAt, sourceText: receipt.text, url: 'https://www.qcc.com/' } : null;
+    if (!info) throw qichachaFailure('response');
+    return { ...info, sourceMode: 'mcp', sourceName: receipt.sourceName, sourceTool: receipt.sourceTool,
+      sourceEndpoint: receipt.sourceEndpoint, queriedAt: receipt.queriedAt, sourceText: receipt.text, url: 'https://www.qcc.com/' };
   }
   if (!settings.appKey || !settings.secretKey) return null;
   const ck = cacheKey('qcc-risk-v2', keyword);
@@ -900,12 +917,18 @@ async function searchQixinbaoCompany(keyword: string): Promise<CompanyInfo | nul
   return info;
 }
 
-export async function searchCompanySources(keyword: string, sourceIds?: string[], options: { localOnly?: boolean } = {}): Promise<CompanyInfo[]> {
+export async function searchCompanySources(keyword: string, sourceIds?: string[], options: { localOnly?: boolean; sourceErrors?: string[] } = {}): Promise<CompanyInfo[]> {
   requireLocalEndpoint('https://agent.qcc.com', 'External company query', options.localOnly);
   const results: CompanyInfo[] = [];
+  const sourceErrors = options.sourceErrors || [];
   if (isSelectedSource(sourceIds, 'qichacha', ['qcc', '企查查'])) {
-    const qcc = await searchQichachaCompany(keyword, options.localOnly);
-    if (qcc) results.push(qcc);
+    try {
+      const qcc = await searchQichachaCompany(keyword, options.localOnly);
+      if (qcc) results.push(qcc);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('[QCC_')) throw error;
+      sourceErrors.push(error.message);
+    }
   }
   if (isSelectedSource(sourceIds, 'tianyancha', ['tyc', '天眼查'])) {
     const tyc = await searchTianyanchaCompany(keyword);
@@ -916,6 +939,7 @@ export async function searchCompanySources(keyword: string, sourceIds?: string[]
     if (qxb) results.push(qxb);
   }
 
+  if (!results.length && sourceErrors.length && !options.sourceErrors) throw new Error(sourceErrors.join('\n'));
   const seen = new Set<string>();
   return results.filter(item => {
     const key = `${item.sourceName}:${item.unifiedCode || item.name}`;
@@ -925,7 +949,7 @@ export async function searchCompanySources(keyword: string, sourceIds?: string[]
   });
 }
 
-export async function searchCompany(keyword: string, options: { localOnly?: boolean } = {}): Promise<CompanyInfo | null> {
+export async function searchCompany(keyword: string, options: { localOnly?: boolean; sourceErrors?: string[] } = {}): Promise<CompanyInfo | null> {
   const results = await searchCompanySources(keyword, undefined, options);
   return results[0] || null;
 }

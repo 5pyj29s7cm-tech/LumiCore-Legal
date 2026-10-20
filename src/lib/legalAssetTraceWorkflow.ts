@@ -38,7 +38,6 @@ export interface AssetTraceWorkflow {
 }
 
 const QUICK_STEPS: readonly AssetTraceStepBlueprint[] = [
-  { id: 'source-preflight', stage: 'quick', order: 0, executionMode: 'automatic', tool: 'legal_external_source_status' },
   { id: 'quick-scan', stage: 'quick', order: 1, executionMode: 'automatic', tool: 'legal_trace_assets' },
 ];
 

@@ -977,7 +977,7 @@ export class ToolRegistry {
       if (context?.userConfirmed === true) {
         userConfirmed = true;
       } else if (context?.requestConfirmation) {
-        const allowed = await context.requestConfirmation(name, executionArgs, capability);
+        const allowed = await context.requestConfirmation(name, executionArgs, capability, { acceptedActionContract: context.acceptedActionContract });
         if (!allowed) {
           finishMetric('waiting_confirmation');
           return `Tool "${name}" requires user confirmation and was not approved.`;

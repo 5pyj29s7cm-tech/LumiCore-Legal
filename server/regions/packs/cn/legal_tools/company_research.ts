@@ -27,7 +27,8 @@ export async function traceAssetsHandler(args: Record<string, any>, context?: an
   const lines: string[] = [`# 被执行人"${subjectName}"财产线索报告\n`];
 
   // 1. Company info
-  const company = await searchCompany(subjectName, { localOnly: context?.dataRoutingPolicy === 'local_only' });
+  const sourceErrors: string[] = [];
+  const company = await searchCompany(subjectName, { localOnly: context?.dataRoutingPolicy === 'local_only', sourceErrors });
   if (company) {
     lines.push('## 企业基本信息');
     lines.push(`- 名称: ${company.name}`);
@@ -54,6 +55,8 @@ export async function traceAssetsHandler(args: Record<string, any>, context?: an
     lines.push('- 律师在授权网页内确认企业信息、股东信息、涉诉/被执行信息后，使用 材料入库 导入知识库。');
   }
 
+  if (sourceErrors.length) lines.push('\n## 企业查询异常', ...sourceErrors.map(message => '- ' + message));
+
   // 2. Enforcement records
   let enforcements: Awaited<ReturnType<typeof searchEnforcementRecords>> = [];
   let enforcementSourceError = '';
@@ -73,7 +76,7 @@ export async function traceAssetsHandler(args: Record<string, any>, context?: an
   }
 
   const observedSourceCount = (company ? 1 : 0) + enforcements.length;
-  const needsSource = Boolean(enforcementSourceError) || observedSourceCount === 0;
+  const needsSource = sourceErrors.length > 0 || Boolean(enforcementSourceError) || observedSourceCount === 0;
   lines.push('\n## 数据可用性');
   lines.push(`- 数据状态: ${needsSource ? 'needs_source' : 'observed'}`);
   lines.push(`- 已取得来源记录: ${observedSourceCount}`);
@@ -107,9 +110,10 @@ export async function equityPenetrationHandler(args: Record<string, any>, contex
   if (!companyName) return '请提供公司名称（name参数）';
   const caseName = textArg(args, 'caseName') || `${companyName}股权穿透`;
 
-  const company = await searchCompany(companyName, { localOnly: context?.dataRoutingPolicy === 'local_only' });
+  const sourceErrors: string[] = [];
+  const company = await searchCompany(companyName, { localOnly: context?.dataRoutingPolicy === 'local_only', sourceErrors });
   if (!company) {
-    const report = `未通过已配置 API 查询到"${companyName}"的企业信息，或尚未配置企查查官方 API 凭证。
+    const report = sourceErrors.join("\n") + `\n未通过已配置 API 取得"${companyName}"的可核验企业信息，不能据此认定企业不存在。
 
 可执行以下授权网页登录协作：
 1. 打开企查查官网并登录授权账号。
@@ -126,6 +130,7 @@ export async function equityPenetrationHandler(args: Record<string, any>, contex
   }
 
   const lines: string[] = [`# ${companyName} 股权穿透分析\n`];
+  if (!company.shareholders.length) lines.push('未取得可核验股东来源，股权穿透尚未完成；不能把空字段解释为没有股东。');
   lines.push('## 第一层：直接股东');
   for (const s of company.shareholders) {
     lines.push(`- ${s.name}: 持股 ${s.ratio}% (${s.type})`);
@@ -133,7 +138,7 @@ export async function equityPenetrationHandler(args: Record<string, any>, contex
 
   // Recursively trace each shareholder (max 3 levels)
   for (const s of company.shareholders.slice(0, 5)) {
-    const subCompany = await searchCompany(s.name, { localOnly: context?.dataRoutingPolicy === 'local_only' });
+    const subCompany = await searchCompany(s.name, { localOnly: context?.dataRoutingPolicy === 'local_only', sourceErrors });
     if (subCompany && subCompany.shareholders.length > 0) {
       lines.push(`\n## 穿透 ${s.name} 的股东`);
       for (const ss of subCompany.shareholders) {
@@ -150,13 +155,16 @@ export async function equityPenetrationHandler(args: Record<string, any>, contex
   lines.push('\n*注意: 股权穿透信息基于公开工商数据，实际控制关系需综合判断。*');
   lines.push(`*数据来源: ${company.sourceName || '企查查授权数据源'} | ${new Date().toISOString().slice(0, 10)}*`);
 
+  if (sourceErrors.length) lines.push('\n## 查询异常', ...sourceErrors.map(message => '- ' + message));
+  const needsSource = sourceErrors.length > 0 || !company.shareholders.length;
   const report = lines.join('\n');
-  return appendLegalWorkProductArchiveSection(report, args, context, {
+  const archivedReport = await appendLegalWorkProductArchiveSection(report, needsSource ? { ...args, persistCase: false } : args, context, {
     caseName,
     title: `${companyName}股权穿透分析报告`,
     type: 'evidence',
     cause: textArg(args, 'caseType') || '主体/股权穿透',
   });
+  return needsSource ? encodeToolResult(archivedReport, { ok: false, status: 'partial' }) : archivedReport;
 }
 
 export function mdCell(value: unknown): string {
@@ -208,7 +216,7 @@ export async function searchExternalAuthoritiesHandler(args: Record<string, any>
     : '| 1 | 未命中 | 未取得可核验来源；未配置、查询失败与无命中不能据此区分 | 待补充 | 待补充 | 请配置授权 API 或使用网页登录协作 | 律师复核 |';
 
   const statusRows = capabilities.map(source =>
-    `| ${mdCell(source.label)} | ${source.accessMode} | ${source.configured ? '已配置/可用' : '未配置或网页登录'} | ${source.canAutoQuery ? '可以' : '不承诺'} | ${mdCell(source.nextAction)} |`,
+    `| ${mdCell(source.label)} | ${source.accessMode} | ${source.configured ? '已配置（以本次回执为准）' : '未配置或网页登录'} | ${source.canAutoQuery ? '可以' : '不承诺'} | ${mdCell(source.nextAction)} |`,
   ).join('\n');
   const sourceOriginals = orderedResults.filter(item => item.sourceText).map(item => ({ ...item, text: item.sourceText }));
   const sourceRegisterRows = orderedResults.length
@@ -296,9 +304,18 @@ export async function companyDatabaseLookupHandler(args: Record<string, any>, co
 
   const queryType = (textArg(args, 'queryType') || 'registration') as QichachaQueryType;
   if (!Object.hasOwn(QICHACHA_QUERY_TOOLS, queryType) || (queryType !== 'registration' && sourceIds.some(id => !['qichacha', 'qcc', '企查查'].includes(id.toLowerCase())))) return encodeToolResult('该查询范围需要明确选择企查查及支持的 queryType，未发起外部查询。', { ok: false, status: 'partial' });
-  const mcpSource = queryType === 'registration' ? null : await queryQichachaMcp(name, queryType, context?.dataRoutingPolicy === 'local_only');
-  const companies = queryType === 'registration' ? await searchCompanySources(name, sourceIds, { localOnly: context?.dataRoutingPolicy === 'local_only' }) : [];
+  const sourceErrors: string[] = [];
+  let mcpSource: Awaited<ReturnType<typeof queryQichachaMcp>> = null;
+  if (queryType !== 'registration') {
+    try { mcpSource = await queryQichachaMcp(name, queryType, context?.dataRoutingPolicy === 'local_only'); }
+    catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('[QCC_')) throw error;
+      sourceErrors.push(error.message);
+    }
+  }
+  const companies = queryType === 'registration' ? await searchCompanySources(name, sourceIds, { localOnly: context?.dataRoutingPolicy === 'local_only', sourceErrors }) : [];
   const observed = companies.length > 0 || Boolean(mcpSource);
+  const complete = observed && sourceErrors.length === 0;
   const sourceOriginals = [...companies.filter(company => company.sourceText).map(company => ({ sourceName: company.sourceName, sourceTool: company.sourceTool, sourceEndpoint: company.sourceEndpoint, queriedAt: company.queriedAt, text: company.sourceText })), ...(mcpSource ? [mcpSource] : [])];
   const capabilities = listLegalSourceCapabilities()
     .filter(source => ['qichacha', 'tianyancha', 'qixinbao', 'national-enterprise-credit'].includes(source.id));
@@ -310,7 +327,7 @@ export async function companyDatabaseLookupHandler(args: Record<string, any>, co
     : mcpSource ? '| 1 | 企查查官方 MCP | 本次请求主体见查询对象，数据见原始回执 | 未另外查询工商字段 | 未另外查询工商字段 | 未另外查询工商字段 | 待核验 | https://agent.qcc.com/ |' : '| 1 | 未命中 | 未取得可核验主体来源；不能据此认定主体不存在 | 待补充 | 待补充 | 待补充 | 待补充 | 使用授权网页登录协作 |';
 
   const statusRows = capabilities.map(source =>
-    `| ${mdCell(source.label)} | ${source.accessMode} | ${source.configured ? '已配置/可用' : '未配置或网页登录'} | ${source.canAutoQuery ? '可以' : '不承诺'} | ${mdCell(source.nextAction)} |`,
+    `| ${mdCell(source.label)} | ${source.accessMode} | ${source.configured ? '已配置（以本次回执为准）' : '未配置或网页登录'} | ${source.canAutoQuery ? '可以' : '不承诺'} | ${mdCell(source.nextAction)} |`,
   ).join('\n');
   const sourceRegisterRows = companies.length
     ? companies.map((company, index) =>
@@ -342,13 +359,15 @@ ${sourceOriginals.map(source => '### 官方 MCP 原始回执（数据，尚待�
 | --- | --- | --- | --- | --- |
 ${statusRows}
 
+${sourceErrors.length ? '### 本次查询异常\n' + sourceErrors.map(message => '- ' + message).join('\n') : ''}
+
 ## 五、下一步
 - 若 API 未命中或未配置，请使用 qichacha、tianyancha、qixinbao 或 national-enterprise-credit 登录预设打开网页核验。
 - 律师确认股东、涉诉、被执行、失信和限制高消费信息后，再用 材料入库 导入组织知识库。
 - Lumi 不绕过验证码、付费墙、账号权限、平台频控或下载限制。`;
 
   let kbLine = '- 知识库：未导入。律师确认来源和使用权限后，可设置 confirmedForKb=true 入库。';
-  if (args.confirmedForKb === true && observed) {
+  if (args.confirmedForKb === true && complete) {
     const article = legalWrite(() => createLegalArticle(orgId, userId, {
       title: `${caseName} 企业主体信息`,
       content: report,
@@ -367,7 +386,7 @@ ${statusRows}
     kbLine = `- 知识库：已导入（articleId=${article.id}，索引块=${chunks}）。`;
   }
 
-  const caseLine = archiveLegalReportToCase(observed ? args : { ...args, persistCase: false }, {
+  const caseLine = archiveLegalReportToCase(complete ? args : { ...args, persistCase: false }, {
     orgId,
     userId,
     caseName,
@@ -377,7 +396,7 @@ ${statusRows}
     cause: textArg(args, 'caseType') || '主体信息核验',
   });
 
-  return encodeToolResult(`${report}\n\n## 六、入库与案件归档\n${kbLine}\n${caseLine}`, { ok: observed, status: observed ? 'observed' : 'partial' });
+  return encodeToolResult(`${report}\n\n## 六、入库与案件归档\n${kbLine}\n${caseLine}`, { ok: complete, status: complete ? 'observed' : 'partial' });
 }
 
 export async function searchTenderProjectsHandler(args: Record<string, any>, context?: any): Promise<string> {
@@ -432,7 +451,7 @@ ${statusRows}
 - 未填写 TENDER_DATA_API_KEY 与 TENDER_DATA_BASE_URL 时，不会发起第三方数据 API 请求，也不会生成模拟项目。
 - Lumi 不绕过验证码、登录、付费墙、频控或下载限制。`;
 
-  const caseLine = archiveLegalReportToCase(args, {
+  const caseLine = archiveLegalReportToCase(projects.length ? args : { ...args, persistCase: false }, {
     orgId,
     userId,
     caseName,

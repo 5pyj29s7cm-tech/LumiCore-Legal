@@ -77,7 +77,7 @@ export async function extractDisputeFocusHandler(args: Record<string, any>, cont
       return encodeToolResult(finish(report + '\n\n## 后续检索与复核\n- 按案件事实和程序日期核验法律，再检索人民法院案例库、裁判文书网、法蝉、Alpha，按最高法、高法、中法、基法比较。\n- 本次只完成来源归集，尚未开展外部检索；原句中的主张、审阅记录和证据限制均不等于已认定事实。'), { ok: true, status: 'generated' });
     }
   } catch { assertLegalExecutionActive(context); }
-  return encodeToolResult(finish('# ' + caseName + ' 争议材料归集未完成\n\n模型没有返回可核验的来源编号，未生成争点结论。\n\n## 保留原始材料\n' + materialOriginals(sources)), { ok: false, status: 'partial' });
+  return encodeToolResult('# ' + caseName + ' 争议材料归集未完成\n\n模型没有返回可核验的来源编号，未生成争点结论。\n\n## 保留原始材料\n' + materialOriginals(sources), { ok: false, status: 'partial' });
 }
 
 export function normalizeLegalWorkProductType(type: string): '代理词' | '法律意见书' | '庭审提纲' | '应对策略' {

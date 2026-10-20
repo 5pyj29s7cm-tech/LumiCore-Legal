@@ -113,8 +113,9 @@ it('allows two 100-second drafting/review phases with provider-default reasoning
  for(const [request] of f.create.mock.calls){expect(request.max_tokens).toBe(16384);expect(request).not.toHaveProperty('reasoning_effort');expect(request.stream).toBe(true);}
  expect(prefs.getUserPreferredLLMConfig(f.userId)).toEqual(before);expect(cases.getCase(f.orgId,f.c.id)!.materials.filter(m=>m.source==='tool')).toHaveLength(1);
 });
-it('caps the two fresh plaintiff analysis targets at the derived shared 270 seconds without multiplying the phase limit',async()=>{
- const f=await setup({ten:170_000,catalog:170_000,review:170_000});vi.useFakeTimers();let done=false;const pending=f.run().then(r=>{done=true;return r;});
- await vi.advanceTimersByTimeAsync(269_999);expect(done).toBe(false);await vi.advanceTimersByTimeAsync(2);const r=await pending;
- expect(r.receipt).toMatchObject({ok:false,status:'partial'});expect(f.create).toHaveBeenCalledTimes(4);expect(cases.getCase(f.orgId,f.c.id)!.materials.filter(m=>m.source==='tool')).toHaveLength(0);expect(f.events.filter(e=>e.kind==='review')).toHaveLength(2);expect(f.events.filter(e=>e.kind==='review').every(e=>e.signal.aborted)).toBe(true);
+it('allows two fresh plaintiff targets their serial170s draft and170s review without extra calls or premature cancellation',async()=>{
+ const f=await setup({ten:170_000,catalog:170_000,review:170_000});vi.useFakeTimers();let done=false;const start=Date.now(),pending=f.run().then(r=>{done=true;return r;});
+ await vi.advanceTimersByTimeAsync(339_999);expect(done).toBe(false);expect(f.events.filter(e=>e.kind==='review')).toHaveLength(2);expect(f.events.filter(e=>e.kind==='review').every(e=>!e.signal.aborted)).toBe(true);await vi.advanceTimersByTimeAsync(2);const r=await pending;
+ expect(r.receipt).toMatchObject({ok:true,status:'generated',draftMode:'model'});expect(Date.now()-start).toBe(340001);expect(f.create).toHaveBeenCalledTimes(4);expect(cases.getCase(f.orgId,f.c.id)!.materials.filter(m=>m.source==='tool')).toHaveLength(1);expect(f.events.filter(e=>e.kind==='review').every(e=>!e.signal.aborted)).toBe(true);
+ expect(f.checkpoints()[0].documents['10_civil-complaint']).toMatchObject({reviewed:true});expect(f.checkpoints()[0].documents['16_evidence-catalog']).toMatchObject({reviewed:true});
 });

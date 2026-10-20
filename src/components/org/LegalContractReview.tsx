@@ -59,7 +59,7 @@ function LegalContractDocument({ caseFile }: { caseFile?: LegalCaseFile | null }
   };
   const handleFileUpload = (source: React.ChangeEvent<HTMLInputElement> | KnowledgeFileSource) => {
     const files = Array.isArray(source) ? source : Array.from(source.currentTarget.files || []);
-    const selectedNames = new Set(files.map(file => typeof file === 'string' ? file.split(/[\\/]/).pop() : file.name));
+    const selectedNames = new Set(files.map(file => file.name));
     return upload(source, async (data, signal) => {
       setUploadFailures(previous => [...previous.filter(name => !selectedNames.has(name)), ...data.failed.map((file: any) => String(file.fileName))]);
       return readFullFiles([...pendingFiles, ...(data.files || [])], signal);

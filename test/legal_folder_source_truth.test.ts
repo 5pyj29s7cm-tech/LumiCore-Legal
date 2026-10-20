@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 vi.mock('../server/regions/packs/cn/legal_tools/context', async original => ({...await original<Record<string, unknown>>(),runLegalLLM:vi.fn()}));
-vi.mock('../server/regions/packs/cn/legal_tools/argument_drafting',()=>({generateArgumentOrOpinionHandler:vi.fn(async()=> '仅供复核的代理词正文')}));
+vi.mock('../server/regions/packs/cn/legal_tools/argument_drafting',()=>({generateArgumentOrOpinionHandler:vi.fn(async()=> '仅供复核的代理词正文\n\u001eLUMI_TOOL_RECEIPT:{"ok":true,"status":"generated"}')}));
 import { runLegalLLM } from '../server/regions/packs/cn/legal_tools/context';
 import { generateArgumentOrOpinionHandler } from '../server/regions/packs/cn/legal_tools/argument_drafting';
 import { analyzeFolderAndDraftArgumentHandler } from '../server/regions/packs/cn/legal_tools/folder_analysis';

@@ -2,14 +2,13 @@ import fs from 'fs';
 import path from 'path';
 import { createHash, randomUUID } from 'crypto';
 import { isLegalSourceMaterial, legalCaseSourceFingerprint, type LegalWorkflowRun } from '../../shared/legal_workflow_receipts';
-import type { LegalReasoningLink } from '../regions/packs/cn/legal_reasoning_links';
-import { getDataPath } from '../config/data_path';
+import type { LegalReasoningLink } from '../../shared/legal_workflow_receipts';
+import { getDataPath, resolveMigratedDataFile } from '../config/data_path';
 import { sameArtifactPath } from '../tools/artifact_evidence';
 import * as EDB from './db';
 import { recordLegalCaseWrite } from '../legal/execution';
 import { searchKnowledgeText, type KnowledgeSearchResult } from './kb';
-import { inspectLegalReasoningStructure } from '../regions/packs/cn/legal_reasoning_structure';
-import { CN_LEGAL_REASONING_DRAFT_MESSAGES } from '../regions/messages/skill_messages';
+import { CN_LEGAL_CASE_DEFAULTS } from '../regions/messages/skill_messages';
 import {
   assertOrganizationResourceAccess,
   authorizeOrganizationResource,
@@ -92,7 +91,7 @@ function readStore(): StoreShape {
   try {
     if (!fs.existsSync(STORE_PATH)) return { cases: [] };
     const parsed = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
-    return { cases: Array.isArray(parsed?.cases) ? parsed.cases : [] };
+    return { ...parsed, cases: Array.isArray(parsed?.cases) ? parsed.cases : [] };
   } catch {
     return { cases: [] };
   }
@@ -126,9 +125,10 @@ function normalizeSnapshotMaterial(
     ? value.source as OrgLegalCaseMaterial['source']
     : 'manual';
   return {
+    ...value,
     id: normalizeText(value.id) || randomUUID(),
     type,
-    title: normalizeText(value.title) || '案件材料',
+    title: normalizeText(value.title) || CN_LEGAL_CASE_DEFAULTS.materialTitle,
     content: normalizeText(value.content),
     fileName: normalizeText(value.fileName) || undefined,
     localPath: normalizeText(value.localPath) || undefined,
@@ -198,27 +198,31 @@ export function upsertCaseSnapshot(
   const stage = ['consultation', 'filing', 'trial', 'judgment', 'enforcement', 'closed'].includes(String(input.stage || ''))
     ? input.stage as LegalCaseStage
     : current?.stage || 'consultation';
-  const removedMaterialIds = [...new Set([...(current?.removedMaterialIds || []), ...(Array.isArray(input.removedMaterialIds) ? input.removedMaterialIds.filter(id => typeof id === 'string' && id.length > 0 && id.length <= 200) : [])])];
+  // Snapshots preserve historical tombstones; existing server materials must
+  // be unlinked through the revision-checked removal owner.
+  const removedMaterialIds = [...new Set([...(current?.removedMaterialIds || []), ...(Array.isArray(input.removedMaterialIds) ? input.removedMaterialIds.filter(id => typeof id === 'string' && id.length > 0 && id.length <= 200 && !current?.materials.some(material => material.id === id)) : [])])];
   const removed = new Set(removedMaterialIds);
   const materials = (Array.isArray(input.materials)
     ? mergeSnapshotMaterials(current?.materials || [], input.materials, userId)
     : current?.materials || []).filter(material => !removed.has(material.id));
   const caseFile: OrgLegalCaseFile = {
+    ...current,
+    ...input,
     id: caseId,
     orgId,
-    title: normalizeText(input.title) || current?.title || '未命名案件',
-    caseNumber: normalizeText(input.caseNumber),
-    party: normalizeText(input.party),
-    cause: normalizeText(input.cause),
-    court: normalizeText(input.court),
-    judge: normalizeText(input.judge),
+    title: normalizeText(input.title) || current?.title || CN_LEGAL_CASE_DEFAULTS.title,
+    caseNumber: Object.hasOwn(input, 'caseNumber') ? normalizeText(input.caseNumber) : current?.caseNumber || '',
+    party: Object.hasOwn(input, 'party') ? normalizeText(input.party) : current?.party || '',
+    cause: Object.hasOwn(input, 'cause') ? normalizeText(input.cause) : current?.cause || '',
+    court: Object.hasOwn(input, 'court') ? normalizeText(input.court) : current?.court || '',
+    judge: Object.hasOwn(input, 'judge') ? normalizeText(input.judge) : current?.judge || '',
     stage,
     factDate: normalizeText(input.factDate) || current?.factDate,
-    hearingDate: normalizeText(input.hearingDate),
-    judgmentDate: normalizeText(input.judgmentDate),
-    appealDeadline: normalizeText(input.appealDeadline),
-    enforcementDeadline: normalizeText(input.enforcementDeadline),
-    notes: normalizeText(input.notes),
+    hearingDate: Object.hasOwn(input, 'hearingDate') ? normalizeText(input.hearingDate) : current?.hearingDate || '',
+    judgmentDate: Object.hasOwn(input, 'judgmentDate') ? normalizeText(input.judgmentDate) : current?.judgmentDate || '',
+    appealDeadline: Object.hasOwn(input, 'appealDeadline') ? normalizeText(input.appealDeadline) : current?.appealDeadline || '',
+    enforcementDeadline: Object.hasOwn(input, 'enforcementDeadline') ? normalizeText(input.enforcementDeadline) : current?.enforcementDeadline || '',
+    notes: Object.hasOwn(input, 'notes') ? normalizeText(input.notes) : current?.notes || '',
     clientPartyName: Object.hasOwn(input, 'clientPartyName') ? normalizeText(input.clientPartyName) : current?.clientPartyName,
     clientRole: normalizeText(input.clientRole) || current?.clientRole,
     objective: normalizeText(input.objective) || current?.objective,
@@ -363,7 +367,7 @@ function materialReviewRevision(caseFile: OrgLegalCaseFile, material: OrgLegalCa
   let fileHash = '';
   if (material.localPath) {
     try {
-      const filePath = path.resolve(material.localPath);
+      const filePath = resolveMigratedDataFile(path.resolve(material.localPath));
       if (fs.statSync(filePath).isFile()) {
         fileHash = createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
         fileState = 'file';
@@ -478,7 +482,7 @@ export function createCase(orgId: string, userId: string, input: Partial<OrgLega
   const caseFile: OrgLegalCaseFile = {
     id: randomUUID(),
     orgId,
-    title: normalizeText(input.title) || '未命名案件',
+    title: normalizeText(input.title) || CN_LEGAL_CASE_DEFAULTS.title,
     caseNumber: normalizeText(input.caseNumber),
     party: normalizeText(input.party),
     cause: normalizeText(input.cause),
@@ -616,7 +620,7 @@ export function addMaterial(
   const nextMaterial: OrgLegalCaseMaterial = {
     id: randomUUID(),
     type: material.type,
-    title: normalizeText(material.title) || '案件材料',
+    title: normalizeText(material.title) || CN_LEGAL_CASE_DEFAULTS.materialTitle,
     content: normalizeText(material.content),
     fileName: material.fileName,
     localPath: material.localPath,

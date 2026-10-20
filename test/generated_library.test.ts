@@ -77,7 +77,7 @@ describe('Generated libraries across conversations', () => {
   });
   it('recovers old data paths only after a verified product-root migration', async () => {
     const { migrateLegacyProductDataRoot, markLegacyProductDataMigrationVerified, resolveMigratedDataFile } = await import('../server/config/data_path');
-    const home = path.join(output, 'migration-home'), oldData = path.join(home, 'LumiOS-Legal', 'data');
+    const home = path.join(output, 'migration-home'), oldData = path.join(home, 'LumiOS', 'data');
     fs.mkdirSync(oldData, { recursive: true });
     const original = path.join(oldData, 'old-result.txt'); fs.writeFileSync(original, 'historical output');
     fs.writeFileSync(path.join(oldData, 'lumi.db'), 'isolated fixture');

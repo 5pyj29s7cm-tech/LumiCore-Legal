@@ -191,7 +191,7 @@ Write-Host "  Shortcut: $shortcutPath" -ForegroundColor Green
 
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  Deployment complete!" -ForegroundColor Cyan
-Write-Host "  Data: $env:USERPROFILE\LumiCore-Legal\data\" -ForegroundColor Cyan
+Write-Host "  Data: $env:USERPROFILE\LumiCore\data\" -ForegroundColor Cyan
 Write-Host "  App:  $InstallDir\" -ForegroundColor Cyan
 Write-Host "  Desktop shortcut ready." -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan

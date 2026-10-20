@@ -15,5 +15,5 @@ export const LEGAL_BID_TOOL_TIMEOUT_MS = LEGAL_BID_MAX_MODEL_BUDGET_MS + LEGAL_B
 export const LEGAL_CONTRACT_MODEL_TIMEOUT_MS = LEGAL_BATCH_MODEL_BUDGET_MS * 2;
 export const LEGAL_CONTRACT_TOOL_TIMEOUT_MS = LEGAL_BATCH_TOOL_TIMEOUT_MS * 2;
 export function legalBatchModelBudgetMs(remainingPhases: number): number {
-  return remainingPhases > 0 ? Math.min(LEGAL_BID_MAX_MODEL_BUDGET_MS, (Math.ceil(remainingPhases / 2) + 1) * LEGAL_REASONING_MODEL_TIMEOUT_MS) : 0;
+  return remainingPhases > 0 ? Math.min(LEGAL_BID_MAX_MODEL_BUDGET_MS, remainingPhases * LEGAL_CONTRACT_MODEL_TIMEOUT_MS) : 0;
 }

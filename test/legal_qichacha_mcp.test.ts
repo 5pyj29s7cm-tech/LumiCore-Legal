@@ -28,7 +28,7 @@ describe('Qichacha official MCP uses the existing legal query and lifecycle',()=
  });
  it('never falls back to the old signed API or another query when MCP fails',async()=>{
   vi.stubEnv('QICHACHA_APP_KEY','legacy-app');vi.stubEnv('QICHACHA_SECRET_KEY','legacy-secret');vi.mocked(mcpManager.callToolForServer).mockRejectedValueOnce(Error('controlled unauthorized'));
-  expect(await searchCompanySources('虚构失败企业',['qichacha'])).toEqual([]);expect(mcpManager.callToolForServer).toHaveBeenCalledTimes(1);expect(fetch).not.toHaveBeenCalled();
+  await expect(searchCompanySources('虚构失败企业',['qichacha'])).rejects.toThrow('[QCC_AUTHORIZATION]');expect(mcpManager.callToolForServer).toHaveBeenCalledTimes(1);expect(fetch).not.toHaveBeenCalled();
  });
  it('keeps the legacy API a separate explicitly configured product',async()=>{
   vi.stubEnv('QICHACHA_API_KEY','');vi.stubEnv('QICHACHA_APP_KEY','legacy-app');vi.stubEnv('QICHACHA_SECRET_KEY','legacy-secret');vi.stubEnv('QICHACHA_BASE_URL','https://old-product.invalid');

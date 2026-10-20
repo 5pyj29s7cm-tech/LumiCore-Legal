@@ -359,7 +359,7 @@ export function useDesktopCaptureAndIdentity(previousBindings: ReturnType<typeof
     voiceprint.templatesLoaded,
   ]);
   useAmbientPoller(socket); // Ambient awareness: polls window, clipboard, idle state
-  const { callState, audioLevel, startCall, startCallRef, switchVoice, endCall, error: callError, transcript, interrupt, toggleMute, isMuted } = useVoiceCall({
+  const { callState, audioLevel, startCall, switchVoice, endCall, error: callError, transcript, interrupt, toggleMute, isMuted } = useVoiceCall({
     socket,
     onTranscript: appendMeetingTranscript,
     proactive: {
@@ -411,6 +411,8 @@ export function useDesktopCaptureAndIdentity(previousBindings: ReturnType<typeof
   const startStandardVoiceCall = useCallback((conversationId?: string) => {
     void startCall(selectedVoiceId, 'lumi', 'lumi', { ...getVoiceScopeOptions(), conversationId });
   }, [getVoiceScopeOptions, selectedVoiceId, startCall]);
+  const startCallRef = useRef(startStandardVoiceCall);
+  startCallRef.current = startStandardVoiceCall;
 
   const stopMeetingAudio = useCallback((options: { refineTranscript?: boolean; refinementId?: string } = {}) => {
     setMeetingPaused(true);

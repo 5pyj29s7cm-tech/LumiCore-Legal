@@ -158,7 +158,7 @@ export async function importMaterialsToKbHandler(args: Record<string, any>, cont
       if (!fs.existsSync(source) || !fs.statSync(source).isFile()) { skipped.push({ source, reason: '文件不存在或不是文件' }); continue; }
       if (!LEGAL_MATERIAL_EXTENSIONS.has(ext)) {
         skipped.push({ source, reason: LEGAL_IMAGE_EXTENSIONS.has(ext)
-          ? '图片材料需先使用 ocr_image_file 提取文字，再将 OCR 文本导入知识库'
+          ? '图片材料需先进行图片文字识别，再将识别文本导入知识库'
           : '暂不支持该格式：' + ext }); continue;
       }
       const parsed = await parseLegalDocument(source, args);

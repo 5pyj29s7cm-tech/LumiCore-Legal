@@ -3,10 +3,8 @@ import { verifyCitation, verifyMultipleCitations } from '../../../legal/kb';
 import { isLegalSourceMaterial } from '../../../../shared/legal_workflow_receipts';
 import type { OrgLegalCaseFile } from '../../../org/legal_cases';
 
-export type LegalRulePart = { id: string; start: number; end: number; quote: string };
-export type LegalApplicationCheck = { partId: string; ruleStart: number; ruleEnd: number; ruleQuote: string;
-  evidence: Array<{ materialId: string; quote: string; locator: string }>;
-  status: 'supported' | 'conditional' | 'unsupported'; application: string; conclusion: string; missingPremises: string[] };
+import type { LegalApplicationCheck, LegalReasoningLink, LegalRulePart } from '../../../../shared/legal_workflow_receipts';
+export type { LegalApplicationCheck, LegalReasoningLink, LegalRulePart } from '../../../../shared/legal_workflow_receipts';
 
 /** New analysis applies the complete provision, without treating punctuation as legal premises. */
 export function legalRuleParts(quote: string): LegalRulePart[] {
@@ -23,20 +21,6 @@ export function compileLegalApplicationChecks(checks: LegalApplicationCheck[]) {
     conclusion: checks.map(check => '【' + check.partId + '】' + (check.status === 'conditional' ? '现有材料不足以作确定结论；' : '') + check.conclusion).join('\n'),
     limitations: [...new Set(checks.flatMap(check => check.missingPremises))].map(premise => '尚待核实是否成立：' + premise).concat('仅为给定材料范围内的拟议分析，不证明证据真实或律师已经核准。').join('；'),
   };
-}
-
-export interface LegalReasoningLink {
-  issue: string;
-  ruleCitation: string;
-  ruleQuote: string;
-  fact: string;
-  evidence: Array<{ materialId: string; quote: string; locator: string }>;
-  application: string;
-  conclusion: string;
-  limitations: string;
-  applicationChecks?: LegalApplicationCheck[];
-  ruleReferenceDate?: string;
-  ruleTemporalScope?: 'fact' | 'procedure';
 }
 
 export const legalReasoningLinksSchema = {
@@ -72,7 +56,7 @@ export function inspectLegalReasoningLinks(input: unknown, caseFile: OrgLegalCas
   const candidates: unknown[] = Array.isArray(input) ? input : [];
   const links = candidates.slice(0, 30).filter(hasReasoningLinkShape).map(link => ({ ...link }));
   if (!caseFile) errors.push('需要关联有权限的案件及已归档原始材料。');
-  if (!candidates.length || candidates.length > 30) errors.push('需要 1–30 条规则—事实—证据—适用结论关联，不能只提供三段论标题。');
+  if (!candidates.length || candidates.length > 30) errors.push('需要 1–30 条规则—事实—证据—适用结论关联，不能只提供分析标题。');
   if (links.length !== Math.min(candidates.length, 30)) errors.push('分析条目格式无效：文字字段及证据 ID、原文、位置必须完整，不能使用空对象或错误类型。');
   for (const [index, link] of links.slice(0, 30).entries()) {
     const prefix = `第 ${index + 1} 项：`;
@@ -149,12 +133,12 @@ export function inspectLegalReasoningLinks(input: unknown, caseFile: OrgLegalCas
 
 export function formatLegalReasoningLinks(links: LegalReasoningLink[]): string {
   return links.filter(hasReasoningLinkShape).map((link, i) => [
-    `### ${i + 1}. ${link.issue}`, `大前提：${link.ruleCitation}\n法条原文：${link.ruleQuote}`,
+    `### ${i + 1}. ${link.issue}`, `法律依据：${link.ruleCitation}\n法条原文：${link.ruleQuote}`,
     ...(link.ruleReferenceDate ? ['本条法律适用基准（' + (link.ruleTemporalScope === 'procedure' ? '程序' : '实体事实') + '，不代替具体事件日期）：' + link.ruleReferenceDate] : []),
     ...(link.applicationChecks ? [
       '适用分析（以下为完整原文的连续衔接片段，不表示各片段是独立成立的法律条件）：\n' + link.application,
       '拟议结论（与同一原文片段编号对应，不另写一套法律前提）：\n' + link.conclusion,
-    ] : [`小前提：${link.fact}`, ...link.evidence.map(e => `- 材料 ${e.materialId}；位置 ${e.locator}；摘录：${e.quote}`),
+    ] : [`事实与证据：${link.fact}`, ...link.evidence.map(e => `- 材料 ${e.materialId}；位置 ${e.locator}；摘录：${e.quote}`),
       `适用分析：${link.application}`, `结论：${link.conclusion}`]),
     `限制与反证：${link.limitations}`,
   ].join('\n\n')).join('\n\n');
