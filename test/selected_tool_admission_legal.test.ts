@@ -9,6 +9,7 @@ import { getMessages, getOrCreateActiveConversation } from '../server/conversati
 import { runLumiEntryTurn, type ExecutedLumiTurn, type LumiEntryTurnInput } from '../server/cognition/turn_execution';
 import { ToolRegistry } from '../server/tools/registry';
 import { registerFileOpsTools } from '../server/tools/definitions/file_ops';
+import { finalizeLumiResponse } from '../server/cognition/result_finalizer';
 import { isCanonicalToolExecutionRecord } from '../server/tools/execution_engine';
 import { createTurnConfirmation } from '../server/tools/turn_confirmation';
 import { getPendingConfirmation, type PendingToolConfirmation } from '../server/tools/pending_confirmation';
@@ -90,7 +91,7 @@ function assertOriginal(f: ReturnType<typeof fixture>) {
   expect(fs.readFileSync(f.filePath, 'utf8')).toBe(f.original);
   expect(f.writeHandler).not.toHaveBeenCalled();
 }
-function selectReadThenReport(f: ReturnType<typeof fixture>, invalidate?: (goal: any) => void) {
+function selectReadThenReport(f: ReturnType<typeof fixture>) {
   let terminal: any;
   provider.mockImplementation(async (messages: any[], declarations: any[], config: any): Promise<NormalizedLLMResponse> => {
     const fields = currentAuthorization(messages);
@@ -99,21 +100,18 @@ function selectReadThenReport(f: ReturnType<typeof fixture>, invalidate?: (goal:
       expect(config.responseFormat).toBeUndefined();
       expect(fields.taskId).toBe('');
       expect(readDB().conversationActionTasks.filter((row: any) => row.userId === f.identity.userId)).toHaveLength(0);
-      return { text: '', toolCalls: [{ id: 'legal-selected-source-read', name: 'read_file', arguments: { path: f.filePath } }], finishReason: 'tool_calls' };
+      return { text: '', toolCalls: [{ id: 'legal-selected-source-read-' + f.identity.requestId, name: 'read_file', arguments: { path: f.filePath } }], finishReason: 'tool_calls' };
     }
     expect(provider.mock.calls).toHaveLength(2);
-    expect(config.responseFormat).toBe('json_object');
+    expect(config.responseFormat).toBeUndefined();
     expect(fields.requestId).toBe(f.identity.requestId);
     expect(fields.taskId).toBeTruthy();
     expect(fields.turnRowId).toBeTruthy();
-    const evidence = fields.completionEvidence;
-    expect(evidence).toHaveLength(1);
-    expect(evidence[0]).toMatchObject({ id: 'legal-selected-source-read', tool: 'read_file', operation: 'observe', status: 'verified_success' });
-    const goal = { text: f.text, operation: evidence[0].operation, effects: evidence[0].effects,
-      status: 'completed', evidenceIds: [evidence[0].id] };
-    invalidate?.(goal);
-    terminal = { answer: f.original, goals: [goal] };
-    return { text: JSON.stringify(terminal), toolCalls: [], finishReason: 'stop' };
+    const rows = readDB().conversationActionReceipts.filter(row => row.requestId === f.identity.requestId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 'legal-selected-source-read-' + f.identity.requestId, taskId: fields.taskId, toolName: 'read_file', outcome: 'verified_success' });
+    terminal = f.original;
+    return { text: terminal, toolCalls: [], finishReason: 'stop' };
   });
   return () => terminal;
 }
@@ -135,7 +133,7 @@ describe('legal selected-call admission keeps strict terminal evidence', () => {
     observed.push({ case: 'continue-no-tool', answer: result.finalized.text, taskId: null, blocked: result.finalized.blocked });
   });
 
-  it('binds the actual read before the handler and produces a scoped strict JSON answer with complete source', async () => {
+  it('binds the actual read before the handler and delivers the complete normal body with scoped canonical evidence', async () => {
     const f = fixture(file => 'Please handle this document. Its path is ' + file + '. Show its complete contents.');
     const terminal = selectReadThenReport(f);
     const result = await runLumiEntryTurn(f.input);
@@ -144,7 +142,7 @@ describe('legal selected-call admission keeps strict terminal evidence', () => {
     expect(handlerContext).toMatchObject({ ...f.identity, taskId: result.taskId, currentTurnExecutionRequested: true });
     const records = result.toolRecords.filter(record => record.name === 'read_file'); expect(records).toHaveLength(1);
     expect(isCanonicalToolExecutionRecord(records[0])).toBe(true);
-    expect(records[0]).toMatchObject({ requestId: f.identity.requestId, taskId: result.taskId, id: 'legal-selected-source-read' });
+    expect(records[0]).toMatchObject({ requestId: f.identity.requestId, taskId: result.taskId, id: 'legal-selected-source-read-' + f.identity.requestId });
     expect(records[0].envelope?.status).toBe('verified_success'); expect(records[0].result).toContain(f.original);
     expect(result.finalized.text).toBe(f.original); expect(result.finalized.blocked).toBe(false);
     expect(result.finalized.text).not.toContain('evidenceIds'); expect(result.finalized.text).not.toContain('legal-selected-source-read');
@@ -178,22 +176,38 @@ describe('legal selected-call admission keeps strict terminal evidence', () => {
       terminalStatus: result.toolRecords.map(record => record.envelope?.status), blocked: result.finalized.blocked, pendingStatus: persisted[0].status });
   });
 
-  it.each(['foreign-evidence', 'wrong-operation', 'invented-clause'] as const)('never converts the invalid %s goal into completion', async invalid => {
+  it.each(['foreign-request', 'foreign-task'] as const)('rejects %s evidence instead of trusting a model completion claim', async invalid => {
     const f = fixture(file => 'Read the file ' + file + ' and show its complete contents.');
-    const terminal = selectReadThenReport(f, goal => {
-      if (invalid === 'foreign-evidence') goal.evidenceIds = ['nonexistent-canonical-receipt'];
-      if (invalid === 'wrong-operation') goal.operation = 'create';
-      if (invalid === 'invented-clause') goal.text = 'This clause does not appear in the accepted user request.';
-    });
+    selectReadThenReport(f);
     const result = await runLumiEntryTurn(f.input);
     expect(provider).toHaveBeenCalledTimes(2); expect(f.readHandler).toHaveBeenCalledOnce();
-    expect(result.toolRecords.find(record => record.name === 'read_file')?.envelope?.status).toBe('verified_success');
-    expect(result.finalized.text).toContain(f.original); expect(result.finalized.blocked).toBe(true);
-    expect(result.modelResult.completionGuard?.blocked).toBe(true);
-    expect(readDB().conversationActionTasks.find((row: any) => row.id === result.taskId)?.status).toBe('blocked');
-    expect(result.finalized.text).not.toContain('evidenceIds'); assertOriginal(f);
-    observed.push({ case: invalid, terminal: terminal(), blocked: result.finalized.blocked, modelGuardReason: result.modelResult.completionGuard?.reason });
+    const canonical = result.toolRecords.find(record => record.name === 'read_file')!;
+    expect(isCanonicalToolExecutionRecord(canonical)).toBe(true);
+    expect(canonical.envelope?.status).toBe('verified_success');
+    expect(result.finalized, JSON.stringify({ final: result.finalized, guard: result.modelResult.completionGuard, records: result.toolRecords })).toMatchObject({ blocked: false, text: f.original });
+    const wrong = { ...canonical };
+    if (invalid === 'foreign-request') wrong.requestId = randomUUID();
+    if (invalid === 'foreign-task') wrong.taskId = randomUUID();
+    const replay = finalizeLumiResponse({ taskText: f.text, responseText: f.original, toolRecords: [wrong],
+      source: 'chat', requestId: f.identity.requestId, taskId: result.taskId });
+    expect(isCanonicalToolExecutionRecord(wrong)).toBe(false);
+    expect(replay.blocked).toBe(true);
+    expect(readDB().conversationActionTasks.find(row => row.id === result.taskId)?.status).toBe('completed');
+    expect(readDB().conversationActionReceipts.filter(row => row.requestId === f.identity.requestId)).toHaveLength(1);
+    assertOriginal(f);
+    observed.push({ case: invalid, canonicalVerified: true, replayBlocked: replay.blocked, replayReason: replay.reason });
   });
+  it('rejects a model-only read claim without canonical execution evidence', async () => {
+    const f = fixture(file => 'Read the file ' + file + ' and show its complete contents.');
+    provider.mockResolvedValue({ text: f.original, toolCalls: [], finishReason: 'stop' });
+    const result = await runLumiEntryTurn(f.input);
+    expect(result.finalized.blocked).toBe(true);
+    expect(result.toolRecords).toEqual([]);
+    expect(readDB().conversationActionReceipts.filter(row => row.requestId === f.identity.requestId)).toHaveLength(0);
+    expect(f.readHandler).not.toHaveBeenCalled(); assertOriginal(f);
+    expect(readDB().conversationActionTasks.find(row => row.id === result.taskId)?.status).not.toBe('completed');
+  });
+
 });
 
 
@@ -277,7 +291,7 @@ describe('legal status inquiries do not turn old task references into execution 
 
 
 describe('whole original legal request remains authoritative after a verified read', () => {
-  it('keeps read-plus-sign incomplete while preserving strict terminal shape and the full source', async () => {
+  it('keeps read-plus-sign incomplete while preserving the normal body and the full source', async () => {
     const f = fixture(file => 'Read the file ' + file + ' and show its complete contents. Then sign the contract.');
     selectReadThenReport(f);
     const result = await runLumiEntryTurn(f.input);

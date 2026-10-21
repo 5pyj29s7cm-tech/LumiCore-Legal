@@ -267,22 +267,24 @@ export function groundedVerifiedDocumentObservation(
   // In particular, preserve a blocked shared-loop verdict instead of saving
   // its "not complete" text under a completed assistant receipt.
   if (input.completionGuard?.blocked) return { ...input.completionGuard };
+  const contract = taskActionContract(input);
+  if (contract.applies && !hasResultCoreActionEvidence(input, contract, input.toolRecords || [], task)) return null;
   const response = String(input.responseText || '').trim();
+  const rawReadOnly = response.replace(/\s+/gu, '') === String(record.result || '').replace(/\s+/gu, '');
   if (unsupportedRealWorldClaim(input)) return null;
   const unusableNarration = !response
-    || isInternalRuntimeWorkNarration(response)
+    || !rawReadOnly && (isInternalRuntimeWorkNarration(response)
     // i18n-allow: Chinese stale/internal blocked-result recognition; not user-visible copy.
-    || /(?:^|\n)\s*(?:状态\s*[：:]\s*(?:受阻|失败)|这(?:次|项操作)还没完成|没有取得可用的分析结果)|(?:尚未|还没|没有|未能|无法).{0,16}(?:完成|算出|计算|给出结果)|\b(?:blocked|execution_recovery_incomplete|not (?:yet )?complete|no (?:usable )?result)\b/iu.test(response);
+    || /(?:^|\n)\s*(?:状态\s*[：:]\s*(?:受阻|失败)|这(?:次|项操作)还没完成|没有取得可用的分析结果)|(?:尚未|还没|没有|未能|无法).{0,16}(?:完成|算出|计算|给出结果)|\b(?:blocked|execution_recovery_incomplete|not (?:yet )?complete|no (?:usable )?result)\b/iu.test(response));
   // A verified read is terminal for a plain read/view request. It is only an
   // intermediate step when the user asked Lumi to interpret or synthesize the
   // document and no usable analysis prose was produced.
   // i18n-allow: Chinese document-analysis intent recognition; not user-visible copy.
   const instruction = [extractPrimaryTaskText(task), input.flow?.rootTaskText || ''].join('\n');
   const calculationRequested = /(?:计算|重算|算出|金额|总额|合计|\b(?:calculat\w*|recalculat\w*|total|multiply)\b)/iu.test(instruction); // i18n-allow: document calculation intent.
-  const analysisRequested = calculationRequested || /(?:分析|审查|审阅|总结|概括|提炼|解读|\b(?:review|analy[sz]e|summari[sz]e|interpret|synthesize)\b)/iu.test(instruction);
+  const analysisRequested = calculationRequested || /(?:分析|审查|审阅|总结|概括|提炼|解读|\b(?:review|analy[sz]e|summari[sz]e|interpret|synthesize|explain)\b)/iu.test(instruction);
   const calculationOutput = /(?:金额|总额|合计|总计|结果|[=×]|\b(?:amount|total|result)\b)[^\r\n]{0,100}(?:\d|[零一二三四五六七八九十百千万])|^\s*[-+]?\d+(?:\.\d+)?\s*(?:元|美元|USD|CNY)?[。.!！]?\s*$/iu.test(response); // i18n-allow: returned calculation data, not tool-count or path digits.
   const onlyReadAcknowledgment = /^(?:(?:已|已经|成功|完成|文件|内容|数据|读取|阅读|查看|检查|核验|验证|完毕|任务|操作|read|file|content|verified|completed|successfully|done)|[\s。.!！,，:：;；-])+$/iu.test(response);
-  const rawReadOnly = response.replace(/\s+/gu, '') === String(record.result || '').replace(/\s+/gu, '');
   const analysisMissing = analysisRequested && (unusableNarration || onlyReadAcknowledgment || rawReadOnly || (calculationRequested && !calculationOutput));
   return {
     text: unusableNarration || analysisMissing

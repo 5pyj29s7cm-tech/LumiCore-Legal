@@ -2,25 +2,26 @@ import type { NormalizedLLMResponse } from "../../tools/types";
 import { replacePromptBlock } from "../prompt_blocks";
 import type { ToolLoopState } from './loop_setup';
 import type { LLMResult } from './contracts';
-import { desktopControlPauseReason, hasCompletedCoreAction, buildDesktopControlPausedSummary, guardModelTerminalResponse } from './projection';
+import { desktopControlPauseReason, hasCompletedCoreAction, buildDesktopControlPausedSummary, guardToolResponseIfNeeded } from './projection';
 import { recordWorkflowIfToolsUsed } from './workflow';
 import { prepareToolLoopModelResponse } from './model_response';
 import { toolCallSignature, buildMissingVerificationObligationPrompt, MAX_VERIFICATION_OBLIGATION_REPLANS, hasUnverifiedToolOutcome, MAX_TOOL_RECOVERY_REPLANS, buildToolRecoveryReplanPrompt, isVerifiedToolSuccess, isRetryableToolOutcome, MAX_IDENTICAL_RECOVERY_RETRIES, shouldSuppressConfirmedReplay } from './recovery';
 import { getPrimaryUserText, buildIterationLimitSummary } from './summaries';
 import { executePlannedToolBatch } from './tool_batch';
-import { buildVerifiedToolCheckpoint } from './checkpoints';
 
 export async function executeToolLoopIteration(state: ToolLoopState, iteration: number): Promise<LLMResult | undefined> {
   const finishModelResponse = (response: NormalizedLLMResponse) => {
-    const guarded = guardModelTerminalResponse({ task: state.primaryTask, response: response.text || '', toolCalls: state.executionLog,
-      structured: state.context?.currentTurnExecutionRequested === true, completionRequest: state.context?.completionRequest,
-      responseIncomplete: response.streamIncomplete === true || response.finishReason === 'length' || response.finishReason === 'content_filter',
-      scopeUnavailable: state.context?.trustedActionContinuation === true && !state.context?.completionRequest?.rootText,
+    const text = response.text || '';
+    if (response.streamIncomplete === true || response.finishReason === 'length' || response.finishReason === 'content_filter') {
+      return state.finish(text, { text, blocked: true, reason: 'reply_response_incomplete' });
+    }
+    if (state.context?.trustedActionContinuation === true && !state.context?.completionRequest?.rootText) {
+      return state.finish(text, { text, blocked: true, reason: 'reply_root_unavailable' });
+    }
+    const guarded = guardToolResponseIfNeeded({ task: state.primaryTask, response: response.text || '', toolCalls: state.executionLog,
       source: state.context?.source, requestId: state.toolExecutionContext?.requestId, taskId: state.toolExecutionContext?.taskId,
       acceptedTaskTarget: state.toolExecutionContext?.acceptedTaskTarget, acceptedActionContract: state.toolExecutionContext?.acceptedActionContract });
-    const delivered = guarded.reason === 'reply_answer_missing'
-      ? buildVerifiedToolCheckpoint(state.executionLog, state.primaryTask, state.toolExecutionContext) : guarded;
-    return state.finish(delivered.text, delivered);
+    return state.finish(guarded.text, guarded);
   };
 
     // Check for cancellation between iterations

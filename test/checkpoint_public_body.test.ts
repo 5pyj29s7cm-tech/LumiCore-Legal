@@ -1,7 +1,7 @@
 import {describe,expect,it,vi} from 'vitest';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {buildVerifiedToolCheckpoint} from '../server/llm/tool_loop/checkpoints';
-import {guardModelTerminalResponse} from '../server/llm/tool_loop/projection';
+import {sanitizeExecutionResponseForDelivery} from '../server/cognition/execution_guard_recovery';
 import {ToolRegistry} from '../server/tools/registry';
 import {executeToolCall,isCanonicalToolExecutionRecord} from '../server/tools/execution_engine';
 import {encodeToolResult} from '../server/tools/result_envelope';
@@ -42,7 +42,7 @@ describe('typed checkpoint delivery reuses existing privacy boundary',async()=>{
   const text='用户提供的synthetic-request-1不是凭空添加的信息。';const result=run([await canonical(text)],'请保留我给的synthetic-request-1');expect(result.text).toContain(text);expect(result.blocked).toBe(true);
  });
  it('keeps the primary decoder private-ID gate unchanged after extraction',async()=>{
-  const result=guardModelTerminalResponse({task:'读取资料',response:JSON.stringify({answer:'synthetic-request-1',goals:[]}),toolCalls:[],structured:true,requestId:'synthetic-request-1',taskId:'synthetic-task-1'} as any);expect(result.reason).toBe('reply_private_reference');expect(result.blocked).toBe(true);expect(result.text).not.toContain('synthetic-request-1');
+  const result=sanitizeExecutionResponseForDelivery({text:'synthetic-request-1',blocked:false,reason:''},{task:'读取资料',toolRecords:[],requestId:'synthetic-request-1',taskId:'synthetic-task-1'});expect(result.reason).toBe('execution_recovery_incomplete');expect(result.blocked).toBe(true);expect(result.text).not.toContain('synthetic-request-1');
  });
  it('redacts secrets from typed content before the blocked early return',async()=>{
   const result=run([await canonical('草稿正文。password=synthetic-secret-734 apiKey=synthetic-key-826')]);expect(result.text).not.toContain('synthetic-secret-734');expect(result.text).not.toContain('synthetic-key-826');expect(result.blocked).toBe(true);

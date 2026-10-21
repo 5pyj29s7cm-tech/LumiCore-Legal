@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import type { ToolExecutionRecord } from '../server/tools/types';
 import './helpers';
 import fs from 'node:fs';
 import { createServer, type Server as HttpServer } from 'node:http';
@@ -17,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   makeLLMCall: vi.fn(),
   makeLLMCallStreaming: vi.fn(),
   runWithTools: vi.fn(),
+  finalizations: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock('../server/stt/adapter', async importOriginal => {
@@ -67,6 +70,20 @@ vi.mock('../server/llm/adapter', async importOriginal => {
   // tool execution, replay protection, cancellation, or completion policy.
   mocks.runWithTools.mockImplementation(actual.runWithTools);
   return { ...actual, runWithTools: mocks.runWithTools };
+});
+
+vi.mock('../server/cognition/result_finalizer', async importOriginal => {
+  const actual = await importOriginal<typeof import('../server/cognition/result_finalizer')>();
+  return { ...actual, finalizeLumiResponse: (input: Parameters<typeof actual.finalizeLumiResponse>[0]) => {
+    const result = actual.finalizeLumiResponse(input);
+    mocks.finalizations.push({ result, input: { taskText: input.taskText, responseText: input.responseText,
+      requestId: input.requestId, taskId: input.taskId, source: input.source, completionGuard: input.completionGuard,
+      flow: input.flow ? { rootTaskText: input.flow.rootTaskText, routeText: input.flow.routeText,
+        acceptedTaskTarget: input.flow.acceptedTaskTarget, acceptedActionContract: input.flow.acceptedActionContract } : undefined,
+      tools: input.toolRecords?.map(record => ({ name: record.name, requestId: record.requestId, taskId: record.taskId,
+        result: record.result, arguments: record.arguments, status: record.envelope?.status })) } });
+    return result;
+  } };
 });
 
 vi.mock('../server/tts/adapter', async importOriginal => {
@@ -259,26 +276,7 @@ describe('accepted STT Voice -> Chat task continuity', () => {
       }
       let text = '我没有找到你指定的文件。请告诉我正确路径，我会接着这个任务继续读取。';
       if (channel === 'chat') {
-        const authorization = messages.findLast((message: any) => (
-          message.promptBlock?.id === 'current-execution-authorization'
-          && message.promptBlock?.authority === 'server'
-        ));
-        const verifiedReads = (authorization?.promptBlock?.fields?.completionEvidence || []).filter((entry: any) => (
-          entry.tool === 'read_file' && entry.status === 'verified_success'
-        ));
-        expect(verifiedReads).toHaveLength(1);
-        expect(verifiedReads[0].operation).toBe('observe');
-        expect(context?.completionRequest?.currentText).toBe(chatText);
-        text = JSON.stringify({
-          answer: `已经按你的纠正读取了正确文件，内容是：${fixtureText}`,
-          goals: [{
-            text: context.completionRequest.currentText,
-            operation: verifiedReads[0].operation,
-            effects: verifiedReads[0].effects,
-            status: 'completed',
-            evidenceIds: [verifiedReads[0].id],
-          }],
-        });
+        text = `已经按你的纠正读取了正确文件，内容是：${fixtureText}`;
       }
       onChunk?.(text);
       return {
@@ -593,7 +591,16 @@ describe('accepted STT Voice -> Chat task continuity', () => {
       conversationId,
       finalized: true,
     });
-    expect(String(chatResponse.text || '')).toContain(fixtureText);
+    const loopDiagnostics = await Promise.all(mocks.runWithTools.mock.results.map(async result => {
+      const value = await result.value;
+      return { text: value?.text, guard: value?.completionGuard, tools: value?.toolCalls?.map((record: ToolExecutionRecord) => ({
+        name: record.name, taskId: record.taskId, requestId: record.requestId, arguments: record.arguments,
+        error: record.error, status: record.envelope?.status, verification: record.terminalVerification,
+      })) };
+    }));
+    expect(String(chatResponse.text || ''), JSON.stringify({ chatResponse, loopDiagnostics, finalizations: mocks.finalizations,
+      tasks: readDB().conversationActionTasks.filter(row => row.userId === userId).map(row => ({ id: row.id, goal: row.goal,
+        status: row.status, activeRequestId: row.activeRequestId, context: row.context })) })).toContain(fixtureText);
     expect(String(chatResponse.text || '')).not.toMatch(/No successful current-turn|persistence_unknown/u);
     expect(chatResponse.taskRelation).toMatchObject({ taskId: voiceTaskId });
 
@@ -643,6 +650,17 @@ describe('accepted STT Voice -> Chat task continuity', () => {
       envelope: { status: 'verified_success' },
     });
     expect(successfulChatRead?.result).toBe(fixtureText);
+    const currentSnapshot = getConversationCompletionSnapshot({ userId, conversationId, taskId: voiceTaskId,
+      requestId: chatRequestId, domain: 'personal', orgId: '' });
+    expect(currentSnapshot).not.toBeNull();
+    const originalReads = currentSnapshot!.receipts.filter(row => row.taskId === voiceTaskId && row.requestId === chatRequestId
+      && row.toolName === 'read_file' && row.inputDigest === digest({ path: fixturePath }));
+    expect(originalReads).toHaveLength(1);
+    const checkedRead = inspectPersistedToolExecutionReceipt(originalReads[0], {
+      rowTaskId: voiceTaskId, requestId: chatRequestId, toolName: 'read_file', outcome: 'verified_success',
+    });
+    expect(checkedRead.valid, checkedRead.reason).toBe(true); expect(checkedRead.explicitlyTerminalVerified).toBe(true);
+    expect(checkedRead.envelope?.result).toMatchObject({ kind: 'text_readback_metadata', contentDigest: createHash('sha256').update(fixtureText).digest('hex'), byteLength: Buffer.byteLength(fixtureText) });
 
     const completedState = getConversationActionStateByTaskId(readDB(), {
       conversationId,
@@ -759,60 +777,14 @@ describe('accepted STT Voice -> Chat task continuity', () => {
     const task = `在 ${target} 新建文本文件，只写入“${content}”。先等待我确认才能写入，不得自行确认。${readbackRequired ? '写完回读并告诉我全文。' : ''}`;
     mocks.runWithTools.mockClear();
     mocks.makeLLMCallStreaming.mockClear();
-    mocks.makeLLMCallStreaming.mockImplementation(async (messages: any[]) => {
+    mocks.makeLLMCallStreaming.mockImplementation(async () => {
       const context = mocks.runWithTools.mock.calls.at(-1)?.[11];
-      const currentText = context?.completionRequest?.currentText;
-      if (currentText === task) return {
-        text: '', toolCalls: [{ id: `voice-bounded-call-write-${suffix}`, name: 'write_file', arguments: { path: target, content } }],
-        usage: { promptTokens: 10, completionTokens: 3, totalTokens: 13 },
-      };
-      expect(currentText).toBe('确认');
-      expect(context?.completionRequest?.rootText).toBe(task);
-      const snapshot = getConversationCompletionSnapshot(context);
-      expect(snapshot?.currentTurn?.requestId).toBe(context.requestId);
-      const entries = [...messages].reverse().find((message: any) => message.promptBlock?.id === 'current-execution-authorization'
-        && message.promptBlock?.authority === 'server')?.promptBlock?.fields?.completionEvidence || [];
-      const proofFor = (tool: string, args: Record<string, unknown>) => {
-        const capability = toolRegistry.getCapabilityManifestEntry(tool, context.toolPolicy, context);
-        for (const entry of entries.filter((item: any) => item.tool === tool && item.status === 'verified_success')) {
-          const rows = snapshot!.receipts.filter(row => row.id === entry.id && row.taskId === context.taskId
-            && row.requestId === context.requestId && row.toolName === tool && row.inputDigest === digest(args));
-          if (rows.length !== 1) continue;
-          const checked = inspectPersistedToolExecutionReceipt(rows[0], { rowTaskId: context.taskId, requestId: context.requestId, toolName: tool, outcome: 'verified_success' });
-          if (checked.valid && checked.explicitlyTerminalVerified && checked.envelope
-            && capability && capability.operation === entry.operation
-            && JSON.stringify(capability.sideEffects.map(effect => effect.type)) === JSON.stringify(entry.effects)) return { entry, row: rows[0], record: checked.envelope };
-        }
-        return null;
-      };
-      const written = proofFor('write_file', { path: target, content });
-      const read = proofFor('read_file', { path: target });
-      if (written && readbackRequired && !read
-        && !snapshot!.receipts.some(row => row.taskId === context.taskId && row.requestId === context.requestId
-          && row.toolName === 'read_file' && row.inputDigest === digest({ path: target }))) return {
-        text: '', toolCalls: [{ id: `voice-bounded-call-read-${suffix}`, name: 'read_file', arguments: { path: target } }],
-        usage: { promptTokens: 10, completionTokens: 3, totalTokens: 13 },
-      };
-      if (!written || readbackRequired && (!read || read.record.result !== content)) return {
-        text: JSON.stringify({ answer: '本次请求尚未全部完成，当前写入或读回证据不足。', goals: [{ text: task, operation: 'unknown', effects: [], status: 'incomplete', evidenceIds: [] }] }),
-        toolCalls: [], usage: { promptTokens: 10, completionTokens: 3, totalTokens: 13 },
-      };
-      expect(written.entry.operation).toBe('create');
-      expect(fs.readFileSync(target, 'utf8')).toBe(content);
-      const readClause = '写完回读并告诉我全文。';
-      const createClause = readbackRequired ? task.slice(0, -readClause.length) : task;
-      const completed = (text: string, proof: NonNullable<typeof written>) => ({
-        text, operation: proof.entry.operation, effects: proof.entry.effects, status: 'completed', evidenceIds: [proof.entry.id],
-      });
-      const goals = [completed(createClause, written), completed(currentText, written)];
-      if (readbackRequired) {
-        expect(read!.entry.operation).toBe('observe');
-        expect(read!.record.result).toBe(content);
-        goals.push(completed(readClause, read!));
-      }
+      const written = context?.priorToolRecords?.some((record: ToolExecutionRecord) => record.name === 'write_file'
+        && record.arguments?.path === target && record.terminalVerification?.status === 'verified');
       return {
-        text: JSON.stringify({ answer: `文件已保存：${target}${readbackRequired ? '\n全文：'+content : ''}`, goals }),
-        toolCalls: [], usage: { promptTokens: 10, completionTokens: 3, totalTokens: 13 },
+        text: '', toolCalls: [{ id: `voice-bounded-call-${written ? 'read' : 'write'}-${suffix}`,
+          name: written ? 'read_file' : 'write_file', arguments: written ? { path: target } : { path: target, content } }],
+        usage: { promptTokens: 10, completionTokens: 3, totalTokens: 13 },
       };
     });
     const speak = async (text: string) => {
@@ -836,11 +808,25 @@ describe('accepted STT Voice -> Chat task continuity', () => {
     if (readbackRequired) expect(result.text).toContain(content);
     expect(fs.readFileSync(target, 'utf8')).toBe(content);
     expect(getPendingConfirmation(userId)).toBeNull();
-    expect(mocks.runWithTools).toHaveBeenCalledTimes(2); // Proposal and same-task confirmation continuation.
-    expect(mocks.makeLLMCallStreaming).toHaveBeenCalledTimes(2); // Proposal plus one whole-request terminal reply; deterministic readback does not add planning.
+    expect(mocks.runWithTools).toHaveBeenCalledTimes(2); // Legal voice preserves both proposal and confirmed turn assembly.
+    expect(mocks.makeLLMCallStreaming).toHaveBeenCalledTimes(readbackRequired ? 1 : 2); // The required same-path readback terminates without a further model round.
     const receipts = await querySQL('SELECT toolName,outcome FROM conversation_action_receipts WHERE requestId=?', [result.requestId]);
     expect(receipts).toEqual(expect.arrayContaining([expect.objectContaining({ toolName: 'write_file', outcome: 'verified_success' })]));
     if (readbackRequired) expect(receipts).toEqual(expect.arrayContaining([expect.objectContaining({ toolName: 'read_file', outcome: 'verified_success' })]));
+    const snapshot = getConversationCompletionSnapshot({ userId, conversationId: proposal.conversationId,
+      requestId: result.requestId, taskId: pending!.taskId!, domain: 'personal', orgId: '' });
+    expect(snapshot!.turns.find(row => row.requestId === result.requestId)?.taskId).toBe(pending!.taskId);
+    for (const [toolName, args] of [['write_file', { path: target, content }],
+      ...(readbackRequired ? [['read_file', { path: target }]] : [])] as Array<[string, Record<string, unknown>]>) {
+      const matching = snapshot!.receipts.filter(row => row.taskId === pending!.taskId && row.requestId === result.requestId
+        && row.toolName === toolName && row.inputDigest === digest(args));
+      expect(matching).toHaveLength(1);
+      const checked = inspectPersistedToolExecutionReceipt(matching[0], { rowTaskId: pending!.taskId!,
+        requestId: result.requestId, toolName, outcome: 'verified_success' });
+      expect(checked.valid).toBe(true); expect(checked.explicitlyTerminalVerified).toBe(true);
+      expect(matching[0].inputDigest).toBe(digest(args));
+      if (toolName === 'read_file') expect(checked.envelope?.result).toMatchObject({ kind: 'text_readback_metadata', contentDigest: createHash('sha256').update(content).digest('hex'), byteLength: Buffer.byteLength(content) });
+    }
     const savedState = getConversationActionStateByTaskId(readDB(), { conversationId: proposal.conversationId, userId, taskId: pending!.taskId! });
     expect(savedState, JSON.stringify(savedState))
       .toMatchObject({ status: 'completed', unfinished: false });

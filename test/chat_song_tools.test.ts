@@ -242,13 +242,11 @@ async function deliverExistingVideoThroughChat(p: ChatSongProject, language: 'en
     : '请取回聊天唱歌工程 ' + p.id + ' 第 ' + p.revision + ' 版已有成片，作为视频附件返回。不要重新生成或修改任何文件。';
   const authorization = captureRequestAuthorization(() => true, 'Synthetic request is no longer current'); let diagnostic: unknown;
   mock.llm.mockReset().mockImplementation(async (messages: Array<{ promptBlock?: { id: string; fields?: Record<string, unknown> } }>, declarations: Array<{ function: { name: string } }>) => {
-    const fields = messages.find(message => message.promptBlock?.id === 'current-execution-authorization')?.promptBlock?.fields;
     if (mock.llm.mock.calls.length === 1) {
       expect(declarations.map(item => item.function.name), JSON.stringify(diagnostic)).toContain('chat_song_read');
       return { text: '', finishReason: 'tool_calls', routingReceiptId: 'synthetic-model-routing-' + requestId, toolCalls: [{ id: 'accepted-existing-song-read', name: 'chat_song_read', arguments: { projectId: p.id, revision: p.revision, includeOutput: true } }] };
     }
-    const evidence = fields?.completionEvidence as Array<{ id: string; operation: string; effects: unknown[] }>;
-    return { text: JSON.stringify({ answer: 'Here is the selected existing video.', goals: [{ text, operation: evidence[0].operation, effects: evidence[0].effects, status: 'completed', evidenceIds: [evidence[0].id] }] }), finishReason: 'stop', toolCalls: [] };
+    return { text: 'Here is the selected existing video.', finishReason: 'stop', toolCalls: [] };
   });
   const input: LumiEntryTurnInput<ExecutedLumiTurn> = {
     entry: { source: 'chat', channel: 'chat', historyLimit: 10, failureText: 'Synthetic existing video request did not finish.', failureReason: 'existing_song_fixture' },
@@ -289,7 +287,7 @@ it.each(['en', 'zh', 'zh-natural'] as const)('delivers an explicitly requested e
   expect(fs.readdirSync(directory)).toEqual(before);
   const artifacts = collectChatArtifacts([record]); expect(artifacts).toHaveLength(1); expect(artifacts[0].kind).toBe('video'); expect(artifacts[0].fileName).toBe(render.fileId);
   expect(registry.getCapabilityManifestEntry('chat_song_read')).toMatchObject({ operation: 'observe', sideEffects: [{ type: 'local_read' }] });
-  expect(mock.media).not.toHaveBeenCalled(); expect(mock.llm).toHaveBeenCalledTimes(2); expect(mock.llm.mock.calls.every(args => args[2].model === 'offline-existing-song')).toBe(true); expect(fs.readdirSync(directory)).toEqual(before); expect(getChatSongProject(uid, p.id)).toEqual(original); expect(original.song?.confirmed).toBe(false);
+  expect(mock.media).not.toHaveBeenCalled(); expect(mock.llm).toHaveBeenCalledTimes(1); expect(mock.llm.mock.calls.every(args => args[2].model === 'offline-existing-song')).toBe(true); expect(fs.readdirSync(directory)).toEqual(before); expect(getChatSongProject(uid, p.id)).toEqual(original); expect(original.song?.confirmed).toBe(false);
 });
 it.each(['stale-request', 'visual-change', 'replaced-video', 'replaced-song', 'replaced-input', 'wrong-receipt-sha', 'old-template'] as const)('rejects %s for existing-output retrieval without rendering or changing lyric approval', async kind => {
   const { p, render, filePath, directory } = await cachedVideo(kind === 'replaced-input');

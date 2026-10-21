@@ -1,4 +1,3 @@
-import { guardModelTerminalResponse } from '../server/llm/tool_loop/projection';
 import { isVerifiedCurrentTurnRecord } from '../server/cognition/result_finalizer_support';
 import './helpers';
 import fs from 'node:fs';
@@ -7,15 +6,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ makeLLMCall: vi.fn() }));
 vi.mock('../server/llm/providers', async importOriginal => {
-  const callMock = async (...args: any[]) => {
-    const response = await mocks.makeLLMCall(...args);
-    if (!response?.text || response.toolCalls?.length) return response;
-    const fields = args[0].find((m:any) => m.promptBlock?.id === 'current-execution-authorization')?.promptBlock?.fields;
-    if (!fields?.completionEvidence) return response;
-    const text = [...args[0]].reverse().find((m:any) => m.role === 'user')?.content;
-    const evidence = fields.completionEvidence.filter((r:any) => r.status === 'verified_success');
-    return {...response, text:JSON.stringify({answer:response.text,goals:evidence.length ? evidence.map((r:any) => ({text,operation:r.operation,effects:r.effects,status:'completed',evidenceIds:[r.id]})) : [{text,operation:'respond',effects:[],status:'incomplete',evidenceIds:[]}]})};
-  };
+  const callMock = (...args: any[]) => mocks.makeLLMCall(...args);
   return {...await importOriginal<typeof import('../server/llm/providers')>(),makeLLMCall:callMock,makeLLMCallStreaming:callMock};
 });
 
@@ -87,7 +78,7 @@ describe('verified bounded actions in the real shared tool loop', () => {
       requestId: value.context.requestId, taskId: value.context.taskId };
     expect(finalizeLumiResponse(input)).toMatchObject({ blocked: false, text: '图片已生成。' });
     const mixed='生成一张蓝色杯子的图片并发送邮件。';
-    expect(guardModelTerminalResponse({task:mixed,response:JSON.stringify({answer:'图片已生成；邮件尚未发送。',goals:[{text:'生成一张蓝色杯子的图片',operation:current[0].capability!.operation,effects:current[0].capability!.sideEffects.map(e=>e.type),status:'completed',evidenceIds:[current[0].id]},{text:'发送邮件',operation:'communicate',effects:['external_communication'],status:'incomplete',evidenceIds:[]}]}),structured:true,completionRequest:{currentText:mixed},toolCalls:current,requestId:input.requestId,taskId:input.taskId,source:'chat'})).toMatchObject({blocked:true});
+    expect(finalizeLumiResponse({ ...input, taskText: mixed, responseText: '图片已生成；邮件尚未发送。', toolRecords: current })).toMatchObject({ blocked: true });
     expect(finalizeLumiResponse({ ...input, taskText: '生成两张蓝色杯子的图片。' }))
       .toMatchObject({ blocked: true, reason: 'media_settings_mismatch' });
     expect(isVerifiedCurrentTurnRecord({...input,requestId:'other-turn'},current[0])).toBe(false);
