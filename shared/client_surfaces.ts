@@ -165,7 +165,8 @@ export const PERSONAL_CLIENT_SURFACES: readonly PersonalClientSurfaceDefinition[
     label: 'Nexus / central world',
     target: 'nexus',
     actions: ['open_nexus'],
-    useWhen: 'Open the full central-world view of the Lumi client.',
+    navigationAliases: ['灵息之境', 'breath realm'],
+    useWhen: 'Enter Breath Realm / 灵息之境 by scrolling up on the personal sphere or clear home background, and return by scrolling down; or ask Lumi to enter it; open Skill Hall from its left control area.',
     closeAfterUse: false,
     launcherIds: [],
   },
@@ -187,7 +188,7 @@ export const PERSONAL_CLIENT_SURFACES: readonly PersonalClientSurfaceDefinition[
       open_command_center: 'office',
       open_chat: 'office',
     },
-    useWhen: "Converse with Lumi, inspect persistent tasks and receipts, and enter the LumiCore workspace. The right-side menu, top to bottom, is: Memory Territory / 记忆领地 (purple castle; private digital people and their conversations), Breath Realm / 灵息之境 / LumiCore (violet CPU; core and system view), Knowledge Base / 知识库 (cyan folder; import, read and search workspace materials), AI Creation / AI 创作 (amber sparkles; image, video and music creation). The calendar/planner is a separate button in the chat header; the right-side icons are named destinations, not generic calendar/processing/files/automation categories.",
+    useWhen: "Converse with Lumi and inspect persistent tasks and receipts. The right-side menu, top to bottom, is: Memory Territory / 记忆领地 (purple castle; private digital people and their conversations), Knowledge Base / 知识库 (cyan folder; import, read and search workspace materials), AI Creation / AI 创作 (amber sparkles; image, video and music creation). Enter Breath Realm / 灵息之境 by scrolling up on the personal sphere or clear home background or by voice; Skill Hall is inside Breath Realm. The calendar/planner is a separate button in the chat header. These are named destinations, not generic calendar/processing/files/automation categories.",
     // The command center is a permanent top-level navigation destination,
     // not a duplicated desktop/app-launcher icon.
     launcherIds: [],
@@ -267,7 +268,7 @@ export const PERSONAL_CLIENT_SURFACES: readonly PersonalClientSurfaceDefinition[
     label: 'Skill Hall',
     target: 'skills',
     actions: ['open_skills'],
-    useWhen: 'Discover, install, enable, repair, and remove skills or MCP extensions, and inspect their health.',
+    useWhen: 'Open Skill Hall from Breath Realm to discover, install, enable, repair, and remove skills or MCP extensions, and inspect their health.',
     launcherIds: [],
   },
   {

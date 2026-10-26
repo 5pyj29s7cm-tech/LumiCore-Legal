@@ -23,9 +23,9 @@ describe('public iteration failure summary', () => {
   it('reports the actual partial progress without planning instructions or declaring that no draft exists', () => {
     const text = buildIterationLimitSummary([record(), record(), record(), record()], '生成文书工作稿');
     expect(text).toMatch(/尚未全部完成/);
-    expect(text).toContain('4.');
-    expect(text).toContain('尚未确认完成');
-    expect(text).toContain('可能已生成文件');
+    expect(text).not.toMatch(/这轮进展|任务处理|4\./u);
+    expect(text).toContain('尚未确认可交付成果');
+    expect(text).not.toContain('可能已生成');
     expect(text).not.toMatch(/没有检测到可验证产物|没有(?:任何)?(?:产物|文件|成果)/);
     expect(text).not.toContain('internal private prompt');
     noInternalInstructions(text);
@@ -47,7 +47,8 @@ describe('public iteration failure summary', () => {
     expect(fs.existsSync(output)).toBe(true);
     expect(text).not.toContain('已确认的产物');
     expect(text).not.toContain(output);
-    expect(text).toContain('可能已生成文件');
+    expect(text).toContain('尚未确认可交付成果');
+    expect(text).not.toContain('可能已生成');
     expect(text).toMatch(/尚未全部完成/);
     noInternalInstructions(text);
   });
@@ -67,7 +68,8 @@ describe('public iteration failure summary', () => {
   it('uses the same concise failure boundary in the English branch', () => {
     const text = buildIterationLimitSummary([record()], 'Prepare a draft');
     expect(text).toContain('This request is not complete.');
-    expect(text).toContain('Files may have been created');
+    expect(text).toContain('Deliverable results have not yet been confirmed');
+    expect(text).not.toContain('Files may have been created');
     noInternalInstructions(text);
   });
 });

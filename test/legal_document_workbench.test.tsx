@@ -210,17 +210,18 @@ describe.each([
 
 describe.each([
   ['citations', 'verify-citations', 'legal_verify_citation'],
-  ['import-judgment', 'import-judgment', 'legal_import_judgment'],
+  ['import-judgment', 'Import materials', 'legal_import_materials_to_kb'],
 ])('%s remaining legal tool', (nav, action, tool) => {
   const open = () => { hubNav(nav); if (nav === 'citations') selectAdvancedLegalTool('legal_verify_citation'); };
-  const start = () => fireEvent.click(screen.getAllByRole('button', { name: action }).at(-1)!);
+  const start = () => fireEvent.click(screen.getAllByRole('button', { name: nav !== 'citations' && fixture.language === 'zh' ? '导入材料' : action }).at(-1)!);
   const text = () => screen.getByRole('textbox') as HTMLTextAreaElement;
   it('prevents duplicate execution and never archives an error or marks it complete', async () => {
     fixture.domain = 'personal'; writeLegalCaseFiles([hubCase('Case A')], 'Case A'); render(<StrictMode>{hubPage()}</StrictMode>); open(); fireEvent.change(text(), { target: { value: 'Judgment source' } });
     const pending = deferred(); fixture.net.mockReturnValueOnce(pending.promise); act(() => { start(); start(); }); expect(fixture.net).toHaveBeenCalledTimes(1);
     await act(async () => pending.resolve(reply({ error: 'request denied' }, 403))); await screen.findByText('Error: request denied'); expect(screen.queryByText('result-ready')).toBeNull(); expect(screen.queryByRole('button', { name: 'archive-to-case' })).toBeNull(); expect(readLegalCaseFiles()[0].materials).toHaveLength(0);
+    if (nav !== 'citations') fixture.net.mockResolvedValueOnce(reply({ text: 'Completed document', caseUpdates: [{ ...hubCase('Case A'), materials: [{ id: 'server-material', type: 'evidence', title: 'Judgment source', content: 'Judgment source', source: 'manual', createdAt: '' }] }] }));
     start(); await screen.findByText('result-ready'); if (nav === 'citations') fireEvent.click(screen.getByRole('button', { name: 'archive-to-case' }));
-    expect(readLegalCaseFiles()[0].materials).toEqual([expect.objectContaining({ type: nav === 'citations' ? 'note' : 'judgment', content: nav === 'citations' ? 'Completed document' : 'Judgment source' })]);
+    expect(readLegalCaseFiles()[0].materials).toEqual([expect.objectContaining({ type: nav === 'citations' ? 'note' : 'evidence', content: nav === 'citations' ? 'Completed document' : 'Judgment source' })]);
   });
   it('keeps drafts on metadata refresh and never applies a late reply or archive to another case', async () => {
     fixture.domain = 'personal'; writeLegalCaseFiles([{ ...hubCase('Case A'), materials: [{ id: 'initial', title: 'Contract', type: 'contract', content: 'Prefilled contract', createdAt: '' }] }], 'Case A'); const view = render(hubPage()); open(); expect(text().value).toBe(nav === 'citations' ? 'Prefilled contract' : '');
@@ -229,10 +230,10 @@ describe.each([
     act(() => writeLegalCaseFiles([hubCase('Case B')], 'Case B')); await act(async () => pending.resolve(reply({ text: 'Old A output' }))); expect(screen.queryAllByText('Old A output')).toHaveLength(0); expect(text().value).toBe(''); if (nav === 'citations') selectAdvancedLegalTool('legal_verify_citation'); expect(signal?.aborted).toBe(true); expect(readLegalCaseFiles().map(item => [item.id, item.materials.length])).toEqual([['Case B', 0]]);
     fireEvent.change(text(), { target: { value: 'New B draft' } }); start(); await screen.findByText('result-ready');
   });
-  it('retains the separate organization case-material write and does not claim that a failed archive succeeded', async () => {
-    fixture.net.mockImplementation(async (url, init) => reply(String(url).endsWith('/materials') ? { error: 'archive denied' } : init?.method === 'POST' ? { text: 'Tool output' } : { cases: [hubCase('Case A')] }, String(url).endsWith('/materials') ? 403 : 200)); render(hubPage()); await screen.findByRole('heading', { name: 'Case A' }); open(); fireEvent.change(text(), { target: { value: 'Organization source' } }); start();
-    if (nav === 'citations') { await screen.findByText(/^Tool output/); fireEvent.click(screen.getByRole('button', { name: 'archive-to-case' })); } else { await screen.findByText(/Error: failed-to-archive-material/); expect(screen.queryByText('result-ready')).toBeNull(); } await waitFor(() => expect(toast.error).toHaveBeenCalledWith('archive denied')); expect(toast.success).not.toHaveBeenCalled(); expect(screen.queryByText(/archived-to-the-current-case/)).toBeNull();
-    expect(fixture.net.mock.calls.filter(([url]) => url === '/api/org/legal/cases/Case%20A/materials')).toHaveLength(1); expect(JSON.parse(fixture.net.mock.calls.find(([url]) => url === `/api/legal/tool/${tool}`)![1].body).args).toMatchObject({ caseId: 'Case A', orgId: 'org-a' });
+  it('uses the owning tool archive and does not claim that a failed organization archive succeeded', async () => {
+    fixture.net.mockImplementation(async (url, init) => reply(String(url).endsWith('/materials') ? { error: 'archive denied' } : String(url).endsWith('/legal_import_materials_to_kb') ? { text: 'archive denied', receipt: { ok: false, status: 'partial' }, verification: { status: 'failed' } } : init?.method === 'POST' ? { text: 'Tool output' } : { cases: [hubCase('Case A')] }, String(url).endsWith('/materials') ? 403 : 200)); render(hubPage()); await screen.findByRole('heading', { name: 'Case A' }); open(); fireEvent.change(text(), { target: { value: 'Organization source' } }); start();
+    if (nav === 'citations') { await screen.findByText(/^Tool output/); fireEvent.click(screen.getByRole('button', { name: 'archive-to-case' })); } else { await screen.findByText('Error: archive denied'); expect(screen.queryByText('result-ready')).toBeNull(); } if (nav === 'citations') await waitFor(() => expect(toast.error).toHaveBeenCalledWith('archive denied')); expect(toast.success).not.toHaveBeenCalled(); expect(screen.queryByText(/archived-to-the-current-case/)).toBeNull();
+    expect(fixture.net.mock.calls.filter(([url]) => url === '/api/org/legal/cases/Case%20A/materials')).toHaveLength(nav === 'citations' ? 1 : 0); expect(JSON.parse(fixture.net.mock.calls.find(([url]) => url === `/api/legal/tool/${tool}`)![1].body).args).toMatchObject({ caseId: 'Case A', orgId: 'org-a' });
   });
 });
 
@@ -270,23 +271,32 @@ it.each(['case', 'organization', 'account', 'domain', 'close'])('drops late know
 });
 
 const workspaceCase = (id = 'Case A') => ({ ...hubCase(id), materials: [{ id: 'draft', type: 'pleading' as const, title: 'Source draft', content: 'Source draft text', createdAt: '' }] });
-it.each([false, true])('judgment import waits for archive confirmation and drops completion after case changes (%s)', async changeCase => {
-  const pending = deferred(); fixture.net.mockImplementation(async (url, init) => String(url).endsWith('/materials') ? pending.promise : reply(init?.method === 'POST' ? { text: 'Knowledge import accepted' } : { cases: [hubCase('Case A'), hubCase('Case B')] })); render(hubPage()); await screen.findByRole('heading', { name: 'Case A' }); hubNav('import-judgment'); fireEvent.change(screen.getByPlaceholderText('paste-judgment-document-content-here'), { target: { value: 'Judgment source' } }); fireEvent.click(screen.getAllByRole('button', { name: 'import-judgment' }).at(-1)!);
-  await waitFor(() => expect(fixture.net.mock.calls.some(([url]) => String(url).endsWith('/materials'))).toBe(true)); expect(screen.queryByText('result-ready')).toBeNull(); expect(screen.queryByText('Knowledge import accepted')).toBeNull();
+it.each([false, true])('material import waits for the backend archive receipt and drops completion after case changes (%s)', async changeCase => {
+  const pending = deferred();
+  fixture.net.mockImplementation(async (url) => String(url).endsWith('/legal_import_materials_to_kb') ? pending.promise : reply({ cases: [hubCase('Case A'), hubCase('Case B')] }));
+  render(hubPage()); await screen.findByRole('heading', { name: 'Case A' }); hubNav('import-judgment');
+  fireEvent.change(screen.getByPlaceholderText('Paste the complete material text, or choose files'), { target: { value: 'General source' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Import materials' }));
+  await waitFor(() => expect(fixture.net.mock.calls.some(([url]) => String(url).endsWith('/legal_import_materials_to_kb'))).toBe(true));
+  const toolCall = fixture.net.mock.calls.find(([url]) => String(url).endsWith('/legal_import_materials_to_kb'))!;
+  expect(JSON.parse(toolCall[1].body).args).toMatchObject({ caseId: 'Case A', persistCase: true, materialType: 'case_material', content: 'General source' });
+  expect(screen.queryByText('result-ready')).toBeNull(); expect(screen.queryByText('Knowledge import accepted')).toBeNull();
   if (changeCase) { hubNav('Case overview'); fireEvent.click(screen.getByRole('button', { name: /^Case B / })); hubNav('import-judgment'); }
-  await act(async () => pending.resolve(reply({ id: 'confirmed-material', title: 'Archived judgment', content: 'Judgment source', type: 'judgment', createdAt: '' })));
-  if (changeCase) { expect(screen.queryByText('result-ready')).toBeNull(); expect((screen.getByPlaceholderText('paste-judgment-document-content-here') as HTMLTextAreaElement).value).toBe(''); } else expect(screen.getByText('result-ready')).toBeTruthy();
+  await act(async () => pending.resolve(reply({ text: 'Knowledge import accepted', receipt: { ok: true, status: 'imported' }, verification: { status: 'verified' } })));
+  if (changeCase) { expect(screen.queryByText('result-ready')).toBeNull(); expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(''); expect(toolCall[1].signal.aborted).toBe(true); } else expect(screen.getByText('result-ready')).toBeTruthy();
+  expect(fixture.net.mock.calls.some(([url]) => String(url).endsWith('/materials'))).toBe(false);
 });
-describe.each(['search'])('%s research ownership and archive', kind => {
+
+describe('case research ownership and archive', () => {
   const writer = vi.fn(), text = () => document.querySelector('input')!;
-  const page = (file = hubCase('Case A')) => <StrictMode>{kind === 'search' ? <LegalCaseSearch caseFile={file} onAddMaterial={writer} /> : <LegalAssetTrace caseFile={file} onAddMaterial={writer} />}</StrictMode>;
+  const page = (file = hubCase('Case A')) => <StrictMode><LegalCaseSearch caseFile={file} onAddMaterial={writer} /></StrictMode>;
   const start = () => fireEvent.keyDown(text(), { key: 'Enter' });
   const archive = () => fireEvent.click(screen.getByRole('button', { name: 'archive-to-case' }));
   it('locks duplicate searches, rejects failed reports and retries with the original request scope', async () => {
     render(page()); fireEvent.change(text(), { target: { value: 'Research subject' } }); const pending = deferred(); fixture.net.mockReturnValueOnce(pending.promise); act(() => { start(); start(); }); expect(fixture.net).toHaveBeenCalledTimes(1);
-    const args = JSON.parse(fixture.net.mock.calls[0][1].body).args; expect(args).toMatchObject({ caseId: 'Case A', persistCase: true, [kind === 'search' ? 'query' : 'name']: 'Research subject' }); if (kind === 'search') expect(args.orgId).toBe('org-a');
+    const args = JSON.parse(fixture.net.mock.calls[0][1].body).args; expect(args).toMatchObject({ caseId: 'Case A', persistCase: true, query: 'Research subject', orgId: 'org-a' });
     await act(async () => pending.resolve(reply({ error: 'research denied' }, 403))); expect(screen.queryByText('result-ready')).toBeNull(); expect(screen.queryByRole('button', { name: 'archive-to-case' })).toBeNull(); expect(fixture.net).toHaveBeenCalledTimes(1);
-    start(); await screen.findByText('result-ready'); expect(fixture.net.mock.calls.filter(([url]) => String(url).includes('legal_equity_penetration'))).toHaveLength(kind === 'trace' ? 1 : 0);
+    start(); await screen.findByText('result-ready'); expect(fixture.net.mock.calls.map(([url]) => url)).toEqual(['/api/legal/tool/legal_search_case', '/api/legal/tool/legal_search_case']);
   });
   it.each(['case', 'organization', 'account', 'close'])('drops old reports and stops remaining tools on %s changes', async change => {
     const pending = deferred(); fixture.net.mockReturnValueOnce(pending.promise); const view = render(page()); fireEvent.change(text(), { target: { value: 'Private draft' } }); start(); const signal = fixture.net.mock.calls[0][1].signal;

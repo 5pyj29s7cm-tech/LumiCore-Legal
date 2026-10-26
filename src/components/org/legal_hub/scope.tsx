@@ -358,7 +358,7 @@ export function LegalHubScope({ initialView = 'workspace', workspaceResetKey = 0
       case 'contract-review': return <LegalContractReview caseFile={toolCase} />;
       case 'strategy': return <LegalStrategyView key={activeCase?.id} caseFile={toolCase} orgId={legalOrgId} />;
       case 'verify': return <LegalVerifyView key={activeCase?.id} caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
-      case 'import': return <LegalImportView key={activeCase?.id} caseFile={toolCase} orgId={legalOrgId} onAddMaterial={toolAddMaterial} />;
+      case 'import': return <LegalImportView key={activeCase?.id} caseFile={toolCase} orgId={legalOrgId} />;
       case 'knowledge-sync': return <LegalKnowledgeSyncView key={activeCase?.id} caseFile={toolCase} />;
       default: return <LegalCaseSearch />;
     }

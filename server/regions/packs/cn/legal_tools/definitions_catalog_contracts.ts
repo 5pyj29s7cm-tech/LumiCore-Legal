@@ -17,14 +17,14 @@ export function catalog_contractsTools(): ToolDefinition[] {
   return [
 defineLegalTool({
 name: 'legal_search_case',
-description: '类案检索 — 根据案由或事实描述在本地裁判文书库中搜索相似案例，返回案号、法院、相似度分数、摘要。数据来源：本地导入的中国裁判文书网公开文书。',
+description: '类案候选检索 — 根据案由或事实描述搜索本地已分类的裁判文书。按文件返回候选材料，保留相关摘录及各自引用、案号和法院；不按文本块计算案件数量。来源为本地知识库，不代替按主体查询涉诉或执行记录。',
 properties: {
 query: stringField('案由或事实描述，如"民间借贷纠纷"或"开发商逾期交房"'),
 limit: numberField('返回结果数量上限，默认5'),
 orgId: stringField('组织ID'),
 },
 required: ['query'],
-handler: withLegalReceipt(searchCaseHandler, { status: 'observed' })
+handler: searchCaseHandler
 }),
 defineLegalTool({
 name: 'legal_search_statute',

@@ -18,9 +18,10 @@ export async function finalizeVoiceModelTurn(context: NonNullable<Awaited<Return
     }
 
     let mainTerminalCommitted = false;
+    let terminalBlocked = finalResponse.blocked;
     if (context.responseText) {
       logger.info(`[Audio] Response: "${context.responseText.slice(0, 80)}" (${context.toolResults.length} tool calls)`);
-      mainTerminalCommitted = await context.finishVoiceTerminal({
+      const terminal = {
         text: context.responseText,
         source: "voice",
         blocked: finalResponse.blocked,
@@ -43,7 +44,9 @@ export async function finalizeVoiceModelTurn(context: NonNullable<Awaited<Return
             finalizationReason: finalResponse.reason,
           });
         },
-      });
+      };
+      mainTerminalCommitted = await context.finishVoiceTerminal(terminal);
+      terminalBlocked = terminal.blocked;
     } else {
       await Promise.allSettled(context.ttsPromises);
     }
@@ -56,7 +59,7 @@ export async function finalizeVoiceModelTurn(context: NonNullable<Awaited<Return
     // before TTS. Playback or
     // disconnect failures must never make a completed/blocked task disappear.
     // Topic tracking — extract and record topics for cross-session continuity
-    if (!finalResponse.blocked) {
+    if (!terminalBlocked) {
       try {
         const topics = extractTopics(context.userText + ' ' + context.responseText);
         for (const topic of topics) {
@@ -83,7 +86,7 @@ export async function finalizeVoiceModelTurn(context: NonNullable<Awaited<Return
         try { const hm = loadHIMState(context.voiceStateKey); const { him: nh } = himTick(updated, hm); saveHIMState(context.voiceStateKey, nh); } catch {}
       } catch { /* best-effort */ }
     }
-    if (mainTerminalCommitted && !finalResponse.blocked) {
+    if (mainTerminalCommitted && !terminalBlocked) {
       context.persistVoiceLearning(context.responseText, { toolRecords: context.toolResults, logLabel: 'voice' });
     }
   return { terminal: false as const, context };

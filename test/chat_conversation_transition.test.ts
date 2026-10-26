@@ -35,7 +35,7 @@ function switchingHarness() {
     normalizePersistedMessages: (rows: any[]) => rows,
     setSearchQuery: noop, setSearchResults: noop, setSearchError: noop,
     seenWorkflowToolEvents: { current: new Set() }, setConversationHistory: noop,
-    setConversationHistorySelectorExpanded: noop, requestAnimationFrame: noop,
+    requestAnimationFrame: noop,
   });
   h.deps.detachPreviousExecution = extract(pagePath, 'detachPreviousExecution', h.deps);
   h.deps.activateTranscript = extract(pagePath, 'activateTranscript', h.deps);

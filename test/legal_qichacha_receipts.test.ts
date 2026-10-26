@@ -40,7 +40,9 @@ describe('shared QCC query contract and truthful failure receipts', () => {
     expect(result.result).not.toContain(fixtureSecret);
     const receipt=parseReceiptObject(result.receipt)!;
     expect(receipt.content).toContain(company);
-    expect(receipt.content).not.toMatch(/- 工具：|- 端点：|confirmedForKb=true|qichacha、tianyancha/u);
+    expect(receipt.content).toContain('- 工具：get_company_registration_info');
+    expect(receipt.content).toContain('- 查询端点：https://agent.qcc.com/mcp/company/stream');
+    expect(receipt.content).not.toMatch(/confirmedForKb=true|qichacha、tianyancha/u);
     expect(receipt.sourceResults[0]).toMatchObject({sourceTool:'get_company_registration_info',sourceEndpoint:'https://agent.qcc.com/mcp/company/stream'});
   });
   it.each([
@@ -107,10 +109,11 @@ describe('shared QCC query contract and truthful failure receipts', () => {
     expect(result.result).toContain('SYNTHETIC-QCC-ID');expect(result.result).toContain('未取得该项来源');expect(result.result).toContain('[QCC_AUTHORIZATION]');
     expect(result.receipt).toMatchObject({ok:false,status:'partial'});expect(fetch).not.toHaveBeenCalled();
   });
-  it('does not mark equity tracing complete when registration contains no shareholder evidence',async () => {
-    const result=await run({},'legal_equity_penetration');
-    expect(result.receipt).toMatchObject({ok:false,status:'partial'});expect(result.result).toContain('股权穿透尚未完成');
-    expect(mcpManager.callToolForServer).toHaveBeenCalledTimes(1);
+  it('keeps an unavailable controller source partial without querying registration',async () => {
+    vi.mocked(mcpManager.callToolForServer).mockResolvedValueOnce('[]');
+    const result=await run({queryType:'controller'});
+    expect(result.receipt).toMatchObject({ok:false,status:'partial'});expect(result.result).toContain('[QCC_EMPTY]');
+    expect(mcpManager.callToolForServer).toHaveBeenCalledExactlyOnceWith('qcc-company','get_actual_controller',{searchKey:'虚构单密钥企业'},expect.any(Object));
   });
   it('blocks a local-only query before dispatch',async () => {
     await expect(searchCompanySources('虚构主体',['qichacha'],{localOnly:true})).rejects.toThrow('local-only');

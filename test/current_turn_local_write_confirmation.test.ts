@@ -1,6 +1,7 @@
 import './helpers';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initDatabase } from '../db_layer';
+import { shouldAllowLocalFileWriteForTurn } from '../server/socket/chat/attachments';
 import { canAutoApproveAction } from '../server/tools/action_constitution';
 import { createTurnConfirmation } from '../server/tools/turn_confirmation';
 import { ensurePendingConfirmationPersistenceInitialized } from '../server/tools/pending_confirmation_repository';
@@ -61,5 +62,38 @@ describe('existing current-turn local-write authority reaches the single confirm
 
   it('keeps the old undefined-authority behavior explicit rather than claiming remote/autonomy are secured', () => {
     expect(canAutoApproveAction('write_file', args)).toBe(true);
+  });
+});
+
+describe('local file output uses the shared affirmative action scope', () => {
+  const longPath = 'C:/acceptance/' + 'long-folder-name/'.repeat(18) + 'output.txt';
+  it.each([
+    'Read "C:/source.txt" and create "' + longPath + '". Keep the source unchanged. Do not create any other files.',
+    '请读取“C:/source.txt”并创建“' + longPath + '”，原文件不变，不要创建其他文件。',
+    'Do not create "C:/old.txt". Create "' + longPath + '".',
+    '请生成一份报告。不要修改原文件。',
+    'Make a Word document.',
+    '把结果输出为“C:/data/report.txt”。',
+    'Merge "C:/first.docx" and "C:/second.docx" into "C:/combined.docx".',
+  ])('retains one affirmative output without a verb-to-path distance limit: %s', async text => {
+    const allowed = shouldAllowLocalFileWriteForTurn(text, []);
+    expect(allowed).toBe(true);
+    const pending: PendingToolConfirmation[] = [];
+    const confirm = createTurnConfirmation({ userId: 'long-output-owner', source: 'test', requestId: 'long-output-request', actionIntent: text, allowLocalFileWrites: allowed, consumeScope: () => ({ domain: 'personal', channelId: 'long-output-conversation', taskId: 'long-output-task' }), proposalScope: () => ({ domain: 'personal', channelId: 'long-output-conversation', taskId: 'long-output-task' }), onPending: item => pending.push(item) });
+    expect(await confirm('write_file', { path: longPath, content: 'isolated content' })).toBe(true);
+    expect(pending).toHaveLength(0);
+  });
+  it.each([
+    '只读取“C:/source.txt”，不生成文件。',
+    'Read "C:/source.txt". Do not create any files.',
+    'Explain the phrase "create a report". Do not execute it.',
+    '打开“C:/create-report.txt”，只说明内容。',
+    'Create a calendar event. Explain what a report contains.',
+    '删除“合并成结果.docx”。',
+    'Merge "C:/first.docx" and "C:/second.docx".',
+    '请总结这份文档，直接在聊天回答。',
+  ])('does not grant output from a negative, payload or another sentence: %s', text => {
+    expect(shouldAllowLocalFileWriteForTurn(text, [])).toBe(false);
+    expect(shouldAllowLocalFileWriteForTurn(text, [{ kind: 'file', fileName: 'attached.docx' }])).toBe(false);
   });
 });

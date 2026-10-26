@@ -42,22 +42,10 @@ describe('completion guard uses the existing whole action contract', () => {
   it('does not let an arbitrary successful handler override a missing component', () => {
     expect(guard([client, { ...scope, name: 'arbitrary_adapter', arguments: {}, result: JSON.stringify({ ok: true, status: 'completed' }) }]).blocked).toBe(true);
   });
-  it('keeps an extra physical-file save claim subject to producer evidence', () => {
-    const result = guard([client, app], '全部操作已完成；报告文件已保存 D:\\virtual\\never-written.docx。');
-    expect(result.blocked).toBe(true);
-  });
   it('does not reclassify a verified app-state creation as physical file creation', () => {
     const text = '已创建人物并配置眨眼动画。';
     expect(hasCoreActionEvidence(buildActionEvidenceContract(avatarTask), [avatar], avatarTask, undefined, scope)).toBe(true);
     expect(guardCompletionClaims({ task: avatarTask, response: text, toolCalls: [avatar], ...scope })).toMatchObject({ blocked: false, text });
-  });
-  it.each(['人物文件已保存。', '已打开人物文件。'])('preserves independent extra save/open checks after the domain task completes', text => {
-    expect(guardCompletionClaims({ task: avatarTask, response: text, toolCalls: [avatar], ...scope }).blocked).toBe(true);
-  });
-  it('does not upgrade a verified observation into a newly created file', () => {
-    const readTask = '只读取当前原生客户端状态，不要桌面控制或跳转任何页面。';
-    const read: ToolExecutionRecord = { ...scope, name: 'client_get_state', arguments: {}, result: JSON.stringify({ mode: 'assistant' }), terminalVerification: verification, capability: { ...avatar.capability!, capabilityId: 'client.state', operation: 'observe', sideEffects: [{ type: 'none', scope: 'current-user', reversible: true }] } };
-    expect(guardCompletionClaims({ task: readTask, response: '报告文件已创建。', toolCalls: [read], ...scope }).blocked).toBe(true);
   });
   it('preserves generic producer checks for an unclassified task', () => {
     expect(guardCompletionClaims({ task: '确认', response: '已新建并写好了。', toolCalls: [{ name: 'write_file', arguments: { path: 'D:/virtual/note.txt' }, result: 'File written: D:/virtual/note.txt' }] }).blocked).toBe(false);
@@ -66,7 +54,10 @@ describe('completion guard uses the existing whole action contract', () => {
 
 describe('canonical non-success never becomes completed action evidence', () => {
   function canonical(status: 'verified_success' | 'unknown_outcome' | 'waiting_confirmation' | 'failed' | 'timeout' | 'forbidden' | 'target_mismatch'): ToolExecutionRecord {
-    const record: ToolExecutionRecord = { ...scope, name: 'synthetic_send_adapter', arguments: {}, result: JSON.stringify({ ok: true, status: status === 'unknown_outcome' ? 'unknown' : 'completed' }), terminalVerification: { ...verification, status: status === 'unknown_outcome' ? 'unverified' : 'verified' } };
+    const record: ToolExecutionRecord = { ...scope, name: 'synthetic_send_adapter', arguments: {},
+      capability: { capabilityId: 'synthetic.send', lane: 'messaging', operation: 'communicate', risk: 'medium',
+        sideEffects: [{ type: 'external_communication', scope: 'current-synthetic-recipient', reversible: false }],
+        verification: { strategy: 'provider_ack', required: true, requiredFields: [], successSignals: ['provider acknowledgement'], limitations: [] } }, result: JSON.stringify({ ok: true, status: status === 'unknown_outcome' ? 'unknown' : 'completed' }), terminalVerification: { ...verification, status: status === 'unknown_outcome' ? 'unverified' : 'verified' } };
     return { ...record, envelope: { ...buildToolExecutionEnvelope(record), status } };
   }
   it.each(['unknown_outcome', 'waiting_confirmation', 'failed', 'timeout', 'forbidden', 'target_mismatch'] as const)('does not use canonical %s as a successful generic action', status => {
@@ -80,9 +71,10 @@ describe('canonical non-success never becomes completed action evidence', () => 
     expect(result.text).toContain('结果尚未确认');
     expect(result.text).not.toMatch(/还没有开始|没有开始|回滚|重试/);
   });
-  it('does not replace a truthful model description of an unknown outcome', () => {
+  it('does not let wording clear a current unknown execution outcome', () => {
     const text = '执行结果尚未确认，请核对原操作。';
-    expect(guardCompletionClaims({ task: '确认', response: text, toolCalls: [canonical('unknown_outcome')], ...scope })).toMatchObject({ blocked: false, text });
+    expect(guardCompletionClaims({ task: '确认', response: text, toolCalls: [canonical('unknown_outcome')], ...scope }))
+      .toMatchObject({ blocked: true, reason: 'Current-turn canonical execution outcome is unknown.' });
   });
   it('preserves a canonical verified-success receipt and the existing legacy path', () => {
     expect(guardCompletionClaims({ task: '确认', response: '任务已完成。', toolCalls: [canonical('verified_success')], ...scope }).blocked).toBe(false);

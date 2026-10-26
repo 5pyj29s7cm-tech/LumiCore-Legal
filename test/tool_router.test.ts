@@ -148,9 +148,7 @@ const DECLARATIONS = [
   'legal_generate_bid',
   'legal_review_contract',
   'legal_draft_contract',
-  'legal_trace_assets',
-  'legal_equity_penetration',
-  'legal_case_strategy',
+  'legal_trace_assets',  'legal_case_strategy',
   'legal_case_workspace',
   'legal_case_workflow_status',
   'legal_message_intake_to_case',
@@ -629,12 +627,10 @@ describe('tool router', () => {
 
     expect(assetRoute.categories).toContain('legal');
     expect(assetRoute.toolNames).toEqual(expect.arrayContaining([
-      'legal_trace_assets',
-      'legal_equity_penetration',
-      'legal_company_database_lookup',
+      'legal_trace_assets',      'legal_company_database_lookup',
     ]));
     expect(assetRoute.toolNames.indexOf('legal_trace_assets')).toBeLessThan(assetRoute.toolNames.indexOf('legal_generate_argument_or_opinion'));
-    expect(assetRoute.toolNames.indexOf('legal_equity_penetration')).toBeLessThan(assetRoute.toolNames.indexOf('legal_generate_argument_or_opinion'));
+    expect(assetRoute.toolNames.indexOf('legal_company_database_lookup')).toBeLessThan(assetRoute.toolNames.indexOf('legal_generate_argument_or_opinion'));
   });
 
   it('routes music requests away from legal tools', () => {

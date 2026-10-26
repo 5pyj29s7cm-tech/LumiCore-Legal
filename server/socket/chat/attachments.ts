@@ -1,4 +1,7 @@
 import { mediaAuthoringMutationScope } from '../../cognition/media_creation_intent';
+import { affirmativeActionClauses, hasAffirmativeArtifactCreationAction, hasAffirmativeArtifactMutationAction, isExplicitArtifactCreationText } from '../../cognition/normalized_action_intent';
+import { withoutLocationLiterals } from '../../cognition/location_literals';
+import { outputDocumentInstruction } from '../../conversation/task_target_anchor';
 
 
 export interface ChatIncomingAttachment {
@@ -116,19 +119,16 @@ export function buildStoredAttachmentSummary(userText: string, attachments: Chat
 }
 
 
-export function shouldAllowLocalFileWriteForTurn(userText: string, attachments: ChatIncomingAttachment[]): boolean {
+/** The same affirmative action owner supplies routing and local-output consent. */
+export function shouldAllowLocalFileWriteForTurn(userText: string, _attachments: ChatIncomingAttachment[]): boolean {
   const clean = String(userText || '').trim();
   if (!clean) return false;
   if (mediaAuthoringMutationScope(clean)?.projectSelection) return true;
-  if (/(?:不要|别|不用|无需|先别|暂时别).{0,12}(?:生成|创建|写入|保存|导出|输出|做成|整理成)/iu.test(clean)) return false;
-
-  const explicitDeliverable =
-    /(?:生成|创建|制作|新建|编写|写成|做成|整理成|汇总成|形成|转成|保存为?|导出为?|输出为?|出一份|做一份).{0,48}(?:文件|文档|材料|报告|笔录|纪要|记录|文本|文字|文稿|清单|方案|表格|DOCX|docx|Word|PDF|pdf|TXT|txt|MD|md|PPTX?|pptx?|XLSX?|xlsx?)/iu.test(clean);
-  const attachedArtifactRequest =
-    attachments.length > 0 &&
-    /(?:整理|汇总|总结|提炼|转写|转成|做成|生成|创建|保存|导出).{0,48}(?:文本|文字|文档|文件|材料|笔录|纪要|记录|报告|DOCX|docx|Word|PDF|pdf|TXT|txt|MD|md)/iu.test(clean);
-  const directEnglishRequest =
-    /\b(?:create|generate|write|save|export|turn|make|draw|draft)\b.{0,64}\b(?:file|document|docx|word|pdf|txt|markdown|transcript|notes|minutes|report|cad|dxf|dwg|drawing|floor\s*plan|blueprint)\b/i.test(clean);
-
-  return explicitDeliverable || attachedArtifactRequest || directEnglishRequest;
+  return affirmativeActionClauses(clean).some(clause => {
+    if (isExplicitArtifactCreationText(clause)) return true;
+    if (outputDocumentInstruction(clause) && hasAffirmativeArtifactMutationAction(clause)) return true;
+    // i18n-allow: Artifact nouns in the same affirmative instruction, not a later sentence or filename.
+    return hasAffirmativeArtifactCreationAction(clause)
+      && /(?:文件|文档|材料|报告|笔录|纪要|记录|文本|文字|文稿|清单|方案|表格|DOCX|Word|PDF|TXT|MD|PPTX?|XLSX?|\b(?:files?|documents?|markdown|transcripts?|notes|minutes|reports?|cad|dxf|dwg|drawings?|floor\s*plans?|blueprints?)\b)/iu.test(withoutLocationLiterals(clause, true));
+  });
 }

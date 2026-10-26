@@ -216,7 +216,11 @@ describe('finalized output paths', () => {
     expect(modelEntry).not.toContain('runPreparedLumiTurn(');
     expect(deliveryEntry).toContain('context.responseText = completed.finalized.text;');
     expect(deliveryEntry).toContain('const finalResponse = completed.finalized;');
-    expect(deliveryEntry).toContain('mainTerminalCommitted = await context.finishVoiceTerminal({');
+    const terminalProjection = deliveryEntry.indexOf('const terminal = {');
+    const terminalCommit = deliveryEntry.indexOf('mainTerminalCommitted = await context.finishVoiceTerminal(terminal);');
+    expect(terminalProjection).toBeGreaterThan(deliveryEntry.indexOf('const finalResponse = completed.finalized;'));
+    expect(terminalCommit).toBeGreaterThan(terminalProjection);
+    expect(deliveryEntry.indexOf('terminalBlocked = terminal.blocked;')).toBeGreaterThan(terminalCommit);
     expect(deliveryEntry).not.toContain('runResolvedLumiRecovery');
     expect(source('server/cognition/turn_model.ts')).toContain('if (!execution.executionRequested)');
     expect(terminalBoundaryStart).toBeGreaterThan(0);
@@ -400,7 +404,7 @@ describe('finalized output paths', () => {
     const terminalBoundaryStart = voice.indexOf('const commitVoiceTerminal = async');
     const terminalBoundaryEnd = voice.indexOf('const maxIterations =', terminalBoundaryStart);
     const terminalBoundary = voice.slice(terminalBoundaryStart, terminalBoundaryEnd);
-    expect(voice.match(/await (?:commitVoiceTerminal|finishVoiceTerminal)\(\{/g)?.length || 0).toBe(11);
+    expect(voice.match(/await (?:commitVoiceTerminal|finishVoiceTerminal)\(/g)?.length || 0).toBe(11);
     expect(terminalBoundary).toContain('persistVoiceAssistantMessage(');
     expect(terminalBoundary).toContain('persistAuthorizedTerminalReceipt(');
     expect(source('server/socket/chat_terminal_boundary.ts')).toContain('recordChatExecutionTerminalEventDurably(');

@@ -28,7 +28,6 @@ const ORGANIZATION_VIEWER_WRITE_TOOLS = [
   'legal_message_intake_to_case',
   'legal_meeting_minutes_to_case',
   'legal_import_materials_to_kb',
-  'legal_import_judgment',
   'wechat_send_file',
   'feishu_send_file',
 ];

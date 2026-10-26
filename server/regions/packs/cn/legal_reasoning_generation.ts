@@ -56,7 +56,7 @@ export function resolveMaterialOutline(value: unknown, sources: Source[]): Array
 export class SourceDraftValidationError extends Error {}
 
 /** Model proposals reference originals; case facts and verification status are server-owned. */
-export function resolveSourceDraftEntries(value: unknown, sources: Source[], allowedSectionIds: readonly string[], deferUnregisteredSources = false): Array<{ sectionId: string; sources: Source[]; sourceIds?: string[]; response: string; missing: string }> {
+export function resolveSourceDraftEntries(value: unknown, sources: Source[], allowedSectionIds: readonly string[]): Array<{ sectionId: string; sources: Source[]; response: string; missing: string }> {
   const entries = record(value) ? value.entries : null;
   if (!allowedSectionIds.length || new Set(allowedSectionIds).size !== allowedSectionIds.length) throw new SourceDraftValidationError('指定章节集合为空或重复。');
   if (!Array.isArray(entries)) throw new SourceDraftValidationError('工作稿未返回章节条目列表。');
@@ -70,11 +70,10 @@ export function resolveSourceDraftEntries(value: unknown, sources: Source[], all
     if (!text(entry.response)) throw new SourceDraftValidationError(item + '缺少拟议正文');
     if (typeof entry.missing !== 'string') throw new SourceDraftValidationError(item + '的待补事项必须是文本');
     if (!Array.isArray(entry.sourceIds) || !entry.sourceIds.length) throw new SourceDraftValidationError(item + '未引用原始材料');
-    if (!entry.sourceIds.every((id: unknown) => typeof id === 'string' && (deferUnregisteredSources || sources.some(source => source.id === id)))) throw new SourceDraftValidationError(item + '引用了未登记的原始材料编号');
+    if (!entry.sourceIds.every((id: unknown) => typeof id === 'string' && sources.some(source => source.id === id))) throw new SourceDraftValidationError(item + '引用了未登记的原始材料编号');
     seen.add(entry.sectionId);
     const sourceIds = [...new Set<string>(entry.sourceIds)];
-    return { sectionId: entry.sectionId, sources: sourceIds.filter(id => sources.some(source => source.id === id)).map(id => sources.find(source => source.id === id)!),
-      ...(deferUnregisteredSources ? { sourceIds: [...entry.sourceIds] } : {}), response: entry.response, missing: entry.missing };
+    return { sectionId: entry.sectionId, sources: sourceIds.map(id => sources.find(source => source.id === id)!), response: entry.response, missing: entry.missing };
   });
 }
 

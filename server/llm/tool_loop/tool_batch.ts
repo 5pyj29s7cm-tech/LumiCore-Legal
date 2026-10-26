@@ -1,7 +1,8 @@
 import { tryFinalizeVerifiedBoundedAction } from '../../cognition/result_finalizer';
 import { getArtifactTaskProgress } from '../../cognition/action_contract';
-import { artifactPathFromRecord, isArtifactProducerRecord, sameArtifactPath } from '../../tools/artifact_evidence';
+import { artifactPathFromRecord, artifactRecordMatchesTurn, isArtifactProducerRecord, sameArtifactPath } from '../../tools/artifact_evidence';
 import { isCanonicalToolExecutionRecord } from '../../tools/execution_engine';
+import { classifyToolRecordTaskDurability } from '../../cognition/continuation/tool_receipts';
 import { isVerifiedToolSuccess } from './recovery';
 import { getStoredDesktopExecutionPreference } from '../../cognition/operation_mode_store';
 import { replacePromptBlock } from "../prompt_blocks";
@@ -74,7 +75,14 @@ export async function executePlannedToolBatch(state: ToolLoopState, { normalized
       }
 
       const callCapability = state.toolRegistry.getCapabilityManifestEntry?.(tc.name, state.toolExecutionContext?.toolPolicy, state.toolExecutionContext);
+      const isolatedCalculation = tc.name === 'code_execution'
+        && callCapability?.source === 'builtin'
+        && callCapability?.capabilityId === 'code.javascript.sandbox.execute'
+        && callCapability.operation === 'test'
+        && callCapability.sideEffects.every(effect => effect.type === 'local_state_change');
       const currentAppGuard = guardCurrentAppToolCall({
+        requestId: state.toolExecutionContext?.requestId,
+        taskId: state.toolExecutionContext?.taskId,
         taskText: state.primaryTask,
         toolName: tc.name,
         arguments: tc.arguments || {},
@@ -82,11 +90,7 @@ export async function executePlannedToolBatch(state: ToolLoopState, { normalized
         acceptedTaskTarget: state.toolExecutionContext?.acceptedTaskTarget,
         currentAppTarget: state.toolExecutionContext?.currentAppTarget,
         desktopExecutionPreference: getStoredDesktopExecutionPreference(state.toolExecutionContext?.userId || ''),
-        isolatedCalculation: tc.name === 'code_execution'
-          && callCapability?.source === 'builtin'
-          && callCapability?.capabilityId === 'code.javascript.sandbox.execute'
-          && callCapability.operation === 'test'
-          && callCapability.sideEffects.every(effect => effect.type === 'local_state_change'),
+        isolatedCalculation,
       });
       const executionArguments = currentAppGuard.normalizedArguments
         || tc.arguments
@@ -105,6 +109,15 @@ export async function executePlannedToolBatch(state: ToolLoopState, { normalized
         preflight: (_name, preparedArguments) => {
           if (!currentAppGuard.allowed) {
             return { allowed: false, reason: currentAppGuard.reason, arguments: executionArguments };
+          }
+          // A missing input is not a batch-wide dependency. Keep independent
+          // observations/calculations available; uncertain side effects cannot
+          // run on invented source content. The canonical call records the block.
+          if (!isolatedCalculation && classifyToolRecordTaskDurability({ capability: callCapability }) !== 'observation_only'
+            && missingTaskInputResult(state.primaryTask, state.executionLog.filter(record =>
+              artifactRecordMatchesTurn(record, state.toolExecutionContext || {})))) {
+            return { allowed: false, arguments: executionArguments,
+              reason: 'Not executed: a required input file is missing; this state-changing capability has no independent source proof.' };
           }
           const output = state.requestedArtifact;
           if (output && isArtifactProducerRecord({ name: tc.name, capability: callCapability })
@@ -149,12 +162,6 @@ export async function executePlannedToolBatch(state: ToolLoopState, { normalized
         return state.finish(text, { text, blocked: true, reason: 'desktop_control_paused' });
       }
 
-      const missingInput = missingTaskInputResult(state.primaryTask, [record]);
-      if (missingInput) {
-        recordWorkflowIfToolsUsed(state.executionLog, state.messages, state.config);
-        return state.finish(missingInput.text, missingInput);
-      }
-
       // A failed paid generation ends this attempt, including queued calls in
       // the same batch. The model must not rewrite the user's brief or retry
       // behind the finalizer; a later user turn owns any authorized retry.
@@ -183,6 +190,7 @@ export async function executePlannedToolBatch(state: ToolLoopState, { normalized
         toolCallId: tc.id,
         name: tc.name,
       });
+
       if (hasCompletedCurrentSimplePlayback(state.primaryTask, state.executionLog, state.context)) {
         recordWorkflowIfToolsUsed(state.executionLog, state.messages, state.config);
         if (!state.context?.currentTurnExecutionRequested) return state.finish('');

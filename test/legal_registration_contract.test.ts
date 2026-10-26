@@ -27,9 +27,9 @@ describe('legal registration public contract', () => {
     const actual = publicContract(definitions);
     for (const original of publicContract(expected)) {
       const upgraded = actual.find((tool: ToolDefinition) => tool.name === original.name);
-      expect(upgraded).toMatchObject(original);
+      expect(upgraded, original.name).toMatchObject(original);
     }
-    expect(new Set(definitions.map(tool => tool.name)).size).toBe(34);
+    expect(new Set(definitions.map(tool => tool.name)).size).toBe(33);
     const archiveTools = definitions.filter(tool => archiveKeys.every(key => tool.parameters.properties[key]));
     expect(archiveTools).toHaveLength(17);
     for (const tool of archiveTools) {

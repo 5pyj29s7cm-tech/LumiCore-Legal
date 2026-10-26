@@ -1,6 +1,7 @@
 
 
-export const FILE_EXTENSIONS = '(?:pptx?|docx?|xlsx?|pdf|txt|md|csv|json|png|jpe?g|gif|svg|dwg|dxf|zip)';
+export const IMAGE_FILE_EXTENSIONS = '(?:png|jpe?g|webp|bmp|gif|tiff?)';
+export const FILE_EXTENSIONS = `(?:pptx?|docx?|xlsx?|pdf|txt|md|csv|json|${IMAGE_FILE_EXTENSIONS}|svg|dwg|dxf|zip)`;
 
 export const FILE_NAME_RE = new RegExp("(?:[\"'“‘]|(?=[A-Za-z0-9_@.+~-][^\\\\/\\s，,;；:：()（）\\[\\]{}=\"'“”‘’。！？!?]*\\." + FILE_EXTENSIONS + "(?![A-Za-z0-9_-]|\\.[A-Za-z0-9_.-])))([^\\\\/\\r\\n，,;；:：()（）\\[\\]{}=\"'“”‘’。！？!?]{1,180}?\\." + FILE_EXTENSIONS + ")(?![A-Za-z0-9_-]|\\.[A-Za-z0-9_.-])", 'iu');
 
@@ -66,7 +67,7 @@ export const APPLICATION_KEYS = ['application', 'applicationName', 'applicationn
 export const EXCLUDED_FILE_CLAUSE_RE = /(?:不要|别|无需|不用|禁止|请勿|勿|不再)\s*(?:再|继续)?\s*(?:读取|读|打开|用|使用|处理|分析|查看|检查)|\b(?:do\s+not|don't|never)\s+(?:read|open|use|process|inspect|analy[sz]e)\b/iu;
 
 // i18n-allow: output destinations are separate from input-file references.
-export const OUTPUT_DESTINATION_RE = /(?:并|然后|再)?(?:另存(?:为|到)?|保存(?:为|到)|导出(?:为|到))|\b(?:and\s+)?(?:save\s+as|save\s+to|export\s+to)\b/iu;
+export const OUTPUT_DESTINATION_RE = /(?:并|然后|再)?(?:另存(?:为|到)?|保存(?:为|到)|导出(?:为|到)|(?:合并|汇总|整合|制作)(?:成|为))|\b(?:and\s+)?(?:save\s+as|save\s+to|export\s+to)\b|\b(?:merge|combine)\b[^!?;\r\n，,。！？；]*?\b(into|to)\b/iu;
 
 // i18n-allow: Value edits retain an input while creating a distinct output.
 export const VALUE_CORRECTION_RE = /(?:数量|单价|价格|金额|日期).{0,12}(?:改成|改为|调整为|换成)|\b(?:quantity|price|amount|date)\b.{0,20}\b(?:change|to|replace)\b/iu;

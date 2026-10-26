@@ -12,7 +12,7 @@ import * as Cases from '../server/org/legal_cases';
 import { searchEnforcementRecords } from '../server/legal/sources';
 const nativeFetch=globalThis.fetch;
 const name='虚构财产快查主体有限公司', userId='synthetic-asset-http-owner';
-const company=JSON.stringify({企业名称:name,统一社会信用代码:'SYNTHETIC-ASSET-QCC',登记状态:'存续',成立日期:'2020-01-02',注册资本:'10万元'});
+const company=JSON.stringify({企业名称:name,统一社会信用代码:'SYNTHETIC-ASSET-QCC',登记状态:'存续',成立日期:'2020-01-02',注册资本:'10万元',实缴资本:'0元',企业类型:'有限责任公司（自然人独资）',登记机关:'虚构登记机关'});
 const enforcement=JSON.stringify({主体名称:name,被执行信息:[{案号:'SYNTHETIC-CASE-001',执行法院:'虚构法院',执行标的:'10万元'}]});
 const sha=(text:string)=>createHash('sha256').update(text).digest('hex');
 const businessContent=({workflowRuns:_runs,updatedAt:_time,updatedBy:_actor,...content}:any)=>JSON.stringify(content);
@@ -35,6 +35,9 @@ describe('property quick scan uses the actual authorized source through the page
    {subject:name,queryType:'enforcement',sourceTool:'get_judgment_debtor_info',sourceEndpoint:'https://agent.qcc.com/mcp/risk/stream',sourceTextSha256:sha(enforcement)}]});
   expect(data.verification.status).toBe('verified');expect(data.caseUpdates).toEqual([]);expect(data.text).toContain(company);expect(data.text).toContain(enforcement);expect(data.text).toContain(sha(enforcement));
   expect(data.text).toContain('已取得执行查询原文；未提供该项结构化明细，见来源');expect(data.text).not.toContain('被执行记录: 0 条');expect(data.text).not.toContain('不存在被执行记录');
+  const summary=data.text.split('## 官方来源原始结果')[0];
+  expect(summary).toContain('- 实缴资本: 0元');expect(summary).toContain('- 企业类型: 有限责任公司（自然人独资）');expect(summary).toContain('- 登记机关: 虚构登记机关');
+  expect(summary).toContain('- 数据状态: 已取得来源');expect(summary).not.toContain('数据状态: observed');
   for(const source of data.receipt.sourceResults)expect(Number.isFinite(Date.parse(source.queriedAt))).toBe(true);
   expect(mcpManager.callToolForServer).toHaveBeenCalledTimes(2);expect(vi.mocked(mcpManager.callToolForServer).mock.calls.map(row=>row[1])).toEqual(['get_company_registration_info','get_judgment_debtor_info']);expect(fetch).not.toHaveBeenCalled();
  });
@@ -53,6 +56,9 @@ describe('property quick scan uses the actual authorized source through the page
   const data=await page({name:sourceFixture.subject}),summary=data.text.split('## 官方来源原始结果')[0];
   expect(data.receipt).toMatchObject({ok:true,status:'observed',persisted:false,changedCaseIds:[],artifacts:[]});expect(data.verification.status).toBe('verified');expect(data.caseUpdates).toEqual([]);
   expect(summary).toContain('# "'+sourceFixture.subject+'"财产线索查询报告');expect(summary).toContain('- 被执行记录: 已取得执行查询原文；未提供该项结构化明细，见来源');expect(summary).toContain('- 失信记录: 已取得执行查询原文；未提供该项结构化明细，见来源');expect(summary).toContain('- 限制消费: 已取得执行查询原文；未提供该项结构化明细，见来源');
+  const registrationFields=JSON.parse(registration.text);
+  for(const field of ['实缴资本','企业类型','登记机关'])expect(summary).toContain('- '+field+': '+registrationFields[field]);
+  expect(summary).toContain('- 数据状态: 已取得来源');expect(summary).not.toContain('数据状态: observed');
   expect(summary).not.toContain('未取得该项来源');expect(summary).not.toMatch(/配偶|婚姻|夫妻/);expect(summary).not.toContain('# 被执行人');expect(summary).toContain('不据此确认查询主体的被执行人身份');expect(summary).not.toContain('被执行记录: 0 条');
   for(const source of sourceFixture.sources){expect(data.text).toContain(source.text);expect(data.receipt.sourceResults).toContainEqual(expect.objectContaining({queryType:source.queryType,sourceTool:source.sourceTool,sourceEndpoint:source.sourceEndpoint,sourceTextSha256:source.sourceTextSha256}));}
   expect(mcpManager.callToolForServer).toHaveBeenCalledTimes(2);expect(fetch).not.toHaveBeenCalled();

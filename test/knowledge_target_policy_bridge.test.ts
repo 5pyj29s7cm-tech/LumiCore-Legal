@@ -10,7 +10,7 @@ import { registerFileOpsTools } from '../server/tools/definitions/file_ops';
 import { ToolRegistry } from '../server/tools/registry';
 import { prepareToolLoop } from '../server/llm/tool_loop/loop_setup';
 import { runWithTools } from '../server/llm/adapter';
-import { compactToolResultForModel, wrapToolOutputForModel } from '../server/llm/tool_loop/receipts';
+import { formatToolRecordForModel, wrapToolOutputForModel } from '../server/llm/tool_loop/receipts';
 import type { LLMConfig } from '../server/llm/tool_loop/contracts';
 import type { ToolContext } from '../server/tools/types';
 
@@ -66,12 +66,12 @@ describe('bound local_only policy reaches the existing model and tool contexts',
 describe('knowledge original text remains untrusted and honest about model-context compaction', () => {
   it('preserves the actual three-source capacity and marks data as untrusted', () => {
     const source = JSON.stringify({ mode: 'source_text', files: [{ fileId: 'A.pdf', text: 'a'.repeat(11453) + 'KB-END-A', truncated: false }, { fileId: 'B.docx', text: 'KB-END-B', truncated: false }, { fileId: 'C.txt', text: 'KB-END-C', truncated: false }] });
-    expect(compactToolResultForModel('knowledge_file_stats', source)).toBe(source);
+    expect(formatToolRecordForModel({name:'knowledge_file_stats',result:source} as any)).toContain(source);
     expect(wrapToolOutputForModel('knowledge_file_stats', source)).toContain('[BEGIN UNTRUSTED DATA');
   });
-  it('does not label a model-context excerpt as complete source text', () => {
+  it('preserves complete source text before provider capacity allocation', () => {
     const source = JSON.stringify({ mode: 'source_text', files: [{ fileId: 'A.pdf', text: 'a'.repeat(40000) + 'KB-END-A', truncated: false }] });
-    const excerpt = compactToolResultForModel('knowledge_file_stats', source);
-    expect(excerpt).toContain('compacted for model context'); expect(excerpt).toContain('KB-END-A'); expect(excerpt).toContain('"truncated":true'); expect(excerpt).not.toContain('"truncated":false');
+    const excerpt = formatToolRecordForModel({name:'knowledge_file_stats',result:source} as any);
+    expect(excerpt).toContain(source); expect(excerpt).toContain('KB-END-A'); expect(excerpt).toContain('"truncated":false'); expect(excerpt).not.toContain('compacted for model context');
   });
 });

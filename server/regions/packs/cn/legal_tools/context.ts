@@ -28,7 +28,7 @@ export function legalTemporalOptions(args: Record<string, any>): CitationVerific
     temporalReviews: Array.isArray(args.temporalReviews) ? args.temporalReviews : undefined };
 }
 
-export async function runLegalLLM(prompt: string, context?: any, maxTokens = 2048, jsonObject = false, timeoutMs = LEGAL_REASONING_MODEL_TIMEOUT_MS, reasoningEffort?: LLMCallConfig['reasoningEffort']): Promise<string | null> {
+export async function runLegalLLM(prompt: string, context?: any, maxTokens: number | null = 2048, jsonObject = false, timeoutMs = LEGAL_REASONING_MODEL_TIMEOUT_MS, reasoningEffort?: LLMCallConfig['reasoningEffort']): Promise<string | null> {
   assertLegalExecutionActive(context);
   const getters = context?.llmGetters;
   if (!getters) return null;
@@ -38,7 +38,7 @@ export async function runLegalLLM(prompt: string, context?: any, maxTokens = 204
   const response = await makeLLMCall(
     messages,
     [],
-    { ...getUserPreferredLLMConfig(userId, { maxTokens, domain: context?.domain, orgId: context?.orgId, requestId: context?.requestId, source: context?.source, conversationId: context?.conversationId }), signal: context?.executionSignal || legalExecutionSignal(), dataRoutingPolicy: context?.dataRoutingPolicy, relayStreaming: true, ...(reasoningEffort ? { reasoningEffort } : {}), ...(jsonObject ? { responseFormat: 'json_object' as const } : {}), attemptTimeouts: { absoluteMs: timeoutMs, semanticContentMs: timeoutMs } },
+    { ...getUserPreferredLLMConfig(userId, { maxTokens: maxTokens ?? undefined, domain: context?.domain, orgId: context?.orgId, requestId: context?.requestId, source: context?.source, conversationId: context?.conversationId }), signal: context?.executionSignal || legalExecutionSignal(), dataRoutingPolicy: context?.dataRoutingPolicy, relayStreaming: true, ...(reasoningEffort ? { reasoningEffort } : {}), ...(jsonObject ? { responseFormat: 'json_object' as const } : {}), attemptTimeouts: { absoluteMs: timeoutMs, semanticContentMs: timeoutMs } },
     ...providerGetterArguments(getters),
   ).catch(error => {
     const reason = error instanceof ModelAttemptDeadlineError && error.completedEmpty
@@ -53,7 +53,7 @@ export async function runLegalLLM(prompt: string, context?: any, maxTokens = 204
   return response.text || null;
 }
 
-export async function runLegalLLMWithin(prompt: string, context: any, maxTokens: number, timeoutMs: number, jsonObject = false, reasoningEffort?: LLMCallConfig['reasoningEffort']): Promise<string | null> {
+export async function runLegalLLMWithin(prompt: string, context: any, maxTokens: number | null, timeoutMs: number, jsonObject = false, reasoningEffort?: LLMCallConfig['reasoningEffort']): Promise<string | null> {
   assertLegalExecutionActive(context);
   const controller = new AbortController();
   const parent = context?.executionSignal || legalExecutionSignal();

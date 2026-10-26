@@ -8,7 +8,6 @@ import { withLegalReceipt } from "./tool_contracts";
 import { authoritySourceStatusHandler } from "./knowledge";
 import { stringField } from "./tool_contracts";
 import { verifyCitationHandler } from "./knowledge";
-import { importJudgmentHandler } from "./knowledge";
 
 export function authority_knowledgeTools(): ToolDefinition[] {
   return [
@@ -48,31 +47,6 @@ text: stringField('包含多个引用的完整文本（将自动识别所有《X
 orgId: stringField('组织ID'),
 },
 handler: verifyCitationHandler
-}),
-defineLegalTool({
-name: 'legal_import_judgment',
-description: '导入裁判文书 — 上传或粘贴裁判文书全文（PDF/DOCX/TXT），自动提取案号、法院、当事人、法条引用等元数据，分块并向量化索引到组织知识库。导入后可通过类案检索查询。',
-properties: {
-password: stringField('PDF打开密码，仅用于本次读取；不得回显或保存到案件材料、记忆和日志。'),
-passwords: { type: 'object', additionalProperties: { type: 'string' }, description: '可选：按文件完整路径提供各自PDF密码，仅用于本次读取。' },
-filePath: stringField('裁判文书文件路径（PDF/DOCX/TXT）'),
-content: stringField('直接粘贴的裁判文书全文（与filePath二选一）'),
-orgId: stringField('组织ID'),
-userId: stringField('操作用户ID'),
-},
-handler: withLegalReceipt(importJudgmentHandler, {
-      status: 'imported',
-      requireArticleMutation: true,
-    }),
-capability: legalCapability({
-      id: 'legal.judgment.import', operation: 'create', risk: 'medium', successStatuses: ['imported'],
-      sideEffects: [
-        { type: 'local_state_change', scope: 'organization judgment knowledge base and vector index', reversible: true },
-        { type: 'local_read', scope: 'selected judgment file or pasted content', reversible: true },
-        { type: 'network_read', scope: 'configured embedding provider when indexing', reversible: true },
-      ],
-    }),
-evidence: legalEvidence('legal.judgment.import', 'create', 'filePath')
 })
   ];
 }

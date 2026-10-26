@@ -85,7 +85,7 @@ export function hasLegalExternalPlatformResultEvidence(records: ToolExecutionRec
     if (/manual_required|captcha|2FA|QR|\u9a8c\u8bc1\u7801|\u626b\u7801|\u4ed8\u8d39|\u9700\u8981\u767b\u5f55|\u672a\u914d\u7f6e|not configured|login required/i.test(result)) {
       return false;
     }
-    const resultTool = /^(legal_search_external_authorities|legal_company_database_lookup|legal_trace_assets|legal_equity_penetration|url_fetch_logged_in|mcp_playwright_browser_snapshot|mcp_playwright_browser_evaluate|browser_open_task)$/i.test(name);
+    const resultTool = /^(legal_search_external_authorities|legal_company_database_lookup|legal_trace_assets|url_fetch_logged_in|mcp_playwright_browser_snapshot|mcp_playwright_browser_evaluate|browser_open_task)$/i.test(name);
     const hasResultMarkers = /(?:\u6765\u6e90\u767b\u8bb0|\u590d\u6838\u72b6\u6001|\u6848\u53f7|\u6cd5\u9662|\u88c1\u5224|\u80a1\u4e1c|\u88ab\u6267\u884c|\u516c\u53f8|\u641c\u7d22\u7ed3\u679c|Page URL|source-register|result|title|case|company)/iu.test(result);
     return resultTool && hasResultMarkers;
   });

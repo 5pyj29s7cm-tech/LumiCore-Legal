@@ -1,5 +1,5 @@
 import { renderChatToolbar } from './chat_toolbar_view';
-import { renderConversationHistoryRail } from './conversation_history_rail_view';
+import { ConversationHistoryRail } from './conversation_history_rail_view';
 import { renderChatPanelHeader } from './chat_panel_header_view';
 import { renderChatMessageFeed } from './chat_message_feed_view';
 import { renderChatComposer } from './chat_composer_view';
@@ -16,7 +16,7 @@ import { ChatAttachmentUploads, type ChatUploadFailure, type ChatUploadKind, typ
 
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { Loader2, Castle, Cpu, Sparkles, XCircle, FolderOpen, Upload, History, Trash2 } from 'lucide-react';
+import { Loader2, Castle, Sparkles, XCircle, FolderOpen, Upload, Trash2 } from 'lucide-react';
 import { ChatFilePreview, type ChatPreviewFile } from "../ChatFilePreview";
 
 import { useVoiceCall } from '@/hooks/useVoiceCall';
@@ -102,7 +102,6 @@ setShowWeChatSettings: React.Dispatch<React.SetStateAction<boolean>>;
 t: any;
 isCommandCenterUtility: boolean;
 onCommandCenterViewChange: (view: CommandCenterView) => void;
-onOpenNexus: () => void;
 onClose: () => void;
 setShowVoicePicker: React.Dispatch<React.SetStateAction<boolean>>;
 showVoicePicker: boolean;
@@ -129,10 +128,10 @@ refreshRuntimeStatus: () => Promise<void>;
 workflowTaskActive: boolean;
 workflowStatus: WorkflowStatus;
 chatProgressStatusText: any;
-conversationHistoryOpen: boolean;
-conversationHistorySelectorExpanded: boolean;
-setConversationHistorySelectorExpanded: React.Dispatch<React.SetStateAction<boolean>>;
-handleConversationHistorySelectorBlur: (event: React.FocusEvent<HTMLElement>) => void;
+refreshConversationHistory: () => Promise<void>;
+loadMoreConversationHistory: () => Promise<void>;
+conversationHistoryError: string;
+scopedConversationUrl: (url: string) => string;
 conversationHistory: ConversationHistoryItem[];
 startNewTextConversation: () => Promise<void>;
 isCreatingConversation: boolean;
@@ -146,7 +145,6 @@ attachmentConversationIdRef: React.RefObject<string>;
 restoreTextConversation: (conversationId: string) => Promise<void>;
 setConversationContextMenu: React.Dispatch<React.SetStateAction<ConversationHistoryContextMenu>>;
 conversationHistoryHasMore: boolean;
-toggleConversationHistory: () => void;
 chatPanelStyle: React.CSSProperties;
 chatHeaderStyle: React.CSSProperties;
 knowledgeStatusText: string;
@@ -168,7 +166,7 @@ searchDisplayMessages: any[];
 hiddenMessageCount: number;
 displayMessages: any[];
 renderGeneratedFiles: (files: GeneratedFileLink[], align?: "start" | "end") => React.JSX.Element;
-openChatFile: (file: Pick<ChatFilePanelItem, "fileName" | "fileId" | "path" | "openUrl" | "saveUrl">) => Promise<void>;
+openChatFile: (file: Pick<ChatFilePanelItem, "fileName" | "fileId" | "path" | "openUrl" | "saveUrl">, mode?: "preview") => Promise<void>;
 handleCopyMessage: (text: string, id: string, container?: HTMLElement | null) => Promise<void>;
 copiedId: string;
 chatProgressLines: ChatProgressLine[];
@@ -207,7 +205,7 @@ deletingConversationId: string;
 deleteConversationFromHistory: (conversationId: string) => Promise<void>;
 };
 export function AgentChatView(input: AgentChatViewInput) {
-  const { isOpen, previewFile, isZh, setPreviewFile, openChatFileInSystem, layout, commandCenterView, resolvedAppearanceMode, prefersReducedMotion, handleChatDragOver, handleChatDragLeave, handleChatDrop, chatAccentTheme, fileInputRef, uploadChatAttachments, isOfficeCommandCenter, mediaStudioMode, appendPendingAttachments, requestCloseCreativeStudio, openMediaGenerationStudio, user, mediaGenerationText, isDraggingFiles, showWeChatSettings, setShowWeChatSettings, t, isCommandCenterUtility, onCommandCenterViewChange, onOpenNexus, runtimeStatus, runtimeStatusLoading, runtimeStatusError, refreshRuntimeStatus, workflowTaskActive, workflowStatus, chatProgressStatusText, conversationHistoryOpen, toggleConversationHistory, chatPanelStyle, commandCenterPlannerOpen, attachmentConversationIdRef, setDraftText, setCommandCenterPlannerOpen, messageInputRef, onOpenMemoryAvatar, onOpenKnowledge, knowledgeStatusText, conversationContextMenu, setConversationContextMenu, deletingConversationId, deleteConversationFromHistory } = input;
+  const { isOpen, previewFile, isZh, setPreviewFile, openChatFileInSystem, layout, commandCenterView, resolvedAppearanceMode, prefersReducedMotion, handleChatDragOver, handleChatDragLeave, handleChatDrop, chatAccentTheme, fileInputRef, uploadChatAttachments, isOfficeCommandCenter, mediaStudioMode, appendPendingAttachments, requestCloseCreativeStudio, openMediaGenerationStudio, user, mediaGenerationText, isDraggingFiles, showWeChatSettings, setShowWeChatSettings, t, isCommandCenterUtility, onCommandCenterViewChange, runtimeStatus, runtimeStatusLoading, runtimeStatusError, refreshRuntimeStatus, workflowTaskActive, workflowStatus, chatProgressStatusText, chatPanelStyle, commandCenterPlannerOpen, attachmentConversationIdRef, setDraftText, setCommandCenterPlannerOpen, messageInputRef, onOpenMemoryAvatar, onOpenKnowledge, knowledgeStatusText, conversationContextMenu, setConversationContextMenu, deletingConversationId, deleteConversationFromHistory } = input;
 
   const [creationLoaded, setCreationLoaded] = React.useState(false);
   React.useEffect(() => { if (mediaStudioMode) setCreationLoaded(true); }, [mediaStudioMode]);
@@ -351,7 +349,6 @@ export function AgentChatView(input: AgentChatViewInput) {
             t={t}
             view={commandCenterView}
             onViewChange={onCommandCenterViewChange || (() => {})}
-            onOpenNexus={onOpenNexus}
           />
         </motion.div>
       )}
@@ -379,7 +376,6 @@ export function AgentChatView(input: AgentChatViewInput) {
                 view="office"
                 backgroundOnly
                 onViewChange={onCommandCenterViewChange || (() => {})}
-                onOpenNexus={onOpenNexus}
                 runtimeStatusOverride={{
                   status: runtimeStatus,
                   loading: runtimeStatusLoading,
@@ -402,26 +398,8 @@ export function AgentChatView(input: AgentChatViewInput) {
 
         {/* Chat Panel and the command-center destination rail. */}
         <div data-wallpaper-tool={isOfficeCommandCenter ? 'command-workspace' : undefined} className={isOfficeCommandCenter ? 'lumi-command-center-conversation-layout relative z-20 flex min-h-0 w-full flex-1' : 'contents'}>
-        {isOfficeCommandCenter && conversationHistoryOpen && (
-          renderConversationHistoryRail(input)
-        )}
-        {isOfficeCommandCenter && !conversationHistoryOpen && (
-          <aside
-            data-command-center-history-rail-collapsed
-            className="lumi-command-center-history-rail-collapsed relative z-30 flex shrink-0 items-start justify-center"
-            aria-label={t.selectPreviousConversation || 'Show conversation history'}
-          >
-            <button
-              type="button"
-              data-command-center-history-toggle
-              onClick={toggleConversationHistory}
-              className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-300/20 bg-cyan-300/[0.06] text-cyan-100/70 transition-colors hover:border-cyan-200/40 hover:bg-cyan-300/[0.12] hover:text-cyan-50"
-              title={t.selectPreviousConversation || 'Show conversation history'}
-              aria-label={t.selectPreviousConversation || 'Show conversation history'}
-            >
-              <History size={15} />
-            </button>
-          </aside>
+        {isOfficeCommandCenter && (
+          <ConversationHistoryRail {...input} />
         )}
         <motion.div
           data-wallpaper-tool={isOfficeCommandCenter ? 'command-dialogue' : undefined}
@@ -476,24 +454,6 @@ export function AgentChatView(input: AgentChatViewInput) {
                 <span className="lumi-command-center-switcher-copy min-w-0">
                   <span className="block text-xs font-black uppercase tracking-[0.12em]">{t.memoryAvatars || uiMessage('agent-chat-page.memory-avatar.8c4e1f7a20', isZh ? 'zh' : 'en')}</span>
                   <span className="mt-1 block text-[10px] text-fuchsia-100/45">{uiMessage('command-center.memory-avatar-hint.6a1d9e3c20', isZh ? 'zh' : 'en')}</span>
-                </span>
-              </button>
-            )}
-            {onOpenNexus && (
-              <button
-                type="button"
-                data-lumi-core-switch
-                onClick={onOpenNexus}
-                className="lumi-command-center-switcher-button group flex items-center gap-3 rounded-2xl border border-violet-300/20 bg-violet-300/[0.08] px-3 py-3 text-left text-violet-50/80 transition-all hover:-translate-x-1 hover:border-violet-200/45 hover:bg-violet-300/[0.16] hover:text-white"
-                title={uiMessage('command-center.inner-realm.4d8f2a1c09', isZh ? 'zh' : 'en')}
-                aria-label={uiMessage('command-center.inner-realm.4d8f2a1c09', isZh ? 'zh' : 'en')}
-              >
-                <span className="lumi-command-center-switcher-icon flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-violet-200/20 bg-violet-200/10 text-violet-100 transition-transform group-hover:scale-105">
-                  <Cpu className="h-5 w-5" />
-                </span>
-                <span className="lumi-command-center-switcher-copy min-w-0">
-                  <span className="block text-xs font-black tracking-[0.12em]">{uiMessage('command-center.inner-realm.4d8f2a1c09', isZh ? 'zh' : 'en')}</span>
-                  <span className="mt-1 block text-[10px] text-violet-100/45">{uiMessage('command-center.lumicore-hint.8f2d4c1a09', isZh ? 'zh' : 'en')}</span>
                 </span>
               </button>
             )}

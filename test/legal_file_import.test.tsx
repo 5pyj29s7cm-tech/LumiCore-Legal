@@ -40,9 +40,8 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); document.querySelectorAll('[data-lumi-file-drop]').forEach(node => node.remove()); vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.resetAllMocks(); });
 
-it.each(['chooser', 'drop-zone', 'drop-textarea'])('imports judgment through %s and sends full original text to the existing tool and case archive', async kind => {
-  const archived = vi.fn(async () => true);
-  render(<StrictMode><LegalImportView caseFile={{ id: 'case-a', title: 'Synthetic', materials: [] } as any} onAddMaterial={archived} /></StrictMode>);
+it.each(['chooser', 'drop-zone', 'drop-textarea'])('imports material through %s and sends the full named original to the general intake tool', async kind => {
+  render(<StrictMode><LegalImportView caseFile={{ id: 'case-a', title: 'Synthetic', materials: [] } as any} /></StrictMode>);
   if (kind === 'chooser') choose();
   else if (kind === 'drop-zone') dropFile();
   else fireEvent.drop(document.querySelector('textarea')!, { dataTransfer: { types: ['Files'], files: [file()] } });
@@ -51,11 +50,13 @@ it.each(['chooser', 'drop-zone', 'drop-textarea'])('imports judgment through %s 
   expect(uploads()[0][0]).not.toContain('import-paths');
   await waitFor(() => expect(document.querySelector('textarea')!.value).toBe('# judgment.docx\n' + text));
   expect(uploads()).toHaveLength(1); expect(uploads()[0][0]).toContain('domain=personal');
-  fireEvent.click(screen.getByRole('button', { name: 'Import judgment' }));
-  await waitFor(() => expect(archived).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('button', { name: 'Import materials' }));
+  await screen.findByText('Imported');
   const tool = fixture.net.mock.calls.find(([url]) => url.includes('/legal/tool/'))!;
   expect(JSON.parse(tool[1].body).args.content).toBe('# judgment.docx\n' + text);
-  expect(archived.mock.calls[0]).toEqual(['judgment', expect.any(String), '# judgment.docx\n' + text, 'import']);
+  expect(tool[0]).toBe('/api/legal/tool/legal_import_materials_to_kb');
+  expect(JSON.parse(tool[1].body).args).toMatchObject({ caseId: 'case-a', persistCase: true, title: 'judgment.docx', materialType: 'case_material' });
+  expect(fixture.net.mock.calls.filter(([url]) => /\/materials$/.test(url))).toHaveLength(0);
 });
 
 it.each(['contract', 'bid'])('supports file drop into the %s source pane without using its preview', async kind => {
@@ -77,20 +78,20 @@ it('does not let background chat or another pane receive a document-zone drop', 
 it.each(['case', 'account', 'organization', 'domain', 'close'])('cancels old import work after changing %s and does not append or archive stale content', async change => {
   if (change === 'organization') fixture.domain = 'work';
   const pending = deferred(); fixture.net.mockImplementationOnce(() => pending.promise);
-  const archived = vi.fn(async () => true), props = { caseFile: { id: 'a', materials: [] } as any, onAddMaterial: archived };
+  const props = { caseFile: { id: 'a', materials: [] } as any };
   const view = render(<LegalImportView {...props} />); act(() => { dropFile(); choose(); }); expect(uploads()).toHaveLength(1);
   const signal = uploads()[0][1].signal;
   if (change === 'close') view.unmount();
   else { if (change === 'account') fixture.uid = 'new'; if (change === 'organization') fixture.org = 'new'; if (change === 'domain') fixture.domain = 'work'; view.rerender(<LegalImportView {...props} caseFile={{ ...props.caseFile, id: change === 'case' ? 'b' : 'a' }} />); }
   await act(async () => pending.resolve(reply({ files: [{ id: 'old.docx', name: 'old.docx' }] })));
-  expect(signal.aborted).toBe(true); expect(archived).not.toHaveBeenCalled(); expect(fixture.net.mock.calls.some(([url]) => url.includes('/files/text/'))).toBe(false);
+  expect(signal.aborted).toBe(true); expect(fixture.net.mock.calls.some(([url]) => url.includes('/files/text/'))).toBe(false);
   if (change !== 'close') expect(document.querySelector('textarea')!.value).toBe('');
 });
 
 it.each(['truncated', 'empty', 'partial-upload'])('does not pass %s content as a complete document', async kind => {
   fixture.net.mockImplementation(async url => url.includes('/files/text/') ? reply({ text: kind === 'empty' ? '' : 'partial text', truncated: kind === 'truncated' }) : reply({ success: kind !== 'partial-upload', files: [{ id: 'good', name: 'good.docx', preview: 'PREVIEW' }], failed: kind === 'partial-upload' ? [{ fileName: 'bad.docx', error: 'upload failed' }] : [] }));
   render(<LegalImportView />); dropFile(); await waitFor(() => expect(toast.error).toHaveBeenCalled());
-  expect(document.querySelector('textarea')!.value).toBe(''); expect((screen.getByRole('button', { name: 'Import judgment' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(document.querySelector('textarea')!.value).toBe(''); expect((screen.getByRole('button', { name: 'Import materials' }) as HTMLButtonElement).disabled).toBe(true);
 });
 
 it('retains successfully uploaded contracts but blocks review until failed files are reselected', async () => {
@@ -143,16 +144,16 @@ it('rejects an empty success receipt instead of inventing an imported file count
   await expect(importKnowledgeFiles([file()], path => path)).rejects.toThrow('File import failed');
 });
 
-it('does not archive an imported judgment when the server has not verified the result', async () => {
+it('does not present an imported material as successful when the server has not verified the result', async () => {
   const transport = fixture.net.getMockImplementation()!;
   fixture.net.mockImplementation((url: string, init?: RequestInit) => url.includes('/legal/tool/')
     ? Promise.resolve(reply({ text: 'Unverified draft', receipt: { ok: true }, verification: { status: 'unknown' } }))
     : transport(url, init));
-  const archived = vi.fn(async () => true);
-  render(<LegalImportView caseFile={{ id: 'unverified-case', materials: [] } as any} onAddMaterial={archived} />);
+  render(<LegalImportView caseFile={{ id: 'unverified-case', materials: [] } as any} />);
   dropFile();
   await waitFor(() => expect(document.querySelector('textarea')!.value).toContain('END-OF-ORIGINAL'));
-  fireEvent.click(screen.getByRole('button', { name: 'Import judgment' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Import materials' }));
   await screen.findByText('Error: Unverified draft');
-  expect(archived).not.toHaveBeenCalled();
+  expect(screen.queryByText('result-ready')).toBeNull();
+  expect(fixture.net.mock.calls.filter(([url]) => /\/materials$/.test(url))).toHaveLength(0);
 });

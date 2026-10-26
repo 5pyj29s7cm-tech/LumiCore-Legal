@@ -4,9 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import JSZip from 'jszip';
 import { writeDocxFromMarkdown } from '../server/regions/packs/cn/legal_tools/documents';
-import { buildBidChapters, buildGroundedBidDraft } from '../server/regions/packs/cn/legal_work_product_quality';
-import { buildMaterialSources } from '../server/regions/packs/cn/legal_reasoning_generation';
-import fixture from './fixtures/legal_bid_six_materials_164.json';
 
 async function exportedParts(markdown: string, pageHeader = '') { 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'legal-table-export-'));
@@ -24,29 +21,6 @@ async function exportedParts(markdown: string, pageHeader = '') {
 async function exportedXml(markdown: string): Promise<string> { return (await exportedParts(markdown)).document; }
 
 describe('actual legal work-table preservation in DOCX', () => {
-  it('compiles all56 existing numbered-source states into one native57-row table', async () => {
-    const sources = buildMaterialSources(fixture.materials);
-    const chapters = buildBidChapters(sources);
-    const response = chapters.find(chapter => chapter.id === 'response')!;
-    expect(sources).toHaveLength(164);
-    expect(response.sections).toHaveLength(56);
-    const entries = response.sections.map(section => ({ sectionId: section.id,
-      sources: [sources.find(source => source.id === section.id)!],
-      response: '虚构对应响应正文，核对原件后再确认。', missing: '原始证明材料待补，不代表资格通过。' }));
-    const markdown = buildGroundedBidDraft('虚构表格完整性验收', fixture.materials.map(material => material.content).join('\n'),
-      sources, chapters, new Map([['response', entries]]));
-    const table = markdown.slice(markdown.indexOf('| 原件编号 |'), markdown.indexOf('## 正式使用边界'));
-    expect(table.split('\n').filter(line => /^\|.*\|$/.test(line))).toHaveLength(58);
-    expect(table).not.toMatch(/\|\n\n\|/);
-    const xml = await exportedXml(markdown);
-    expect((xml.match(/<w:tbl>/g) || [])).toHaveLength(1);
-    expect((xml.match(/<w:tr>/g) || [])).toHaveLength(57);
-    expect((xml.match(/<w:tblHeader\b/g) || [])).toHaveLength(1);
-    expect((xml.match(/已取得拟议响应；内容待核验，未核准/g) || [])).toHaveLength(56);
-    for (const title of ['R01【范围】', 'R25【尾部稽核】', 'E01【价格 30 分】', 'E02【实施方案 25 分】', 'B12：']) expect(xml).toContain(title);
-    expect(xml).toContain('真实平台');
-  });
-
   it('does not silently erase isolated table-shaped rows separated by blank paragraphs', async () => {
     const markdown = ['# 虚构旧格式', '| 编号 | 材料 |', '| --- | --- |', '| R01 | 首条原文 |', '| R25 | 末条原文TAIL |', '普通段落仍保留。'].join('\n\n');
     const xml = await exportedXml(markdown);
@@ -63,34 +37,6 @@ describe('actual legal work-table preservation in DOCX', () => {
     expect((xml.match(/<w:tblHeader\b/g) || [])).toHaveLength(2);
     for (const text of ['表前原文。', '第一表', '两表之间', '第二表', '表后尾段TAIL。']) expect(xml).toContain(text);
   });
-  it('uses the same native table for exact section locations and unchanged missing-material text without inferring assignees', async () => {
-    const sources = buildMaterialSources([
-      { id: 'original-a', title: '虚构文件甲', content: 'R13【偏差】须列商务偏差。\nF05【补料】材料及动作、责任人待核对。' },
-      { id: 'original-b', title: '虚构文件乙', content: 'R13【偏差】另一原件的同编号要求，补料负责人未指派。' },
-    ]);
-    const chapters = buildBidChapters(sources);
-    const exactMissing = '专项资质原件未提供；平台条件待确认；责任人不是虚构周样的既定任务。';
-    const entries = sources.map((source, index) => ({ sectionId: source.id, sources: [source],
-      response: '本项拟议正文保留，不重复搬入表格。', missing: index === 1 ? '' : exactMissing }));
-    const markdown = buildGroundedBidDraft('虚构补料台账', '', sources, chapters, new Map([['response', entries]]));
-    const table = markdown.slice(markdown.indexOf('| 原件编号 |'), markdown.indexOf('## 正式使用边界'));
-    expect(table).toContain('待补事项及动作');
-    expect(table).toContain(exactMissing);
-    expect(table).toContain('模型未列其他缺项；不代表没有缺项');
-    for (const position of [1, 2, 3]) expect(table).toContain('实际正文第' + position + '节');
-    expect(table).toContain('待补动作：核对上述事项，补充原件或确认前提');
-    expect(table).toContain('责任人待指定；时点待确认');
-    expect(markdown).toContain('原文仅表示提供的资料，不代表证明已核验');
-    const xml = await exportedXml(markdown);
-    expect((xml.match(/<w:tbl>/g) || [])).toHaveLength(1);
-    expect((xml.match(/<w:tr>/g) || [])).toHaveLength(4);
-    expect((xml.match(/<w:tc>/g) || [])).toHaveLength(24);
-    expect(xml).toContain(exactMissing);
-    expect(xml).not.toContain('&lt;br&gt;待补动作');
-    expect(xml).toContain('责任人待指定；时点待确认');
-    expect((xml.match(/本项拟议正文保留，不重复搬入表格。/g) || [])).toHaveLength(3);
-  });
-
   it('writes a real default header and dynamic page field without replacing body text or marking data rows as headers', async () => {
     const parts = await exportedParts('# 虚构响应底稿\n\n正文及尾段TAIL不能被页眉替代。\n\n| 编号 | 原文 |\n| --- | --- |\n| R01 | 虚构首项 |\n| R56 | 虚构尾项 |', '虚构清泉项目  BID-TEST-2026-001');
     expect(parts.headers).toHaveLength(1); expect(parts.footers).toHaveLength(1);

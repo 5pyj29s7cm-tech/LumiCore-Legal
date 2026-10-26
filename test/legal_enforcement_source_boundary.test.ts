@@ -54,8 +54,8 @@ describe('enforcement sources require authorized webpage evidence', () => {
 
   it('keeps a missing enforcement source partial through the registered tool and terminal verification', async () => {
     const record = await trace('验收主体');
-    expect(record.result).toContain('查询状态: needs_source');
-    expect(record.result).toContain('数据状态: needs_source');
+    expect(record.result).toContain('查询状态: 待补来源');
+    expect(record.result).toContain('数据状态: 待补来源');
     expect(record.result).toContain('已取得来源记录: 0');
     expect(record.result).toContain('公开执行来源未取得（待授权网页核验）');
     expect(record.result).not.toContain('被执行记录: 0 条');
@@ -81,7 +81,7 @@ describe('enforcement sources require authorized webpage evidence', () => {
     expect(record.result).toContain('被执行记录: 2 条');
     expect(record.result).toContain('查询来源: 已核验企业 API 来源');
     expect(record.result).toContain('已取得来源记录: 1');
-    expect(record.result).toContain('数据状态: needs_source');
+    expect(record.result).toContain('数据状态: 待补来源');
     expect(record.result).toContain('公开执行查询尚未完成');
     expect(record.receipt).toMatchObject({ ok: false, status: 'partial', persisted: false });
     expect(record.terminalVerification?.status).toBe('failed');

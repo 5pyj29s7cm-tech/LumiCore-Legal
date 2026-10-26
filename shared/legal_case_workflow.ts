@@ -134,7 +134,7 @@ export function evaluateLegalCaseWorkflow(
   const lawBlocked = lawState === 'blocked';
   const lawPassed = lawState === 'passed';
   const linkedReasoning = runs.some(run => run.ok && run.reasoningLinked);
-  const hasSources = completed(['legal_import_judgment']);
+  const hasSources = completed(['legal_import_materials_to_kb']);
   const hasWorkProduct = completed(['legal_generate_litigation_packet', 'legal_generate_argument_or_opinion', 'legal_review_contract', 'legal_draft_contract', 'legal_generate_bid']);
   const hasFilingHandoff = completed(['legal_prepare_filing_handoff']);
   const hasFormalDelivery = !lawBlocked && runs.some(run => run.ok && run.tool === 'legal_finalize_delivery_package'

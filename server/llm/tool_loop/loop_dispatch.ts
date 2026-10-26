@@ -33,6 +33,6 @@ export async function runWithToolsInternal(
 
 
   recordWorkflowIfToolsUsed(state.executionLog, state.messages, state.config);
-  const text = buildIterationLimitSummary(state.executionLog, getPrimaryUserText(state.messages));
+  const text = buildIterationLimitSummary(state.executionLog, getPrimaryUserText(state.messages), state.toolExecutionContext);
   return state.finish(text, { text, blocked: true, reason: 'Tool iteration limit reached before a verified final response.' });
 }

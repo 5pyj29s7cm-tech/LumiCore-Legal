@@ -2,13 +2,13 @@ import { extendTurnBindings } from "../../../cognition/turn_bindings";
 import { logger } from "../../../../logger";
 import { createDurableForegroundReleaseGate } from "../../../conversation/manager";
 import { recordChatExecutionPersistenceUnknownDurably } from "../../chat_execution_registry";
-import { flushDBOrThrow } from "../../../../db_layer";
+import { flushDBOrThrow, readDB } from "../../../../db_layer";
 import { stopVoiceWorkHeartbeat } from "../work_progress";
 import { commitChatTerminalBoundary, persistAuthorizedTerminalReceipt } from "../../chat_terminal_boundary";
 import { resetSilenceTimer, enforceVoiceForegroundConvergenceBeforeRelease } from "../../voice_transport_runtime";
 import type { ToolExecutionRecord } from "../../../tools/types";
 import { scheduleTurnMemory } from "../../../memory/turn_memory";
-import { createVoiceTerminalCompletion } from "../terminal_completion";
+import { applyPersistedVoiceTerminalOutcome, createVoiceTerminalCompletion } from "../terminal_completion";
 import type { prepareVoiceSpeech } from './prepare_voice_speech';
 
 export async function prepareVoiceRelease(context: NonNullable<Awaited<ReturnType<typeof prepareVoiceSpeech>>["context"]>) {
@@ -74,6 +74,25 @@ export async function prepareVoiceRelease(context: NonNullable<Awaited<ReturnTyp
               : undefined,
           },
         );
+        const identity = {
+          userId: context.session.userId,
+          conversationId: context.conversationTurn.conversation.id,
+          requestId: context.requestId,
+          taskId: context.foregroundRequestIdentity?.expectedTaskId,
+          assistantMessageId,
+        };
+        const persisted = readDB();
+        const turn = persisted.conversationActionTurns.find((row: any) => row.userId === identity.userId
+          && row.conversationId === identity.conversationId && row.requestId === identity.requestId);
+        applyPersistedVoiceTerminalOutcome(terminalPayload, identity, {
+          turn,
+          task: persisted.conversationActionTasks.find((row: any) => row.id === turn?.taskId
+            && row.userId === identity.userId && row.conversationId === identity.conversationId),
+          assistant: persisted.interactions.find((row: any) => row.id === assistantMessageId
+            && row.userId === identity.userId && row.conversationId === identity.conversationId),
+        });
+        input.blocked = terminalPayload.blocked;
+        input.reason = terminalPayload.reason;
         return assistantMessageId;
       },
       flush: flushDBOrThrow,

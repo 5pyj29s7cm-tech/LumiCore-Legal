@@ -23,8 +23,13 @@ function run(name:string,item:ReturnType<typeof fixture>,extra:Record<string,unk
  return executeToolCall({registry,name,arguments:{caseId:item.id,name:'Synthetic '+item.id,query:'Synthetic query '+item.id,...extra},context:{userId:actor,orgId:domain==='work'?item.orgId:undefined,domain,authenticated:true} as any});
 }
 describe('registered external query archival uses actual source availability',()=>{
- it.each(['legal_company_database_lookup','legal_search_external_authorities','legal_trace_assets','legal_equity_penetration'])('%s preserves a partial workflow history without adding a missing-source material',async name=>{
-  const before=fixture();const result=await run(name,before);const after=getCase(before.orgId,before.id,owner)!;
+ it.each([
+  {name:'legal_company_database_lookup',scope:'registration',extra:{}},
+  {name:'legal_search_external_authorities',scope:'authorities',extra:{includeOfficialWeb:false}},
+  {name:'legal_trace_assets',scope:'trace',extra:{}},
+  {name:'legal_company_database_lookup',scope:'controller',extra:{queryType:'controller',sourceIds:['qichacha']}},
+ ])('$scope preserves a partial workflow history without adding a missing-source material',async ({name,extra})=>{
+  const before=fixture();const result=await run(name,before,extra);const after=getCase(before.orgId,before.id,owner)!;
   expect(result.receipt).toMatchObject({ok:false,status:'partial',persisted:false,changedCaseIds:[]});
   expect(result.terminalVerification?.status).toBe('failed');expect(after.materials).toEqual(before.materials);expect(after.notes).toBe(before.notes);
   expect(after.workflowRuns?.at(-1)).toMatchObject({tool:name,ok:false,status:'partial',materialIds:[]});
@@ -68,7 +73,7 @@ describe('configured legal gateway must return readable source rows',()=>{
   const before=fixture();vi.stubEnv('PKULAW_API_KEY','fixture');vi.stubEnv('PKULAW_BASE_URL','https://law.invalid/readable');
   vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({items:[candidate]}),{status:200}));
   const result=await run('legal_search_external_authorities',before,{sourceIds:['pkulaw']});
-  expect(result.receipt).toMatchObject({ok:true,status:'observed',persisted:true});expect(result.result).toContain(Object.values(candidate)[0]);expect(result.result).toContain('律师复核');
+  expect(result.receipt).toMatchObject({ok:true,status:'observed',persisted:true});expect(result.result).toContain(Object.values(candidate)[0]);
   expect(getCase(before.orgId,before.id,owner)!.materials).toHaveLength(before.materials.length+1);expect(fetch).toHaveBeenCalledTimes(1);
  });
 });

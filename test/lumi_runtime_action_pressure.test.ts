@@ -71,7 +71,6 @@ const declarations = [
   'legal_search_case',
   'legal_search_statute',
   'legal_trace_assets',
-  'legal_equity_penetration',
   'legal_company_database_lookup',
   'legal_case_strategy',
   'legal_case_workspace',
@@ -202,8 +201,8 @@ describe('Lumi runtime action pressure coverage', () => {
         text: '\u67e5\u88ab\u6267\u884c\u4eba\u8d22\u4ea7\u7ebf\u7d22\u548c\u80a1\u6743\u7a7f\u900f',
         kind: 'none',
         categories: ['legal'],
-        tools: ['legal_trace_assets', 'legal_equity_penetration', 'legal_company_database_lookup'],
-        earlyTools: ['legal_trace_assets', 'legal_equity_penetration'],
+        tools: ['legal_trace_assets', 'legal_company_database_lookup'],
+        earlyTools: ['legal_trace_assets', 'legal_company_database_lookup'],
       },
     ];
 

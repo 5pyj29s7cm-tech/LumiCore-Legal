@@ -458,7 +458,8 @@ describe('accepted STT Voice -> Chat task continuity', () => {
     expect(conversationId).toMatch(/^conv_/u);
     expect(voiceResponse).toMatchObject({ requestId: voiceRequestId, conversationId, channel: 'voice', finalized: true, blocked: true });
     expect(String(voiceResponse.text || '').trim()).not.toBe('');
-    expect(String(voiceResponse.text || '')).toMatch(/没能开始|(?:未|没有).*完成|尚未.*核验/u);
+    // A blocked outcome retains the model's exact source-absence report, not a canned incomplete-work sentence.
+    expect(voiceResponse.text).toBe('我没有找到你指定的文件。请告诉我正确路径，我会接着这个任务继续读取。');
     expect(String(voiceResponse.text || '')).not.toMatch(/trusted application|window\/object\/path anchor|terminalVerification|read_file|search_files|execution_recovery_incomplete/u);
     expect(String(voiceResponse.text || '')).not.toMatch(/No successful current-turn|persistence_unknown|Document analysis is blocked/u);
     expect(clientEvents.some(item => (

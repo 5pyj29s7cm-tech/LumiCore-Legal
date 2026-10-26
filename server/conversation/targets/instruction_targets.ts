@@ -1,20 +1,38 @@
 import { primaryTaskText, compact, capsuleTaskText } from './values';
 import { OUTPUT_DESTINATION_RE, EXCLUDED_FILE_CLAUSE_RE, VALUE_CORRECTION_RE, ABSOLUTE_FILE_RE, POSIX_ABSOLUTE_FILE_RE, FILE_NAME_RE, FILE_EXTENSIONS, FILE_TASK_RE, FILE_ACTION_RE, WPS_RE, CURRENT_DOCUMENT_RE, IMPLICIT_CURRENT_DOCUMENT_RE, AUTHORING_APPLICATION_RE } from './recognition';
 import { directorySearchReference, displayableFileName } from './paths';
+import { actionInstructionClauses } from '../../cognition/action_instruction_clauses';
+import { withoutLocationLiterals } from '../../cognition/location_literals';
+
+/** Match instruction syntax while retaining the original source/destination spans. */
+function outputDestination(text: string): { index: number; end: number; destination: string } | null {
+  for (const clause of actionInstructionClauses(text)) {
+    const syntax = withoutLocationLiterals(clause.probe, false, true);
+    const match = OUTPUT_DESTINATION_RE.exec(syntax);
+    if (!match) continue;
+    // i18n-allow: A negated save/export/merge clause grants no destination.
+    if (/(?:不要|别|禁止|无需|不用|不)\s*$|\b(?:do not|don't|without)\s*$/iu.test(syntax.slice(0, match.index))) continue;
+    const end = clause.start + match.index + match[0].length;
+    const destination = text.slice(end, clause.start + clause.text.length).split(/[\r\n，,；;。！？!?]/u)[0].trim();
+    if (!ABSOLUTE_FILE_RE.test(destination) && !POSIX_ABSOLUTE_FILE_RE.test(destination) && !FILE_NAME_RE.test(destination)) continue;
+    // English merge predicates precede their source operands; only the
+    // destination complement separates those inputs from the result.
+    const complementOffset = match[1] ? match[0].length - match[1].length : 0;
+    return { index: clause.start + match.index + complementOffset, end, destination };
+  }
+  return null;
+}
 
 /** Read verification and target selection share the same input/output roles. */
 export function sourceDocumentInstruction(text: string): string {
-  return primaryTaskText(text).split(OUTPUT_DESTINATION_RE, 1)[0];
+  const task = primaryTaskText(text);
+  const destination = outputDestination(task);
+  return destination ? task.slice(0, destination.index) : task;
 }
 
 /** Explicit save-as destination, separate from the referential input file. */
 export function outputDocumentInstruction(text: string): string {
-  const task = primaryTaskText(text);
-  const match = OUTPUT_DESTINATION_RE.exec(task);
-  if (!match) return '';
-  // i18n-allow: A negated save/export clause grants no destination.
-  if (/(?:不要|别|禁止|无需|不用|不)\s*$|\b(?:do not|don't|without)\s*$/iu.test(task.slice(0, match.index))) return '';
-  return task.slice(match.index + match[0].length).split(/[\r\n，,；;。！？!?]/u)[0].trim();
+  return outputDestination(primaryTaskText(text))?.destination || '';
 }
 
 export function fileReferenceClauses(text: string): string[] {
@@ -35,7 +53,8 @@ export function explicitFile(text: string, keepExcluded = false): string {
     .join('，');
   // In "edit that workbook, save as X", X is only the output. The input
   // remains referential and must be recovered from a trusted prior receipt.
-  let clean = positive.split(OUTPUT_DESTINATION_RE, 1)[0];
+  const destination = outputDestination(positive);
+  let clean = destination ? positive.slice(0, destination.index) : positive;
   // A new output filename must not replace the already selected input when
   // the user adjusts a value and asks to generate the resulting file.
   if (VALUE_CORRECTION_RE.test(positive)) {
@@ -49,7 +68,7 @@ export function explicitFile(text: string, keepExcluded = false): string {
   // An output destination is not the value of the preceding quantity/price
   // correction, even when the user omitted punctuation between the clauses.
   // i18n-allow: output-destination input recognition.
-  const replacementValue = replacement?.split(OUTPUT_DESTINATION_RE, 1)[0];
+  const replacementValue = replacement ? sourceDocumentInstruction(replacement) : undefined;
   const replacementNamesFile = replacementValue && (
     ABSOLUTE_FILE_RE.test(replacementValue) || POSIX_ABSOLUTE_FILE_RE.test(replacementValue)
     || FILE_NAME_RE.test(replacementValue)

@@ -35,9 +35,12 @@ export async function traceAssetsHandler(args: Record<string, any>, context?: an
     lines.push(`- 名称: ${company.name}`);
     lines.push(`- 法定代表人: ${company.legalPerson}`);
     lines.push(`- 注册资本: ${company.registeredCapital}`);
+    if (company.paidInCapital !== undefined) lines.push(`- 实缴资本: ${company.paidInCapital}`);
     lines.push(`- 状态: ${company.status}`);
     lines.push(`- 成立日期: ${company.establishDate}`);
     lines.push(`- 统一社会信用代码: ${company.unifiedCode}`);
+    if (company.enterpriseType !== undefined) lines.push(`- 企业类型: ${company.enterpriseType}`);
+    if (company.registrationAuthority !== undefined) lines.push(`- 登记机关: ${company.registrationAuthority}`);
     if (company.shareholders.length > 0) {
       lines.push('- 股东结构:');
       for (const s of company.shareholders) {
@@ -71,7 +74,7 @@ export async function traceAssetsHandler(args: Record<string, any>, context?: an
   }
   lines.push('\n## 公开执行记录');
   if (enforcementSourceError) {
-    lines.push('- 查询状态: needs_source');
+    lines.push('- 查询状态: 待补来源');
     lines.push(`- ${enforcementSourceError}`);
   } else if (enforcementSource) {
     lines.push('- 已取得授权数据源原始结果，内容见下方来源；不将未提供的字段推断为无执行记录。');
@@ -80,7 +83,7 @@ export async function traceAssetsHandler(args: Record<string, any>, context?: an
   const observedSourceCount = (company ? 1 : 0) + (enforcementSource ? 1 : 0);
   const needsSource = sourceErrors.length > 0 || Boolean(enforcementSourceError) || observedSourceCount === 0;
   lines.push('\n## 数据可用性');
-  lines.push(`- 数据状态: ${needsSource ? 'needs_source' : 'observed'}`);
+  lines.push(`- 数据状态: ${needsSource ? '待补来源' : '已取得来源'}`);
   lines.push(`- 已取得来源记录: ${observedSourceCount}`);
   if (enforcementSourceError) {
     lines.push('- 企业已有来源予以保留；公开执行查询尚未完成，不能将本步骤标记为已完成。请由律师通过授权网页核验后导入来源材料。');
@@ -110,68 +113,6 @@ export async function traceAssetsHandler(args: Record<string, any>, context?: an
   });
 }
 
-export async function equityPenetrationHandler(args: Record<string, any>, context?: any): Promise<string> {
-  const companyName = args.name as string;
-  if (!companyName) return '请提供公司名称（name参数）';
-  const caseName = textArg(args, 'caseName') || `${companyName}股权穿透`;
-
-  const sourceErrors: string[] = [];
-  const company = await searchCompany(companyName, { localOnly: context?.dataRoutingPolicy === 'local_only', sourceErrors });
-  if (!company) {
-    const report = sourceErrors.join("\n") + `\n未通过已配置 API 取得"${companyName}"的可核验企业信息，不能据此认定企业不存在。
-
-可执行以下授权网页登录协作：
-1. 打开企查查官网并登录授权账号。
-2. 核验查询主体和股东信息。
-3. 律师在网页内确认股东、对外投资、风险信息后，使用 材料入库 导入 Lumi 知识库。
-
-边界：这不是平台数据接入；不自动抓取、不批量同步、不绕过验证码、付费墙、账号权限或频控。`;
-    return encodeToolResult(await appendLegalWorkProductArchiveSection(report, { ...args, persistCase: false }, context, {
-      caseName,
-      title: `${companyName}股权穿透协作报告`,
-      type: 'evidence',
-      cause: textArg(args, 'caseType') || '主体/股权穿透',
-    }), { ok: false, status: 'partial' });
-  }
-
-  const lines: string[] = [`# ${companyName} 股权穿透分析\n`];
-  if (!company.shareholders.length) lines.push('未取得可核验股东来源，股权穿透尚未完成；不能把空字段解释为没有股东。');
-  lines.push('## 第一层：直接股东');
-  for (const s of company.shareholders) {
-    lines.push(`- ${s.name}: 持股 ${s.ratio}% (${s.type})`);
-  }
-
-  // Recursively trace each shareholder (max 3 levels)
-  for (const s of company.shareholders.slice(0, 5)) {
-    const subCompany = await searchCompany(s.name, { localOnly: context?.dataRoutingPolicy === 'local_only', sourceErrors });
-    if (subCompany && subCompany.shareholders.length > 0) {
-      lines.push(`\n## 穿透 ${s.name} 的股东`);
-      for (const ss of subCompany.shareholders) {
-        const indirectRatio = Math.round(s.ratio * ss.ratio / 100);
-        lines.push(`- ${ss.name}: 间接持股 ~${indirectRatio}% (${ss.type})`);
-      }
-    }
-  }
-
-  lines.push('\n## 财产线索');
-  lines.push(`- 实际控制人: 需结合工商登记+公司章程判断`);
-  lines.push(`- 注册资本: ${company.registeredCapital}`);
-  lines.push('- 建议进一步查询: 银行流水、关联交易、对外投资');
-  lines.push('\n*注意: 股权穿透信息基于公开工商数据，实际控制关系需综合判断。*');
-  lines.push(`*数据来源: ${company.sourceName || '企查查授权数据源'} | ${new Date().toISOString().slice(0, 10)}*`);
-
-  if (sourceErrors.length) lines.push('\n## 查询异常', ...sourceErrors.map(message => '- ' + message));
-  const needsSource = sourceErrors.length > 0 || !company.shareholders.length;
-  const report = lines.join('\n');
-  const archivedReport = await appendLegalWorkProductArchiveSection(report, needsSource ? { ...args, persistCase: false } : args, context, {
-    caseName,
-    title: `${companyName}股权穿透分析报告`,
-    type: 'evidence',
-    cause: textArg(args, 'caseType') || '主体/股权穿透',
-  });
-  return needsSource ? encodeToolResult(archivedReport, { ok: false, status: 'partial' }) : archivedReport;
-}
-
 export function mdCell(value: unknown): string {
   return String(value ?? '').replace(/\|/g, ' ').replace(/\n+/g, ' ').trim() || '待登记';
 }
@@ -196,7 +137,8 @@ export async function searchExternalAuthoritiesHandler(args: Record<string, any>
   ];
   const type = normalizeExternalLegalKind(textArg(args, 'type') || textArg(args, 'kind'));
   const limit = Math.max(1, Math.min(Number(args.limit) || 5, 20));
-  const includeOfficialWeb = args.includeOfficialWeb === true;
+  const includeOfficialWeb = args.includeOfficialWeb !== false && type !== 'case'
+    && context?.dataRoutingPolicy !== 'local_only';
 
   const results = await searchLegalAuthorityDatabase({
     query,
@@ -211,24 +153,12 @@ export async function searchExternalAuthoritiesHandler(args: Record<string, any>
     const bRank = courtLevelRank(b.court || '');
     return aRank - bRank;
   });
-  const capabilities = listLegalSourceCapabilities()
-    .filter(source => ['qichacha', 'pkulaw', 'farui', 'people-court-case-library', 'china-judgments-online'].includes(source.id));
-
-  const resultRows = orderedResults.length
-    ? orderedResults.map((item, index) =>
-      `| ${index + 1} | ${mdCell(item.sourceName)} | ${mdCell(item.title)} | ${mdCell(item.caseNumber || item.effectiveStatus)} | ${mdCell(item.publishDate || item.court)} | ${mdCell(item.url || item.summary)} | 律师复核 |`,
-    ).join('\n')
-    : '| 1 | 未命中 | 未取得可核验来源；未配置、查询失败与无命中不能据此区分 | 待补充 | 待补充 | 请配置授权 API 或使用网页登录协作 | 律师复核 |';
-
-  const statusRows = capabilities.map(source =>
-    `| ${mdCell(source.label)} | ${source.accessMode} | ${source.configured ? '已配置（以本次回执为准）' : '未配置或网页登录'} | ${source.canAutoQuery ? '可以' : '不承诺'} | ${mdCell(source.nextAction)} |`,
-  ).join('\n');
   const sourceOriginals = orderedResults.filter(item => item.sourceText).map(item => ({ ...item, text: item.sourceText }));
   const sourceRegisterRows = orderedResults.length
     ? orderedResults.map((item, index) =>
-      `| ${index + 1} | ${mdCell(item.sourceName)} | ${mdCell(query)} | ${mdCell(item.title)} | ${mdCell(item.caseNumber || item.effectiveStatus)} | ${mdCell(item.court || item.publishDate)} | ${mdCell(item.url)} | ${mdCell(item.summary || '待摘录')} | 律师复核 |`,
+      `| ${index + 1} | ${mdCell(item.sourceName)} | ${mdCell(query)} | ${mdCell(item.title)} | ${mdCell(item.caseNumber || item.effectiveStatus)} | ${mdCell([item.court, item.publishDate].filter(Boolean).join('；'))} | ${mdCell(item.url)} | ${mdCell(item.summary || '待摘录')} |`,
     ).join('\n')
-    : '| 1 | 待登记 | 待登记 | 待登记 | 待登记 | 待登记 | 待登记 | 待摘录 | 律师复核 |';
+    : '| 1 | 未取得来源 | 待登记 | 未取得可核验来源 | 待补充 | 待补充 | 待补充 | 未配置、查询失败与无命中不能据此区分 |';
 
   const report = `# ${caseName} 外部法律数据库检索
 
@@ -239,29 +169,17 @@ export async function searchExternalAuthoritiesHandler(args: Record<string, any>
 - 官方网页兜底：${includeOfficialWeb ? '启用' : '未启用'}
 - 类案排序：${LEGAL_CASE_SEARCH_ORDER.join(' > ')}；无法识别法院层级的结果列后。
 
-## 二、API 查询结果
-| 序号 | 数据源 | 标题 | 案号/效力 | 日期/法院 | 链接或摘要 | 复核状态 |
-| --- | --- | --- | --- | --- | --- | --- |
-${resultRows}
+## 二、来源登记回填
+${sourceOriginals.map(source => '### 原始来源回执（本次返回数据）\n- 来源记录：' + (source.title || '未返回') + '；数据库查询时效力：' + (source.effectiveStatus || '未返回') + (source.sourceTool ? '\n- 工具：' + source.sourceTool : '') + '\n- 来源链接：' + (source.url || '未返回') + '\n- 查询端点：' + (source.sourceEndpoint || '未返回') + '\n- 查询时间：' + (source.queriedAt || '未返回') + '\n- 读取范围：以下仅列出实际返回内容；目录、摘要或元数据不能代替正文，原文提取范围以来源内容为准。\n\n' + source.text).join('\n\n')}
 
-## 三、来源登记回填
-| 序号 | 来源 | 检索词 | 标题 | 案号/效力 | 法院/发布日期 | 链接 | 关键摘录 | 复核状态 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 序号 | 来源 | 检索词 | 标题 | 案号/效力 | 法院/发布日期 | 链接 | 关键摘录 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
 ${sourceRegisterRows}
 
-${sourceOriginals.map(source => '### 官方 MCP 原始回执（数据，尚待律师核验）\n- 来源：' + source.sourceName + '\n- 查询时间：' + source.queriedAt + '\n\n' + source.text).join('\n\n')}
+## 三、查询范围
+- 仅调用已配置且授权的 API/网关；未配置的数据源不承诺自动查询。`;
 
-## 四、接入状态
-| 数据源 | 模式 | 状态 | 自动查询 | 下一步 |
-| --- | --- | --- | --- | --- |
-${statusRows}
-
-## 五、边界
-- 仅调用已配置且授权的 API/网关；未配置的数据源不承诺自动查询。
-- 人民法院案例库、裁判文书网、法蝉、Alpha 默认仍按授权网页登录协作和材料导入处理。
-- 所有法条效力、案例适用性和引用表述必须由律师最终复核。`;
-
-  let kbLine = '- 知识库：未导入。律师确认来源和授权范围后，可设置 confirmedForKb=true 入库。';
+  let kbLine = '- 知识库：未导入。';
   if (args.confirmedForKb === true && orderedResults.length > 0) {
     const article = legalWrite(() => createLegalArticle(orgId, userId, {
       title: `${caseName} 外部法律数据库检索`,
@@ -291,7 +209,9 @@ ${statusRows}
     cause: textArg(args, 'caseType') || query,
   });
 
-  return encodeToolResult(`${report}\n\n## 六、入库与案件归档\n${kbLine}\n${caseLine}`, { ok: orderedResults.length > 0, status: orderedResults.length ? 'observed' : 'partial' });
+  return encodeToolResult(`${report}\n\n## 四、入库与案件归档\n${kbLine}\n${caseLine}`, { ok: orderedResults.length > 0, status: orderedResults.length ? 'observed' : 'partial',
+    statuteSources: orderedResults.flatMap(item => item.statuteSource ? [item.statuteSource] : []),
+  });
 }
 
 export async function companyDatabaseLookupHandler(args: Record<string, any>, context?: any): Promise<string> {
@@ -357,7 +277,7 @@ ${companyRows}
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 ${sourceRegisterRows}
 
-${sourceOriginals.map(source => '### 官方 MCP 原始回执（数据，尚待律师核验）\n- 来源：' + source.sourceName + '\n- 查询时间：' + source.queriedAt + '\n\n' + source.text).join('\n\n')}
+${sourceOriginals.map(source => '### 官方 MCP 原始回执（数据，尚待律师核验）\n- 来源：' + source.sourceName + (source.sourceTool ? '\n- 工具：' + source.sourceTool : '') + (source.sourceEndpoint ? '\n- 查询端点：' + source.sourceEndpoint : '') + '\n- 查询时间：' + source.queriedAt + '\n\n' + source.text).join('\n\n')}
 
 ## 四、接入状态
 | 数据源 | 模式 | 状态 | 自动查询 | 下一步 |

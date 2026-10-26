@@ -34,8 +34,13 @@ describe('external query truth and absence boundaries', () => {
     vi.mocked(fetch).mockImplementation(async()=>new Response(JSON.stringify(p.wrap({name:++calls===1?'First actual company':'Second actual company'})),{status:200}));
     expect((await searchCompanySources(prefix+' A',[p.id]))[0].name).toBe('First actual company');expect((await searchCompanySources(prefix+' B',[p.id]))[0].name).toBe('Second actual company');expect(fetch).toHaveBeenCalledTimes(2);
   });
-  it.each(['legal_company_database_lookup','legal_search_external_authorities','legal_search_tender_projects','legal_equity_penetration'])('%s retains an incomplete receipt when no source is configured', async name=> {
-    const record=await tool(name,{name:'Synthetic no-source company',keyword:'Synthetic no-source project',query:'Synthetic no-source legal query'});expect(record.receipt).toMatchObject({ok:false,status:'partial'});expect(record.terminalVerification?.status).toBe('failed');expect(fetch).not.toHaveBeenCalled();
+  it.each([
+    {name:'legal_company_database_lookup',scope:'registration',extra:{}},
+    {name:'legal_search_external_authorities',scope:'authorities',extra:{includeOfficialWeb:false}},
+    {name:'legal_search_tender_projects',scope:'tender',extra:{}},
+    {name:'legal_company_database_lookup',scope:'controller',extra:{queryType:'controller',sourceIds:['qichacha']}},
+  ])('$scope retains an incomplete receipt when no source is configured', async ({name,extra})=> {
+    const record=await tool(name,{name:'Synthetic no-source company',keyword:'Synthetic no-source project',query:'Synthetic no-source legal query',...extra});expect(record.receipt).toMatchObject({ok:false,status:'partial'});expect(record.terminalVerification?.status).toBe('failed');expect(fetch).not.toHaveBeenCalled();
   });
   it('shows unavailable risks separately from actual zeros in the registered execution report',async()=> {
     const p=providers[0];configure(p);vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(p.wrap({Name:'Synthetic partially observed company',EnforcementCount:0})),{status:200}));

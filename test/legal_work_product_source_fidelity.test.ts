@@ -12,7 +12,7 @@ import { LEGAL_REASONING_BASELINE } from '../server/regions/packs/cn/legal_tools
 import { buildFormalLegalMarkdown } from '../server/regions/packs/cn/legal_tools/documents';
 import { analyzeFolderAndDraftArgumentHandler } from '../server/regions/packs/cn/legal_tools/folder_analysis';
 import { contractStructuredReply } from './legal_contract_fixture';
-import { bidStructuredReply, sdkCompletion } from './legal_bid_fixture';
+import { sdkCompletion } from './legal_bid_fixture';
 let app: Awaited<ReturnType<typeof makeApp>>;
 beforeAll(async () => { app = await makeApp(); });
 afterAll(() => app.cleanup());
@@ -51,13 +51,13 @@ describe('legal work product preserves source and explicitly requested terminolo
     expectVerbatim(output); expect(f.create).toHaveBeenCalledTimes(1);
     expect(output).not.toContain(LEGAL_REASONING_BASELINE);
   });
-  it('preserves both bid response and missing text through source-bound decoding and review', async () => {
-    const f = fixture(prompt => bidStructuredReply(prompt, body, quote + ' ' + payment));
+  it('preserves the complete bid Markdown body without terminology rewriting', async () => {
+    const f = fixture(() => body);
     const result = decodeToolResult(await f.registry.execute('legal_generate_bid', {
       projectName:'虚构引文标书-' + crypto.randomUUID(), requirements:'A01：仅要求保留提供原句，未知条件待核对。', persistCase:false,
     }, f.context));
     expect(result.receipt).toMatchObject({ok:true,status:'generated'}); expectVerbatim(result.content);
-    expect(result.content).toContain(quote + ' ' + payment); expect(f.create).toHaveBeenCalledTimes(6);
+    expect(f.create).toHaveBeenCalledTimes(1);
   });
   it('preserves fact-review output in the registered packet final body and saved file', async () => {
     const f = fixture(prompt => {

@@ -4,7 +4,6 @@ import { stringField } from "./tool_contracts";
 import { booleanField } from "./tool_contracts";
 import { withLegalReceipt } from "./tool_contracts";
 import { traceAssetsHandler } from "./company_research";
-import { equityPenetrationHandler } from "./company_research";
 import { caseStrategyHandler } from "./argument_drafting";
 import { legalCapability } from "./tool_contracts";
 import { legalEvidence } from "./tool_contracts";
@@ -35,21 +34,6 @@ handler: withLegalReceipt(traceAssetsHandler, {
         ? { ok: true, status: 'needs_source' }
         : { ok: true, status: 'observed' },
     })
-}),
-defineLegalTool({
-name: 'legal_equity_penetration',
-description: '股权穿透分析 — 追溯目标公司的股东结构，多层穿透识别实际控制人和关联财产线索。企查查仅在配置官方 API 凭证后自动查询；未配置时输出授权网页登录协作和材料入库步骤。',
-properties: {
-name: stringField('公司名称'),
-caseId: stringField('已有案件工作台 ID；提供后会把股权穿透报告归档到该案件空间'),
-caseName: stringField('关联案件名称或简称'),
-caseType: stringField('案由或事项类型；用于新建案件或归档标记'),
-persistCase: booleanField('是否归档到案件空间；提供 caseId/caseName 时默认归档，设置 false 可关闭'),
-orgId: stringField('组织 ID，默认上下文 orgId 或 default'),
-userId: stringField('操作用户 ID，默认上下文 userId 或 system'),
-},
-required: ['name'],
-handler: withLegalReceipt(equityPenetrationHandler, { status: 'observed', expectCaseMutation: 'when_requested' })
 }),
 defineLegalTool({
 name: 'legal_case_strategy',

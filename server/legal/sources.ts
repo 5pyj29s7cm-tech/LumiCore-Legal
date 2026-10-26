@@ -13,7 +13,10 @@ import { getKey } from '../config/keys';
 import { getDataDirectory } from '../config/data_path';
 import { requireLocalEndpoint } from '../config/privacy';
 import { mcpManager } from '../mcp/client';
+import { normalizeStatuteReferenceTitle } from '../regions/packs/cn/statute_provisions';
+import { searchOfficialStatuteRecords, officialQueryLocator, projectCachedStatuteOriginal, type CurrentStatuteOriginalEvidence, type CachedStatuteOriginal } from './statute_authority_refresh';
 import { CN_QICHACHA_QUERY_COPY } from '../regions/packs/cn/qichacha_copy';
+import { mapQichachaCompanyRegistration, pickQichachaResult, type CompanyRegistrationFields } from '../../shared/legal_company_info';
 import {
   CN_ASSET_TRACE_OFFICIAL_CAPABILITIES,
   CN_ASSET_TRACE_SOURCE_COPY,
@@ -397,6 +400,7 @@ export interface ExternalLegalSearchResult {
   queriedAt?: string;
   sourceTool?: string;
   sourceText?: string;
+  statuteSource?: CurrentStatuteOriginalEvidence;
   sourceEndpoint?: string;
 }
 
@@ -520,6 +524,10 @@ export async function searchLegalAuthorityDatabase(params: {
       effectiveStatus: item.status,
       publishDate: item.publishDate,
       raw: item,
+      sourceText: item.sourceText,
+      statuteSource: item.statuteSource,
+      sourceEndpoint: item.sourceEndpoint,
+      queriedAt: item.queriedAt,
     })));
   }
 
@@ -536,44 +544,87 @@ export interface StatuteSearchResult {
   effectiveDate: string;
   issuingBody: string;
   url: string;
+  sourceText?: string;
+  statuteSource?: CurrentStatuteOriginalEvidence;
+  sourceEndpoint?: string;
+  queriedAt?: string;
+}
+
+// Keep this bounded cache namespace collision-resistant even on legacy key encoders.
+function officialStatuteCacheKey(query: string): string {
+  return cacheKey('flk-api-v8', crypto.createHash('sha256').update(query).digest('hex'));
+}
+function officialStatuteOriginalKey(title: string): string {
+  return cacheKey('flk-original-v1', crypto.createHash('sha256').update(normalizeStatuteReferenceTitle(title)).digest('hex'));
+}
+type CachedStatuteSearchResult = StatuteSearchResult & { _originalCache?: CachedStatuteOriginal };
+function rememberStatuteOriginals(rows: CachedStatuteSearchResult[]): void {
+  for (const title of new Set(rows.filter(row => row._originalCache).map(row => row.title))) {
+    const key = officialStatuteOriginalKey(title);
+    const previous = readCache(key, 24 * 60 * 60 * 1000);
+    const candidates: CachedStatuteSearchResult[] = Array.isArray(previous) ? previous : [];
+    const identity = (row: CachedStatuteSearchResult) => [row.docId, row.publishDate, row.url].join('\u0000');
+    const versions = new Map(candidates.map(row => [identity(row), row]));
+    // Keep metadata-only versions too; one successful version cannot erase ambiguity.
+    for (const row of rows.filter(row => row.title === title)) {
+      const { sourceText: _display, ...original } = row;
+      versions.set(identity(row), original);
+    }
+    writeCache(key, [...versions.values()]);
+  }
+}
+function publicStatuteRows(rows: CachedStatuteSearchResult[]): StatuteSearchResult[] {
+  return rows.map(({ _originalCache, ...row }) => row);
+}
+
+function selectedStatuteRows(keyword: string, rows: CachedStatuteSearchResult[]): StatuteSearchResult[] | undefined {
+  const selected = rows.map(row => {
+      const source = row.statuteSource;
+      if (!source || !row._originalCache || row.docId !== source.recordId || row.title !== source.title
+        || row.publishDate !== source.versionDate || row.effectiveDate !== source.effectiveDate || row.url !== source.sourceUrl
+        || row.queriedAt !== source.queriedAt) return undefined;
+      const projection = projectCachedStatuteOriginal(keyword, source, row._originalCache);
+      return projection ? { ...publicStatuteRows([row])[0], ...projection } : undefined;
+  });
+  return selected.length && selected.every(row => row !== undefined) ? selected as StatuteSearchResult[] : undefined;
 }
 
 export async function searchFLK(keyword: string): Promise<StatuteSearchResult[]> {
-  const ck = cacheKey('flk', keyword);
+  if (!keyword.trim()) return [];
+  const ck = officialStatuteCacheKey(keyword.trim());
   const cached = readCache(ck, 24 * 60 * 60 * 1000);
-  if (cached) return cached;
-
-  const results: StatuteSearchResult[] = [];
-
-  const html = await fetchWithUA(
-    `https://flk.npc.gov.cn/search.html?keyword=${encodeURIComponent(keyword)}`,
-    12000,
-  );
-
-  if (html) {
-    try {
-      // Try to find embedded JSON data
-      const dataRe = /(?:var|let|const)\s+\w+\s*=\s*(\[[\s\S]*?\]);/;
-      const match = html.match(dataRe);
-      if (match) {
-        const list = JSON.parse(match[1]);
-        for (const item of list) {
-          results.push({
-            title: item.title || item.name || '',
-            docId: item.id || '',
-            status: item.status || item.effectiveness || '未知',
-            publishDate: item.publishDate || '',
-            effectiveDate: item.effectiveDate || '',
-            issuingBody: item.issuingBody || '全国人民代表大会',
-            url: `https://flk.npc.gov.cn/detail.html?${item.id || ''}`,
-          });
-        }
-      }
-    } catch { /* HTML parse fallback */ }
+  const locator = officialQueryLocator(keyword.trim());
+  if (Array.isArray(cached) && cached.length > 0) {
+    rememberStatuteOriginals(cached);
+    if (!locator?.articleKeys.length) return publicStatuteRows(cached);
+    const selected = selectedStatuteRows(keyword, cached);
+    if (selected) return selected;
   }
-
-  writeCache(ck, results);
-  return results;
+  if (locator?.articleKeys.length) {
+    const whole = readCache(officialStatuteOriginalKey(locator.title), 24 * 60 * 60 * 1000);
+    const matching: CachedStatuteSearchResult[] = Array.isArray(whole)
+      ? whole.filter(row => normalizeStatuteReferenceTitle(row.title) === normalizeStatuteReferenceTitle(locator.title)) : [];
+    const selected = selectedStatuteRows(keyword, matching);
+    if (selected) return selected;
+  }
+  const statuses: Record<number, string> = { 1: '已废止', 2: '已修改', 3: '现行有效', 4: '尚未生效' };
+  const results = (await searchOfficialStatuteRecords(keyword, 20)).map(({ details, sourceUrl, sourceEndpoint, queriedAt, sourceText, statuteSource, originalCache }) => ({
+    title: String(details.title || '').replace(/<[^>]+>/g, '').trim(),
+    docId: details.bbbs!,
+    status: statuses[Number(details.sxx)] || '未知',
+    publishDate: String(details.gbrq || ''),
+    effectiveDate: String(details.sxrq || ''),
+    issuingBody: String(details.zdjgName || ''),
+    url: sourceUrl,
+    sourceText,
+    statuteSource,
+    _originalCache: originalCache,
+    sourceEndpoint,
+    queriedAt,
+  }));
+  if (results.length > 0) writeCache(ck, results);
+  rememberStatuteOriginals(results);
+  return publicStatuteRows(results);
 }
 
 // ── 住建部合同模板 (mohurd.gov.cn) ─────────────────────────────────────
@@ -604,15 +655,7 @@ export async function searchMOHURDTemplates(keyword?: string): Promise<ContractT
 
 // ── 企查查 (qcc.com) — 企业信息查询 ───────────────────────────────────
 
-export interface CompanyInfo {
-  name: string;
-  legalPerson: string;
-  registeredCapital: string;
-  status: string;
-  establishDate: string;
-  unifiedCode: string;
-  address: string;
-  businessScope: string;
+export interface CompanyInfo extends CompanyRegistrationFields {
   shareholders: { name: string; ratio: number; type: string }[];
   branches: string[];
   riskInfo: {
@@ -642,34 +685,17 @@ function qichachaHeaders(config: ReturnType<typeof qichachaConfig>): Record<stri
   };
 }
 
-function pickQichachaResult(data: any): any {
-  const result = data?.Result ?? data?.result ?? data?.Data ?? data?.data;
-  if (Array.isArray(result)) return result[0];
-  if (Array.isArray(result?.Result)) return result.Result[0];
-  if (Array.isArray(result?.Items)) return result.Items[0];
-  if (Array.isArray(result?.items)) return result.items[0];
-  return result || data;
-}
-
 function riskCount(raw: any, keys: string[]): number | null {
   const value = firstString(raw, keys), count = Number(value);
   return value && Number.isSafeInteger(count) && count >= 0 ? count : null;
 }
 
 function mapQichachaCompany(raw: any, keyword: string): CompanyInfo | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const name = firstString(raw, ['企业名称', 'Name', 'name', 'CompanyName', 'companyName']); // i18n-allow: official provider JSON property names, not display copy.
-  if (!name) return null;
+  const registration = mapQichachaCompanyRegistration(raw);
+  if (!registration) return null;
   const keyNo = raw.KeyNo || raw.keyNo || raw.No || raw.id || encodeURIComponent(keyword);
   return {
-    name,
-    legalPerson: raw['法定代表人'] || raw.OperName || raw.legalPersonName || raw.LegalPerson || raw.operName || '', // i18n-allow: official provider JSON property names, not display copy.
-    registeredCapital: raw['注册资本'] || raw.RegistCapi || raw.registeredCapital || raw.RegisteredCapital || '', // i18n-allow: official provider JSON property names, not display copy.
-    status: raw['登记状态'] || raw.Status || raw.regStatus || raw.StatusCode || raw.status || '', // i18n-allow: official provider JSON property names, not display copy.
-    establishDate: raw['成立日期'] || raw.StartDate || raw.establishDate || raw.EstablishDate || '', // i18n-allow: official provider JSON property names, not display copy.
-    unifiedCode: raw['统一社会信用代码'] || raw.CreditCode || raw.unifiedCode || raw.CreditNo || raw.No || '', // i18n-allow: official provider JSON property names, not display copy.
-    address: raw['注册地址'] || raw.Address || raw.address || '', // i18n-allow: official provider JSON property names, not display copy.
-    businessScope: raw['经营范围'] || raw.Scope || raw.businessScope || raw.BusinessScope || '', // i18n-allow: official provider JSON property names, not display copy.
+    ...registration,
     shareholders: (raw.Shareholders || raw.shareholders || raw.Partners || []).map((s: any) => ({
       name: s.Name || s.name || s.StockName || '',
       ratio: Number.parseFloat(String(s.Ratio || s.ratio || s.StockPercent || 0)) || 0,
@@ -735,6 +761,10 @@ async function callQichachaMcp(lane: 'company' | 'risk' | 'case' | 'regulation',
 export async function queryQichachaMcp(searchKey: string, kind: QichachaQueryType = 'registration', localOnly = false): Promise<ExternalSourceReceipt | null> {
   const target = Object.hasOwn(QICHACHA_QUERY_TOOLS, kind) ? QICHACHA_QUERY_TOOLS[kind] : undefined;
   return target ? callQichachaMcp(target[0], target[1], { searchKey }, localOnly) : null;
+}
+
+export async function queryQichachaSubjectCases(subjectName: string, localOnly = false): Promise<ExternalSourceReceipt | null> {
+  return callQichachaMcp('case', 'get_judicial_case_search', { party: subjectName.trim() }, localOnly);
 }
 
 async function searchQichachaCompany(keyword: string, localOnly = false): Promise<CompanyInfo | null> {

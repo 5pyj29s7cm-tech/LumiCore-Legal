@@ -18,7 +18,7 @@ import type { MediaGenerationArtifact } from "@/lib/mediaGenerationArtifacts";
 import type { useChatIdentityAndState } from './use_chat_identity_and_state';
 
 export function useChatAttachmentsAndPresentation(previousBindings: ReturnType<typeof useChatIdentityAndState>) {
-  const { isCreationWorkspace, chatExecutionSource, mediaStudioOpenRef, activeMediaGenerationRef, mediaGenerationArtifactsRef, mediaGenerationArtifactValidationRef, setMediaStudioMode, setMediaGenerationArtifacts, setMediaGeneration, setMediaGenerationRetryRequest, setMediaSourceArtifacts, setMediaSources, setMediaSourceUploading, mediaSourceUploadTargetRef, isOpen, isOfficeCommandCenter, pendingAttachmentsRef, pendingAttachments, inputDictationActiveRef, localCallState, endLocalVoiceSession, setIsListening, chatProgressClearTimerRef, lastChatProgressTextRef, setChatProgressLines, chatTurnTimerGuardRef, setWorkflowStatus, seenWorkflowToolEvents, draftTextRef, setHasDraftText, messageInputRef, showVoicePicker, setShowVoicePicker, showWeChatSettings, setShowWeChatSettings, showAttachmentMenu, setShowAttachmentMenu, conversationHistoryOpen, setConversationHistoryOpen, conversationContextMenu, setConversationContextMenu, agent, t, user, agentId, activeDomain, activeOrgId, chatViewWorkRef, chatUploadsRef, setAttachmentUploadFailures, setIsOptimizing, setOptimizationProgress, setPreviewFile, messages, mediaSourceArtifacts, mediaGenerationArtifacts, platform } = previousBindings;
+  const { isCreationWorkspace, chatExecutionSource, mediaStudioOpenRef, activeMediaGenerationRef, mediaGenerationArtifactsRef, mediaGenerationArtifactValidationRef, setMediaStudioMode, setMediaGenerationArtifacts, setMediaGeneration, setMediaGenerationRetryRequest, setMediaSourceArtifacts, setMediaSources, setMediaSourceUploading, mediaSourceUploadTargetRef, isOpen, isOfficeCommandCenter, pendingAttachmentsRef, pendingAttachments, inputDictationActiveRef, localCallState, endLocalVoiceSession, setIsListening, chatProgressClearTimerRef, lastChatProgressTextRef, setChatProgressLines, chatTurnTimerGuardRef, setWorkflowStatus, seenWorkflowToolEvents, draftTextRef, setHasDraftText, messageInputRef, showVoicePicker, setShowVoicePicker, showWeChatSettings, setShowWeChatSettings, showAttachmentMenu, setShowAttachmentMenu, conversationContextMenu, setConversationContextMenu, agent, t, user, agentId, activeDomain, activeOrgId, chatViewWorkRef, chatUploadsRef, setAttachmentUploadFailures, setIsOptimizing, setOptimizationProgress, setPreviewFile, messages, mediaSourceArtifacts, mediaGenerationArtifacts, platform } = previousBindings;
 
 
   const resetMediaGenerationSurface = useCallback(() => {
@@ -135,13 +135,12 @@ export function useChatAttachmentsAndPresentation(previousBindings: ReturnType<t
         if (showVoicePicker) setShowVoicePicker(false);
         if (showWeChatSettings) setShowWeChatSettings(false);
         if (showAttachmentMenu) setShowAttachmentMenu(false);
-        if (conversationHistoryOpen) setConversationHistoryOpen(false);
         if (conversationContextMenu) setConversationContextMenu(null);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [conversationContextMenu, conversationHistoryOpen, setConversationContextMenu, setConversationHistoryOpen, setShowAttachmentMenu, setShowVoicePicker, setShowWeChatSettings, showAttachmentMenu, showVoicePicker, showWeChatSettings]);
+  }, [conversationContextMenu, setConversationContextMenu, setShowAttachmentMenu, setShowVoicePicker, setShowWeChatSettings, showAttachmentMenu, showVoicePicker, showWeChatSettings]);
 
   const agentName = agent?.name || (t.lumiEssence || 'Lumi Essence');
   const agentCategory = agent?.category || (t.friend || 'friend');
@@ -306,12 +305,19 @@ export function useChatAttachmentsAndPresentation(previousBindings: ReturnType<t
     }
   }, [openNativeFilePath, scopedFileUrl]);
 
-  const openChatFile = useCallback(async (file: Pick<ChatFilePanelItem, 'fileName' | 'fileId' | 'path' | 'openUrl' | 'saveUrl'>) => {
+  const openChatFile = useCallback(async (file: Pick<ChatFilePanelItem, 'fileName' | 'fileId' | 'path' | 'openUrl' | 'saveUrl'>, mode?: 'preview') => {
+    if (mode !== 'preview' && platform === 'tauri' && file.path && /\.(?:pdf|docx?|xlsx?|pptx?|odt|ods|odp|rtf|txt|md|csv|tsv)$/iu.test(file.fileName)) {
+      try {
+        if (await openNativeFilePath(file.path)) return;
+      } catch {
+        toast.error(uiMessage('agent-chat-page.default-app-failed-opening-the.56984c4d66'));
+      }
+    }
     const url = file.openUrl || file.saveUrl || (file.fileId
       ? scopedFileUrl(`/api/files/download/${encodeURIComponent(file.fileId)}?inline=1`)
       : file.path ? makeChatArtifact(file.path, attachmentConversationIdRef.current).url : '');
     if (url) setPreviewFile({ fileName: file.fileName, path: file.path, url });
-  }, [attachmentConversationIdRef, scopedFileUrl, setPreviewFile]);
+  }, [attachmentConversationIdRef, openNativeFilePath, platform, scopedFileUrl, setPreviewFile]);
 
   const chatFileSections = useMemo(() => {
     const pending: ChatFilePanelItem[] = pendingAttachments.map(item => ({

@@ -1,3 +1,5 @@
+import { withoutLocationLiterals } from './location_literals';
+
 export interface ActionInstructionClause { text: string; probe: string; start: number }
 export interface NegatedActionInstruction { text: string; instruction: string }
 interface ProjectedClause extends ActionInstructionClause { syntax: string }
@@ -20,10 +22,11 @@ function projectInstructionClauses(input: string): ProjectedClause[] {
         const literal = input.slice(quoteStart, index + quote.length);
         const value = input.slice(quoteStart + quote.length, index).trim();
         // The former artifact projection protected exact quoted filesystem paths.
-        const exactPath = /^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+[\\/]|\/(?!\/))[^\r\n<>|*?"'，,；;。！？!]+$/u.test(value)
+        const exactPath = (/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+[\\/]|\/(?!\/))[^\r\n<>|*?"'，,；;。！？!]+$/u.test(value)
+          || /^[^\\/:<>|*?"'“”‘’「」『』\r\n，,；;。！？!]{1,160}\.(?:xlsx?|xlsm|docx?|pptx?|pdf|rtf|txt|md|csv|tsv|json|html?|wps|et|dps|png|jpe?g|webp|bmp|gif|tiff?|mp4|wav|mp3)$/iu.test(value))
           && !/\.(?:xlsx?|xlsm|docx?|pptx?|pdf|rtf|txt|md|csv|tsv|json|html?|wps|et|dps|png|jpe?g|webp|bmp|gif|tiff?|mp4|wav|mp3)\s+\S/iu.test(value);
-        probe += exactPath ? literal : ' ';
-        syntax += exactPath ? ' '.repeat(literal.length) : ' ';
+        probe += exactPath ? literal : ' '.repeat(literal.length);
+        syntax += ' '.repeat(literal.length);
         index += quote.length - 1;
         quote = '';
       }
@@ -42,13 +45,35 @@ function projectInstructionClauses(input: string): ProjectedClause[] {
       start = index + 1; probe = ''; syntax = '';
     }
   }
-  if (quote) { probe += ' '; syntax += ' '; }
+  if (quote) { const remaining = ' '.repeat(input.length - quoteStart); probe += remaining; syntax += remaining; }
   parts.push({ text: input.slice(start), probe, syntax, start });
   return parts;
 }
 
+/** Preserve operands and source spans while projecting only unquoted coordination. */
+function coordinatedInstructionClauses(clause: ProjectedClause): ProjectedClause[] {
+  const syntax = withoutLocationLiterals(clause.syntax, false, true);
+  // i18n-allow: Coordinating/sequence grammar, not a list of recognized actions.
+  const boundaries = syntax.matchAll(/(?<=\s)(?:and(?:\s+then)?|then|afterwards)(?=\s)|并且|然后|接着|(?<!合)并/giu);
+  const parts: ProjectedClause[] = [];
+  let start = 0;
+  for (const boundary of boundaries) {
+    const end = boundary.index + boundary[0].length;
+    const following = clause.probe.slice(end);
+    const remainingSyntax = withoutLocationLiterals(clause.syntax.slice(end), false, true);
+    // A conjunction before another location is an operand list, not a new predicate.
+    const first = following.trimStart().match(/^\S+/u)?.[0]?.replace(/[.,;!?]+$/u, '');
+    if (following.search(/\S/u) !== remainingSyntax.search(/\S/u)
+      || first && !withoutLocationLiterals('"' + first + '"').trim()) continue;
+    parts.push({ text: clause.text.slice(start, end), probe: clause.probe.slice(start, boundary.index), syntax: clause.syntax.slice(start, boundary.index), start: clause.start + start });
+    start = end;
+  }
+  parts.push({ text: clause.text.slice(start), probe: clause.probe.slice(start), syntax: clause.syntax.slice(start), start: clause.start + start });
+  return parts;
+}
+
 export function actionInstructionClauses(input: string): ActionInstructionClause[] {
-  return projectInstructionClauses(input).map(({ syntax, ...clause }) => clause);
+  return projectInstructionClauses(input).flatMap(coordinatedInstructionClauses).map(({ syntax, ...clause }) => clause);
 }
 
 /** Pure affirmative-clause projection; it never calls an intent, contract, or artifact owner. */
@@ -70,7 +95,7 @@ function projectActionInstructionPolarity(input: string): { affirmative: ActionI
         // A bare Chinese 不 is a negator only before a predicate, not a character
         // inside its object. Relative clauses qualify that object, not the later command.
         // i18n-allow: Existing operation vocabulary scopes predicate negation.
-        const negativePredicate = /(?:不要|别|无需|不需要|不用|不必|不能|不得|不准|禁止|请勿|勿|不(?=\s*(?:(?:再(?:次)?|重新|继续|对外|[一二三四五六七八九十\d]+次)\s*)*(?:创建|新建|生成|写入|保存|另存|导出|起草|撰写|制作|编辑|修改|修订|调整|更新|追加|替换|删除|重命名|移动|复制|覆盖|改成|改为|换成|读取|查看|打开|运行|执行|调用|选入|发送|提交|发布|上传|支付|付款|付费|转账|签署|归档|入案)))|\b(?:do\s+not|don't|never|without|cannot|can't|no\s+need\s+to|must\s+not|should\s+not|not)\b/iu;
+        const negativePredicate = /(?:不要|别|无需|不需要|不用|不必|不能|不得|不准|禁止|请勿|勿|不(?=\s*(?:(?:再(?:次)?|重新|继续|对外|[一二三四五六七八九十\d]+次)\s*)*(?:创建|新建|生成|写入|保存|另存|导出|起草|撰写|制作|编辑|修改|修订|调整|更新|追加|替换|删除|重命名|移动|复制|覆盖|合并|改成|改为|换成|查询|检索|搜索|读取|查看|打开|运行|执行|调用|选入|发送|提交|发布|上传|支付|付款|付费|转账|签署|归档|入案)))|\b(?:do\s+not|don't|never|without|cannot|can't|no\s+need\s+to|must\s+not|should\s+not|not)\b/iu;
         let positive = part, predicateText = grammar;
         for (let count = 0; count < 20; count++) {
           const negative = negativePredicate.exec(predicateText);
@@ -81,15 +106,20 @@ function projectActionInstructionPolarity(input: string): { affirmative: ActionI
           // i18n-allow: Chinese object-marker input grammar, not user-visible text.
           if (relative && /(?:把|将|对)/u.test(predicateText.slice(0, negative.index))) {
             const end = negative.index + relative[0].length;
-            positive = before + positive.slice(end);
-            predicateText = predicateText.slice(0, negative.index) + predicateText.slice(end);
+            positive = before + ' '.repeat(end - negative.index) + positive.slice(end);
+            predicateText = predicateText.slice(0, negative.index) + ' '.repeat(end - negative.index) + predicateText.slice(end);
           } else {
             negativeClauses.push({ text: positive.slice(negative.index).trim(), instruction: positive.slice(negative.index + negative[0].length).trim() });
-            positive = before; break;
+            positive = before + ' '.repeat(positive.length - negative.index);
+            predicateText = predicateText.slice(0, negative.index) + ' '.repeat(predicateText.length - negative.index); break;
           }
         }
-        positive = positive.trim();
-        if (positive) result.push({ ...clause, probe: positive });
+        for (const { syntax: _syntax, ...part } of coordinatedInstructionClauses({
+          text: clause.text.slice(offset, boundary.index), probe: positive, syntax: predicateText, start: clause.start + offset,
+        })) {
+          const probe = part.probe.trim();
+          if (probe) result.push({ ...part, probe });
+        }
         offset = boundary.index! + boundary[0].length;
       }
     }

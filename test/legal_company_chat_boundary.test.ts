@@ -47,12 +47,12 @@ describe('company lookup current-turn read boundary', () => {
     expect(pipeline.authorizationPolicy.forbiddenTools).toContain('legal_import_materials_to_kb');
     expect(pipeline.modelToolProjection.toolNames.some(name => /send_message|send_file/.test(name))).toBe(false);
   });
-  it('retains real asset and equity observation tools without creating document obligations', () => {
+  it('retains asset and explicitly scoped company observation tools without creating document obligations', () => {
     const query='查被执行人财产线索和股权穿透';
     const pipeline=buildLumiExecutionPipeline({dispatch:{userId:'asset-observe-fixture',text:query,channel:'chat',source:'command-center-chat',operationMode:'assistant',targetIsLumi:true,domain:'personal'},registry,executionBoundary:'trusted_local'});
     expect(pipeline.turnIntent.flow.acceptedActionContract?.contract.kind).toBe('none');
     expect(pipeline.modelToolProjection.toolNames).toContain('legal_trace_assets');
-    expect(pipeline.modelToolProjection.toolNames).toContain('legal_equity_penetration');
+    expect(pipeline.modelToolProjection.toolNames).toContain('legal_company_database_lookup');
   });
   it('keeps the fresh source query as execution when its failure clause only asks for truthful reporting', () => {
     expect(classifyExecutionGuardIntent(text)).toBe('action_execution');

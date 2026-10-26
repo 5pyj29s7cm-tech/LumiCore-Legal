@@ -142,7 +142,7 @@ describe('receipt-backed current application control', () => {
     expect(result.text).not.toMatch(/desktop_|target_mismatch|\u8bc1\u636e|\u56de\u6267/iu);
   });
 
-  it('blocks bracketed internal tool protocol and removes false current-mode claims', async () => {
+  it('blocks bracketed internal tool protocol while preserving model wording and actual mode facts', async () => {
     const leaked = finalizeLumiResponse({
       taskText: '\u5438\u6536\u672c\u5730\u77e5\u8bc6\u5e93',
       responseText: '[\u5207\u6362\u52a9\u624b\u6a21\u5f0f] set_client_mode(assistant)',
@@ -167,8 +167,21 @@ describe('receipt-backed current application control', () => {
       source: 'voice',
       flow,
     });
-    expect(grounded.text).toContain('\u521a\u624d\u662f\u6211\u5728\u8bf4\u8bdd');
-    expect(grounded.text).not.toContain('\u5bf9\u8bdd\u6a21\u5f0f');
-    expect(grounded.text).not.toContain('\u5207\u6362\u5230\u52a9\u624b');
+    expect(flow.operationMode).toBe('assistant');
+    expect(flow.effectiveOperationMode).toBe('assistant');
+    expect(flow.requestedMode).toBeNull();
+    // The old output-rewriting contract is retired. State facts do not authorize rewriting model prose.
+    expect(grounded.text).toBe('刚才是我在说话。不过我现在是对话模式。要执行需要先切换到助手模式。');
   });
+  it.each([
+    '第一段讨论对话模式。\n\n第二段保留原样。',
+    '他说：“我现在是对话模式。”这是会议记录里的引述。',
+    '这段正文只说明会议安排和材料顺序。',
+  ])('preserves ordinary paragraph or quoted content without a mode-text filter: %s', async responseText => {
+    const { buildLumiTurnFlow } = await import('../server/cognition/turn_flow');
+    const flow = buildLumiTurnFlow({ userId: 'mode-wording-user', text: '说明一下', channel: 'voice', source: 'voice', operationMode: 'assistant' });
+    expect(flow.effectiveOperationMode).toBe('assistant');
+    expect(finalizeLumiResponse({ taskText: '说明一下', responseText, toolRecords: [], source: 'voice', flow }).text).toBe(responseText);
+  });
+
 });

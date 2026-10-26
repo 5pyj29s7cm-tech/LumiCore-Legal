@@ -36,25 +36,54 @@ import { loadStatuteAuthorityRefreshState } from "../../../../legal/statute_auth
 import { courtLevelRank } from "./case_workflow";
 
 export async function searchCaseHandler(args: Record<string, any>, context?: any): Promise<string> {
-  const query = args.query as string;
+  const query = textArg(args, 'query');
   const limit = Math.max(1, Math.min(Number(args.limit) || 5, 20));
-  if (!query) return '请提供案由或事实描述（query参数）';
+  const result = (content: string, sourceResults: Record<string, unknown>[] = []) => encodeToolResult(content, {
+    ok: sourceResults.length > 0,
+    status: sourceResults.length ? 'observed' : 'partial',
+    resultCount: sourceResults.length,
+    excerptCount: sourceResults.reduce((count, source) => count + (source.excerpts as unknown[]).length, 0),
+    sourceResults,
+    persisted: false,
+    changedCaseIds: [],
+    articleIds: [],
+    artifacts: [],
+  });
+  if (!query) return result('请提供案由或事实描述（query参数）；未执行类案检索。');
 
   // Search local KB
   const orgId = legalWorkspaceId(args, context);
   const userId = context?.userId || textArg(args, 'userId') || 'system';
-  const localResults = (await searchSimilarCases(orgId, query, Math.min(50, limit * 4), userId))
-    .sort((a, b) => courtLevelRank(a.court || '') - courtLevelRank(b.court || '') || b.score - a.score).slice(0, limit);
+  const localResults = await searchSimilarCases(orgId, query, Math.min(50, limit * 4), userId);
+  const documents = new Map<string, typeof localResults>();
+  for (const row of localResults) {
+    const excerpts = documents.get(row.articleId) || [];
+    if (!excerpts.some(excerpt => excerpt.citationKey === row.citationKey && excerpt.chunk === row.chunk)) excerpts.push(row);
+    documents.set(row.articleId, excerpts);
+  }
+  const candidates = [...documents.values()].sort((a, b) =>
+    courtLevelRank(a[0].court || '') - courtLevelRank(b[0].court || '')
+    || Math.max(...b.map(row => row.score)) - Math.max(...a.map(row => row.score))).slice(0, limit);
 
-  if (localResults.length > 0) {
-    const lines = localResults.map((r, i) =>
-      `${i + 1}. **${r.title}** [${r.source === 'keyword' ? '原文匹配' : '语义相关度'}: ${r.score}]\n   案号: ${r.caseNumber || 'N/A'} | 法院: ${r.court || 'N/A'}\n   引用: ${r.citationKey || r.articleId}\n   摘录: ${r.chunk}`,
-    );
-    return `本地知识库检索到 ${localResults.length} 个相似案例：\n\n${lines.join('\n\n')}\n\n*来源: 本地裁判文书知识库*`;
+  if (candidates.length > 0) {
+    const queriedAt = new Date().toISOString();
+    const sourceResults = candidates.map(rows => ({
+      sourceName: '本地裁判文书知识库', sourceTool: 'legal_search_case', queriedAt, query,
+      articleId: rows[0].articleId, title: rows[0].title,
+      caseNumber: rows[0].caseNumber, court: rows[0].court,
+      status: 'observed',
+      excerpts: rows.map(row => ({ text: row.chunk, citationKey: row.citationKey || row.articleId,
+        score: row.score, retrievalMethod: row.source })),
+    }));
+    const lines = candidates.map((rows, index) => [
+      `${index + 1}. **${rows[0].title}**`,
+      `   案号: ${rows[0].caseNumber || '未提供'} | 法院: ${rows[0].court || '未提供'}`,
+      ...rows.map(row => `   [${row.source === 'keyword' ? '原文匹配' : '语义相关度'}: ${row.score}]\n   引用: ${row.citationKey || row.articleId}\n   摘录: ${row.chunk}`),
+    ].join('\n'));
+    return result(`本地知识库检索到 ${candidates.length} 份候选裁判文书，共 ${sourceResults.reduce((count, source) => count + source.excerpts.length, 0)} 段相关摘录：\n\n${lines.join('\n\n')}\n\n*来源: 本地裁判文书知识库。相似检索结果为候选材料，不确认其与查询主体、具体案件或执行记录的对应关系。*`, sourceResults);
   }
 
-  // Fallback: search wenshu
-  return '本地知识库中未找到相似案例。建议导入相关裁判文书到知识库，或访问中国裁判文书网 (wenshu.court.gov.cn) 手动检索。';
+  return result('本地知识库中未找到相似案例，未取得候选裁判文书。可导入相关裁判文书，或通过中国裁判文书网 (wenshu.court.gov.cn) 检索；本次未查询外部来源。');
 }
 
 export async function searchStatuteHandler(args: Record<string, any>, context?: any): Promise<string> {
@@ -128,7 +157,8 @@ export async function importMaterialsToKbHandler(args: Record<string, any>, cont
       if (!current) throw new Error('Legal case authorization changed.');
       if (!current.materials.some(material => material.content?.includes(marker))) {
         const material = legalWrite(() => LegalCases.addMaterial(orgId, userId, caseId, {
-          type: 'evidence', title, content: marker + '\n' + text,
+          type: articleType === 'judgment' || articleType === 'contract' || articleType === 'pleading' ? articleType : 'evidence',
+          title, content: marker + '\n' + text,
           fileName: source === 'pasted-content' ? undefined : path.basename(source),
           localPath: source === 'pasted-content' ? undefined : source, source: 'manual',
         }));
@@ -269,57 +299,4 @@ export async function refreshAuthoritativeSourcesHandler(args: Record<string, an
 
 export async function authoritySourceStatusHandler(): Promise<string> {
   return formatStatuteAuthorityRefreshReport(loadStatuteAuthorityRefreshState());
-}
-
-export async function importJudgmentHandler(args: Record<string, any>, context?: any): Promise<string> {
-  const filePath = args.filePath as string;
-  const orgId = legalWorkspaceId(args, context);
-  const userId = context?.userId || (args.userId as string) || 'system';
-  const content = textArg(args, 'materials') || textArg(args, 'content');
-
-  if (!filePath && !content) return '请提供filePath（文件路径）或content（文书正文）。';
-
-  let text: string;
-  if (content) {
-    text = content;
-  } else {
-    const result = await parseLegalDocument(filePath, args);
-    if (!result) return `无法解析文件: ${filePath}`;
-    text = result.text;
-  }
-
-  const metadata = extractLegalMetadata(text);
-  const title = metadata.caseNumber
-    ? `${metadata.caseNumber} ${metadata.causeOfAction || ''}`
-    : (filePath ? filePath.split('/').pop()?.split('\\').pop() || '裁判文书' : '裁判文书');
-
-  const article = legalWrite(() => createLegalArticle(orgId, userId, {
-    title,
-    content: text,
-    articleType: 'judgment',
-    metadata: {
-      articleType: 'judgment',
-      caseNumber: metadata.caseNumber,
-      court: metadata.court,
-      parties: metadata.parties,
-      causeOfAction: metadata.causeOfAction,
-      judgmentDate: metadata.judgmentDate,
-      statutesCited: metadata.statutesCited,
-    },
-  }));
-
-  const indexed = await indexLegalArticle(orgId, article.id, context?.userId || userId, { signal: context?.executionSignal || legalExecutionSignal() });
-
-  return `裁判文书导入成功。
-
-- 标题: ${title}
-- 案号: ${metadata.caseNumber || '未识别'}
-- 审理法院: ${metadata.court || '未识别'}
-- 案由: ${metadata.causeOfAction || '未识别'}
-- 当事人: ${metadata.parties?.join(', ') || '未识别'}
-- 引用法条: ${metadata.statutesCited?.join(', ') || '未识别'}
-- 裁判日期: ${metadata.judgmentDate || '未识别'}
-- 索引状态: ${indexed} 个文本块已向量化
-
-该文书已录入当前裁判文书知识库，可通过类案检索查询。`;
 }

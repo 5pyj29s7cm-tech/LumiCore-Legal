@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { makeApp } from './helpers';
 import { decodeToolResult } from '../server/tools/result_envelope';
-import { bidStructuredReply } from './legal_bid_fixture';
 let app: Awaited<ReturnType<typeof makeApp>>;
 beforeAll(async () => { app = await makeApp(); });
 afterAll(() => app.cleanup());
@@ -18,7 +17,7 @@ async function fixture(model: boolean) {
   const create = vi.fn(async (params: any) => {
     const prompt = String(params.messages.find((m: any) => m.role === 'user')?.content || '');
     const text = '本段仅用于虚构初审验收，合同原文和资格证明仍须责任人核验，未确认任何未知主体、资质、报价或履行事实。';
-    return sdkCompletionFixture((prompt.includes('指定子节：') || prompt.includes('待核对JSON草稿：')) ? bidStructuredReply(prompt, text) : contractStructuredReply(prompt, text), 'stop', params.stream);
+    return sdkCompletionFixture(contractStructuredReply(prompt, text), 'stop', params.stream);
   });
   const context: any = { userId, domain: 'personal', localExecution: true, executionBoundary: 'trusted_local', ...(model ? { llmGetters: { getDeepSeek: () => null, getGemini: () => null, getRelay: () => ({ chat: { completions: { create } } }) } } : {}) };
   const { ensureLegalDeliveryRoot } = await import('../server/regions/packs/cn/legal_tools/context');
@@ -41,7 +40,7 @@ it.each([false, true])('bid preserves local draft without archiving an unfinishe
     expect(result.receipt).toMatchObject({ ok: model, status: model ? 'generated' : 'partial' });
     expect(f.cases.getCase(f.orgId, f.item.id)!.materials.filter(m => m.source === 'tool')).toHaveLength(model ? 1 : 0);
     expect(result.content).toContain('DOCX 文件：');
-    if (!model) expect(result.content).toContain('正文未完成');
+    if (!model) expect(result.content).toContain('未生成标书正文');
     if (model) expect(f.create).toHaveBeenCalled(); else expect(f.create).not.toHaveBeenCalled();
   } finally { fs.rmSync(f.outputDir, { recursive: true, force: true }); }
 });

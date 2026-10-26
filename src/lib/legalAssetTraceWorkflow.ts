@@ -43,9 +43,9 @@ const QUICK_STEPS: readonly AssetTraceStepBlueprint[] = [
 
 const ENTERPRISE_STEPS: readonly AssetTraceStepBlueprint[] = [
   { id: 'enterprise-company-profile', stage: 'deep', order: 1, executionMode: 'automatic', tool: 'legal_company_database_lookup' },
-  { id: 'enterprise-judicial-cases', stage: 'deep', order: 2, executionMode: 'automatic', tool: 'legal_search_case' },
-  { id: 'enterprise-web-footprint', stage: 'deep', order: 3, executionMode: 'assisted', tool: 'legal_external_research_plan' },
-  { id: 'enterprise-related-parties', stage: 'deep', order: 4, executionMode: 'automatic', tool: 'legal_equity_penetration' },
+  { id: 'enterprise-judicial-cases', stage: 'deep', order: 2, executionMode: 'automatic', tool: 'legal_search_subject_cases' },
+  { id: 'enterprise-web-footprint', stage: 'deep', order: 3, executionMode: 'automatic', tool: 'legal_search_public_footprint' },
+  { id: 'enterprise-related-parties', stage: 'deep', order: 4, executionMode: 'automatic', tool: 'legal_company_database_lookup' },
   { id: 'enterprise-finance-tax', stage: 'deep', order: 5, executionMode: 'manual' },
   { id: 'enterprise-bids-receivables', stage: 'deep', order: 6, executionMode: 'assisted', tool: 'legal_search_tender_projects' },
   { id: 'enterprise-timeline', stage: 'deep', order: 7, executionMode: 'automatic', tool: 'local_timeline' },
@@ -60,13 +60,13 @@ const INDIVIDUAL_STEPS: readonly AssetTraceStepBlueprint[] = [
   { id: 'individual-identity-companies', stage: 'deep', order: 1, executionMode: 'assisted', tool: 'legal_company_database_lookup' },
   { id: 'individual-property-vehicles', stage: 'deep', order: 2, executionMode: 'manual' },
   { id: 'individual-income-social-security', stage: 'deep', order: 3, executionMode: 'manual' },
-  { id: 'individual-online-footprint', stage: 'deep', order: 4, executionMode: 'assisted', tool: 'legal_external_research_plan' },
+  { id: 'individual-online-footprint', stage: 'deep', order: 4, executionMode: 'automatic', tool: 'legal_search_public_footprint' },
   { id: 'individual-family-holding', stage: 'deep', order: 5, executionMode: 'manual' },
   { id: 'individual-financial-assets', stage: 'deep', order: 6, executionMode: 'manual' },
   { id: 'individual-rural-assets', stage: 'deep', order: 7, executionMode: 'manual' },
   { id: 'individual-travel-activity', stage: 'deep', order: 8, executionMode: 'manual' },
   { id: 'individual-business-household', stage: 'deep', order: 9, executionMode: 'assisted', tool: 'legal_company_database_lookup' },
-  { id: 'individual-enforcement-rewards', stage: 'deep', order: 10, executionMode: 'automatic', tool: 'legal_search_case' },
+  { id: 'individual-enforcement-rewards', stage: 'deep', order: 10, executionMode: 'automatic', tool: 'legal_search_subject_cases' },
 ];
 
 const ANALYSIS_STEPS: readonly AssetTraceStepBlueprint[] = [
@@ -117,16 +117,17 @@ export function normalizeAssetTraceWorkflow(value: unknown): AssetTraceWorkflow 
   const savedById = new Map(currentSteps.map(step => [step?.id, step]));
   const steps = getAssetTraceBlueprints(subjectType).map(blueprint => {
     const saved = savedById.get(blueprint.id) as Partial<AssetTraceWorkflowStep> | undefined;
-    const status = saved && ['pending', 'running', 'needs_action', 'completed', 'skipped', 'failed'].includes(String(saved.status))
+    const toolChanged = Boolean(saved && saved.tool !== blueprint.tool);
+    const status = saved && !toolChanged && ['pending', 'running', 'needs_action', 'completed', 'skipped', 'failed'].includes(String(saved.status))
       ? saved.status as AssetTraceStepStatus
       : 'pending';
     return {
       ...blueprint,
       status: status === 'running' ? 'pending' : status,
-      output: saved?.output ? String(saved.output) : undefined,
+      output: !toolChanged && saved?.output ? String(saved.output) : undefined,
       note: saved?.note ? String(saved.note) : undefined,
-      error: saved?.error ? String(saved.error) : undefined,
-      updatedAt: saved?.updatedAt ? String(saved.updatedAt) : undefined,
+      error: !toolChanged && saved?.error ? String(saved.error) : undefined,
+      updatedAt: !toolChanged && saved?.updatedAt ? String(saved.updatedAt) : undefined,
     };
   });
   const workflow: AssetTraceWorkflow = {
@@ -159,8 +160,9 @@ export function getAssetTraceCompletion(workflow: AssetTraceWorkflow): { done: n
 
 export function getNextAssetTraceStep(workflow: AssetTraceWorkflow): AssetTraceWorkflowStep | null {
   const scoped = getAssetTraceStepsInScope(workflow);
-  if (scoped.some(step => step.status === 'running' || step.status === 'needs_action' || step.status === 'failed')) return null;
-  return scoped.find(step => step.status === 'pending') || null;
+  if (scoped.some(step => step.status === 'running')) return null;
+  const current = scoped.find(step => step.status !== 'completed' && step.status !== 'skipped');
+  return current?.status === 'pending' ? current : null;
 }
 
 export function patchAssetTraceStep(
@@ -182,10 +184,11 @@ export function promoteAssetTraceWorkflow(workflow: AssetTraceWorkflow): AssetTr
 
 export function recalculateAssetTraceWorkflow(workflow: AssetTraceWorkflow): AssetTraceWorkflow {
   const steps = getAssetTraceStepsInScope(workflow);
+  const current = steps.find(step => step.status !== 'completed' && step.status !== 'skipped');
   let status: AssetTraceWorkflowStatus = 'ready';
   if (steps.some(step => step.status === 'running')) status = 'running';
-  else if (steps.some(step => step.status === 'needs_action' || step.status === 'failed')) status = 'needs_action';
-  else if (steps.length > 0 && steps.every(step => step.status === 'completed' || step.status === 'skipped')) status = 'completed';
+  else if (current?.status === 'needs_action' || current?.status === 'failed') status = 'needs_action';
+  else if (steps.length > 0 && !current) status = 'completed';
   return { ...workflow, status };
 }
 
