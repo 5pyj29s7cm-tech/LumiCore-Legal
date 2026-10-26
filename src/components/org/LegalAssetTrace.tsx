@@ -40,15 +40,16 @@ import {
 } from '../../lib/legalAssetTraceWorkflow';
 import { runLegalToolExecution } from '../../lib/legalToolClient';
 import { LegalCaseContextBar } from './LegalCaseContextBar';
+import { LegalCompanyShareholders } from './LegalCompanyShareholders';
 import { chinaLegalCopy } from '../../i18n/regions/cn/legal';
 import { uiMessage } from '../../i18n/uiMessages';
 import { ChatMessageMarkdown } from '../ChatMessageMarkdown';
 import { ChatFilePreview, type ChatPreviewFile } from '../ChatFilePreview';
 import { sanitizeAgentResponseTextForDisplay } from '../../lib/agentResponseDelivery';
-import { mapQichachaCompanyRegistration, pickQichachaResult, type CompanyRegistrationFields } from '../../../shared/legal_company_info';
+import { mapQichachaCompanyRegistration, mapQichachaShareholders, pickQichachaResult, type CompanyRegistrationFields, type CompanyShareholderFields } from '../../../shared/legal_company_info';
 
 interface TraceResult extends Partial<CompanyRegistrationFields> {
-  shareholders?: { name: string; ratio?: number }[];
+  shareholders?: CompanyShareholderFields[];
   enforcements?: { caseNumber: string; court: string; target: string; date: string }[];
   raw?: string;
 }
@@ -470,6 +471,8 @@ function AssetTrace({ caseFile, orgId, onAddMaterial, onUpdateCase }: Props) {
           </div>
         </section>
 
+        {subjectType === 'enterprise' && <LegalCompanyShareholders subjectName={name} disabled={loading} />}
+
         <section className="min-h-[420px] rounded-lg border border-white/10 bg-white/[0.04] p-3 sm:p-4">
           {workflow ? (
             <div className="flex min-h-0 flex-col">
@@ -772,8 +775,8 @@ function EquityList({ result, copy }: { result: TraceResult; copy: TraceCopy }) 
     <div className="space-y-2">
       {result.shareholders.map((item, index) => (
         <div key={`${item.name}-${index}`} className="rounded-lg border border-white/10 bg-black/15 p-4">
-          <div className="mb-2 flex items-center justify-between gap-3"><span className="text-sm text-white/80">{item.name}</span>{item.ratio !== undefined && <span className="font-mono text-sm text-cyan-200">{item.ratio}%</span>}</div>
-          {item.ratio !== undefined && <div className="h-2 overflow-hidden rounded-full bg-white/[0.08]"><div className="h-full rounded-full bg-cyan-400/60" style={{ width: `${Math.max(0, Math.min(100, item.ratio))}%` }} /></div>}
+          <div className="flex flex-wrap items-center justify-between gap-3"><span className="text-sm text-white/80">{item.name}</span>{item.ratio !== undefined && <span className="font-mono text-sm text-cyan-200">{item.ratio}</span>}</div>
+          {item.shares !== undefined && <p className="mt-2 text-xs text-white/50">{copy.directShareholders.shares}: {item.shares}</p>}
         </div>
       ))}
     </div>
@@ -849,15 +852,8 @@ function projectTraceResult(workflow: AssetTraceWorkflow): TraceResult {
         const company = mapQichachaCompanyRegistration(record);
         if (!matchesSubject(company)) continue;
         if (tool === 'get_company_registration_info' && !result.name) Object.assign(result, company);
-        const shareholders = record.Shareholders ?? record.shareholders ?? record.Partners;
-        if (Array.isArray(shareholders)) result.shareholders = shareholders.flatMap((entry: any) => {
-          if (!entry || typeof entry !== 'object') return [];
-          const name = text(entry.Name ?? entry.name ?? entry.StockName);
-          if (!name) return [];
-          const suppliedRatio = text(entry.Ratio ?? entry.ratio ?? entry.StockPercent);
-          const ratio = suppliedRatio ? Number.parseFloat(suppliedRatio) : NaN;
-          return [{ name, ...(Number.isFinite(ratio) ? { ratio } : {}) }];
-        });
+        const shareholders = mapQichachaShareholders(record);
+        if (shareholders.length) result.shareholders = shareholders;
       } catch { /* Non-JSON source text remains available unchanged in the original results. */ }
     }
     // i18n-allow: A bounded canonical company section supports sources without JSON originals.

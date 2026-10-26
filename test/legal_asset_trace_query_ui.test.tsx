@@ -90,7 +90,7 @@ describe('saved asset reports project their own sources into readable views with
   fireEvent.click((await screen.findAllByRole('button',{name:copy.company})).at(-1)!); expect(screen.getByText('Synthetic Director')).toBeTruthy();
   fireEvent.click(screen.getByRole('button',{name:copy.equity}));
   expect(screen.getByText('Synthetic Known Holder')).toBeTruthy(); expect(screen.getByText('25%')).toBeTruthy();
-  expect(screen.getByText('Synthetic Zero Holder')).toBeTruthy(); expect(screen.getByText('0%')).toBeTruthy();
+  expect(screen.getByText('Synthetic Zero Holder')).toBeTruthy(); expect(screen.getByText('0')).toBeTruthy();
   const unknown=screen.getByText('Synthetic Unknown Holder').closest('div.rounded-lg')!; expect(unknown.textContent).not.toContain('%'); expect(unknown.querySelector('[style]')).toBeNull();
   fireEvent.click(screen.getByRole('button',{name:copy.enforcement}));
   for(const value of ['SYNTHETIC-EXECUTION-01','Synthetic Execution Court','9000'])expect(screen.getByText(value)).toBeTruthy();

@@ -12,6 +12,12 @@ export interface CompanyRegistrationFields {
   registrationAuthority?: string;
 }
 
+export interface CompanyShareholderFields {
+  name: string;
+  ratio?: string;
+  shares?: string;
+}
+
 export function pickQichachaResult(data: any): any {
   const result = data?.Result ?? data?.result ?? data?.Data ?? data?.data;
   if (Array.isArray(result)) return result[0];
@@ -33,6 +39,27 @@ function suppliedCompanyString(value: unknown): string | undefined {
   if (typeof value === 'string') return value.trim() ? value : undefined;
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return undefined;
+}
+
+/** Projects supplied direct-shareholder fields without changing their units or precision. */
+export function mapQichachaShareholders(raw: unknown): CompanyShareholderFields[] {
+  const record = pickQichachaResult(raw);
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return [];
+  // i18n-allow: official provider JSON property names, not display copy.
+  const entries = record['股东信息'] ?? record.Shareholders ?? record.shareholders ?? record.Partners;
+  if (!Array.isArray(entries)) return [];
+  return entries.flatMap((entry: unknown) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const supplied = entry as Record<string, unknown>;
+    // i18n-allow: official provider JSON property names, not display copy.
+    const name = firstCompanyString(supplied, ['股东名称', 'Name', 'name', 'StockName']);
+    if (!name) return [];
+    // i18n-allow: official provider JSON property names, not display copy.
+    const ratio = suppliedCompanyString(supplied['持股比例'] ?? supplied.Ratio ?? supplied.ratio ?? supplied.StockPercent);
+    // i18n-allow: official provider JSON property names, not display copy.
+    const shares = suppliedCompanyString(supplied['持股数'] ?? supplied.Shares ?? supplied.shares ?? supplied.StockCount);
+    return [{ name, ...(ratio !== undefined ? { ratio } : {}), ...(shares !== undefined ? { shares } : {}) }];
+  });
 }
 
 /** Projects a registration object only; source selection and provenance remain with the caller. */

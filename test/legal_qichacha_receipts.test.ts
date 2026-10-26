@@ -8,6 +8,7 @@ import { registerLegalTools } from '../server/regions/packs/cn/legal_tools';
 import { createCase, getCase } from '../server/org/legal_cases';
 import { parseReceiptObject } from '../server/tools/receipt_payload';
 import { legalWorkspaceId } from '../server/regions/packs/cn/legal_tools/context';
+import { createHash } from 'node:crypto';
 
 const company = JSON.stringify({企业名称:'虚构单密钥企业',统一社会信用代码:'SYNTHETIC-QCC-ID',法定代表人:'模拟甲',登记状态:'存续',注册资本:'10万元'});
 const fixtureSecret = 'fixture-qcc-do-not-echo';
@@ -27,6 +28,24 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(
 const run = (args: Record<string, unknown> = {}, name = 'legal_company_database_lookup') => executeToolCall({registry,name,arguments:{name:'虚构单密钥企业',sourceIds:['qichacha'],persistCase:false,...args},context});
 
 describe('shared QCC query contract and truthful failure receipts', () => {
+  it('returns the complete direct-shareholder original beside its provenance without other queries or archiving', async () => {
+    const raw = JSON.stringify({ 企业名称: '虚构单密钥企业', 股东信息: [
+      { 股东名称: '虚构股东甲', 持股比例: '16.3440%', 持股数: '59,205,999' },
+      { 股东名称: '虚构股东乙', 持股比例: '0.0000%' },
+    ] });
+    vi.mocked(mcpManager.callToolForServer).mockResolvedValueOnce(raw);
+    const result = await run({ queryType: 'shareholders', confirmedForKb: false });
+    expect(result.receipt).toMatchObject({ ok: true, status: 'observed', persisted: false, changedCaseIds: [], articleIds: [], artifacts: [], sourceResults: [{
+      subject: '虚构单密钥企业', queryType: 'shareholders', sourceTool: 'get_shareholder_info',
+      sourceEndpoint: 'https://agent.qcc.com/mcp/company/stream', sourceText: raw,
+      sourceTextSha256: createHash('sha256').update(raw).digest('hex'),
+    }] });
+    expect(parseReceiptObject(result.receipt)!.sourceResults).toHaveLength(1);
+    expect(result.terminalVerification?.status).toBe('verified');
+    expect(result.result).toContain(raw);
+    expect(mcpManager.callToolForServer).toHaveBeenCalledExactlyOnceWith('qcc-company', 'get_shareholder_info', { searchKey: '虚构单密钥企业' }, expect.any(Object));
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it('uses one official MCP key and returns exact Chinese registration data once',async () => {
     const result = await run();
     expect(result.receipt).toMatchObject({ok:true,status:'observed'});
