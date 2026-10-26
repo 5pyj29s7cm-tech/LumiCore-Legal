@@ -12,7 +12,7 @@ vi.mock('../services/authService', async () => ({
   isNativeDesktopRuntime: () => false,
   getMe: mocks.me,
 }));
-vi.mock('../services/socketService', () => ({ socketService: { disconnect: mocks.disconnect, refreshAuth: vi.fn() } }));
+vi.mock('../services/socketService', () => ({ socketService: { disconnect: mocks.disconnect, refreshAuth: vi.fn(), getSocket: () => null, connect: () => null } }));
 const reply = (body: unknown, status = 200) => ({ ok: status < 400, status, json: async () => body });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 function initialRead(url: string) {
@@ -70,11 +70,13 @@ describe('settings share confirmed context state', () => {
     await act(async () => { pending.resolve(reply({ success: true, ids: [] })); expect(await saving).toBe(false); }); expect(hook.result.current.notifications[0].title).toBe('Private B'); expect(mocks.error).not.toHaveBeenCalled();
   });
 
-  it('preserves the installation local case list and consultation selection across account changes and logout', async () => {
+  it('isolates local cases on account change and logout while preserving the original account data', async () => {
     const hook = await app(); act(() => { writeLegalCaseFiles([{ ...createEmptyLegalCase(), id: 'A', title: 'Local case' }], 'A'); setLegalConsultationCaseId('A'); });
     mocks.me.mockResolvedValue({ user: { uid: 'account-b', username: 'B', role: 'user' } }); await act(async () => { await hook.result.current.refreshUser(); });
+    expect(readLegalCaseFiles()).toEqual([]); expect(getLegalConsultationCaseId()).toBe('');
+    await act(async () => { await hook.result.current.logout(); }); expect(hook.result.current.user).toBeNull(); expect(readLegalCaseFiles()).toEqual([]); expect(getLegalConsultationCaseId()).toBe('');
+    mocks.me.mockResolvedValue({ user: { uid: 'synthetic-user', username: 'Tester', role: 'user' } }); await act(async () => { await hook.result.current.refreshUser(); });
     expect(readLegalCaseFiles()[0].title).toBe('Local case'); expect(getLegalConsultationCaseId()).toBe('A');
-    await act(async () => { await hook.result.current.logout(); }); expect(hook.result.current.user).toBeNull(); expect(readLegalCaseFiles()[0].id).toBe('A'); expect(getLegalConsultationCaseId()).toBe('A');
   });
   it('keeps vision and tool settings unchanged after a rejected save', async () => {
     const hook = await app();
@@ -196,5 +198,27 @@ describe('settings share confirmed context state', () => {
       act(() => { pending = hook.result.current.reloadModelPreferences('vision'); }); await waitFor(() => expect(timeout).toHaveBeenCalledWith(15_000)); await act(async () => { deadline.abort(new Error('Read timed out')); await pending; }); expect(hook.result.current.visionConfig).toMatchObject({ ready: false, loadError: 'Read timed out' }); expect(hook.result.current.aiConfig.ready).toBe(true);
       await act(async () => { await hook.result.current.reloadModelPreferences('vision'); }); expect(hook.result.current.visionConfig).toMatchObject({ ready: true, loadError: '' });
     } finally { timeout.mockRestore(); }
+  });
+});
+
+describe('native session lifecycle refresh', () => {
+  it('reads the current server identity after recovery and ignores an older pending identity', async () => {
+    const hook = await app(), pending = deferred<any>();
+    mocks.me.mockReturnValueOnce(pending.promise).mockResolvedValue({ user: { uid: 'account-b', username: 'B', role: 'user' } });
+    act(() => { window.dispatchEvent(new Event('lumi:native-session-recovered')); });
+    await act(async () => { await hook.result.current.refreshUser(); }); expect(hook.result.current.user?.uid).toBe('account-b');
+    await act(async () => { pending.resolve({ user: { uid: 'synthetic-user', username: 'Old account', role: 'user' } }); });
+    expect(hook.result.current.user?.uid).toBe('account-b');
+  });
+  it('does not restore an identity when a recovery read finishes after explicit logout', async () => {
+    const hook = await app(), pending = deferred<any>(); mocks.me.mockReturnValueOnce(pending.promise);
+    act(() => { window.dispatchEvent(new Event('lumi:native-session-recovered')); });
+    await act(async () => { await hook.result.current.logout(); }); expect(hook.result.current.user).toBeNull();
+    await act(async () => { pending.resolve({ user: { uid: 'synthetic-user', username: 'Old account', role: 'user' } }); });
+    expect(hook.result.current.user).toBeNull(); expect(mocks.disconnect).toHaveBeenCalledTimes(1);
+  });
+  it('removes the recovery listener when its context owner unmounts', async () => {
+    const hook = await app(); hook.unmount(); const calls = mocks.me.mock.calls.length;
+    window.dispatchEvent(new Event('lumi:native-session-recovered')); await Promise.resolve(); expect(mocks.me).toHaveBeenCalledTimes(calls);
   });
 });
