@@ -1,3 +1,7 @@
+# Current work focus
+
+The user sealed the lawyer development state on 2026-10-27 and switched to main-program optimization in D:/lumiOS. Preserve all retained acceptance issues. Do not resume lawyer acceptance unless the user requests it. The archival tag is `archive/legal-development-20261027`; ACCEPTANCE.json records the local archive.
+
 # Acceptance checkpoint workflow
 
 This repository is part of the ongoing Lumi acceptance work.
