@@ -16,6 +16,7 @@ import { getSavedKeyStatus, saveServerKeys, type KeyStatus } from '../../service
 import { useT } from '../../lib/useT';
 import { uiMessage } from '../../i18n/uiMessages';
 import { useApp } from '@/contexts/AppContext';
+import { legalDataSourceRecoveryCopy } from '../../i18n/locales/legalDataSourceRecovery';
 import {
   CHINA_LEGAL_BROWSER_SOURCE_IDS,
   CHINA_LEGAL_DATA_SOURCES,
@@ -23,6 +24,24 @@ import {
   type ChinaLegalDataSourceDefinition,
   type ChinaLegalDataSourceField,
 } from '../../i18n/regions/cn/legal';
+
+async function keyRequestWithDeadline<T>(owner: AbortSignal, operation: (signal: AbortSignal) => Promise<T>, timeoutMessage: string): Promise<T> {
+  const deadline = new AbortController();
+  const signal = AbortSignal.any([owner, deadline.signal]);
+  signal.throwIfAborted();
+  const timer = window.setTimeout(() => deadline.abort(new DOMException(timeoutMessage, 'TimeoutError')), 15_000);
+  let onAbort: () => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => { signal.throwIfAborted(); return operation(signal); }), aborted]);
+  } finally {
+    window.clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort!);
+  }
+}
 
 function dataSourceFieldLabel(field: ChinaLegalDataSourceField): string {
   if (field.keyName.endsWith('_APP_KEY')) return uiMessage('settings.app-key.48d8312e26');
@@ -43,11 +62,16 @@ function DataSourceEditor() {
   const t = useT();
   const isZh = t.langCode !== 'en';
   const regionalCopy = chinaLegalCopy(isZh ? 'zh' : 'en');
+  const recoveryCopy = legalDataSourceRecoveryCopy[isZh ? 'zh' : 'en'];
+  const recoveryCopyRef = useRef(recoveryCopy);
+  useEffect(() => { recoveryCopyRef.current = recoveryCopy; }, [recoveryCopy]);
   const [status, setStatus] = useState<KeyStatus>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [busyKey, setBusyKey] = useState('');
   const [error, setError] = useState('');
+  const [saveError, setSaveError] = useState('');
+  const [writeUnconfirmed, setWriteUnconfirmed] = useState(false);
   const request = useRef({ owner: null as AbortController | null, busy: false, revision: 0 });
 
   const loadStatus = useCallback(async () => {
@@ -56,8 +80,12 @@ function DataSourceEditor() {
     setLoading(true);
     setError('');
     try {
-      const next = await getSavedKeyStatus(signal);
-      if (!signal.aborted && revision === request.current.revision) setStatus(next);
+      const next = await keyRequestWithDeadline(signal, getSavedKeyStatus, recoveryCopyRef.current.loadTimeout);
+      if (!signal.aborted && revision === request.current.revision) {
+        setStatus(next);
+        setWriteUnconfirmed(false);
+        setSaveError('');
+      }
     } catch (err: any) {
       if (!signal.aborted && revision === request.current.revision) setError(err?.message || String(err));
     } finally {
@@ -86,25 +114,31 @@ function DataSourceEditor() {
 
   const changeKeys = async (fields: ChinaLegalDataSourceField[], remove = false) => {
     const signal = request.current.owner?.signal;
-    if (!signal || signal.aborted || request.current.busy || loading || error) return;
+    if (!signal || signal.aborted || request.current.busy || loading || error || writeUnconfirmed) return;
     const keys = Object.fromEntries(fields.map(field => [field.keyName, remove ? '' : (drafts[field.keyName] || '').trim()]).filter(([, value]) => remove || value));
     if (!Object.keys(keys).length) return;
     request.current.busy = true; request.current.revision++;
     setBusyKey(fields[0].keyName);
+    setSaveError('');
     try {
-      const result = await saveServerKeys(keys, signal);
+      const result = await keyRequestWithDeadline(signal, requestSignal => saveServerKeys(keys, requestSignal), recoveryCopy.saveTimeout);
       if (signal.aborted) return;
       setStatus(result.status);
       setDrafts(previous => Object.fromEntries(Object.entries(previous).filter(([name]) => !Object.hasOwn(keys, name))));
       toast.success(uiMessage(remove ? 'legal-data-sources-settings.legal-data-source-key-removed.a6062630fb' : 'legal-data-sources-settings.legal-data-source-key-saved.aa9bdea122'));
     } catch (err: any) {
-      if (!signal.aborted) toast.error(err?.message || uiMessage(remove ? 'legal-data-sources-settings.remove-failed.415d663686' : 'legal-data-sources-settings.save-failed.5b5ea27d01'));
+      if (!signal.aborted) {
+        const message = err?.message || uiMessage(remove ? 'legal-data-sources-settings.remove-failed.415d663686' : 'legal-data-sources-settings.save-failed.5b5ea27d01');
+        setSaveError(message);
+        if (err?.name === 'TimeoutError') setWriteUnconfirmed(true);
+        toast.error(message);
+      }
     } finally {
       if (!signal.aborted) { request.current.busy = false; setBusyKey(''); }
     }
   };
 
-  const locked = loading || Boolean(error) || Boolean(busyKey);
+  const locked = loading || Boolean(error) || Boolean(busyKey) || writeUnconfirmed;
   const renderField = (field: ChinaLegalDataSourceField) => {
                   const configured = Boolean(status[field.keyName]);
                   const busy = busyKey === field.keyName;
@@ -183,10 +217,10 @@ function DataSourceEditor() {
         </button>
       </div>
 
-      {error && (
+      {(error || saveError) && (
         <div role="alert" className="mb-4 flex items-start gap-2 rounded-lg border border-red-400/20 bg-red-500/10 px-3 py-2 text-sm text-red-100">
           <AlertCircle size={16} className="mt-0.5 shrink-0" />
-          <span>{error}</span>
+          <span>{error || saveError}</span>
         </div>
       )}
 
