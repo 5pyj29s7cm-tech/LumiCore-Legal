@@ -3,7 +3,7 @@ import { buildTaskTargetAnchorProjection, canonicalPathIdentity, outputDocumentI
 import { hasAffirmativeArtifactMutationAction, normalizeActionIntent } from './normalized_action_intent';
 import path from 'node:path';
 import os from 'node:os';
-import { withoutLocationLiterals } from './location_literals';
+import { directoryArtifactPath, withoutLocationLiterals } from './location_literals';
 
 /** Resolve a named file only in an explicit absolute or standard user folder. */
 export function resolveExplicitUserFilePath(text: string, folderContext = ''): string {
@@ -26,6 +26,8 @@ export function resolveExplicitUserFilePath(text: string, folderContext = ''): s
 /** Writable artifacts retain their existing supported-format constraint. */
 export function resolveExplicitUserArtifactPath(text: string, folderContext = ''): string {
   if ((text.match(/\.(?:xlsx?|docx?|pptx?|pdf|txt|md|csv|json)(?![a-z])/giu) || []).length !== 1) return '';
+  const inDirectory = directoryArtifactPath(text);
+  if (inDirectory) return inDirectory;
   return resolveExplicitUserFilePath(text, folderContext);
 }
 

@@ -1,4 +1,6 @@
-name: LumiCore CI
+# Default disabled: setting this repository variable requires a separate maintainer decision.
+# This source change does not enable GitHub Actions or release installers.
+name: Lumi Legal CI
 
 permissions:
   contents: read
@@ -15,7 +17,7 @@ concurrency:
 
 jobs:
   quality:
-    if: ${{ github.repository == '5pyj29s7cm-tech/LumiCore' }}
+    if: ${{ github.repository == '5pyj29s7cm-tech/lumi-legal-client' && vars.LUMI_LEGAL_DELIVERY_ENABLED == 'true' }}
     name: Lint, tests, frontends, audit and budget
     runs-on: ubuntu-latest
     steps:
@@ -50,7 +52,7 @@ jobs:
         run: npm run security:audit
 
   rust-check:
-    if: ${{ github.repository == '5pyj29s7cm-tech/LumiCore' }}
+    if: ${{ github.repository == '5pyj29s7cm-tech/lumi-legal-client' && vars.LUMI_LEGAL_DELIVERY_ENABLED == 'true' }}
     name: Rust release check
     runs-on: ubuntu-latest
     steps:

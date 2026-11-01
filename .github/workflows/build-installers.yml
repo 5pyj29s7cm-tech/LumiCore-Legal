@@ -1,3 +1,5 @@
+# Default disabled: setting this repository variable requires a separate maintainer decision.
+# This source change does not enable GitHub Actions or release installers.
 name: Build Desktop Installers
 
 run-name: Desktop installers · ${{ github.ref_name }} · ${{ github.sha }}
@@ -17,7 +19,7 @@ concurrency:
 
 jobs:
   windows-x64:
-    if: github.repository == '5pyj29s7cm-tech/LumiCore'
+    if: github.repository == '5pyj29s7cm-tech/lumi-legal-client' && vars.LUMI_LEGAL_DELIVERY_ENABLED == 'true'
     name: Windows x64 · unsigned NSIS
     runs-on: windows-latest
     timeout-minutes: 120
@@ -82,7 +84,7 @@ jobs:
           "$digest  $($installer.Name)" | Set-Content -LiteralPath "$($installer.FullName).sha256" -Encoding ascii
           $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
           [ordered]@{
-            product = 'LumiCore'
+            product = 'Lumi Legal'
             version = (Get-Content -LiteralPath 'package.json' -Raw | ConvertFrom-Json).version
             commit = $env:GITHUB_SHA
             platform = 'windows'
@@ -98,7 +100,7 @@ jobs:
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: lumi-core-windows-x64-unsigned-${{ github.sha }}
+          name: lumi-legal-windows-x64-unsigned-${{ github.sha }}
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/*.exe.sha256
@@ -107,7 +109,7 @@ jobs:
           retention-days: 14
 
   macos:
-    if: github.repository == '5pyj29s7cm-tech/LumiCore'
+    if: github.repository == '5pyj29s7cm-tech/lumi-legal-client' && vars.LUMI_LEGAL_DELIVERY_ENABLED == 'true'
     name: macOS ${{ matrix.label }} · ad-hoc DMG
     timeout-minutes: 120
     strategy:
@@ -209,7 +211,7 @@ jobs:
           digest="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
           printf '%s  %s\n' "$digest" "$(basename "$dmg_path")" > "$dmg_path.sha256"
           {
-            echo "product=LumiCore"
+            echo "product=Lumi Legal"
             echo "version=$expected_version"
             echo "commit=$GITHUB_SHA"
             echo "platform=macos"
@@ -225,7 +227,7 @@ jobs:
       - name: Upload verified macOS installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: lumi-core-macos-${{ matrix.artifact_arch }}-adhoc-${{ github.sha }}
+          name: lumi-legal-macos-${{ matrix.artifact_arch }}-adhoc-${{ github.sha }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg.sha256

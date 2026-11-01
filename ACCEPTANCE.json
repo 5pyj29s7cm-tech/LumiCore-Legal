@@ -1,14 +1,14 @@
 {
   "schema": "lumi.acceptance.checkpoint.v1",
-  "updatedAt": "2026-11-01T13:25:47.590281+00:00",
+  "updatedAt": "2026-11-01T14:19:04.898089+00:00",
   "localDate": "2026-11-01",
   "timezone": "Asia/Shanghai",
   "kind": "local-progress-checkpoint",
   "currentItem": {
     "id": null,
-    "title": "Three-edition personal background and scoped fixes; Designer synchronized with Main",
-    "status": "implemented-locally-verified-with-retained-baseline-failures",
-    "instruction": "Local source/profile maintenance finished with explicit retained baseline failures. Historical business acceptance and native coordinate testing remain sealed or held."
+    "title": "Three-edition legacy applicability remediation",
+    "status": "implemented-and-isolated-verified",
+    "instruction": "Current maintenance summary: latestApplicabilityRemediation. Historical business acceptance is unchanged; native coordinate testing remains paused."
   },
   "acceptedWholeItems": [
     3,
@@ -36,23 +36,205 @@
     "Existing file full body returned through normal Socket and persisted exactly once with terminal task/turn"
   ],
   "knownUnresolved": [
-    "Composite read/calculate/write reply still blocked by the retained analysis-finalization branch",
-    "Directory-plus-create expression remains one failing scoped check",
-    "Native input/capture and other held acceptance boundaries remain unverified"
+    "本轮仅完成源码清理、兼容迁移和隔离回归，不代表63个分区或整程序真人验收通过。真人坐标复测继续暂停。",
+    "普通Chat按现行设计保留原生会话历史，不自动注入跨会话记忆；其工具注册表没有已保存记忆检索入口。显式查询这类记忆的规划探针未通过能力预期，作为现行能力限制保留，不计本轮功能通过；本轮未新增该产品能力。",
+    "外部账号、模型供应商、实际搜索/嵌入、付费生成、平台发布、ERP/银行、正式财务审批与过账没有在本轮执行或验收。业务工作表的手工数据边界保留。",
+    "CI工作流和Unix安装脚本仅做隔离fixture、语法和静态检查；没有启动远端CI、真实安装或签名发行，Legal继承Actions仍默认禁用。",
+    "当前源码版本仍为3.1.1；未构建、安装或重启当前运行客户端，不据此宣称运行二进制已更新。",
+    "历史3/15/16封存、2暂停、10保留及其他held状态不变；未改默认模型、未恢复法律历史验收或推送远端。",
+    "快照容量、单后端工作表锁、大数据性能、原生硬件及后台活动等历史运行边界仍保留。旧PID/健康/数据库计数为带日期的历史观测，不是本轮观测。",
+    "测试使用隔离数据、合成回执和mock模型；行号/SHA用于源码定位，不是动态行覆盖。完整测试套件和真实业务验收未执行。"
   ],
   "validation": {
-    "tsc": "passed in both repositories",
-    "gitDiffCheck": "passed in both repositories",
-    "scopedLegalCore": "239/240; one known failure retained",
-    "fullSuiteReRun": false,
-    "wholeApplicationAccepted": false,
-    "installerReleased": false
+    "scope": "current scoped maintenance only",
+    "selectedRegression": {
+      "countRuleZh": "按版本+测试文件选取最后完整通过的文件结果；同文件重跑不累加，跳过/未选/中间失败不计通过。各次源码稳定性与执行范围以command原始记录为准。",
+      "perEdition": {
+        "main": {
+          "files": 31,
+          "executed": 787,
+          "passed": 787,
+          "failed": 0,
+          "skipped": 0
+        },
+        "legal": {
+          "files": 36,
+          "executed": 924,
+          "passed": 924,
+          "failed": 0,
+          "skipped": 0
+        },
+        "designer": {
+          "files": 34,
+          "executed": 815,
+          "passed": 815,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      "totalExecuted": 2526,
+      "totalPassed": 2526,
+      "totalFailed": 0,
+      "selectedTests": "final-selected-tests.json",
+      "checks": {
+        "main": {
+          "sourceStable": true,
+          "checks": [
+            {
+              "name": "typecheck",
+              "command": [
+                "node",
+                "node_modules/typescript/bin/tsc",
+                "--noEmit"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "architecture",
+              "command": [
+                "node",
+                "scripts/check-architecture-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "i18n",
+              "command": [
+                "node",
+                "scripts/check-i18n-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "diff-check",
+              "command": [
+                "git",
+                "diff",
+                "--check"
+              ],
+              "exitCode": 0
+            }
+          ]
+        },
+        "legal": {
+          "sourceStable": true,
+          "checks": [
+            {
+              "name": "typecheck",
+              "command": [
+                "node",
+                "node_modules/typescript/bin/tsc",
+                "--noEmit"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "architecture",
+              "command": [
+                "node",
+                "scripts/check-architecture-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "i18n",
+              "command": [
+                "node",
+                "scripts/check-i18n-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "diff-check",
+              "command": [
+                "git",
+                "diff",
+                "--check"
+              ],
+              "exitCode": 0
+            }
+          ]
+        },
+        "designer": {
+          "sourceStable": true,
+          "checks": [
+            {
+              "name": "typecheck",
+              "command": [
+                "node",
+                "node_modules/typescript/bin/tsc",
+                "--noEmit"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "architecture",
+              "command": [
+                "node",
+                "scripts/check-architecture-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "i18n",
+              "command": [
+                "node",
+                "scripts/check-i18n-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "diff-check",
+              "command": [
+                "git",
+                "diff",
+                "--check"
+              ],
+              "exitCode": 0
+            }
+          ]
+        }
+      },
+      "fullSuite": false
+    },
+    "separateCapabilityProbes": {
+      "descriptionZh": "普通Chat显式查询已保存记忆的现行能力摸排，未提供对应工具；这些失败保留，未计入选定通过数。纯回忆探针与目标回归重叠，不再次累加。",
+      "perEdition": {
+        "main": {
+          "executed": 6,
+          "passed": 2,
+          "failed": 4,
+          "unselected": 7,
+          "report": "legal/memory-plan-review/main/tests.json"
+        },
+        "legal": {
+          "executed": 6,
+          "passed": 2,
+          "failed": 4,
+          "unselected": 7,
+          "report": "legal/memory-plan-review/legal/tests.json"
+        },
+        "designer": {
+          "executed": 6,
+          "passed": 2,
+          "failed": 4,
+          "unselected": 7,
+          "report": "legal/memory-plan-review/designer/tests.json"
+        }
+      },
+      "executed": 18,
+      "passed": 6,
+      "failed": 12,
+      "unselected": 21,
+      "disposition": "retained-existing-capability-limit-not-implemented"
+    },
+    "wholeApplicationAccepted": false
   },
   "evidence": {
-    "directory": "D:\\Lumi-Audit-Temp\\edition-optimization-20261101",
-    "manifest": "D:\\Lumi-Audit-Temp\\edition-optimization-20261101\\evidence-seal.json",
-    "sha256": "9217f8e56a1be63a44b630a6e03ee939e3bab69f39f7e818f295a02199b4ccc9",
-    "files": 1420,
+    "directory": "D:\\Lumi-Audit-Temp\\legacy-applicability-remediation-20261101",
+    "manifest": "D:\\Lumi-Audit-Temp\\legacy-applicability-remediation-20261101\\evidence-seal.json",
+    "sha256": "f73c22fb6c9be487b5451921397dd8598f14776fe46748a3d0267ec67fbef8a4",
+    "files": 993,
     "canonicalLedger": "C:\\Users\\Administrator\\Documents\\Codex\\2026-10-03\\new-chat\\work\\customer-installation-closure-20261020\\joint-acceptance-20261023.json",
     "canonicalCheckpoint": "C:\\Users\\Administrator\\Documents\\Codex\\2026-10-03\\new-chat\\work\\customer-installation-closure-20261020\\active-closure-checkpoint.json"
   },
@@ -68,8 +250,9 @@
   "repository": {
     "edition": "legal",
     "root": "D:/lumiOS-variants/lumi-legal-client",
-    "baseCommit": "e6e0572f0fbed06e5f5e18b70fa6f0ade1d63a3f",
-    "branch": "contrib/installer-inputs-20260915-legal"
+    "baseCommit": "d6fcdb0abdf91e349b535953dce23c7a01beae0b",
+    "branch": "contrib/installer-inputs-20260915-legal",
+    "localCommitReceipt": "D:\\Lumi-Audit-Temp\\legacy-applicability-remediation-delivery-20261101.json"
   },
   "checkpointPurpose": "Preserve current reviewed source changes and acceptance state, including held failures; not a release.",
   "latestOrderedReview": {
@@ -280,11 +463,11 @@
     }
   },
   "workFocus": {
-    "area": "edition-maintenance",
-    "status": "implemented-locally-verified-with-retained-baseline-failures",
+    "area": "main-program-optimization-and-scoped-variant-maintenance",
+    "status": "implemented-and-isolated-verified",
     "resumeOnlyOnUserRequest": true,
     "sourceRoot": "D:\\lumiOS-variants\\lumi-legal-client",
-    "priority": "Scoped source and skill startup repairs completed. Retained baseline failures and real-provider/native validation remain explicit; no accepted business operation replay."
+    "priority": "Main, Legal and Designer scoped maintenance only; historical business acceptance remains held or sealed."
   },
   "archivedLegalDevelopment": {
     "at": "2026-10-27T13:13:39.160Z",
@@ -522,5 +705,301 @@
     "edition": "legal",
     "sourceRoot": "D:/lumiOS-variants/lumi-legal-client",
     "sourceBaseCommit": "a786c8feafc384f54ed287ab79a3585e1e1d1435"
+  },
+  "checkpointSummaryHistory": [
+    {
+      "archivedAtUTC": "2026-11-01T14:19:04.898089+00:00",
+      "baseCommit": "d6fcdb0abdf91e349b535953dce23c7a01beae0b",
+      "snapshot": "D:\\Lumi-Audit-Temp\\legacy-applicability-remediation-20261101\\checkpoint-before\\legal\\ACCEPTANCE.json",
+      "snapshotSha256": "5b41fec7916851293106d6cb4c1ed9c968b619439bad8cccc0669d8c6ba8279d",
+      "reason": "Superseded current maintenance summary; historical business acceptance remains authoritative in its original fields.",
+      "currentItem": {
+        "id": null,
+        "title": "Three-edition personal background and scoped fixes; Designer synchronized with Main",
+        "status": "implemented-locally-verified-with-retained-baseline-failures",
+        "instruction": "Local source/profile maintenance finished with explicit retained baseline failures. Historical business acceptance and native coordinate testing remain sealed or held."
+      },
+      "knownUnresolved": [
+        "Composite read/calculate/write reply still blocked by the retained analysis-finalization branch",
+        "Directory-plus-create expression remains one failing scoped check",
+        "Native input/capture and other held acceptance boundaries remain unverified"
+      ],
+      "evidence": {
+        "directory": "D:\\Lumi-Audit-Temp\\edition-optimization-20261101",
+        "manifest": "D:\\Lumi-Audit-Temp\\edition-optimization-20261101\\evidence-seal.json",
+        "sha256": "9217f8e56a1be63a44b630a6e03ee939e3bab69f39f7e818f295a02199b4ccc9",
+        "files": 1420,
+        "canonicalLedger": "C:\\Users\\Administrator\\Documents\\Codex\\2026-10-03\\new-chat\\work\\customer-installation-closure-20261020\\joint-acceptance-20261023.json",
+        "canonicalCheckpoint": "C:\\Users\\Administrator\\Documents\\Codex\\2026-10-03\\new-chat\\work\\customer-installation-closure-20261020\\active-closure-checkpoint.json"
+      },
+      "workFocus": {
+        "area": "edition-maintenance",
+        "status": "implemented-locally-verified-with-retained-baseline-failures",
+        "resumeOnlyOnUserRequest": true,
+        "sourceRoot": "D:\\lumiOS-variants\\lumi-legal-client",
+        "priority": "Scoped source and skill startup repairs completed. Retained baseline failures and real-provider/native validation remain explicit; no accepted business operation replay."
+      },
+      "repository": {
+        "edition": "legal",
+        "root": "D:/lumiOS-variants/lumi-legal-client",
+        "baseCommit": "e6e0572f0fbed06e5f5e18b70fa6f0ade1d63a3f",
+        "branch": "contrib/installer-inputs-20260915-legal"
+      },
+      "validation": {
+        "tsc": "passed in both repositories",
+        "gitDiffCheck": "passed in both repositories",
+        "scopedLegalCore": "239/240; one known failure retained",
+        "fullSuiteReRun": false,
+        "wholeApplicationAccepted": false,
+        "installerReleased": false
+      },
+      "updatedAt": "2026-11-01T13:25:47.590281+00:00"
+    }
+  ],
+  "latestApplicabilityRemediation": {
+    "atUTC": "2026-11-01T14:19:04.898089+00:00",
+    "status": "implemented-and-isolated-verified",
+    "report": "D:\\Lumi-Audit-Temp\\legacy-applicability-remediation-20261101\\report.json",
+    "reportSha256": "bcfc6acef28908562a9c916d41f42071e9457a31d55241bbd1d0e6916a4326f7",
+    "sourceVersions": {
+      "main": "3.1.1",
+      "legal": "3.1.1",
+      "designer": "3.1.1"
+    },
+    "recommendationsHandledLocally": 17,
+    "selectedRegression": {
+      "countRuleZh": "按版本+测试文件选取最后完整通过的文件结果；同文件重跑不累加，跳过/未选/中间失败不计通过。各次源码稳定性与执行范围以command原始记录为准。",
+      "perEdition": {
+        "main": {
+          "files": 31,
+          "executed": 787,
+          "passed": 787,
+          "failed": 0,
+          "skipped": 0
+        },
+        "legal": {
+          "files": 36,
+          "executed": 924,
+          "passed": 924,
+          "failed": 0,
+          "skipped": 0
+        },
+        "designer": {
+          "files": 34,
+          "executed": 815,
+          "passed": 815,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      "totalExecuted": 2526,
+      "totalPassed": 2526,
+      "totalFailed": 0,
+      "selectedTests": "final-selected-tests.json",
+      "checks": {
+        "main": {
+          "sourceStable": true,
+          "checks": [
+            {
+              "name": "typecheck",
+              "command": [
+                "node",
+                "node_modules/typescript/bin/tsc",
+                "--noEmit"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "architecture",
+              "command": [
+                "node",
+                "scripts/check-architecture-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "i18n",
+              "command": [
+                "node",
+                "scripts/check-i18n-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "diff-check",
+              "command": [
+                "git",
+                "diff",
+                "--check"
+              ],
+              "exitCode": 0
+            }
+          ]
+        },
+        "legal": {
+          "sourceStable": true,
+          "checks": [
+            {
+              "name": "typecheck",
+              "command": [
+                "node",
+                "node_modules/typescript/bin/tsc",
+                "--noEmit"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "architecture",
+              "command": [
+                "node",
+                "scripts/check-architecture-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "i18n",
+              "command": [
+                "node",
+                "scripts/check-i18n-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "diff-check",
+              "command": [
+                "git",
+                "diff",
+                "--check"
+              ],
+              "exitCode": 0
+            }
+          ]
+        },
+        "designer": {
+          "sourceStable": true,
+          "checks": [
+            {
+              "name": "typecheck",
+              "command": [
+                "node",
+                "node_modules/typescript/bin/tsc",
+                "--noEmit"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "architecture",
+              "command": [
+                "node",
+                "scripts/check-architecture-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "i18n",
+              "command": [
+                "node",
+                "scripts/check-i18n-boundaries.mjs"
+              ],
+              "exitCode": 0
+            },
+            {
+              "name": "diff-check",
+              "command": [
+                "git",
+                "diff",
+                "--check"
+              ],
+              "exitCode": 0
+            }
+          ]
+        }
+      },
+      "fullSuite": false
+    },
+    "separateCapabilityProbes": {
+      "descriptionZh": "普通Chat显式查询已保存记忆的现行能力摸排，未提供对应工具；这些失败保留，未计入选定通过数。纯回忆探针与目标回归重叠，不再次累加。",
+      "perEdition": {
+        "main": {
+          "executed": 6,
+          "passed": 2,
+          "failed": 4,
+          "unselected": 7,
+          "report": "legal/memory-plan-review/main/tests.json"
+        },
+        "legal": {
+          "executed": 6,
+          "passed": 2,
+          "failed": 4,
+          "unselected": 7,
+          "report": "legal/memory-plan-review/legal/tests.json"
+        },
+        "designer": {
+          "executed": 6,
+          "passed": 2,
+          "failed": 4,
+          "unselected": 7,
+          "report": "legal/memory-plan-review/designer/tests.json"
+        }
+      },
+      "executed": 18,
+      "passed": 6,
+      "failed": 12,
+      "unselected": 21,
+      "disposition": "retained-existing-capability-limit-not-implemented"
+    },
+    "evidence": {
+      "directory": "D:\\Lumi-Audit-Temp\\legacy-applicability-remediation-20261101",
+      "manifest": "D:\\Lumi-Audit-Temp\\legacy-applicability-remediation-20261101\\evidence-seal.json",
+      "sha256": "f73c22fb6c9be487b5451921397dd8598f14776fe46748a3d0267ec67fbef8a4",
+      "files": 993,
+      "canonicalLedger": "C:\\Users\\Administrator\\Documents\\Codex\\2026-10-03\\new-chat\\work\\customer-installation-closure-20261020\\joint-acceptance-20261023.json",
+      "canonicalCheckpoint": "C:\\Users\\Administrator\\Documents\\Codex\\2026-10-03\\new-chat\\work\\customer-installation-closure-20261020\\active-closure-checkpoint.json"
+    },
+    "limitsZh": [
+      "本轮仅完成源码清理、兼容迁移和隔离回归，不代表63个分区或整程序真人验收通过。真人坐标复测继续暂停。",
+      "普通Chat按现行设计保留原生会话历史，不自动注入跨会话记忆；其工具注册表没有已保存记忆检索入口。显式查询这类记忆的规划探针未通过能力预期，作为现行能力限制保留，不计本轮功能通过；本轮未新增该产品能力。",
+      "外部账号、模型供应商、实际搜索/嵌入、付费生成、平台发布、ERP/银行、正式财务审批与过账没有在本轮执行或验收。业务工作表的手工数据边界保留。",
+      "CI工作流和Unix安装脚本仅做隔离fixture、语法和静态检查；没有启动远端CI、真实安装或签名发行，Legal继承Actions仍默认禁用。",
+      "当前源码版本仍为3.1.1；未构建、安装或重启当前运行客户端，不据此宣称运行二进制已更新。",
+      "历史3/15/16封存、2暂停、10保留及其他held状态不变；未改默认模型、未恢复法律历史验收或推送远端。",
+      "快照容量、单后端工作表锁、大数据性能、原生硬件及后台活动等历史运行边界仍保留。旧PID/健康/数据库计数为带日期的历史观测，不是本轮观测。",
+      "测试使用隔离数据、合成回执和mock模型；行号/SHA用于源码定位，不是动态行覆盖。完整测试套件和真实业务验收未执行。"
+    ],
+    "wholeApplicationAccepted": false,
+    "nativeCoordinateTesting": "paused",
+    "archiveAcceptanceResumed": false,
+    "defaultModelChanged": false,
+    "remotePushPerformed": false,
+    "runtimeRestarted": false,
+    "installedBinariesRebuilt": false,
+    "localCommitReceipt": "D:\\Lumi-Audit-Temp\\legacy-applicability-remediation-delivery-20261101.json",
+    "selectivePatchProvenance": {
+      "main": {
+        "path": "D:/lumiOS",
+        "head": "6fc2354c34493bfcd6e3ddee4ab3d58c31ea5693",
+        "branch": "feature/chat-song-workbench-20260916",
+        "status": ""
+      },
+      "legal": {
+        "path": "D:/lumiOS-variants/lumi-legal-client",
+        "head": "d6fcdb0abdf91e349b535953dce23c7a01beae0b",
+        "branch": "contrib/installer-inputs-20260915-legal",
+        "status": ""
+      },
+      "designer": {
+        "path": "D:/lumiOS-variants/lumi-designer-client",
+        "head": "931a883f2daac07e6af72bb83a6ca83ed7e40fdd",
+        "branch": "contrib/installer-inputs-20260915-designer",
+        "status": ""
+      }
+    },
+    "lastSyncedCommitMeaning": "Full merge ancestry is unchanged; these scoped patches are recorded separately."
+  },
+  "latestMaintenanceSummary": {
+    "field": "latestApplicabilityRemediation",
+    "atUTC": "2026-11-01T14:19:04.898089+00:00",
+    "historicalBusinessStateNotResumed": true,
+    "historicalFields": "checkpointSummaryHistory preserves superseded summaries; acceptedWholeItems/counts/heldItems/archive are unchanged."
   }
 }

@@ -1,21 +1,21 @@
-# LumiCore
+# Lumi Legal
 
 面向个人与组织的私有化本地智能体系统。
 
 **浙江灵序科技有限公司 · [lumiai.asia](https://lumiai.asia)**
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-orange.svg)](./LICENSE)
-[![LumiCore CI](https://github.com/5pyj29s7cm-tech/LumiCore/actions/workflows/ci.yml/badge.svg)](https://github.com/5pyj29s7cm-tech/LumiCore/actions/workflows/ci.yml)
+[![Lumi Legal CI](https://github.com/5pyj29s7cm-tech/lumi-legal-client/actions/workflows/ci.yml/badge.svg)](https://github.com/5pyj29s7cm-tech/lumi-legal-client/actions/workflows/ci.yml)
 
-> LumiCore 不只是一个聊天助手。
+> Lumi Legal 不只是一个聊天助手。
 >
 > 它把模型、语音、记忆、知识、人格、技能、工具和桌面程序收敛到一个可持续工作的 LumiCore 中。
 
 ## 当前状态
 
-当前版本：`3.1.0`
+当前源码版本：`3.1.1`（不代表已安装或运行中的客户端已更新）
 
-本仓库是 LumiCore 的公开源码与社区协作仓库，目前仅提供源码，不提供公开安装包、Release 或构建产物。Windows 和 macOS 安装包只有通过签名、冒烟、生命周期与发布门禁后，才会作为独立发行物提供。
+本仓库是 Lumi Legal 的独立源码与交付仓库，共享 LumiCore 底层。安装器、更新通道和应用标识属于律师版；数据目录以当前运行配置为准。远端 CI/安装交付默认禁用，只有维护者另行授权并设置仓库变量后才运行。Windows 和 macOS 安装包仍须通过签名、冒烟、生命周期与发布门禁。
 
 LumiCore 仍在快速迭代。统一意图、风险决策、任务账本、工具回执和多模型配置已经形成底层主干；桌面控制、连续语音、外部平台协作和行业软件自动化仍会受到操作系统、模型能力、第三方界面、账号权限与网络环境影响。
 
@@ -144,16 +144,16 @@ LumiCore 把行业能力放在技能层，把具体执行放在工具和适配�
 
 ## 行业定制版
 
-公开主仓库维护 LumiCore 的统一底层。行业版本从稳定主线派生，保留共同 Git 历史，并在各自仓库中进行表层适配和业务交付。
+LumiCore 主程序维护统一底层，并在「经营工作台」内提供电商、财税业务工作区。律师与设计师保留独立客户端及交付身份；三个客户端共享 Git 历史，按审核范围同步通用修复。电商、财税独立客户端已退役，不再单独构建、同步或发布，历史数据导入入口继续保留。
 
 | 版本 | 主要工作区 |
 | --- | --- |
-| 电商版 | 今日经营、爆款雷达、店铺数据、商品管理、内容与客服 |
+| Main 内电商工作区 | 今日经营、爆款雷达、店铺数据、商品管理、内容与客服 |
 | 设计师版 | 设计项目、CAD 方案、效果图、提案 PPT、交付中心 |
 | 律师版 | 案件工作台、文书生成、合同审查、法条与类案、财产线索、交付核验、标书制作 |
-| 财税版 | 经营看板、票税管理、账务处理、税务申报、资金与风险、报表交付 |
+| Main 内财税工作区 | 经营看板、票税管理、账务处理、税务申报、资金与风险、报表交付 |
 
-这些版本不是四套重新开发的底层。它们共享模型、记忆、语音、意图、工具、回执和任务系统，再围绕特定用户压缩入口、词汇和工作流。通用改进可以通过独立提交反哺主程序。
+这些业务共享模型、记忆、语音、意图、工具、回执和任务系统；业务工作区不等于独立安装器。部署、版本同步和现行/历史正式验收 schema 的边界见 [交付维护说明](./docs/delivery-maintenance.md)。
 
 ## 能力边界
 
@@ -190,8 +190,8 @@ LumiCore 把行业能力放在技能层，把具体执行放在工具和适配�
 ### 获取源码
 
 ```bash
-git clone https://github.com/5pyj29s7cm-tech/LumiCore.git
-cd LumiCore
+git clone https://github.com/5pyj29s7cm-tech/lumi-legal-client.git
+cd lumi-legal-client
 npm ci
 ```
 

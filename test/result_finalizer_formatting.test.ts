@@ -2,8 +2,9 @@ import './helpers';
 import { describe, expect, it } from 'vitest';
 import { finalizeLumiResponse } from '../server/cognition/result_finalizer';
 import type { LumiTurnFlow } from '../server/cognition/turn_flow';
+import { normalizeLumiClientMode } from '../shared/operation_modes';
 
-const flow = { effectiveOperationMode: 'assistant' } as LumiTurnFlow;
+const flow = { operationMode: normalizeLumiClientMode('assistant') } as LumiTurnFlow;
 
 function finalize(text: string) {
   return finalizeLumiResponse({
@@ -20,7 +21,7 @@ function finalize(text: string) {
   });
 }
 
-describe('result finalizer preserves layout while correcting operation-mode claims', () => {
+describe('result finalizer preserves supplied layout under the single-core contract', () => {
   it.each([
     ['Markdown table', '**工作表：订单**\n\n| 商品 | 数量 | 单价 | 金额 |\n|---|---|---|---|\n| 水杯 | 2 | 12 | 24 |\n| 笔记本 | 3 | 8 | 24 |'],
     ['calculation list', '计算如下：\n\n- 水杯：4 × 12 = 48 元\n- 笔记本：3 × 8 = 24 元\n- 贴纸：4 × 3 = 12 元\n\n总额：84 元。'],
@@ -32,32 +33,45 @@ describe('result finalizer preserves layout while correcting operation-mode clai
     expect(result.text).toBe(text);
   });
 
-  it('removes a contradictory current-mode sentence without joining the remaining table rows', () => {
+  it('preserves the supplied mode vocabulary and complete table instead of applying a retired mode rewrite', () => {
     const table = '**订单**\n\n| 商品 | 金额 |\n|---|---|\n| 水杯 | 24 |';
     const result = finalize(`我当前聊天模式。\n\n${table}`);
     expect(result.blocked).toBe(false);
-    expect(result.text).toBe(table);
-    expect(result.text).not.toContain('聊天模式');
+    expect(result.text).toBe(`我当前聊天模式。\n\n${table}`);
+    expect(result.text).toContain(table);
   });
 
-  it('removes an already-satisfied switch prerequisite while retaining separate list items', () => {
+  it('keeps the original switch wording as supplied prose without joining separate list items', () => {
     const list = '- 水杯：24 元\n- 笔记本：24 元';
     const result = finalize(`需要先切换到助手模式。\n\n${list}`);
     expect(result.blocked).toBe(false);
-    expect(result.text).toBe(list);
+    expect(result.text).toBe(`需要先切换到助手模式。\n\n${list}`);
+    expect(result.text).toContain(list);
   });
 
-  it('retains a true mode statement and its paragraph boundaries', () => {
+  it('retains supplied mode wording and paragraph boundaries without treating it as current mode evidence', () => {
     const text = '我当前助手模式。\n\n金额明细：\n- 水杯：24 元\n- 笔记本：24 元';
     const result = finalize(text);
     expect(result.blocked).toBe(false);
     expect(result.text).toBe(text);
   });
 
-  it('keeps surrounding paragraphs when a contradictory sentence is removed from the middle', () => {
+  it('keeps all original paragraph boundaries when mode vocabulary occurs in the middle', () => {
     const result = finalize('商品明细：\n- 水杯：24 元\n\n我当前聊天模式。\n\n说明：金额按数量乘单价计算。');
     expect(result.blocked).toBe(false);
-    expect(result.text).toBe('商品明细：\n- 水杯：24 元\n\n\n\n说明：金额按数量乘单价计算。');
+    expect(result.text).toBe('商品明细：\n- 水杯：24 元\n\n我当前聊天模式。\n\n说明：金额按数量乘单价计算。');
+  });
+
+  it.each(['chat', 'assistant', 'autonomous'])('answers an actual mode question from canonical facts despite legacy %s input', legacy => {
+    expect(normalizeLumiClientMode(legacy)).toBe('assistant');
+    const result = finalizeLumiResponse({taskText: 'What operation mode are you in?',
+      responseText: 'Switch to Assistant mode to enable tools.', source: 'chat', toolRecords: [],
+      flow: {operationMode: normalizeLumiClientMode(legacy)} as LumiTurnFlow});
+    expect(result.blocked).toBe(false);
+    expect(result.reason).toBe('canonical_operation_mode_facts');
+    expect(result.text).toContain('one personal core');
+    expect(result.text).toContain('There are no Chat, Assistant or Autonomous modes to select.');
+    expect(result.text).not.toContain('Switch to Assistant mode to enable tools.');
   });
 
   it.each([
