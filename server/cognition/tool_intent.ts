@@ -403,6 +403,7 @@ export function isInformationOnlyQuestion(text: string, analysis?: ActionIntentA
   const clauses = actionInstructionClauses(text).map(clause => clause.probe.trim()).filter(Boolean);
   if (clauses.some(clause => methodQuestion.test(clause)) && !clauses.some(clause => {
     if (methodQuestion.test(clause)) return false;
+    // i18n-allow: Input/receipt recognition grammar only; not user-visible copy or new authorization.
     const instruction = clause.replace(/^(?:然后|接着|随后|之后|同时|并且|再)\s*/u, '');
     return hasExplicitActionRequest(instruction) || normalizeActionIntent(instruction, analysis).kind !== 'none'
       || matchesIntentGrammar(instruction, STRUCTURED_TOOL_INTENT_RULES)

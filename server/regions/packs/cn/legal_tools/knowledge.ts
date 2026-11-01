@@ -5,6 +5,7 @@ import { searchSimilarCases } from "../../../../legal/kb";
 import { searchStatutes } from "../../../../legal/kb";
 import { searchLegalAuthorityDatabase } from "../../../../legal/sources";
 import { listArg } from "./context";
+import { statuteSourceLanguage } from '../../../messages/statute_source_messages';
 import * as LegalCases from "../../../../org/legal_cases";
 import { normalizeMaterialArticleType } from "./documents";
 import crypto from "node:crypto";
@@ -95,6 +96,7 @@ export async function searchStatuteHandler(args: Record<string, any>, context?: 
   const results = await searchStatutes(orgId, query, 5, userId);
   const externalResults = await searchLegalAuthorityDatabase({
     query,
+    language: statuteSourceLanguage(context?.completionRequest?.currentText || context?.actionIntent),
     type: 'law',
     sourceIds: [
       ...listArg(args, 'sourceIds'),

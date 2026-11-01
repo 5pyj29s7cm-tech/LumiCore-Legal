@@ -4,6 +4,7 @@ import { encodeToolResult } from "../../../../tools/result_envelope";
 import { textArg } from "./context";
 import { searchCompany } from "../../../../legal/sources";
 import { searchEnforcementRecords } from "../../../../legal/sources";
+import { statuteSourceLanguage } from '../../../messages/statute_source_messages';
 import { appendLegalWorkProductArchiveSection } from "./citations";
 import { type ExternalLegalSearchKind } from "../../../../legal/sources";
 import { legalWorkspaceId } from "./context";
@@ -142,6 +143,7 @@ export async function searchExternalAuthoritiesHandler(args: Record<string, any>
 
   const results = await searchLegalAuthorityDatabase({
     query,
+    language: statuteSourceLanguage(context?.completionRequest?.currentText || context?.actionIntent),
     type,
     sourceIds,
     limit,

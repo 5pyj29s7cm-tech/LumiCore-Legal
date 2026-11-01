@@ -2,6 +2,7 @@ import { affirmativeActionInstructionClauses } from './action_instruction_clause
 import { currentAppMutationRequirements } from './action_request';
 import { CN_TASK_EXECUTION_MESSAGES } from '../regions/messages/task_execution_messages';
 import { CN_ACTION_CONTRACT_COPY } from "../regions/messages/action_contract_copy";
+import { hasTerminalExecutionClaim } from './execution_claims';
 import type { ToolExecutionRecord } from '../tools/types';
 import { isCanonicalToolExecutionRecord } from '../tools/execution_engine';
 import { actualDocumentReadContent, isSuccessfulExactDocumentRead, requestsExactReadOnlyArtifactInspection } from './action_desktop_evidence';
@@ -14,7 +15,11 @@ import { buildActionContract, claimsCurrentAppSaveCompletion, documentReadMatche
 import { formatCnMessagingContractBlocker } from "../regions/messages/messaging_messages";
 import { CN_EXECUTION_EVIDENCE_MESSAGES } from "../regions/messages/execution_evidence_messages";
 import { formatVerifiedTaskResultForReadability } from './reply_style';
-import { hasExplicitNoMutationInstruction } from './tool_intent';
+import { hasExplicitNoMutationInstruction, isClientRuntimeMutationRequest } from './tool_intent';
+import { guardReportedDiagnosticClaims } from './reported_diagnostic_claims';
+import { CN_REPORTED_EXECUTION_MESSAGES } from '../regions/messages/reported_execution_messages';
+import { CN_RESULT_GROUNDING_MESSAGES } from '../regions/messages/voice_fast_path_messages';
+import { normalizeActionIntent, isImmediateAssistantRestatementRequest } from './normalized_action_intent';
 import { hasVisionIntent } from './vision_routing';
 import { isModelConfigurationReadRequest } from './model_configuration_intent';
 import type { LumiTurnFlow } from './turn_flow';
@@ -33,7 +38,8 @@ import { buildOperationModeMetaResponse } from './capability_meta';
 import { formatGroundedKnowledgeObservation } from './knowledge_result';
 import { buildMediaArtifactReceipt } from '../socket/media_artifact_receipt';
 import { sanitizeUserFacingExecutionOutput } from './user_output_protection';
-import { guardCompletionClaims } from '../work_product/completion_guard';
+import { guardCompletionClaims, omitObservedSourceBlocks } from '../work_product/completion_guard';
+import { isReportedStatusExcerpt } from '../work_product/response_execution_claims';
 
 import { formatClientDiagnosticResult, hasCompleteClientDiagnosticReceipts } from './client_diagnostic_result';
 import { evaluateDesktopObservationEvidence } from './desktop_observation';
@@ -42,7 +48,7 @@ import { type LumiResultFinalizerInput, type LumiResultFinalizerResult } from ".
 import { taskActionContract, isInternalRuntimeWorkNarration, resultTaskText, isChineseText, summarizeToolFailure, hasResultCoreActionEvidence, isVerifiedCurrentTurnRecord, requiresSourceGroundedArtifactContent, sanitizeInternalExecutionText } from "./result_finalizer_support";
 import { formatGroundedDesktopEvidence, formatGroundedSimpleDesktopOpenResult, formatGroundedClientActionResult, formatGroundedCurrentAuthoringDocumentResult, formatGoalSpecificDesktopResult, formatObservedDesktopOpenResult, formatGroundedPartialActionResult, formatCurrentAuthoringDocumentClarification, formatCreatedArtifactWithoutInAppCompletion } from "./result_desktop_presenter";
 import { leakedLegacyToolProtocol, groundedVerifiedDocumentObservation, VERIFIED_DOCUMENT_OBSERVATION_TOOL_RE } from "./result_claim_guards";
-import { groundedMediaGeneration, formatGroundedWorkflowProgress, formatGroundedSkillDraft, formatGroundedArtifactResult, formatGroundedCadRunResult, formatGroundedBlankAutoCadDocumentResult, formatGroundedWpsMutationResult, formatGroundedCadGeometryExtractionResult, formatExternalAiHistoryResult } from "./result_artifact_presenter";
+import { groundedMediaGeneration, formatGroundedWorkflowProgress, formatGroundedSkillDraft, formatGroundedArtifactResult, formatRequestedDocumentObservation, formatGroundedCadRunResult, formatGroundedBlankAutoCadDocumentResult, formatGroundedWpsMutationResult, formatGroundedCadGeometryExtractionResult, formatExternalAiHistoryResult } from "./result_artifact_presenter";
 
 const TOOL_ITERATION_LIMIT_RESPONSE_RE =
   /The tool loop reached its limit|Maximum tool call iterations reached|before Lumi could write the final answer|\u8fd9\u8f6e\u5de5\u5177(?:\u5904\u7406|\u8c03\u7528)\u6b21\u6570(?:\u5df2)?(?:\u5230\u8fbe|\u8fbe\u5230|\u5230)\u4e0a\u9650/iu;
@@ -87,7 +93,6 @@ function formatGroundedRuntimeWorkResult(
   if (cancelling) {
     // A truthful non-empty model sentence is acceptable. Empty/internal
     // transport output is replaced with the canonical receipt projection.
-    if (!isInternalRuntimeWorkNarration(modelText)) return null;
     const text = formatRuntimeCleanupReceipt(resultTaskText(input), payload);
     return {
       text: text || (isChineseText(resultTaskText(input))
@@ -622,6 +627,22 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     )),
   };
   const actionText = resultTaskText(input);
+  const diagnosticClaim = guardReportedDiagnosticClaims(input);
+  if (diagnosticClaim) return diagnosticClaim;
+  if (isClientRuntimeMutationRequest(actionText) && !(input.toolRecords || []).length) return {
+    text: isChineseText(actionText) ? CN_RESULT_GROUNDING_MESSAGES.actionNotStarted : 'The runtime repair has not started; no execution result was produced.',
+    blocked: true, reason: 'No tool execution started for the requested runtime mutation.',
+  };
+  // A ledger save can prove the update, but cannot prove execution of a continued task.
+  // i18n-allow: Explicit persistent-task continuation, not a status-only edit or query.
+  if (/(?:继续|执行)|\b(?:continue|execute|resume)\b/iu.test(actionText)
+    && (input.toolRecords || []).length > 0
+    && (input.toolRecords || []).every(record => record.name === 'work_takeover_task_update')
+    && hasTerminalExecutionClaim(input.responseText || '')) return {
+    text: isChineseText(actionText) ? CN_REPORTED_EXECUTION_MESSAGES.ledgerOnly
+      : 'Only task bookkeeping was saved. No verified action receipt establishes execution of the continued task.',
+    blocked: true, reason: 'Task bookkeeping without a verified action receipt.',
+  };
   const missingInput = missingTaskInputResult(actionText,
     (input.toolRecords || []).filter(record => artifactRecordMatchesTurn(record, input)));
   if (missingInput) {
@@ -640,13 +661,12 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       .filter(record => isVerifiedCurrentTurnRecord(input, record) && isSuccessfulExactDocumentRead(record)
         && documentReadMatchesRequestedTarget(record, actionText, input.flow?.acceptedTaskTarget, input.flow?.currentAttachmentPaths))
       .map(record => ({ path: artifactPathFromRecord(record), name: artifactPathFromRecord(record).split(/[\\/]/u).pop(), body: actualDocumentReadContent(record) })) : [];
-    const claimText = availableSources.reduce((text, source) => source.body ? text.split(source.body).join('\n') : text, modelText);
-    const checked = affirmativeActionInstructionClauses(claimText).every(clause => !guardCompletionClaims({
-      task: clause.probe, response: clause.text,
-      toolCalls: buildActionContract(clause.probe).applies ? input.toolRecords || [] : [],
+    const claimText = omitObservedSourceBlocks(modelText, availableSources.map(source => source.body));
+    const checked = !guardCompletionClaims({
+      task: actionText, response: claimText, toolCalls: input.toolRecords || [], claimsOnly: true,
       source: input.source, requestId: input.requestId, taskId: input.taskId,
       acceptedTaskTarget: input.flow?.acceptedTaskTarget,
-    }).blocked);
+    }).blocked;
     const explanation = modelText && missingNames.length && missingNames.every(name => modelNames.includes(name.toLocaleLowerCase()))
       && checked
       ? modelText : missingInput.text;
@@ -664,6 +684,35 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   const windowObservation = groundedReadOnlyWindowObservation(input);
   if (windowObservation) return preserveModelWordingOnGroundedSuccess(input, windowObservation, true);
   const actionContract = taskActionContract(input);
+  // A factual restatement does not create a calendar entry. Keep the useful facts,
+  // dropping only unrequested scheduling assertions when no tool ran at all.
+  if (!actionContract.applies && !(input.toolRecords || []).length
+    && normalizeActionIntent(actionText).kind !== 'scheduled_task'
+    // i18n-allow: A request to restate existing facts, not creative dialogue or a new scheduling task.
+    && (isImmediateAssistantRestatementRequest(actionText) || /完整说出|重述|复述|\brestate\b/iu.test(actionText))) {
+    // i18n-allow: Asserted calendar side effects/future reminder commitments, not quoted content.
+    const inventedReminders = affirmativeActionInstructionClauses(input.responseText || '').filter(({ probe }) =>
+      /(?:在|到)(?:日程|日历)里?(?:记着了|记下了|登记了)|(?:到时候|届时|到时)我(?:会)?提醒你|\b(?:I(?:'ll| will) remind you then|added (?:it|this) to (?:your|the) calendar)\b/iu.test(probe));
+    const factualText = inventedReminders.reduceRight((text, clause) =>
+      text.slice(0, clause.start) + text.slice(clause.start + clause.text.length), input.responseText || '').trim();
+    if (inventedReminders.length) {
+      if (!factualText) return { text: isChineseText(actionText) || isChineseText(input.responseText)
+        ? CN_REPORTED_EXECUTION_MESSAGES.unverified.reminder : 'No reminder was created, so a future notification is not confirmed.',
+      blocked: true, reason: 'Unrequested reminder claim without an execution receipt.' };
+      input = { ...input, responseText: factualText };
+    }
+  }
+  // A terminal reply cannot claim a new action is still running using only finished observations.
+  // i18n-allow: Standalone ongoing-status tails; never remove verified source text.
+  const ongoingTail = /(?:^|\n)\s*(?:正在执行|我正在执行)[—…\s。.!！]*$/u.exec(input.responseText || '');
+  if (ongoingTail && !isReportedStatusExcerpt(input.responseText || '', ongoingTail.index)
+    && !(input.toolRecords || []).some(record => isSuccessfulExactDocumentRead(record)
+    && actualDocumentReadContent(record).includes(ongoingTail[0].trim()))) {
+    if (actionContract.applies && hasResultCoreActionEvidence(input, actionContract, input.toolRecords || [], actionText)) {
+      input = { ...input, responseText: input.responseText.slice(0, ongoingTail.index).trim() };
+    } else return { text: isChineseText(actionText) || isChineseText(input.responseText) ? CN_REPORTED_EXECUTION_MESSAGES.ended
+      : 'This turn has ended; no evidence supports an ongoing action.', blocked: true, reason: 'Terminal reply claimed ongoing execution without current action evidence.' };
+  }
   const artifactComponents = actionContract.kind === 'artifact_work' && actionContract.components?.every(item =>
     item.contract.kind === 'artifact_work' && requestedArtifactInstructions(item.text).length === 1)
     ? actionContract.components : [];
@@ -720,7 +769,9 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
         ? records.find(record => isVerifiedCurrentTurnRecord(scoped, record) && isSuccessfulExactDocumentRead(record)
           && documentReadMatchesRequestedTarget(record, component.text, input.flow?.acceptedTaskTarget, input.flow?.currentAttachmentPaths)) : undefined;
       const componentInput = { ...scoped, taskText: component.text, flow: { rootTaskText: actionText } as LumiTurnFlow, completionGuard: undefined,
-        responseText: outputs.length === 1 ? '' : sourceRead && (!input.responseText || input.responseText.includes(actualDocumentReadContent(sourceRead)))
+        // A creation leaf owns receipt facts, not the root answer's sibling claims.
+        // This also covers path-free creation clauses split from a save clause.
+        responseText: component.contract.kind === 'artifact_work' && !sourceRead ? '' : sourceRead && (!input.responseText || input.responseText.includes(actualDocumentReadContent(sourceRead)))
           ? actualDocumentReadContent(sourceRead) : input.responseText };
       const result = (outputs.length === 1 ? formatGroundedArtifactResult(componentInput) : null)
         || finalizeLumiResponse(componentInput);
@@ -788,6 +839,8 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     && !hasMediaPlaybackEvidence(input.toolRecords || [], actionText, { requestId: input.requestId, taskId: input.taskId })) {
     return { text: desktopCompletionReviewText(actionText, desktopReview), blocked: true, reason: DESKTOP_COMPLETION_REVIEW_REASON };
   }
+  const protocolCadResult = protocolLeak && formatGroundedCadRunResult(input);
+  if (protocolCadResult) return protocolCadResult;
   if (protocolLeak) return protocolLeak;
   const safeResponseText = sanitizeInternalExecutionText(
     input.responseText,
@@ -826,7 +879,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
   const goalSpecificDesktopResult = formatGoalSpecificDesktopResult(input);
   if (goalSpecificDesktopResult) return preserveModelWordingOnGroundedSuccess(input, goalSpecificDesktopResult, true);
   const verifiedDocumentObservation = !input.completionGuard?.primaryGoalResult && !input.completionGuard?.blocked ? groundedVerifiedDocumentObservation(input) : null;
-  if (verifiedDocumentObservation) return verifiedDocumentObservation;
+  if (verifiedDocumentObservation) return formatRequestedDocumentObservation(input, verifiedDocumentObservation);
   const currentVerifiedRecords = (input.toolRecords || []).filter(record => isVerifiedCurrentTurnRecord(input, record));
   const verifiedInputReads = currentVerifiedRecords.filter(record => (
     VERIFIED_DOCUMENT_OBSERVATION_TOOL_RE.test(String(record.name || ''))
@@ -865,9 +918,7 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
       && hasExplicitNoMutationInstruction(actionText)
     )
   );
-  const guard = input.completionGuard?.blocked ? input.completionGuard : ordinaryConversation
-    ? { text: input.responseText, blocked: false as const }
-    : guardCompletionClaims({
+  const guard = input.completionGuard?.blocked ? input.completionGuard : guardCompletionClaims({
         task: actionText,
         response: input.responseText,
         toolCalls: input.toolRecords || [],
@@ -967,7 +1018,10 @@ export function finalizeLumiResponse(input: LumiResultFinalizerInput): LumiResul
     return preserveModelWordingOnGroundedSuccess(input, groundedSimpleOpen);
   }
   const observedDesktopOpen = formatObservedDesktopOpenResult(input);
-  if (observedDesktopOpen) return preserveModelWordingOnGroundedSuccess(input, observedDesktopOpen, true);
+  if (observedDesktopOpen && (!guard.blocked || (input.toolRecords || []).some(record =>
+    /^(?:desktop_open|browser_open_task)$/u.test(record.name) && artifactRecordMatchesTurn(record, input)))) {
+    return preserveModelWordingOnGroundedSuccess(input, observedDesktopOpen, true);
+  }
   const groundedPartialAction = formatGroundedPartialActionResult(input);
   if (groundedPartialAction) return preserveModelWordingOnGroundedSuccess(input, groundedPartialAction);
   const groundedDriftCorrection = correctCurrentTurnContractDrift(input, actionContract);
@@ -1154,6 +1208,10 @@ function finalizeActionCompletionClaims(
     (input.toolRecords || []).filter(record => isVerifiedCurrentTurnRecord(input, record)),
   )) {
     return blockedCompletionClaim(input, 'Missing current-law verification gate for legal document.');
+  }
+  if (guard.blocked && guard.reason?.startsWith('Missing current-turn evidence for reported ')
+    && !(input.toolRecords || []).some(record => record.error)) {
+    return blockedCompletionClaim(input, guard.reason, guard.text);
   }
   if (shouldEnforceCoreActionContract(actionContract, actionText) && !legalExternalHandoffOnly && !hasResultCoreActionEvidence(input, actionContract, input.toolRecords || [], actionText)) {
     if (guard.blocked && /content-read\/open\/review/i.test(guard.reason || '')) {

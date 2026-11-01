@@ -1,3 +1,4 @@
+import { PERSONAL_COMPLETION_MESSAGES } from '../regions/messages/personal_completion_messages';
 import type { ToolExecutionRecord } from '../tools/types';
 import fs from 'node:fs';
 import { affirmativeActionInstructionClauses, actionInstructionClauses } from './action_instruction_clauses';
@@ -19,21 +20,31 @@ export function projectRequestedSourceArtifactHandoff(task: string, records: Too
   const name = sourcePath.split(/[\\/]/u).at(-1) || source.object;
   // i18n-allow: same-chat handoff instructions and later restrictions share clause order.
   const affirmative = new Set(affirmativeActionInstructionClauses(task).map(item => item.text));
+  // i18n-allow: Source-object reference grammar; not display copy.
   const sourceReference = (probe: string, text: string) => /(?:原|源)(?:Word|PDF|文件|文档|稿)|\b(?:original|source)\s+(?:word|pdf|file|document)\b/iu.test(probe)
     || Boolean(name && text.includes(name));
   let required = false;
   for (const { probe, text } of actionInstructionClauses(task)) {
+    // i18n-allow: Input/receipt recognition grammar only; not user-visible copy or new authorization.
+    // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
     const restriction = probe.replace(/((?:不要|别|不必|无需|不用|禁止|请勿|只|仅)(?:要|需|需要)?)\s*把\s*([^，,。；;\n]{1,80}?)\s*(发送|发|附上|附|回传|交付|返回)/gu, '$1$3$2');
     if (affirmative.has(text) && sourceReference(probe, text)
+      // i18n-allow: Input/receipt recognition grammar only; not user-visible copy or new authorization.
+      // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
       && /(?:发(?:送|回|到|在)?|回传|附上|交付|返回|提供).{0,24}(?:当前聊天|本次聊天|这里)|\b(?:send|return|attach|provide)\b.{0,120}\b(?:here|(?:this|current)\s+chat)\b/iu.test(probe)) required = true;
     if (sourceReference(probe, text)
+      // i18n-allow: Input/receipt recognition grammar only; not user-visible copy or new authorization.
+      // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
       && /(?:不要|别|不必|无需|不用|禁止|请勿)\s*(?:再)?(?:发送|发|附上|附|回传|交付|返回)|\b(?:do not|don't|never)\s+(?:send|attach|return|provide)\b/iu.test(restriction)) required = false;
+    // i18n-allow: Input/receipt recognition grammar only; not user-visible copy or new authorization.
+    // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
     const only = restriction.match(/(?:只|仅)(?:要|需|需要)?(?:发送|发|附上|回传|交付|返回)\s*([^。；;\n]{1,80})|\b(?:only\s+(?:send|attach|return|provide)|(?:send|attach|return|provide)\s+only)\s+([^.;\n]{1,80})/iu);
     if (only && !sourceReference(only[1] || only[2], only[1] || only[2])) {
       const value = only[1] || only[2];
       const formats = value.match(/\b(?:PDF|Word|DOCX?|XLSX?|Excel|PPTX?|PowerPoint|TXT)\b/giu) || [];
       const sourceFormat = /\.docx?$/iu.test(name) ? /^(?:word|docx?)$/iu : /\.pdf$/iu.test(name) ? /^pdf$/iu
         : /\.xlsx?$/iu.test(name) ? /^(?:excel|xlsx?)$/iu : /\.pptx?$/iu.test(name) ? /^(?:powerpoint|pptx?)$/iu : /^txt$/iu;
+      // i18n-allow: Input/receipt recognition grammar only; not user-visible copy or new authorization.
       if (formats.length && !formats.some(format => sourceFormat.test(format)) || /(?:新文件|新文档)|\bnew\s+(?:file|document)\b/iu.test(value)) required = false;
     }
   }
@@ -73,7 +84,9 @@ export function extractExplicitArtifactTextRequirements(input: string): string[]
   const requirements: string[] = [];
   const patterns = [
     // i18n-allow: Exact user-supplied content recognition.
+    // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
     /(?:明确写出|原样写入|精确写入|(?:只|仅)写入|内容(?:为|是)|必须(?:包含|写入))\s*[：:]?\s*[“"]([^”"]{1,200})[”"]/gu,
+    // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
     /第(?:[一二三四五六七八九十百\d]+)行\s*[：:]?\s*[“"]([^”"\r\n]{1,1000})[”"]/gu, // i18n-allow: Line numbers in user instructions.
     /\b(?:exactly\s+(?:include|write)|must\s+(?:include|contain))\s*[：:]?\s*[“"]([^”"]{1,200})[”"]/giu,
   ];
@@ -89,13 +102,18 @@ export function artifactContentRequirements(task: string): ArtifactContentRequir
   const instruction = result.reduce((text, requirement) => text.replaceAll(requirement.value, ''), task);
   // Explicit short section lists, not arbitrary nouns from the task or document.
   // i18n-allow: Document structure requirements in user instructions.
+  // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
   const lists = /(?:整理为|分为|分成|章节(?:为|包括)|结构(?:为|包括)|包含以下(?:部分|章节))\s*[：:]?\s*([^。！？!?；;\n]{1,160})/gu;
   for (const match of instruction.matchAll(lists)) {
+    // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
     if (/(?:不要|无需|不用|不必|不需要)\s*$/u.test(instruction.slice(Math.max(0, match.index! - 12), match.index))) continue; // i18n-allow: Negated structure requests.
+    // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
     const items = match[1].replace(/[，,]?\s*(?:这|等)?[一二三四五六七八九十\d]+(?:个)?部分\s*$/u, '').split(/[、，,]|以及|和/u); // i18n-allow: Section-list grammar.
     if (items.length < 2 || items.length > 12) continue;
     for (const item of items) {
+      // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
       const blank = /^(?:留空|空白)(?:的)?/u.test(item.trim()) || /(?:留空|保持空白)$/u.test(item.trim()); // i18n-allow: Explicit blank section.
+      // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
       const value = item.trim().replace(/^(?:留空|空白)(?:的)?|(?:留空|保持空白)$/gu, '').replace(/^[“"「]|[”"」]$/gu, '').trim(); // i18n-allow: Section label extraction.
       if (value && value.length <= 24 && !/[\/:.]/u.test(value)) result.push({ kind: blank ? 'blank_section' : 'section', value });
     }
@@ -105,7 +123,9 @@ export function artifactContentRequirements(task: string): ArtifactContentRequir
 
 function heading(line: string): string {
   // i18n-allow: Numbering and blank labels in document headings.
+  // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
   return line.trim().replace(/^#{1,6}\s*|^[（(]?[一二三四五六七八九十\d]+[）)、.．]\s*/u, '')
+    // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
     .replace(/[（(](?:留空|空白|待填写|blank|pending)[）)]\s*$/iu, '').replace(/[：:]\s*$/u, '').trim();
 }
 
@@ -117,6 +137,7 @@ function matchesHeading(line: string, value: string): boolean {
 function isBlankPlaceholder(value: string): boolean {
   // These are placeholders only. A substantive decision plus "pending" fails.
   // i18n-allow: Blank-field marker recognition in actual document content.
+  // i18n-allow: Artifact instruction polarity, structure, or placeholder grammar; not display copy.
   return !value.replace(/会议尚未举行|会议尚未召开|此处留空|待会议结束后由记录人补充填写|待(?:会后|会议结束后)?(?:补充)?填写|待定|留空|空白|尚未填写|\b(?:TBD|blank|pending|to be filled(?: in)?(?: after the meeting)?)\b/giu, '')
     .replace(/[\s_\-—.。；;，,：:（）()\[\]【】]/gu, '');
 }
@@ -198,12 +219,12 @@ export function artifactProgressFeedback(progress: NonNullable<ReturnType<typeof
     ...(progress.missingSpreadsheetRequirements.length ? [zh ? CN.spreadsheetIncomplete(progress.missingSpreadsheetRequirements)
       : `Workbook requirements missing: ${progress.missingSpreadsheetRequirements.join(', ')}`] : []),
     ...(progress.openRequestedAndPending ? [zh ? CN.artifactPendingOpen : 'Requested application open is unverified'] : []),
-    ...(progress.sourceAttachment?.missing ? [zh ? `尚未读取并附上原文件：${progress.sourceAttachment.sourcePath}` : `The requested original file has not been read and attached: ${progress.sourceAttachment.sourcePath}`] : []),
+    ...(progress.sourceAttachment?.missing ? [zh ? PERSONAL_COMPLETION_MESSAGES.sourceNotAttached(progress.sourceAttachment.sourcePath) : `The requested original file has not been read and attached: ${progress.sourceAttachment.sourcePath}`] : []),
   ];
   const nextSteps = progress.complete ? [] : [progress.next === 'readback'
     ? zh ? CN.artifactNextRead : 'Read the saved version and verify the requirements.'
     : progress.next === 'open' ? zh ? CN.artifactNextOpen : 'Open the saved file and verify the target window.'
-      : progress.next === 'source_attachment' ? zh ? '读取指定原文件，并将原文件和新文件一起附在当前聊天。' : 'Read the exact original and attach it alongside the new file in this chat.'
+      : progress.next === 'source_attachment' ? zh ? PERSONAL_COMPLETION_MESSAGES.attachSourceNext : 'Read the exact original and attach it alongside the new file in this chat.'
       : zh ? CN.artifactNextRepair : 'Repair the listed requirements, preserve existing work, then read back the new version.'];
   return { completed, incomplete, nextSteps, evidence: [progress.savedPath] };
 }

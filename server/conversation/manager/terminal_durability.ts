@@ -1,6 +1,21 @@
 import { finalizeConversationActionTurn, quarantineConversationActionTurnPersistenceInDb } from "../action_turn_ledger";
 import { normalizeCompletionFeedbackForPersistence } from "../completion_feedback";
 import { readDatabaseTables, commitDatabaseTables } from "../../../db_layer";
+
+/** Read only the current conversation's terminal rows; socket phases never receive a database root. */
+export function readConversationTerminalRows(identity: { userId: string; conversationId: string; requestId: string }) {
+  const empty = { conversations: [], conversationActionTurns: [], conversationActionTasks: [], interactions: [] };
+  if (!identity.userId || !identity.conversationId || !identity.requestId) return empty;
+  const db = readDatabaseTables(['conversations', 'conversationActionTurns', 'conversationActionTasks', 'interactions']);
+  const sameConversation = (row: any) => row.userId === identity.userId && row.conversationId === identity.conversationId;
+  return {
+    conversations: db.conversations.filter(row => row.userId === identity.userId && row.id === identity.conversationId),
+    conversationActionTurns: db.conversationActionTurns.filter(sameConversation),
+    conversationActionTasks: db.conversationActionTasks.filter(sameConversation),
+    interactions: db.interactions.filter(row => sameConversation(row)
+      && (row.requestId === identity.requestId || row.externalMessageId === identity.requestId)),
+  };
+}
 import type { Conversation } from "./contracts";
 import { normalizeConversationActionState } from "../../cognition/action_continuation";
 import { parseStoredObject as parsePersistedObject } from "../../tools/receipt_payload";

@@ -796,6 +796,7 @@ function TraceReportContent({ text, raw = false }: { text: string; raw?: boolean
     // i18n-allow: Legacy application report metadata, never values inside official source originals.
     if (!['数据可用性', '公开执行记录'].includes(section.title)) return section.original;
     return section.original.split('\n').map(line => {
+      // i18n-allow: Exact provider/report field grammar; source data keys are not translated.
       const field = line.match(/^- (数据状态|查询状态)[：:]\s*(\S+)\s*$/);
       const label = field?.[2] === 'observed' ? copy.sourceObserved : field?.[2] === 'needs_source' ? copy.sourceMissing : '';
       return label ? '- ' + field![1] + ': ' + label : line;
@@ -835,15 +836,19 @@ function projectTraceResult(workflow: AssetTraceWorkflow): TraceResult {
     // i18n-allow: Exact report headings, source tool names and supplied JSON property names, never narrative keyword matches.
     for (const section of sections.filter(item => item.title === '官方来源原始结果')) {
       const [metadata, ...original] = section.body.trim().split(/\r?\n\r?\n/);
+      // i18n-allow: Exact provider/report field grammar; source data keys are not translated.
       const tool = traceReportFields(metadata)['工具'];
       if (!['get_company_registration_info', 'get_shareholder_info', 'get_judgment_debtor_info'].includes(tool)) continue;
       try {
         const record = pickQichachaResult(JSON.parse(original.join('\n\n')));
         if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
         if (tool === 'get_judgment_debtor_info') {
+          // i18n-allow: Exact provider/report field grammar; source data keys are not translated.
           if (text(record['主体名称']) !== workflow.subjectName.trim() || !Array.isArray(record['被执行信息'])) continue;
+          // i18n-allow: Exact provider/report field grammar; source data keys are not translated.
           result.enforcements = record['被执行信息'].flatMap((entry: any) => {
             if (!entry || typeof entry !== 'object') return [];
+            // i18n-allow: Exact provider/report field grammar; source data keys are not translated.
             const item = { caseNumber: text(entry['案号']), court: text(entry['执行法院']), target: text(entry['执行标的']), date: text(entry['立案日期'] ?? entry['日期']) };
             return item.caseNumber || item.court || item.target ? [item] : [];
           });
@@ -859,6 +864,7 @@ function projectTraceResult(workflow: AssetTraceWorkflow): TraceResult {
     // i18n-allow: A bounded canonical company section supports sources without JSON originals.
     if (!result.name) for (const section of sections.filter(item => item.title === '企业基本信息')) {
       const fields = traceReportFields(section.body);
+      // i18n-allow: Exact provider/report field grammar; source data keys are not translated.
       const company = mapQichachaCompanyRegistration({ ...fields, 企业名称: fields['名称'] || fields['企业名称'], 登记状态: fields['状态'] || fields['登记状态'] });
       if (matchesSubject(company)) Object.assign(result, company);
     }

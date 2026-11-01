@@ -2,7 +2,8 @@ import { extendTurnBindings } from "../../../cognition/turn_bindings";
 import { logger } from "../../../../logger";
 import { createDurableForegroundReleaseGate } from "../../../conversation/manager";
 import { recordChatExecutionPersistenceUnknownDurably } from "../../chat_execution_registry";
-import { flushDBOrThrow, readDB } from "../../../../db_layer";
+import { flushDBOrThrow } from "../../../../db_layer";
+import { readConversationTerminalRows } from '../../../conversation/manager/terminal_durability';
 import { stopVoiceWorkHeartbeat } from "../work_progress";
 import { commitChatTerminalBoundary, persistAuthorizedTerminalReceipt } from "../../chat_terminal_boundary";
 import { resetSilenceTimer, enforceVoiceForegroundConvergenceBeforeRelease } from "../../voice_transport_runtime";
@@ -81,7 +82,7 @@ export async function prepareVoiceRelease(context: NonNullable<Awaited<ReturnTyp
           taskId: context.foregroundRequestIdentity?.expectedTaskId,
           assistantMessageId,
         };
-        const persisted = readDB();
+        const persisted = readConversationTerminalRows(identity);
         const turn = persisted.conversationActionTurns.find((row: any) => row.userId === identity.userId
           && row.conversationId === identity.conversationId && row.requestId === identity.requestId);
         applyPersistedVoiceTerminalOutcome(terminalPayload, identity, {

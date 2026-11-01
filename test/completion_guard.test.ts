@@ -46,7 +46,7 @@ describe('completion guard desktop action handling', () => {
     expect(result.text).toBe(response);
   });
 
-  it('does not replace an attempted desktop action with a file-reading guard', () => {
+  it('blocks a failed desktop attempt using desktop rather than file-reading wording', () => {
     const response = 'I will open WeChat from the desktop shortcut and check the process.';
 
     const result = guardCompletionClaims({
@@ -62,8 +62,9 @@ describe('completion guard desktop action handling', () => {
       ],
     });
 
-    expect(result.blocked).toBe(false);
-    expect(result.text).toBe(response);
+    expect(result.blocked).toBe(true);
+    expect(result.text).toContain('desktop action');
+    expect(result.text).not.toContain('file/location');
   });
 
   it('uses desktop wording when an open-completion claim is not verified', () => {
@@ -144,13 +145,13 @@ describe('completion guard reply formatting', () => {
       name: 'execution-status guard',
       task: 'open WeChat from the desktop shortcut',
       response: "I'm executing this now.",
-      expected: /not started|could not start/i,
+      expected: /desktop action is not complete/i,
     },
     {
       name: 'action-promise guard',
       task: 'review the attached document',
       response: 'I will review the document now.',
-      expected: /could not start|not started/i,
+      expected: /action is not complete/i,
     },
     {
       name: 'completion-evidence guard',
@@ -255,7 +256,7 @@ describe('completion guard generic execution claims', () => {
 
   it('does not turn a successful handler return into a completed action without terminal verification', () => {
     const result = guardCompletionClaims({
-      task: 'Perform the requested desktop operation.',
+      task: 'launch an external desktop program',
       response: 'The task is completed successfully.',
       toolCalls: [{
         name: 'unclassified_desktop_adapter',
@@ -271,13 +272,13 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('No verified target window was observed');
+    expect(result.reason).toContain('Missing current-turn evidence for reported generic completion');
   });
 
-  it('allows a generic completion claim after the same capability receipt is verified', () => {
+  it('does not substitute an unclassified capability receipt for the requested desktop target evidence', () => {
     const response = 'The task is completed successfully.';
     const result = guardCompletionClaims({
-      task: 'Perform the requested desktop operation.',
+      task: 'launch an external desktop program',
       response,
       toolCalls: [{
         name: 'unclassified_desktop_adapter',
@@ -292,8 +293,8 @@ describe('completion guard generic execution claims', () => {
       }],
     });
 
-    expect(result.blocked).toBe(false);
-    expect(result.text).toBe(response);
+    expect(result.blocked).toBe(true);
+    expect(result.reason).toBe('Missing core evidence for desktop_operation.');
   });
 
   it.each([
@@ -310,7 +311,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('\u8fd9\u4e00\u8f6e\u6ca1\u6709\u6210\u529f\u6267\u884c\u4efb\u4f55\u5de5\u5177');
+    expect(result.reason).toContain('Missing current-turn evidence for reported');
     expect(result.text).toContain('\u8fd9\u9879\u64cd\u4f5c\u8fd8\u6ca1\u5b8c\u6210');
     expect(result.text).toContain('\u91cd\u8bd5');
     expectCustomerReadableGuard(result.text);
@@ -329,8 +330,8 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('current-turn tool execution');
-    expect(result.text).toContain('\u64cd\u4f5c\u8fd8\u6ca1\u6709\u5f00\u59cb');
+    expect(result.reason).toContain('execution promise');
+    expect(result.text).toContain('\u64cd\u4f5c\u8fd8\u6ca1\u5b8c\u6210');
     expectCustomerReadableGuard(result.text);
   });
 
@@ -375,8 +376,8 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('current-turn tool execution');
-    expect(result.text).toMatch(/\u6ca1\u6709\u5f00\u59cb|\u6ca1\u80fd\u5b8c\u6210/u);
+    expect(result.reason).toContain('execution promise');
+    expect(result.text).toContain('\u684c\u9762\u64cd\u4f5c\u8fd8\u6ca1\u5b8c\u6210');
     expect(result.text).not.toContain('AutoCAD launch failed');
     expectCustomerReadableGuard(result.text);
   });
@@ -393,7 +394,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('\u5199\u5165/\u751f\u6210/\u9a8c\u6536\u8bb0\u5f55');
+    expect(result.reason).toContain('reported artifact completion');
   });
 
   it('does not mistake a saved prior-turn receipt for a saved artifact', () => {
@@ -452,7 +453,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('写入/生成/验收记录');
+    expect(result.reason).toContain('reported artifact completion');
   });
 
   it('does not let receipt wording hide an explicit saved-file claim', () => {
@@ -467,7 +468,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('写入/生成/验收记录');
+    expect(result.reason).toContain('reported artifact completion');
   });
 
   it.each([
@@ -486,7 +487,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('写入/生成/验收记录');
+    expect(result.reason).toContain('reported artifact completion');
   });
 
   it('does not count a confirmation blocker returned as tool text as success', () => {
@@ -535,7 +536,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('\u6210\u529f\u6267\u884c\u4e86\u67e5\u8be2\u6216\u68c0\u67e5\u5de5\u5177');
+    expect(result.reason).toBe('Missing core evidence for desktop_operation.');
     expect(result.text).toContain('\u5df2\u7ecf\u5b8c\u6210\u7684\u90e8\u5206\u4f1a\u4fdd\u7559');
     expect(result.text).not.toContain('client_get_state');
     expect(result.text).toContain('\u8fd9\u9879\u64cd\u4f5c\u8fd8\u6ca1\u5b8c\u6210');
@@ -559,7 +560,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('\u6210\u529f\u6267\u884c\u4e86\u67e5\u8be2\u6216\u68c0\u67e5\u5de5\u5177');
+    expect(result.reason).toContain('Missing current-turn evidence');
     expect(result.text).toContain('Completed work is preserved');
     expect(result.text).toContain('not complete');
     expect(result.text).not.toContain('client_get_state');
@@ -583,6 +584,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
+    expect(result.text).toMatch(/not complete|not started|not verified/i);
     expect(result.text).not.toContain(expectedDetail);
     expect(result.text).not.toContain('desktop_active_window');
     expectCustomerReadableGuard(result.text);
@@ -681,7 +683,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('工具');
+    expect(result.reason).toContain('reported open completion');
   });
 
   it('does not mistake an external project construction claim for self-development reflection', () => {
@@ -702,7 +704,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('current-turn tool execution');
+    expect(result.reason).toContain('execution promise');
   });
 
   it.each([
@@ -716,7 +718,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('current-turn tool execution');
+    expect(result.reason).toContain('execution promise');
   });
 
   it('still blocks a promised review when the user task actually requests external work', () => {
@@ -727,7 +729,7 @@ describe('completion guard generic execution claims', () => {
     });
 
     expect(result.blocked).toBe(true);
-    expect(result.reason).toContain('content-read/open/review');
+    expect(result.reason).toContain('execution promise');
   });
 
   it('does not mistake client text inside an artifact path for a Lumi client action', () => {
@@ -830,6 +832,53 @@ describe('completion guard current-app UI evidence', () => {
 
     expect(result.blocked).toBe(true);
     expect(result.reason).toBe('Missing verified in-app save evidence.');
+  });
+
+  const savedResponse = 'Created the document, entered the requested text and saved it.';
+  const namedTask = task.replace('\u5728\u8fd9\u91cc\u9762', '\u5728 WPS \u91cc\u9762');
+  const saveAction = { name: 'desktop_keyboard_press', arguments: { key: 'ctrl+s' }, result: 'Pressed: ctrl+s' };
+  const saveObservation = { name: 'desktop_ui_snapshot', arguments: { root: 'active' }, result: '{"root":{"name":"note.docx - WPS Office"}}' };
+
+  it('accepts the extra save claim only after a current-turn save and matching post-save observation', () => {
+    const toolCalls = [...typedAndVerified, saveAction, saveObservation].map(call => ({ ...call, requestId: 'current-save', taskId: 'save-task' }));
+    expect(guardCompletionClaims({ task: namedTask, response: savedResponse, requestId: 'current-save', taskId: 'save-task', toolCalls }))
+      .toMatchObject({ blocked: false, text: savedResponse });
+  });
+
+  it.each([
+    ['missing post-save observation', [...typedAndVerified, saveAction]],
+    ['observation before save', [...typedAndVerified, saveObservation, saveAction]],
+    ['save before requested edit', [typedAndVerified[0], saveAction, saveObservation, ...typedAndVerified.slice(1)]],
+    ['different foreground at save', [...typedAndVerified, { name: 'desktop_active_window', arguments: {}, result: '{"title":"Notepad","process_name":"notepad.exe"}' }, saveAction, saveObservation]],
+    ['different post-save application', [...typedAndVerified, saveAction, { ...saveObservation, result: '{"root":{"name":"note.docx - Notepad"}}' }]],
+    ['failed save actuation', [...typedAndVerified, { ...saveAction, error: 'Save failed' }, saveObservation]],
+    ['later unsaved edit', [...typedAndVerified, saveAction, saveObservation, ...typedAndVerified.slice(2)]],
+  ])('blocks a save claim with %s', (_label, toolCalls) => {
+    expect(guardCompletionClaims({ task: namedTask, response: savedResponse, toolCalls }))
+      .toMatchObject({ blocked: true, reason: 'Missing verified in-app save evidence.' });
+  });
+
+  it('rejects an old-turn save receipt after a current-turn edit', () => {
+    const current = typedAndVerified.map(call => ({ ...call, requestId: 'now', taskId: 'task-now' }));
+    const old = [saveAction, saveObservation].map(call => ({ ...call, requestId: 'before', taskId: 'task-before' }));
+    expect(guardCompletionClaims({ task, response: savedResponse, toolCalls: [...current, ...old], requestId: 'now', taskId: 'task-now' }))
+      .toMatchObject({ blocked: true, reason: 'Missing verified in-app save evidence.' });
+  });
+
+  it.each([
+    'The requested text is entered. I have not saved the document.',
+    'The requested text is entered. If saved, the document can be reopened.',
+    'The requested text is entered. The quoted source says "saved successfully".',
+    '\u5df2\u5199\u5165\u6307\u5b9a\u5185\u5bb9\uff0c\u4f46\u5e76\u672a\u4fdd\u5b58\u3002',
+    '\u5df2\u5199\u5165\u6307\u5b9a\u5185\u5bb9\u3002\u539f\u6587\u5199\u7740\u201c\u5df2\u4fdd\u5b58\u201d\u3002',
+  ])('preserves non-asserted save prose without inventing a save obligation: %s', response => {
+    expect(guardCompletionClaims({ task, response, toolCalls: typedAndVerified }))
+      .toMatchObject({ blocked: false, text: response });
+  });
+
+  it('does not let a quoted save claim hide a separate affirmative save assertion', () => {
+    expect(guardCompletionClaims({ task, response: 'The source says "not saved". I saved the document.', toolCalls: typedAndVerified }))
+      .toMatchObject({ blocked: true, reason: 'Missing verified in-app save evidence.' });
   });
 });
 

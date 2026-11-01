@@ -250,7 +250,7 @@ export function DesktopShellView(input: DesktopShellViewInput) {
       data-theme-scope="shell"
       data-appearance={resolvedAppearanceMode}
       data-view-mode={viewMode}
-      data-personal-background={viewMode === 'personal' && activeTab !== 'org' ? (resolvedAppearanceMode === 'light' ? 'white' : 'black') : undefined}
+      data-personal-background={!isWallpaperMode && viewMode === 'personal' && activeTab !== 'org' ? (resolvedAppearanceMode === 'light' ? 'white' : 'black') : undefined}
       data-ui-density={desktopChrome.density}
       data-compact-layout={isCompactDesktopLayout ? 'true' : 'false'}
       data-wallpaper-presentation={isWallpaperMode ? wallpaperPresentation : undefined}
@@ -267,7 +267,7 @@ export function DesktopShellView(input: DesktopShellViewInput) {
           backgroundPosition: 'center',
           backgroundRepeat: 'no-repeat',
         } : {}),
-        ...(viewMode === 'personal' && activeTab !== 'org' ? { backgroundColor: resolvedAppearanceMode === 'light' ? '#fff' : '#000', backgroundImage: 'none' } : {}),
+        ...(!isWallpaperMode && viewMode === 'personal' && activeTab !== 'org' ? { backgroundColor: resolvedAppearanceMode === 'light' ? '#fff' : '#000', backgroundImage: 'none' } : {}),
       }}
     >
       <input ref={wallpaperInputRef} type="file" accept="image/*" onChange={handleWallpaperUpload} className="hidden" />

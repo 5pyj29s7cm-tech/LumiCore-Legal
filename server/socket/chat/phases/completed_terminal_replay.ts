@@ -1,4 +1,4 @@
-import { readDatabaseTables } from '../../../../db_layer';
+import { readConversationTerminalRows } from '../../../conversation/manager/terminal_durability';
 import { getChatExecution, type ChatExecutionScope } from '../../chat_execution_registry';
 import { TERMINAL_RETENTION_MS } from '../../chat_execution_registry/contracts';
 import { parseStoredArray, parseStoredObject } from '../../../tools/receipt_payload';
@@ -20,7 +20,7 @@ export async function reconcileCompletedChatReplay(scope: ChatExecutionScope, re
     || payload.requestId !== requestId || payload.conversationId !== conversationId
     || payload.source !== scope.source || parseStoredObject(payload.completionFeedback).status !== 'completed') return false;
 
-  const db = readDatabaseTables(['conversationActionTasks', 'conversationActionTurns', 'conversations', 'interactions']);
+  const db = readConversationTerminalRows({ userId: scope.userId, conversationId, requestId });
   const orgId = scope.domain === 'work' ? String(scope.orgId || '') : '';
   const inScope = (row: any) => row.userId === scope.userId && row.conversationId === conversationId;
   const conversations = (db.conversations || []).filter((row: any) => row.id === conversationId

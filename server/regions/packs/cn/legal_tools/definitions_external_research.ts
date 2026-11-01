@@ -120,6 +120,7 @@ subjectType: { ...stringField('主体类型，仅用于说明输入'), enum: ['e
 scope: { ...stringField('本次查询范围'), enum: ['cases', 'enforcement'] },
 },
 required: ['name'],
+serverOwnedArgumentBinder: args => ({ ...args, persistCase: false, confirmedForKb: false }),
 handler: withLegalReceipt(searchSubjectCasesHandler, { status: 'observed' }),
 capability: legalCapability({
   id: 'legal.subject-cases.search', operation: 'observe', risk: 'low', successStatuses: ['observed'],
@@ -136,6 +137,7 @@ name: stringField('明确提供的企业或个人名称'),
 subjectType: { ...stringField('调查主体类型'), enum: ['enterprise', 'individual'] },
 },
 required: ['name'],
+serverOwnedArgumentBinder: args => ({ ...args, persistCase: false, confirmedForKb: false }),
 handler: withLegalReceipt(searchPublicFootprintHandler, { status: 'observed' }),
 capability: legalCapability({
   id: 'legal.public-footprint.search', operation: 'observe', risk: 'low', successStatuses: ['observed'],
@@ -158,7 +160,14 @@ persistCase: booleanField('是否归档到案件空间；提供 caseId/caseName 
 orgId: stringField('组织 ID，默认上下文 orgId 或 default'),
 userId: stringField('操作用户 ID，默认上下文 userId 或 system'),
 },
-handler: withLegalReceipt(externalResearchPlanHandler, { status: 'observed', expectCaseMutation: 'when_requested' })
+handler: withLegalReceipt(externalResearchPlanHandler, { status: 'planned', expectCaseMutation: 'when_requested' }),
+    capability: legalCapability({
+      id: 'legal.external-research-plan.create', operation: 'create', risk: 'low', successStatuses: ['planned'],
+      sideEffects: [{ type: 'local_state_change', scope: 'optional authorized case archive of the generated research plan', reversible: true }],
+      limitations: ['Only a research plan is generated. This is not evidence of platform queries, source verification, browser login, sending, filing, or payment.'],
+    }),
+    evidence: legalEvidence('legal.external-research-plan.create', 'create', 'caseId'),
+
 }),
 defineLegalTool({
 name: 'legal_generate_citation_verification_report',
