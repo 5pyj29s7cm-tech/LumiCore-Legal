@@ -120,13 +120,22 @@ export function useConversationTransitions({ conversationTransitionRef, isCreati
   }, [isOpen, startNewTextConversation]);
 
   const [conversationHistoryError, setConversationHistoryError] = useState('');
-  const historyPanelVisibilityRef = useRef<{ scope: string; visible: boolean } | null>(null);
+  const historyPanelVisibilityRef = useRef<{ scope: string; urlScope: typeof scopedConversationUrl; visible: boolean } | null>(null);
+  const historyRowsScopeRef = useRef(scopedConversationUrl);
+  const historyAbortRef = useRef<AbortController | null>(null);
+  // Hide the preceding owner's headers during the scope-changing render,
+  // before the effect resets the underlying page state.
+  const scopedConversationHistory = useMemo(() => historyRowsScopeRef.current === scopedConversationUrl
+    ? conversationHistory : [], [conversationHistory, scopedConversationUrl]);
 
   const loadConversationHistory = useCallback(async ({ append = false }: { append?: boolean } = {}) => {
     if (append && conversationHistoryLoadingRef.current) return;
     if (append && !conversationHistoryHasMoreRef.current) return;
 
     const requestId = ++conversationHistoryRequestRef.current;
+    historyAbortRef.current?.abort();
+    const controller = new AbortController();
+    historyAbortRef.current = controller;
     const offset = append ? conversationHistoryOffsetRef.current : 0;
     conversationHistoryLoadingRef.current = true;
     setConversationHistoryError('');
@@ -136,11 +145,11 @@ export function useConversationTransitions({ conversationTransitionRef, isCreati
     try {
       const response = await fetch(
         scopedConversationUrl(`/api/conversations?limit=${CONVERSATION_HISTORY_PAGE_SIZE}&offset=${offset}`),
-        { credentials: 'include' },
+        { credentials: 'include', signal: controller.signal },
       );
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result?.error || 'Unable to load conversation history');
-      if (requestId !== conversationHistoryRequestRef.current) return;
+      if (requestId !== conversationHistoryRequestRef.current || controller.signal.aborted) return;
 
       const page = (Array.isArray(result?.conversations) ? result.conversations : [])
         .filter((item: any) => String(item?.id || '').trim()) as ConversationHistoryItem[];
@@ -163,7 +172,7 @@ export function useConversationTransitions({ conversationTransitionRef, isCreati
       conversationHistoryHasMoreRef.current = hasMore;
       setConversationHistoryHasMore(hasMore);
     } catch (error: any) {
-      if (requestId === conversationHistoryRequestRef.current) {
+      if (requestId === conversationHistoryRequestRef.current && !controller.signal.aborted) {
         const message = error?.message || 'Unable to load conversation history';
         setConversationHistoryError(message);
         if (!append) toast.error(message);
@@ -174,16 +183,20 @@ export function useConversationTransitions({ conversationTransitionRef, isCreati
         setConversationHistoryLoading(false);
         setConversationHistoryLoadingMore(false);
       }
+      if (historyAbortRef.current === controller) historyAbortRef.current = null;
     }
   }, [conversationHistoryHasMoreRef, conversationHistoryListRef, conversationHistoryLoadingRef, conversationHistoryOffsetRef, conversationHistoryRequestRef, scopedConversationUrl, setConversationHistory, setConversationHistoryHasMore, setConversationHistoryLoading, setConversationHistoryLoadingMore]);
 
   const refreshConversationHistory = useCallback(() => loadConversationHistory(), [loadConversationHistory]);
   const loadMoreConversationHistory = useCallback(() => loadConversationHistory({ append: true }), [loadConversationHistory]);
 
-  // Reset the paging cursor when the user switches domain/agent. A stale
+  // Reset the paging cursor when the account or conversation scope changes. A stale
   // response from the previous scope is ignored by the request generation.
   useEffect(() => {
     conversationHistoryRequestRef.current += 1;
+    historyAbortRef.current?.abort();
+    historyAbortRef.current = null;
+    historyRowsScopeRef.current = scopedConversationUrl;
     conversationHistoryOffsetRef.current = 0;
     conversationHistoryHasMoreRef.current = true;
     conversationHistoryLoadingRef.current = false;
@@ -192,7 +205,12 @@ export function useConversationTransitions({ conversationTransitionRef, isCreati
     setConversationHistoryLoading(false);
     setConversationHistoryLoadingMore(false);
     setConversationHistoryError('');
-  }, [activeDomain, activeOrgId, agentId, conversationHistoryHasMoreRef, conversationHistoryLoadingRef, conversationHistoryOffsetRef, conversationHistoryRequestRef, setConversationHistory, setConversationHistoryHasMore, setConversationHistoryLoading, setConversationHistoryLoadingMore]);
+    return () => {
+      conversationHistoryRequestRef.current += 1;
+      historyAbortRef.current?.abort();
+      historyAbortRef.current = null;
+    };
+  }, [activeDomain, activeOrgId, agentId, scopedConversationUrl, conversationHistoryHasMoreRef, conversationHistoryLoadingRef, conversationHistoryOffsetRef, conversationHistoryRequestRef, setConversationHistory, setConversationHistoryHasMore, setConversationHistoryLoading, setConversationHistoryLoadingMore]);
 
   // Refresh when the office becomes visible or changes scope.
   // Ordinary renders and focus changes never reload the fixed history panel.
@@ -200,10 +218,10 @@ export function useConversationTransitions({ conversationTransitionRef, isCreati
     const scope = JSON.stringify([activeDomain, activeOrgId || '', agentId]);
     const visible = isOpen && isOfficeCommandCenter;
     const previous = historyPanelVisibilityRef.current;
-    historyPanelVisibilityRef.current = { scope, visible };
-    if (!visible || (previous?.visible && previous.scope === scope)) return;
+    historyPanelVisibilityRef.current = { scope, urlScope: scopedConversationUrl, visible };
+    if (!visible || (previous?.visible && previous.scope === scope && previous.urlScope === scopedConversationUrl)) return;
     void refreshConversationHistory();
-  }, [activeDomain, activeOrgId, agentId, isOfficeCommandCenter, isOpen, refreshConversationHistory]);
+  }, [activeDomain, activeOrgId, agentId, isOfficeCommandCenter, isOpen, refreshConversationHistory, scopedConversationUrl]);
 
   // If the first page does not fill the rail, keep asking for pages until the
   // list has a scrollable viewport (or the server reports that it is done).
@@ -230,14 +248,14 @@ export function useConversationTransitions({ conversationTransitionRef, isCreati
 
   // Keep the active transcript at the front without changing its content.
   const orderedConversationHistory = useMemo(() => {
-    const activeId = conversationHistory.find(item => item.status === 'active')?.id || attachmentConversationIdRef.current;
-    if (!activeId) return conversationHistory;
-    return [...conversationHistory].sort((left, right) => {
+    const activeId = scopedConversationHistory.find(item => item.status === 'active')?.id || attachmentConversationIdRef.current;
+    if (!activeId) return scopedConversationHistory;
+    return [...scopedConversationHistory].sort((left, right) => {
       if (left.id === activeId) return -1;
       if (right.id === activeId) return 1;
       return 0;
     });
-  }, [attachmentConversationIdRef, conversationHistory]);
+  }, [attachmentConversationIdRef, scopedConversationHistory]);
 
   const restoreTextConversation = useCallback(async (conversationId: string) => {
     if (!conversationId || conversationTransitionRef.current || restoringConversationId || isCreatingConversation) return;
@@ -337,5 +355,5 @@ export function useConversationTransitions({ conversationTransitionRef, isCreati
       setDeletingConversationId('');
     }
   }, [appConfirm, attachmentConversationIdRef, conversationHistory, conversationHistoryOffsetRef, deletingConversationId, isZh, restoringConversationId, scopedConversationUrl, setConversationContextMenu, setConversationHistory, setDeletingConversationId, startNewTextConversation, t.cancel, t.delete, t.deleteFailed, t.deleted, t.untitled]);
-return { refreshConversationHistory, loadMoreConversationHistory, conversationHistoryError, startNewTextConversation, handleConversationHistoryScroll, orderedConversationHistory, restoreTextConversation, deleteConversationFromHistory };
+return { refreshConversationHistory, loadMoreConversationHistory, scopedConversationHistory, conversationHistoryError: historyRowsScopeRef.current === scopedConversationUrl ? conversationHistoryError : '', startNewTextConversation, handleConversationHistoryScroll, orderedConversationHistory, restoreTextConversation, deleteConversationFromHistory };
 }

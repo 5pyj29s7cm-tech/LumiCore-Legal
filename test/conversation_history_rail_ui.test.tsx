@@ -296,4 +296,35 @@ describe('conversation history rail interactions', () => {
     expect(ui.callbacks.restoreTextConversation).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it('aborts an in-flight search on unmount and never restores a late result', async () => {
+    const held = deferred<any>();
+    const fetcher = installSearchServer([]);
+    fetcher.mockImplementationOnce(() => held.promise);
+    const ui = controls();
+    inputSearch('pending search');
+    await waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+    const signal = (fetcher.mock.calls[0] as unknown as [string, RequestInit])[1].signal!;
+    ui.unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => { held.resolve(reply({ results: [searchRow('late-existing', 'late result')], limit: 500 })); await held.promise; });
+    expect(ui.callbacks.restoreTextConversation).not.toHaveBeenCalled();
+    expect(ui.callbacks.startNewTextConversation).not.toHaveBeenCalled();
+    expect(ui.currentRef.current).toBe('current-conversation');
+  });
+
+  it('shows the bounded search warning for 500 message hits without claiming complete conversation pagination', async () => {
+    const fetcher = installSearchServer(Array.from({ length: 500 }, (_, index) => searchRow('same-existing', 'matched content ' + index, 'match-' + index)));
+    const ui = controls({ isZh: false });
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search all conversations' }), { target: { value: 'matched content' } });
+    await screen.findByText('Showing the first 500 matching messages. Refine your search for more.');
+    expect(ui.container.querySelectorAll('[data-command-center-history-item]')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Load more conversations' })).toBeNull();
+    expect(screen.queryByText('All conversations loaded')).toBeNull();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(ui.callbacks.loadMoreConversationHistory).not.toHaveBeenCalled();
+    expect(ui.callbacks.restoreTextConversation).not.toHaveBeenCalled();
+    assertTranscriptUntouched(ui);
+  });
+
 });

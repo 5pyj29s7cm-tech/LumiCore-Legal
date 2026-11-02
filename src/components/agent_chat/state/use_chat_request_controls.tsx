@@ -120,7 +120,7 @@ export function useChatRequestControls(previousBindings: ReturnType<typeof useCh
     if (socket.connected) void resumeActiveExecution();
     return () => { socket.off('connect', resumeActiveExecution); };
   }, [activeDomain, activeExecutionStorageKey, activeOrgId, agentId, attachChatExecutionWatch, chatRequestLedgerRef, chatTurnTimerGuardRef, clearChatProgress, clearPersistedExecution, isFounder, isZh, lastResumedRequestIdsRef, pushChatProgress, recoveryOwner, setIsTyping, socket]);
-  const { refreshConversationHistory, loadMoreConversationHistory, conversationHistoryError, startNewTextConversation, handleConversationHistoryScroll, orderedConversationHistory, restoreTextConversation, deleteConversationFromHistory } = useConversationTransitions({
+  const { refreshConversationHistory, loadMoreConversationHistory, scopedConversationHistory, conversationHistoryError, startNewTextConversation, handleConversationHistoryScroll, orderedConversationHistory, restoreTextConversation, deleteConversationFromHistory } = useConversationTransitions({
     conversationTransitionRef, isCreatingConversation, restoringConversationId, setConversationTransitionPending,
     setIsCreatingConversation, invalidateChatViewWork, chatViewWorkRef, scopedConversationUrl, activeDomain,
     detachPreviousExecution, bindAttachmentContextToConversation, setConversationHistory, setMessages,
@@ -289,7 +289,7 @@ export function useChatRequestControls(previousBindings: ReturnType<typeof useCh
     return requestId;
   }, [pendingAttachments, conversationTransitionRef, chatUploadsRef, conversationAttachmentsRef, user, t.chatUserFallback, messagesRef, messages, chatRequestLedgerRef, chatTurnUiMetaRef, setMessages, setDraftText, setPendingAttachments, rememberAttachmentContext, setIsTyping, taskRelationLedgerRef, attachmentConversationIdRef, chatTurnTimerGuardRef, persistActiveExecution, attachChatExecutionWatch, chatExecutionSource, agentCategory, agentId, activeDomain, activeOrgId, operationMode, socket, attachmentUploadText.processing, attachmentUploadText.failed, currentTurnUiMetaRef, clearChatProgress, pushChatProgress, isZh, setWorkflowStatus, pendingAttachmentsRef, activeMediaGenerationRef]);
   return {
-    ...previousBindings, sendText, refreshConversationHistory, loadMoreConversationHistory, conversationHistoryError, startNewTextConversation, handleConversationHistoryScroll,
+    ...previousBindings, conversationHistory: scopedConversationHistory, sendText, refreshConversationHistory, loadMoreConversationHistory, conversationHistoryError, startNewTextConversation, handleConversationHistoryScroll,
     orderedConversationHistory, restoreTextConversation, clearConversationAttachmentContext, deleteConversationFromHistory
   } as const;
 }

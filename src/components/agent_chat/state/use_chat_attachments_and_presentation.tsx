@@ -161,10 +161,16 @@ export function useChatAttachmentsAndPresentation(previousBindings: ReturnType<t
   const { conversationAttachments, conversationAttachmentsRef, attachmentConversationIdRef,
     bindAttachmentContextToConversation, rememberConversationAttachments, clearConversationAttachments: clearStoredAttachments,
   } = useConversationAttachments(attachmentContextStoragePrefix, resetAttachmentConversationView);
+  // The server owns authorization. Keep the URL callback identity bound to the
+  // complete UI scope even when two authenticated scopes use the same URL.
+  const conversationUrlScope = useMemo(() => ({
+    ownerId: user?.uid || user?.id || user?.username || 'anonymous',
+    domain: activeDomain, orgId: activeOrgId || '', agentId, isCreationWorkspace,
+  }), [user?.uid, user?.id, user?.username, activeDomain, activeOrgId, agentId, isCreationWorkspace]);
   const scopedConversationUrl = useCallback((path: string) => {
     const separator = path.includes('?') ? '&' : '?';
-    return `${path}${separator}domain=${encodeURIComponent(activeDomain)}&agentId=${encodeURIComponent(agentId)}${isCreationWorkspace ? '&surface=creation' : ''}`;
-  }, [activeDomain, agentId, isCreationWorkspace]);
+    return `${path}${separator}domain=${encodeURIComponent(conversationUrlScope.domain)}&agentId=${encodeURIComponent(conversationUrlScope.agentId)}${conversationUrlScope.isCreationWorkspace ? '&surface=creation' : ''}`;
+  }, [conversationUrlScope]);
   const scopedFileUrl = useCallback((path: string) => {
     const separator = path.includes('?') ? '&' : '?';
     const orgScope = activeDomain === 'work' && activeOrgId
